@@ -7,6 +7,9 @@ from pathlib import Path
 import sys
 import time
 
+_PROTOCOL_STDOUT = sys.stdout
+sys.stdout = sys.stderr  # third-party status/progress output must not corrupt JSON-lines stdout
+
 import numpy as np
 import soxr
 import torch
@@ -18,7 +21,7 @@ SAMPLE_RATE = 24000
 
 
 def emit(value: dict) -> None:
-    print(json.dumps(value, ensure_ascii=False), flush=True)
+    print(json.dumps(value, ensure_ascii=False), file=_PROTOCOL_STDOUT, flush=True)
 
 
 def output_path(value: str) -> Path:
