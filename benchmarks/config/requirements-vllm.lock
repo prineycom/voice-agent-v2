@@ -1,0 +1,15 @@
+# Runtime-critical resolution captured from PyPI metadata before inference.
+# Install only into the authorized Slice 2 cache; capture full wheel hashes and
+# `pip freeze --all` before model acquisition or serving.
+vllm==0.26.0
+torch==2.11.0
+torchaudio==2.11.0
+torchvision==0.26.0
+transformers==5.15.0
+tokenizers==0.22.2
+compressed-tensors==0.17.0
+flashinfer-python==0.6.14
+triton==3.6.0
+numpy==2.4.6
+safetensors==0.8.0
+huggingface-hub==1.27.0

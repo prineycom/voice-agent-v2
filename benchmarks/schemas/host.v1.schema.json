@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/slice2-host.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "captured_at", "redaction", "os", "cpu", "memory", "gpu", "benchmark_capabilities"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-host.v1"},
+    "captured_at": {"type": "string", "minLength": 10},
+    "redaction": {"type": "string", "minLength": 20},
+    "os": {"type": "object"},
+    "cpu": {"type": "object"},
+    "memory": {"type": "object"},
+    "gpu": {"type": "object"},
+    "benchmark_capabilities": {"type": "object"}
+  }
+}

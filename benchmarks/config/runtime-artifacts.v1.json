@@ -1,0 +1,42 @@
+{
+  "schema_version": "voice-agent.slice2-runtime-artifacts.v1",
+  "expected_download_bytes": 5482352882,
+  "python": {
+    "version": "3.14.6",
+    "source": "canonical host /usr/bin/python3",
+    "isolation": "separate venvs under the authorized Slice 2 cache"
+  },
+  "vllm": {
+    "version": "0.26.0",
+    "revision": "568afb3a13806beb53bb2e6bd518269357b237c0",
+    "license": "Apache-2.0",
+    "requires_python": ">=3.10,<3.15",
+    "wheel": {
+      "name": "vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+      "size_bytes": 303698761,
+      "sha256": "adb1e4c9b46d0dfdb094121ae5aad670a42412dd813ed4e5db069ed6a15006de"
+    },
+    "resolved_dependency_count": 195,
+    "resolved_download_bytes": 3854486734,
+    "resolution_evidence_sha256": "3501843ffa54300ca0d589b83163859b9225670f65dfb1819e169b9fd0f137bd",
+    "size_evidence_sha256": "205e548cdfaedb81cc484436074258b9e804cecb40648b0a07955fda29223f52",
+    "major_dependencies": [
+      "torch==2.11.0",
+      "transformers==5.15.0",
+      "compressed-tensors==0.17.0",
+      "CUDA 13 user-space wheel set"
+    ],
+    "server_limits": {
+      "max_model_len": 4096,
+      "max_num_seqs": 4,
+      "gpu_memory_utilization": 0.58
+    }
+  },
+  "stt_tts": {
+    "requirements": "benchmarks/config/requirements-stt-tts.lock",
+    "resolved_dependency_count": 29,
+    "resolved_download_bytes": 1627866148,
+    "resolution_evidence_sha256": "0fd5d876c98883aec865bc92458a5ce607f5a577e4461f3cc79fafb0af177e98",
+    "size_evidence_sha256": "25b12319ac6d45d1682a9df21acc06ba9b7d1e346d55a5a23845f259a200fd19"
+  }
+}

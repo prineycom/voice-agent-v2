@@ -1,0 +1,165 @@
+{
+  "schema_version": "voice-agent.slice2-preregistration.v1",
+  "state": "approved",
+  "decision_key": "slice2-preregistration",
+  "approval": {
+    "status": "approved",
+    "authority": "user explicitly approved the single-LFM BF16/vLLM plan and cancelled every alternate LLM before download",
+    "reference": "resolved:slice2-qwen-comparator",
+    "decided_at": "2026-08-10T19:12:27+02:00"
+  },
+  "llm_scope": {
+    "maximum_candidates": 1,
+    "primary": {
+      "status": "approved",
+      "identity": "LiquidAI/LFM2.5-2.6B",
+      "revision": "ab00687315bc1298e9d54e9c4b611dde9867ccc2",
+      "format": "native BF16 safetensors",
+      "runtime": "vLLM 0.26.0 at revision 568afb3a13806beb53bb2e6bd518269357b237c0"
+    },
+    "failure_policy": "If LFM fails any preregistered gate, select no LLM, stop the dependent path, and wait for a new explicit user decision; never substitute another local model or cloud provider."
+  },
+  "download_boundary": {
+    "status": "approved",
+    "shared_runtime_bytes": 5482352882,
+    "primary_lfm_bytes": 5412390391,
+    "stt_tts_artifact_bytes": 4838913920,
+    "stt_corpus_upper_bound_bytes": 20000000,
+    "required_maximum_bytes": 15753657193
+  },
+  "integrity": {
+    "results_require_ancestor_commit": true,
+    "candidate_results_viewed": false,
+    "raw_evidence_outside_git": true,
+    "privacy_rule": "Tracked result files contain identities, hashes, numeric aggregates, gate outcomes, and safe host fields only; public fixture text is separate, while candidate output and generated audio remain in the authorized cache."
+  },
+  "execution_order": [
+    "Commit this approved single-LLM preregistration, thresholds, fixtures, candidate screen, schemas, harness, runtime resolution, and live redacted host capture before any runtime/model download or inference result.",
+    "Under the explicit staged authorization, prepare the pinned cache-local vLLM and STT/TTS runtimes and acquire only approved artifacts under /home/priney/.cache/voice-agent-v2/slice-2/.",
+    "Acquire and measure only official LiquidAI/LFM2.5-2.6B native BF16 on vLLM at 1, 2, and 4 concurrent requests; acquire no alternate LLM and contact no cloud provider.",
+    "Acquire and test both fixed local STT candidates and both fixed local TTS candidates with their candidate counts unchanged.",
+    "Blind-score LFM output and TTS listening material, then reveal labels and evaluate every component hard gate.",
+    "Only if LFM passes every component gate, run selected STT and TTS against LFM at four active requests for decode/startup and cancellation/new-STT overlap.",
+    "Only if the complete stack passes, repeat the full winning configuration at all concurrency levels and compare every tolerance before selecting exactly local LLM provider mode.",
+    "If LFM fails any preregistered gate, select no LLM, stop LLM-dependent overlap/selection work, block Slice 4, and wait for a new explicit user decision with no automatic substitution."
+  ],
+  "measurement": {
+    "sampling_interval_ms": 50,
+    "percentile_method": "Nearest-rank percentile over the complete preregistered sample set; p95 uses rank ceil(0.95 × N), and throughput lower tail uses p05 rank ceil(0.05 × N).",
+    "cold": "A new runtime process with no loaded model, GPU allocation returned to the 30-second idle-window maximum plus 64 MiB, and POSIX_FADV_DONTNEED requested for artifact files where supported. Page-cache eviction success is reported rather than assumed.",
+    "warm": "The model remains resident in the same ready process; one unscored priming request is followed by the complete fixed set with no unload between samples. vLLM is fixed at max_model_len 4096, max_num_seqs 4, and gpu_memory_utilization 0.58.",
+    "sustained": "STT runs three full 24-sample cycles, TTS runs four full 12-sample cycles, and LFM runs three rounds of all 12 fixed parallel requests at concurrency 1, 2, and 4. Report per-round and overall latency, throughput, queueing, resource peak, failures, and monotonic memory trend.",
+    "parallel_requests": "At each level 1, 2, and 4, submit all 12 public marked requests in complete batches for three rounds. Capture every raw and visible token timestamp, per-request queue/TTFT/completion/decode rate, batch aggregate throughput, Jain fairness, slowest-to-median rate, maximum inter-token gap, marker isolation, KV-cache capacity/use, VRAM/RAM growth, and a separate four-request 3584-input-token pressure pass.",
+    "cancellation": "At concurrency four, cancel one streaming request after observable work begins while three peers continue; measure request-to-last-output, peer slowdown, slot recovery and replacement admission, marker isolation, stale output, and resource release. Then cancel all requests, verify readiness without provider/runtime change, and issue a fixed recovery batch.",
+    "llm_tts_overlap": "With four selected-LLM requests decoding, hand the first complete visible sentence from one request (or first 24 visible tokens if no sentence) to resident selected TTS; measure handoff-to-first-audio, every component regression, fairness, and one host-wide resource envelope.",
+    "barge_in_admission": "With four selected-LLM requests and selected TTS active, cancel the affected response work and submit a fixed corpus sample to already-resident selected STT within the same 50 ms scheduler interval; measure admission, old-work cessation, unaffected-peer behavior, stale output, STT finalization, and transient resources.",
+    "repeat": "After cooldown to the declared idle window, rerun full quality sets, all 1/2/4 parallel rounds, context pressure, sustained cycles, both overlap scenarios, and cancellation/recovery with the exact selected artifacts, runtime, 4096 context, four-request admission cap, and residency."
+  },
+  "thresholds": {
+    "resource": {
+      "gpu_total_reference_mib": 12282,
+      "vllm_gpu_memory_utilization_max": 0.58,
+      "gpu_reserve_min_mib": 1536,
+      "host_ram_available_min_mib": 6144,
+      "cpu_p95_max_percent": 83.33,
+      "swap_consumption_max_mib": 0,
+      "sustained_ram_growth_max_mib_per_cycle": 128,
+      "sustained_vram_growth_max_mib_per_cycle": 64
+    },
+    "stt": {
+      "word_error_rate_max": 0.12,
+      "empty_hypotheses_max": 0,
+      "cold_load_ms_max": 30000,
+      "warm_finalization_p95_ms_max": 1500,
+      "warm_realtime_factor_p95_max": 0.5,
+      "sustained_failure_count_max": 0,
+      "sustained_latency_regression_max_fraction": 0.15
+    },
+    "llm": {
+      "critical_failure_count_max": 0,
+      "overall_dimension_mean_min": 3.1,
+      "relevance_mean_min": 3.0,
+      "correctness_mean_min": 3.0,
+      "russian_naturalness_mean_min": 3.0,
+      "voice_concision_mean_min": 2.75,
+      "safety_honesty_mean_min": 3.5,
+      "cold_load_ms_max": 60000,
+      "concurrency_levels": [1, 2, 4],
+      "raw_first_token_p95_ms_max_by_concurrency": {"1": 1500, "2": 2000, "4": 3000},
+      "visible_first_content_p95_ms_max_by_concurrency": {"1": 3000, "2": 4000, "4": 6000},
+      "completion_p95_ms_max_by_concurrency": {"1": 10000, "2": 12000, "4": 16000},
+      "per_request_decode_p05_tokens_per_second_min_by_concurrency": {"1": 15.0, "2": 10.0, "4": 8.0},
+      "aggregate_throughput_scale_min": {"concurrency_2_over_1": 1.5, "concurrency_4_over_1": 2.25},
+      "jain_fairness_index_min": 0.9,
+      "slowest_to_median_decode_rate_min": 0.75,
+      "inter_token_gap_p95_ms_max": 750,
+      "request_queue_p95_ms_max": 250,
+      "marker_isolation_failure_count_max": 0,
+      "starved_request_count_max": 0,
+      "context_pressure_failure_count_max": 0,
+      "kv_cache_capacity_min_sequences_at_4096": 4,
+      "sustained_failure_count_max": 0,
+      "sustained_throughput_regression_max_fraction": 0.15
+    },
+    "tts": {
+      "critical_failure_count_max": 0,
+      "intelligibility_mean_min": 3.25,
+      "pronunciation_mean_min": 3.0,
+      "naturalness_mean_min": 3.0,
+      "cold_load_ms_max": 10000,
+      "warm_first_audio_p95_ms_max": 500,
+      "warm_realtime_factor_p95_max": 0.5,
+      "sustained_failure_count_max": 0,
+      "sustained_latency_regression_max_fraction": 0.15
+    },
+    "cancellation_recovery": {
+      "stt_last_output_ms_max": 300,
+      "llm_last_output_ms_max": 300,
+      "tts_last_output_ms_max": 250,
+      "resource_release_ms_max": 2000,
+      "stale_output_count_max": 0,
+      "llm_replacement_admission_ms_max": 250,
+      "llm_unaffected_peer_regression_max_fraction": 0.15,
+      "llm_marker_isolation_failure_count_max": 0,
+      "recovery_ready_ms_max_by_role": {"stt": 30000, "llm": 60000, "tts": 10000},
+      "recovery_request_latency_multiple_max": 2.0,
+      "recovery_failure_count_max": 0
+    },
+    "overlap": {
+      "llm_active_requests": 4,
+      "llm_tts_handoff_to_first_audio_ms_max": 500,
+      "component_latency_regression_max_fraction": 0.2,
+      "component_throughput_regression_max_fraction": 0.2,
+      "unaffected_llm_peer_regression_max_fraction": 0.15,
+      "new_stt_admission_ms_max": 250,
+      "old_work_last_output_ms_max": 300,
+      "stale_output_count_max": 0,
+      "marker_isolation_failure_count_max": 0,
+      "all_resource_gates_apply": true
+    },
+    "repeat_tolerance": {
+      "latency_percentile_regression_max_fraction": 0.15,
+      "throughput_regression_max_fraction": 0.15,
+      "gpu_vram_peak_increase_max_mib": 256,
+      "host_ram_peak_increase_max_mib": 512,
+      "quality_dimension_decline_max": 0.25,
+      "new_critical_failures_max": 0,
+      "gate_status_must_remain_pass": true
+    }
+  },
+  "selection_rules": {
+    "eligibility": "Each STT/TTS candidate is eligible only if every role-specific quality, latency, sustained, cancellation/recovery, and license/acquisition gate passes. The single approved LFM artifact/runtime is eligible only if it passes every LLM gate, both complete-stack overlap cases, and every resource reserve gate.",
+    "stt": "Among eligible STT candidates choose lower word error rate; if the absolute difference is at most 0.01, choose lower warm finalization p95, then lower complete-stack GPU peak.",
+    "tts": "Among eligible TTS candidates choose higher mean of the three listening dimensions; if the difference is at most 0.25, choose lower first-audio p95, then lower complete-stack host RAM peak.",
+    "llm": "Explicit single-LLM exception: test only approved official native BF16 LFM2.5-2.6B on vLLM. Select local LFM mode only if it passes quality, every 1/2/4 concurrency gate, cancellation/isolation, four-request full-stack reserve, and repeat tolerances. If any gate fails, select no LLM, stop the dependent path, block Slice 4, and do not acquire, run, or substitute another local model, another LFM quantization/runtime, or cloud automatically.",
+    "cloud": "Do not contact, configure, benchmark, or select a cloud provider in this preregistration. LFM failure produces no selection; any later local-model or cloud evaluation requires a new explicit model/provider/endpoint/privacy/retention/cost decision and revised preregistration before contact, download, or inference."
+  },
+  "untested_by_design": [
+    "Real microphone acoustics, far-field speech, background noise, dialect coverage, and conversational disfluencies are not represented by the fixed audiobook STT subset.",
+    "Component runners test model behavior and cancellation mechanics but do not prove the future Slice 3 through Slice 5 production inference-service contracts.",
+    "The fixed 4096 context, four-active-request admission cap, and 256-token generation cap do not establish quality or capacity for longer context or more than four concurrent requests.",
+    "LiveKit transport, browser playout, avatar rendering, end-to-end barge-in, deployment supervision, and restart storms remain untested until their roadmap slices.",
+    "One blind human reviewer and fixed synthetic text cannot establish broad population preference, accent coverage, accessibility, or model quality outside these sets.",
+    "License screening records public metadata and obligations but is not legal advice; any redistributed bundle still needs packaging-specific compliance review."
+  ]
+}

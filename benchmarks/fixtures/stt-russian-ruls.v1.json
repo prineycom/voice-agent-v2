@@ -1,0 +1,49 @@
+{
+  "schema_version": "voice-agent.slice2-stt-corpus.v1",
+  "title": "Fixed Russian LibriSpeech public-domain test subset",
+  "source": {
+    "dataset": "istupakov/russian_librispeech",
+    "revision": "a519c986bb3342cc8136d3d14e5ad8a4f1e1a2bd",
+    "split": "test",
+    "license": "CC-BY-4.0 dataset card; upstream OpenSLR SLR96 states public domain in the USA",
+    "origin": "Russian LibriSpeech derived from public-domain LibriVox audiobooks",
+    "attribution": "OpenSLR SLR96 Russian LibriSpeech and Hugging Face conversion by istupakov"
+  },
+  "selection": "Twenty-four row indexes were chosen by evenly spacing endpoints 0 through 1351 before any candidate output was viewed. This prevents result-driven sample selection and covers seven source-reader path prefixes.",
+  "acquisition": {
+    "outside_git": true,
+    "maximum_download_bytes": 20000000,
+    "retention": "Audio is downloaded only under the authorized Slice 2 cache. Git retains public metadata, references, revision, and later redacted aggregate scores only."
+  },
+  "scoring": {
+    "metric": "word-error-rate",
+    "normalization": "Unicode lowercase, Russian ё mapped to е, all characters except Cyrillic а-я and digits mapped to spaces, whitespace collapsed, then word tokenization.",
+    "aggregation": "Micro-average Levenshtein word errors divided by total reference words over all 24 fixed samples; no cherry-picking or per-speaker exclusion."
+  },
+  "samples": [
+    {"id": "stt-01", "row_index": 0, "duration_seconds": 11.35, "reference": "для вас души моей царицы красавицы для вас одних времен минувших небылицы в часы досугов золотых под шепот старины болтливой рукою верной я писал", "source_audio_path": "audio/2671/2145/poemi_01_pushkin_0000.wav"},
+    {"id": "stt-02", "row_index": 59, "duration_seconds": 7.61, "reference": "вдоль берегов днепра счастливых летят в клубящейся пыли уже скрываются вдали уж всадников не видно боле", "source_audio_path": "audio/2671/2145/poemi_01_pushkin_0062.wav"},
+    {"id": "stt-03", "row_index": 117, "duration_seconds": 6.92, "reference": "морей неверные пучины с дружиной братской переплыть и бранной славой заслужить вниманье гордое наины", "source_audio_path": "audio/2671/2145/poemi_01_pushkin_0123.wav"},
+    {"id": "stt-04", "row_index": 176, "duration_seconds": 9.64, "reference": "соперники другого рода вы рыцари парнасских гор старайтесь не смешить народа нескромным шумом ваших ссор бранитесь только осторожно", "source_audio_path": "audio/2671/2145/poemi_02_pushkin_0003.wav"},
+    {"id": "stt-05", "row_index": 235, "duration_seconds": 9.38, "reference": "княжне воздушными перстами златую косу заплела с искусством в наши дни не новым и обвила венцом перловым окружность бледного чела", "source_audio_path": "audio/2671/2145/poemi_02_pushkin_0066.wav"},
+    {"id": "stt-06", "row_index": 294, "duration_seconds": 6.48, "reference": "зажавши уши поскорее хотел бежать но в бороде запутался упал и бьется встает упал", "source_audio_path": "audio/2671/2145/poemi_02_pushkin_0125.wav"},
+    {"id": "stt-07", "row_index": 352, "duration_seconds": 9.64, "reference": "людмила шапкой завертела на брови прямо набекрень и задом наперед надела и что ж о чудо старых дней людмила в зеркале пропала", "source_audio_path": "audio/2671/2145/poemi_03_pushkin_0044.wav"},
+    {"id": "stt-08", "row_index": 411, "duration_seconds": 8.55, "reference": "наш витязь в трепете веселом его схватил и к голове по окровавленной траве бежит с намереньем жестоким ей нос и уши обрубить", "source_audio_path": "audio/2671/2145/poemi_03_pushkin_0105.wav"},
+    {"id": "stt-09", "row_index": 470, "duration_seconds": 2.94, "reference": "при шуме ласковых речей он окружен", "source_audio_path": "audio/3056/2145/poemi_04_pushkin_0028.wav"},
+    {"id": "stt-10", "row_index": 529, "duration_seconds": 4.58, "reference": "чу вдруг раздался рога звон и кто то карлу вызывает", "source_audio_path": "audio/3056/2145/poemi_04_pushkin_0090.wav"},
+    {"id": "stt-11", "row_index": 587, "duration_seconds": 4.2, "reference": "как часто тихое лицо мгновенной розою пылает", "source_audio_path": "audio/3056/2145/poemi_05_pushkin_0059.wav"},
+    {"id": "stt-12", "row_index": 646, "duration_seconds": 14.46, "reference": "княжны искатель недостойный охоту к славе потеряв никем не знаемый фарлаф в пустыне дальней и спокойной скрывался и наины ждал и час торжественный настал", "source_audio_path": "audio/3056/2145/poemi_05_pushkin_0121.wav"},
+    {"id": "stt-13", "row_index": 705, "duration_seconds": 8.76, "reference": "все встали с шепотом глухим и вдруг смутились зашумели людмила здесь фарлаф", "source_audio_path": "audio/4471/2145/poemi_06_pushkin_0029.wav"},
+    {"id": "stt-14", "row_index": 764, "duration_seconds": 13.14, "reference": "на трубный звук на голос боя дружины конные славян помчались по следам героя сразились гибни басурман объемлет ужас печенегов", "source_audio_path": "audio/4471/2145/poemi_06_pushkin_0096.wav"},
+    {"id": "stt-15", "row_index": 822, "duration_seconds": 4.4, "reference": "гнездо разбойничьих племен черкесской вольности ограда", "source_audio_path": "audio/2826/2145/poemi_08_pushkin_0028.wav"},
+    {"id": "stt-16", "row_index": 881, "duration_seconds": 4.2, "reference": "стремится конь во весь опор исполнен огненной отваги", "source_audio_path": "audio/2826/2145/poemi_08_pushkin_0091.wav"},
+    {"id": "stt-17", "row_index": 940, "duration_seconds": 4.44, "reference": "их прадеды в кругу сидят из трубок дым виясь синеет", "source_audio_path": "audio/2826/2145/poemi_09_pushkin_0061.wav"},
+    {"id": "stt-18", "row_index": 999, "duration_seconds": 4.74, "reference": "а там заря златобагряна сквозь лес увеселяет взор", "source_audio_path": "audio/4471/2145/poemi_11_pushkin_0025.wav"},
+    {"id": "stt-19", "row_index": 1057, "duration_seconds": 11.24, "reference": "его преследует закон но я ему подругой буд его зовут алеко он готов идти за мною всюду старик я рад", "source_audio_path": "audio/4372/2145/poemi_15_pushkin_0015.wav"},
+    {"id": "stt-20", "row_index": 1116, "duration_seconds": 3.8, "reference": "презрев оковы просвещенья алеко волен как они", "source_audio_path": "audio/4372/2145/poemi_15_pushkin_0076.wav"},
+    {"id": "stt-21", "row_index": 1175, "duration_seconds": 4.06, "reference": "вольнее птицы младость кто в силах удержать любовь", "source_audio_path": "audio/4372/2145/poemi_15_pushkin_0138.wav"},
+    {"id": "stt-22", "row_index": 1234, "duration_seconds": 5.54, "reference": "итак домой пришед евгений стряхнул шинель разделся лег", "source_audio_path": "audio/4091/2145/poemi_26_pushkin_0009.wav"},
+    {"id": "stt-23", "row_index": 1292, "duration_seconds": 3.12, "reference": "злые дети бросали камни вслед ему", "source_audio_path": "audio/4091/2145/poemi_27_pushkin_0033.wav"},
+    {"id": "stt-24", "row_index": 1351, "duration_seconds": 5.71, "reference": "но ты не слышишь идешь куда тебя влекут мечтанья тайные твой труд тебе награда", "source_audio_path": "audio/5548/2145/poemi_36_pushkin_0046.wav"}
+  ]
+}
