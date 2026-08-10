@@ -26,32 +26,45 @@ class AdapterProcess:
         self._log = None
         self._events: queue.Queue[dict | BaseException | None] = queue.Queue()
         self._reader: threading.Thread | None = None
+        self._cancel_requested = threading.Event()
 
     def start(self, timeout_seconds: float) -> dict:
         if self.process is not None:
             raise AdapterProcessError("adapter already started")
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log = self.log_path.open("x", encoding="utf-8")
-        self.process = subprocess.Popen(
-            self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
-            text=True, bufsize=1, start_new_session=True, env=self.environment,
-        )
-        assert self.process.stdout is not None
+        self._events = queue.Queue()
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log = self.log_path.open("x", encoding="utf-8")
+            process = subprocess.Popen(
+                self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
+                text=True, bufsize=1, start_new_session=True, env=self.environment,
+            )
+            self.process = process
+            if self._cancel_requested.is_set():
+                self.cancel()
+                raise AdapterProcessError("adapter startup cancelled")
+            assert process.stdout is not None
 
-        def read() -> None:
+            def read() -> None:
+                try:
+                    for line in process.stdout:
+                        self._events.put(json.loads(line))
+                    self._events.put(None)
+                except BaseException as error:
+                    self._events.put(error)
+
+            self._reader = threading.Thread(target=read, name="voice-agent-adapter-reader", daemon=True)
+            self._reader.start()
+            ready = self.receive(timeout_seconds)
+            if ready.get("event") != "ready":
+                raise AdapterProcessError("adapter did not become ready")
+            return ready
+        except BaseException:
             try:
-                for line in self.process.stdout:
-                    self._events.put(json.loads(line))
-                self._events.put(None)
-            except BaseException as error:
-                self._events.put(error)
-
-        self._reader = threading.Thread(target=read, name="voice-agent-adapter-reader", daemon=True)
-        self._reader.start()
-        ready = self.receive(timeout_seconds)
-        if ready.get("event") != "ready":
-            raise AdapterProcessError("adapter did not become ready")
-        return ready
+                self.close()
+            except (OSError, subprocess.SubprocessError):
+                pass
+            raise
 
     def send(self, value: dict) -> None:
         if self.process is None or self.process.stdin is None or self.process.poll() is not None:
@@ -94,21 +107,36 @@ class AdapterProcess:
                 return
 
     def cancel(self, timeout_seconds: float = 5.0) -> float:
-        if self.process is None or self.process.poll() is not None:
+        self._cancel_requested.set()
+        process = self.process
+        if process is None or process.poll() is not None:
             return 0.0
         started = time.monotonic()
-        os.killpg(self.process.pid, signal.SIGTERM)
+        os.killpg(process.pid, signal.SIGTERM)
         try:
-            self.process.wait(timeout=timeout_seconds)
+            process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            os.killpg(self.process.pid, signal.SIGKILL)
-            self.process.wait(timeout=timeout_seconds)
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=timeout_seconds)
         return (time.monotonic() - started) * 1000
 
     def close(self) -> None:
-        if self.process is not None and self.process.poll() is None:
-            self.cancel()
-        if self._reader is not None:
-            self._reader.join(timeout=5)
-        if self._log is not None:
-            self._log.close()
+        process = self.process
+        try:
+            if process is not None and process.poll() is None:
+                self.cancel()
+            if self._reader is not None:
+                self._reader.join(timeout=5)
+        finally:
+            if process is not None:
+                for stream in (process.stdin, process.stdout):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+            if self._log is not None:
+                self._log.close()
+            self.process = None
+            self._reader = None
+            self._log = None

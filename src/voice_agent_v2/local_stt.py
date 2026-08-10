@@ -46,8 +46,17 @@ class WhisperSTT:
             "--model", str(MODEL), "--device", "cuda", "--compute-type", "float16",
         ]
         log = LOGS / f"whisper-{time.monotonic_ns()}.stderr.log"
-        self._process = AdapterProcess(command, log, _environment())
-        self.ready_metadata = self._process.start(60)
+        process = AdapterProcess(command, log, _environment())
+        self._process = process
+        try:
+            self.ready_metadata = process.start(60)
+        except (AdapterProcessError, OSError) as error:
+            try:
+                process.close()
+            finally:
+                self._process = None
+                self.ready_metadata = None
+            raise StageFailure("stt", "selected_stt_unavailable") from error
         return dict(self.ready_metadata)
 
     def transcribe(self, *, session_id: str, turn_id: str, pcm: bytes, audio_format: AudioFormat) -> str:
@@ -58,7 +67,9 @@ class WhisperSTT:
         if not pcm or len(pcm) % 2 or len(pcm) > 30 * 16_000 * 2:
             raise StageFailure("stt", "invalid_audio_payload")
         self.start()
-        assert self._process is not None
+        process = self._process
+        if process is None:
+            raise StageFailure("stt", "selected_stt_unavailable")
         TEMP.mkdir(parents=True, exist_ok=True)
         path = TEMP / f"{session_id}-{turn_id}-{time.monotonic_ns()}.wav"
         started = time.monotonic()
@@ -68,7 +79,7 @@ class WhisperSTT:
                 output.setsampwidth(2)
                 output.setframerate(16_000)
                 output.writeframes(pcm)
-            response = self._process.request(
+            response = process.request(
                 {"operation": "transcribe", "request_id": f"{session_id}-{turn_id}", "audio_path": str(path)},
                 60,
             )
@@ -88,10 +99,12 @@ class WhisperSTT:
         return transcript.strip()
 
     def cancel(self) -> float:
-        if self._process is None:
+        process = self._process
+        if process is None:
             return 0.0
-        latency = self._process.cancel()
-        self._process.close()
+        latency = process.cancel()
+        if getattr(process, "process", None) is not None:
+            process.close()
         self._process = None
         self.ready_metadata = None
         return latency

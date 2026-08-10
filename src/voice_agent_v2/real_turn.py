@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Callable
 
 from .audio import DEFAULT_AUDIO_FORMAT
@@ -9,6 +10,10 @@ from .contracts import (
     EventEnvelope, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure, valid_correlation_id,
 )
 from .tracer import CancellationToken, TraceResult
+
+
+class _TurnInterrupted(Exception):
+    pass
 
 
 class RealTurnController:
@@ -54,15 +59,68 @@ class RealTurnController:
             emit("turn.failed", {"outcome": "failed", "stage": error.stage, "code": error.code}, True)
             return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
 
+        def cancel_adapters(*adapters) -> None:
+            for adapter in adapters:
+                cancel = getattr(adapter, "cancel", None)
+                if cancel is not None:
+                    try:
+                        cancel()
+                    except Exception:
+                        pass
+
+        def interrupted() -> TraceResult:
+            emit("turn.interrupted", {
+                "outcome": "interrupted", "audio_chunks_emitted": len(output_chunks),
+            }, True)
+            return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
+
+        def run_stage(operation, *adapters):
+            if token.cancelled:
+                cancel_adapters(*adapters)
+                raise _TurnInterrupted
+            finished = threading.Event()
+            cancellation_delivered = threading.Event()
+
+            def watch_cancellation() -> None:
+                while not finished.wait(0.005):
+                    if token.cancelled:
+                        cancel_adapters(*adapters)
+                        cancellation_delivered.set()
+                        return
+
+            watcher = threading.Thread(
+                target=watch_cancellation, name="voice-turn-cancellation", daemon=True,
+            )
+            watcher.start()
+            try:
+                result = operation()
+            except StageFailure:
+                if token.cancelled:
+                    raise _TurnInterrupted
+                raise
+            finally:
+                finished.set()
+                watcher.join()
+            if token.cancelled:
+                if not cancellation_delivered.is_set():
+                    cancel_adapters(*adapters)
+                raise _TurnInterrupted
+            return result
+
         emit("turn.listening", {
             "audio_format": DEFAULT_AUDIO_FORMAT.as_dict(), "input_bytes": len(input_pcm),
             "audio_duration_ms": len(input_pcm) / 2 / 16_000 * 1000,
         })
         emit("turn.transcribing", {"stage": "stt"})
         try:
-            transcript = self.stt.transcribe(
-                session_id=session_id, turn_id=turn_id, pcm=input_pcm, audio_format=DEFAULT_AUDIO_FORMAT,
+            transcript = run_stage(
+                lambda: self.stt.transcribe(
+                    session_id=session_id, turn_id=turn_id, pcm=input_pcm, audio_format=DEFAULT_AUDIO_FORMAT,
+                ),
+                self.stt,
             )
+        except _TurnInterrupted:
+            return interrupted()
         except StageFailure as error:
             return fail(error)
         emit("stt.final", {"transcript": transcript})
@@ -84,22 +142,25 @@ class RealTurnController:
                     audio_format=self.tts.output_format,
                 ):
                     if token.cancelled:
-                        self.tts.cancel()
-                        self.llm.cancel()
-                        raise StageFailure("tts", "turn_cancelled")
+                        raise _TurnInterrupted
                     pending_chunks.append(chunk)
             except StageFailure as error:
                 tts_error = error
 
-        try:
+        def generate_response() -> str:
             if hasattr(self.llm, "respond_with_handoff"):
-                response = self.llm.respond_with_handoff(
+                return self.llm.respond_with_handoff(
                     session_id=session_id, turn_id=turn_id, transcript=transcript,
                     on_sentence=synthesize_sentence,
                 )
-            else:
-                response = self.llm.respond(session_id=session_id, turn_id=turn_id, transcript=transcript)
-                synthesize_sentence(response)
+            response = self.llm.respond(session_id=session_id, turn_id=turn_id, transcript=transcript)
+            synthesize_sentence(response)
+            return response
+
+        try:
+            response = run_stage(generate_response, self.llm, self.tts)
+        except _TurnInterrupted:
+            return interrupted()
         except StageFailure as error:
             return fail(error)
 
@@ -108,14 +169,17 @@ class RealTurnController:
             "provider_identity": self.llm.provider_identity,
         })
         emit("turn.speaking", {"stage": "tts", "audio_format": self.tts.output_format.as_dict()})
+        if token.cancelled:
+            cancel_adapters(self.llm, self.tts)
+            return interrupted()
         if tts_error is not None:
             return fail(tts_error)
+        if not pending_chunks:
+            return fail(StageFailure("tts", "empty_tts_output"))
         for index, chunk in enumerate(pending_chunks):
             if token.cancelled:
-                self.tts.cancel()
-                self.llm.cancel()
-                emit("turn.interrupted", {"outcome": "interrupted", "audio_chunks_emitted": len(output_chunks)}, True)
-                return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
+                cancel_adapters(self.llm, self.tts)
+                return interrupted()
             output_chunks.append(chunk)
             emit("tts.audio", {
                 "chunk_index": index, "byte_count": len(chunk),
@@ -124,10 +188,8 @@ class RealTurnController:
             if cancel_after_output_chunks == len(output_chunks):
                 token.cancel()
         if token.cancelled:
-            self.tts.cancel()
-            self.llm.cancel()
-            emit("turn.interrupted", {"outcome": "interrupted", "audio_chunks_emitted": len(output_chunks)}, True)
-            return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
+            cancel_adapters(self.llm, self.tts)
+            return interrupted()
         output_pcm = b"".join(output_chunks)
         emit("turn.completed", {
             "outcome": "completed", "audio_chunks_emitted": len(output_chunks),

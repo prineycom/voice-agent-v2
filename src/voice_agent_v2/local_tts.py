@@ -40,8 +40,17 @@ class Qwen3TTS:
         if self._process is not None:
             return dict(self.ready_metadata or {})
         log = LOGS / f"qwen3-tts-{time.monotonic_ns()}.stderr.log"
-        self._process = AdapterProcess([str(VENV / "bin" / "python"), str(RUNNER)], log, _environment())
-        self.ready_metadata = self._process.start(180)
+        process = AdapterProcess([str(VENV / "bin" / "python"), str(RUNNER)], log, _environment())
+        self._process = process
+        try:
+            self.ready_metadata = process.start(180)
+        except (AdapterProcessError, OSError) as error:
+            try:
+                process.close()
+            finally:
+                self._process = None
+                self.ready_metadata = None
+            raise StageFailure("tts", "selected_tts_unavailable") from error
         return dict(self.ready_metadata)
 
     def stream_synthesize(
@@ -54,14 +63,17 @@ class Qwen3TTS:
         if not text.strip() or len(text) > 4096:
             raise StageFailure("tts", "tts_text_out_of_bounds")
         self.start()
-        assert self._process is not None
+        process = self._process
+        if process is None:
+            raise StageFailure("tts", "selected_tts_unavailable")
         request_id = f"{session_id}-{turn_id}-{time.monotonic_ns()}"
         started = time.monotonic()
         first = None
         chunks = 0
         total_bytes = 0
+        final_seen = False
         try:
-            for event in self._process.stream(
+            for event in process.stream(
                 {
                     "command": "synthesize", "request_id": request_id, "text": text,
                     "emit_pcm": True, "output_sample_rate_hz": OUTPUT_FORMAT.sample_rate_hz,
@@ -78,13 +90,20 @@ class Qwen3TTS:
                     first = first or time.monotonic()
                     yield data
                 elif event["event"] == "final":
+                    if final_seen:
+                        raise AdapterProcessError("duplicate TTS terminal event")
+                    final_seen = True
                     if (
                         event["audio_bytes"] != total_bytes or event["chunk_count"] != chunks
                         or event["sample_rate_hz"] != OUTPUT_FORMAT.sample_rate_hz
                         or event["channels"] != OUTPUT_FORMAT.channels or event["encoding"] != OUTPUT_FORMAT.encoding
                     ):
                         raise AdapterProcessError("TTS terminal totals/format mismatch")
-        except (AdapterProcessError, OSError, ValueError) as error:
+                else:
+                    raise AdapterProcessError("unknown TTS event")
+            if not final_seen or chunks == 0 or total_bytes == 0:
+                raise AdapterProcessError("TTS produced no audio")
+        except (AdapterProcessError, OSError, ValueError, KeyError, TypeError) as error:
             raise StageFailure("tts", "selected_tts_unavailable") from error
         completed = time.monotonic()
         self.observations.append({
@@ -101,10 +120,12 @@ class Qwen3TTS:
         return tuple(self.stream_synthesize(session_id=session_id, turn_id=turn_id, text=text, audio_format=audio_format))
 
     def cancel(self) -> float:
-        if self._process is None:
+        process = self._process
+        if process is None:
             return 0.0
-        latency = self._process.cancel()
-        self._process.close()
+        latency = process.cancel()
+        if getattr(process, "process", None) is not None:
+            process.close()
         self._process = None
         self.ready_metadata = None
         return latency

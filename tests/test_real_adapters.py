@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from io import BytesIO
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -10,7 +14,9 @@ from voice_agent_v2.cloud_llm import ALIAS, LiteLLMProvider
 from voice_agent_v2.contracts import AudioFormat, StageFailure
 from voice_agent_v2.local_stt import WhisperSTT
 from voice_agent_v2.local_tts import OUTPUT_FORMAT, Qwen3TTS
+from voice_agent_v2.process_adapter import AdapterProcess, AdapterProcessError
 from voice_agent_v2.real_turn import RealTurnController
+from voice_agent_v2.tracer import CancellationToken
 
 
 class FailingProcess:
@@ -54,6 +60,55 @@ class StubStreamingProcess:
         return None
 
 
+class EmptyStreamingProcess(StubStreamingProcess):
+    def stream(self, value: dict, timeout: float):
+        del timeout
+        yield {
+            "event": "final", "request_id": value["request_id"], "audio_bytes": 0, "chunk_count": 0,
+            "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le",
+        }
+
+
+class StartupFailingProcess:
+    instances = []
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def start(self, _timeout: float) -> dict:
+        raise AdapterProcessError("injected startup failure")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class StubHTTPResponse:
+    def __init__(self, body: bytes, status: int = 200) -> None:
+        self.status = status
+        self._body = body
+        self.fp = BytesIO(body)
+
+    def read(self, _limit: int | None = None) -> bytes:
+        return self._body
+
+
+class StubHTTPConnection:
+    def __init__(self, response: StubHTTPResponse) -> None:
+        self.response = response
+        self.requests = []
+        self.closed = False
+
+    def request(self, method: str, path: str, body=None, headers=None) -> None:
+        self.requests.append((method, path, body, headers))
+
+    def getresponse(self) -> StubHTTPResponse:
+        return self.response
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class LocalTTSContractTests(unittest.TestCase):
     def test_streaming_pcm_is_ordered_and_not_retained(self) -> None:
         tts = Qwen3TTS()
@@ -85,6 +140,18 @@ class LocalTTSContractTests(unittest.TestCase):
                 text="Публичный ответ.", audio_format=AudioFormat(sample_rate_hz=24_000),
             ))
         self.assertIsNone(tts._process)
+
+    def test_empty_terminal_result_is_an_explicit_tts_failure(self) -> None:
+        tts = Qwen3TTS()
+        tts._process = EmptyStreamingProcess()
+        tts.ready_metadata = {"event": "ready"}
+        with self.assertRaises(StageFailure) as raised:
+            tuple(tts.stream_synthesize(
+                session_id="session-test-0001", turn_id="turn-test-0001",
+                text="Публичный ответ.", audio_format=OUTPUT_FORMAT,
+            ))
+        self.assertEqual(raised.exception.code, "selected_tts_unavailable")
+        self.assertFalse(tts.observations)
 
 
 class LiteLLMProviderContractTests(unittest.TestCase):
@@ -131,6 +198,65 @@ class LiteLLMProviderContractTests(unittest.TestCase):
             provider.respond(session_id="session-a", turn_id="turn-a", transcript="x" * 4097)
         self.assertEqual(raised.exception.code, "transcript_out_of_bounds")
 
+    def test_readiness_proves_wireguard_and_authenticated_alias_capability(self) -> None:
+        body = json.dumps({"data": [{"id": ALIAS}]}).encode()
+        connection = StubHTTPConnection(StubHTTPResponse(body))
+        transport = {
+            "address_class": "tailscale-cgnat-ipv4", "route_interface": "tailscale0",
+            "resolved_address": "100.64.0.1",
+        }
+        with (
+            patch.object(LiteLLMProvider, "_transport_gate", return_value=transport),
+            patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+            patch("voice_agent_v2.cloud_llm.subprocess.run") as run,
+            patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+        ):
+            readiness = LiteLLMProvider().readiness()
+        self.assertTrue(readiness["wireguard_proven"])
+        self.assertTrue(readiness["authenticated_alias_capability"])
+        self.assertEqual(readiness["selected_alias"], ALIAS)
+        self.assertEqual(run.call_args.args[0][:3], ["tailscale", "ping", "--tsmp"])
+        method, path, request_body, headers = connection.requests[0]
+        self.assertEqual((method, path, request_body), ("GET", "/v1/models", None))
+        self.assertEqual(headers["Authorization"], "Bearer test-token")
+        self.assertTrue(connection.closed)
+
+    def test_stream_output_type_and_size_are_enforced_locally(self) -> None:
+        cases = (
+            ({"choices": [{"delta": {"content": 7}}]}, "selected_provider_protocol_error"),
+            ({"choices": [{"delta": {"content": "x" * 8193}}]}, "selected_provider_output_out_of_bounds"),
+        )
+        transport = {"resolved_address": "100.64.0.1"}
+        for event, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                stream = b"data: " + json.dumps(event).encode() + b"\ndata: [DONE]\n"
+                connection = StubHTTPConnection(StubHTTPResponse(stream))
+                provider = LiteLLMProvider()
+                with (
+                    patch.object(LiteLLMProvider, "_transport_gate", return_value=transport),
+                    patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+                    patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+                ):
+                    with self.assertRaises(StageFailure) as raised:
+                        provider.respond(
+                            session_id="session-a", turn_id="turn-a", transcript="Публичный запрос",
+                        )
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertEqual(provider.observations[-1]["error_class"], expected_code)
+                self.assertNotIn("text", provider.observations[-1])
+
+    def test_executor_output_is_bounded_and_protocol_failures_are_explicit(self) -> None:
+        for result, expected_code in (
+            ({"text": 7}, "selected_provider_protocol_error"),
+            ({"text": "x" * 8193}, "selected_provider_output_out_of_bounds"),
+        ):
+            with self.subTest(expected_code=expected_code):
+                provider = LiteLLMProvider(executor=lambda _payload, result=result: result)
+                with self.assertRaises(StageFailure) as raised:
+                    provider.respond(session_id="session-a", turn_id="turn-a", transcript="Публичный запрос")
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertEqual(provider.observations[-1]["error_class"], expected_code)
+
 
 class FakeSTT:
     version = "voice-agent.stt.v1"
@@ -153,12 +279,30 @@ class FakeLLM:
         return None
 
 
+class BlockingLLM(FakeLLM):
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.cancel_count = 0
+
+    def respond_with_handoff(self, **_kwargs) -> str:
+        self.entered.set()
+        if not self.release.wait(1):
+            raise AssertionError("LLM cancellation was not delivered")
+        raise StageFailure("llm_provider", "selected_provider_cancelled")
+
+    def cancel(self) -> None:
+        self.cancel_count += 1
+        self.release.set()
+
+
 class FakeTTS:
     version = "voice-agent.tts.v1"
     output_format = OUTPUT_FORMAT
 
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
+        self.cancel_count = 0
 
     def stream_synthesize(self, **_kwargs):
         if self.fail:
@@ -166,7 +310,26 @@ class FakeTTS:
         yield b"\0\0" * 10
 
     def cancel(self) -> float:
+        self.cancel_count += 1
         return 0.0
+
+
+class BlockingTTS(FakeTTS):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def stream_synthesize(self, **_kwargs):
+        self.entered.set()
+        if not self.release.wait(1):
+            raise AssertionError("TTS cancellation was not delivered")
+        raise StageFailure("tts", "selected_tts_unavailable")
+        yield b""
+
+    def cancel(self) -> float:
+        self.release.set()
+        return super().cancel()
 
 
 class RealTurnControllerTests(unittest.TestCase):
@@ -207,6 +370,47 @@ class RealTurnControllerTests(unittest.TestCase):
         terminal_index = [event["terminal"] for event in result.events].index(True)
         self.assertEqual(terminal_index, len(result.events) - 1)
         self.assertEqual(sum(event["type"] == "tts.audio" for event in result.events), 1)
+
+    def test_mid_generation_cancellation_stops_adapters_and_interrupts_once(self) -> None:
+        llm = BlockingLLM()
+        tts = FakeTTS()
+        token = CancellationToken()
+        canceller = threading.Thread(target=lambda: (llm.entered.wait(1), token.cancel()))
+        canceller.start()
+        result = RealTurnController(FakeSTT(), llm, tts).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+            cancellation=token,
+        )
+        canceller.join()
+        self.assertEqual(result.terminal_event["type"], "turn.interrupted")
+        self.assertEqual(sum(event["terminal"] for event in result.events), 1)
+        self.assertGreaterEqual(llm.cancel_count, 1)
+        self.assertGreaterEqual(tts.cancel_count, 1)
+
+    def test_mid_synthesis_cancellation_normalizes_adapter_failure_to_interruption(self) -> None:
+        tts = BlockingTTS()
+        token = CancellationToken()
+        canceller = threading.Thread(target=lambda: (tts.entered.wait(1), token.cancel()))
+        canceller.start()
+        result = RealTurnController(FakeSTT(), FakeLLM(), tts).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+            cancellation=token,
+        )
+        canceller.join()
+        self.assertEqual(result.terminal_event["type"], "turn.interrupted")
+        self.assertNotIn("turn.failed", [event["type"] for event in result.events])
+        self.assertGreaterEqual(tts.cancel_count, 1)
+
+    def test_empty_tts_stream_cannot_complete_spoken_turn(self) -> None:
+        class EmptyTTS(FakeTTS):
+            def stream_synthesize(self, **_kwargs):
+                return iter(())
+
+        result = RealTurnController(FakeSTT(), FakeLLM(), EmptyTTS()).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+        )
+        self.assertEqual(result.terminal_event["type"], "turn.failed")
+        self.assertEqual(result.terminal_event["payload"]["code"], "empty_tts_output")
 
 
 class LocalSTTContractTests(unittest.TestCase):
@@ -258,6 +462,42 @@ class LocalSTTContractTests(unittest.TestCase):
         stt._process = StubProcess()
         self.assertEqual(stt.cancel(), 12.0)
         self.assertIsNone(stt._process)
+
+    def test_stt_and_tts_startup_failures_are_stage_specific_and_cleaned_up(self) -> None:
+        StartupFailingProcess.instances.clear()
+        with patch("voice_agent_v2.local_stt.AdapterProcess", StartupFailingProcess):
+            stt = WhisperSTT()
+            with self.assertRaises(StageFailure) as stt_failure:
+                stt.transcribe(
+                    session_id="session-test-0001", turn_id="turn-test-0001", pcm=b"\0\0" * 160,
+                    audio_format=AudioFormat(),
+                )
+        with patch("voice_agent_v2.local_tts.AdapterProcess", StartupFailingProcess):
+            tts = Qwen3TTS()
+            with self.assertRaises(StageFailure) as tts_failure:
+                tuple(tts.stream_synthesize(
+                    session_id="session-test-0001", turn_id="turn-test-0001",
+                    text="Публичный ответ.", audio_format=OUTPUT_FORMAT,
+                ))
+        self.assertEqual(stt_failure.exception.code, "selected_stt_unavailable")
+        self.assertEqual(tts_failure.exception.code, "selected_tts_unavailable")
+        self.assertIsNone(stt._process)
+        self.assertIsNone(tts._process)
+        self.assertTrue(all(process.closed for process in StartupFailingProcess.instances))
+
+
+class AdapterProcessTests(unittest.TestCase):
+    def test_invalid_startup_event_terminates_child_and_resets_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = AdapterProcess(
+                [sys.executable, "-c", "import time; print('{}', flush=True); time.sleep(30)"],
+                Path(directory) / "adapter.log", dict(os.environ),
+            )
+            with self.assertRaises(AdapterProcessError):
+                adapter.start(1)
+            self.assertIsNone(adapter.process)
+            self.assertIsNone(adapter._reader)
+            self.assertIsNone(adapter._log)
 
 
 if __name__ == "__main__":
