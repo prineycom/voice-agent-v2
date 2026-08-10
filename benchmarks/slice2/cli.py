@@ -17,6 +17,7 @@ from .results import write_failed_selection
 from .safety import assert_privacy_safe_result
 from .schema import validate
 from .scoring import aggregate_human_score_card, score_stt
+from .stack_measure import measure_qwen3_tts
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "schemas"
@@ -101,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     measure.add_argument("role", choices=("stt", "llm", "tts", "cloud"))
     measure.add_argument("candidate_id")
     measure.add_argument("--run-label", choices=("primary", "repeat"), default="primary")
+    commands.add_parser("measure-qwen-tts", help="measure the committed fixed Qwen3 TTS configuration")
     commands.add_parser("finalize-failure", help="write fail-closed results after measured hard-gate failure")
     return parser.parse_args()
 
@@ -139,6 +141,8 @@ def main() -> int:
                 if args.candidate_id != "deepseek-v4-flash":
                     raise ValueError("cloud measurement is approved only for deepseek-v4-flash")
                 _print(measure_cloud(args.run_label))
+        elif args.command == "measure-qwen-tts":
+            _print(measure_qwen3_tts())
         elif args.command == "finalize-failure":
             _print(write_failed_selection())
         else:  # pragma: no cover - argparse closes the command set
