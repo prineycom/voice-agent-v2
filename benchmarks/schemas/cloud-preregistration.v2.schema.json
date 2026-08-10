@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/cloud-preregistration.v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "decision_key", "supersedes", "approval", "provider", "credential", "fixtures", "request_contract", "execution_order", "measurement", "thresholds", "selection_rule", "scope_exceptions", "integrity"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-cloud-preregistration.v2"},
+    "state": {"type": "string", "const": "approved"},
+    "decision_key": {"type": "string", "const": "slice2-litellm-cloud-preregistration"},
+    "supersedes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "commit", "local_outcome", "preserve_failed_evidence"],
+      "properties": {
+        "path": {"type": "string", "const": "benchmarks/config/preregistration.v1.json"},
+        "commit": {"type": "string", "const": "f11f6caa42301376b96063cea61a617b94ecaad1"},
+        "local_outcome": {"type": "string", "const": "failed-selection"},
+        "preserve_failed_evidence": {"type": "boolean", "const": true}
+      }
+    },
+    "approval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "authority", "reference", "decided_at"],
+      "properties": {
+        "status": {"type": "string", "const": "approved"},
+        "authority": {"type": "string", "minLength": 20},
+        "reference": {"type": "string", "const": "decision:slice2-litellm-model-selection"},
+        "decided_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "provider": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "gateway", "gateway_version", "endpoint", "transport", "selected_alias", "allowed_aliases", "underlying_provider", "underlying_model", "routing_provenance", "routing_shape", "automatic_fallback", "cloud_stt_tts"],
+      "properties": {
+        "mode": {"type": "string", "const": "cloud"},
+        "gateway": {"type": "string", "const": "LiteLLM"},
+        "gateway_version": {"type": "string", "const": "1.87.0"},
+        "endpoint": {"type": "string", "const": "http://rpi:4000"},
+        "transport": {"type": "string", "const": "HTTP carried only inside a freshly proven Tailscale WireGuard path; redirects rejected"},
+        "selected_alias": {"type": "string", "const": "deepseek-v4-flash"},
+        "allowed_aliases": {"type": "array", "const": ["deepseek-v4-flash"]},
+        "underlying_provider": {"type": "string", "const": "DeepSeek route (operator-attested)"},
+        "underlying_model": {"type": "string", "const": "opaque operator-attested route behind deepseek-v4-flash"},
+        "routing_provenance": {"type": "string", "const": "operator-attested; active config did not prove the mapping"},
+        "routing_shape": {"type": "string", "const": "one explicitly requested alias; gateway internals intentionally opaque for this test"},
+        "automatic_fallback": {"type": "boolean", "const": false},
+        "cloud_stt_tts": {"type": "boolean", "const": false}
+      }
+    },
+    "credential": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "required_mode", "exception_scope", "never_log", "never_send_elsewhere"],
+      "properties": {
+        "source": {"type": "string", "const": "/home/priney/.cache/voice-agent-v2/slice-2/secrets/litellm.token"},
+        "required_mode": {"type": "string", "const": "0600"},
+        "exception_scope": {"type": "string", "const": "user-accepted disclosed test credential for this closed-circuit Slice 2 benchmark only"},
+        "never_log": {"type": "boolean", "const": true},
+        "never_send_elsewhere": {"type": "boolean", "const": true}
+      }
+    },
+    "fixtures": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "sha256", "public_synthetic"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "public_synthetic": {"type": "boolean", "const": true}
+        }
+      }
+    },
+    "request_contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["allowed_body_fields", "allowed_message_roles", "allowed_headers", "forbidden_data", "maximum_context_tokens", "maximum_generated_tokens", "sampling", "seed", "stream", "usage_observation"],
+      "properties": {
+        "allowed_body_fields": {"type": "array", "const": ["model", "messages", "temperature", "top_p", "max_tokens", "seed", "stream", "stream_options"]},
+        "allowed_message_roles": {"type": "array", "const": ["system", "user"]},
+        "allowed_headers": {"type": "array", "const": ["Authorization", "Content-Type", "Accept", "Connection"]},
+        "forbidden_data": {"type": "array", "minItems": 8, "items": {"type": "string"}},
+        "maximum_context_tokens": {"type": "integer", "const": 4096},
+        "maximum_generated_tokens": {"type": "integer", "const": 512},
+        "sampling": {"type": "object", "const": {"temperature": 0.1, "top_p": 0.9}},
+        "seed": {"type": "integer", "const": 20260810},
+        "stream": {"type": "boolean", "const": true},
+        "usage_observation": {"type": "string", "const": "stream_options.include_usage=true; numeric token counts only"}
+      }
+    },
+    "execution_order": {"type": "array", "minItems": 7, "items": {"type": "string", "minLength": 20}},
+    "measurement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["percentile_method", "quality", "parallel", "context_pressure", "cancellation", "sustained", "repeat", "raw_evidence"],
+      "properties": {
+        "percentile_method": {"type": "string", "minLength": 20},
+        "quality": {"type": "string", "minLength": 20},
+        "parallel": {"type": "string", "minLength": 20},
+        "context_pressure": {"type": "string", "minLength": 20},
+        "cancellation": {"type": "string", "minLength": 20},
+        "sustained": {"type": "string", "minLength": 20},
+        "repeat": {"type": "string", "minLength": 20},
+        "raw_evidence": {"type": "string", "minLength": 20}
+      }
+    },
+    "thresholds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["quality", "latency", "throughput_fairness", "cancellation", "identity_transport", "privacy_observability", "sustained", "repeat_tolerance"],
+      "properties": {
+        "quality": {"type": "object"},
+        "latency": {"type": "object"},
+        "throughput_fairness": {"type": "object"},
+        "cancellation": {"type": "object"},
+        "identity_transport": {"type": "object"},
+        "privacy_observability": {"type": "object"},
+        "sustained": {"type": "object"},
+        "repeat_tolerance": {"type": "object"}
+      }
+    },
+    "selection_rule": {"type": "string", "minLength": 50},
+    "scope_exceptions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["operator_attestation_accepted", "cost_evaluated", "retention_training_region_evaluated", "production_approval", "private_or_live_content", "reason"],
+      "properties": {
+        "operator_attestation_accepted": {"type": "boolean", "const": true},
+        "cost_evaluated": {"type": "boolean", "const": false},
+        "retention_training_region_evaluated": {"type": "boolean", "const": false},
+        "production_approval": {"type": "boolean", "const": false},
+        "private_or_live_content": {"type": "boolean", "const": false},
+        "reason": {"type": "string", "minLength": 50}
+      }
+    },
+    "integrity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["results_require_ancestor_commit", "completion_results_viewed", "discovery_only_before_commit", "raw_evidence_outside_git", "privacy_rule"],
+      "properties": {
+        "results_require_ancestor_commit": {"type": "boolean", "const": true},
+        "completion_results_viewed": {"type": "boolean", "const": false},
+        "discovery_only_before_commit": {"type": "boolean", "const": true},
+        "raw_evidence_outside_git": {"type": "boolean", "const": true},
+        "privacy_rule": {"type": "string", "minLength": 30}
+      }
+    }
+  }
+}

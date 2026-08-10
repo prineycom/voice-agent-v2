@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from benchmarks.slice2.acquire import acquire_candidates
 from benchmarks.slice2.cli import validate_committed
+from benchmarks.slice2.cloud_measure import _payload, _validate_payload
 from benchmarks.slice2.safety import assert_privacy_safe_result, cache_path
 from benchmarks.slice2.schema import SchemaViolation, validate
 from benchmarks.slice2.scoring import edit_distance, normalize_russian
@@ -26,6 +27,65 @@ class Slice2CommittedEvidenceTests(unittest.TestCase):
         report = validate_committed()
         self.assertEqual(report["status"], "pass")
         self.assertIn("benchmarks/evidence/host-live.v1.json", report["validated"])
+        self.assertIn("benchmarks/evidence/litellm-discovery.v1.json", report["validated"])
+
+    def test_cloud_discovery_and_operator_attestation_remain_prompt_free(self) -> None:
+        evidence = json.loads((BENCHMARKS / "evidence" / "litellm-discovery.v1.json").read_text())
+        self.assertEqual(evidence["gateway"]["allowlisted_endpoint"], "http://rpi:4000")
+        self.assertEqual(evidence["transport"]["kernel_route_interface"], "tailscale0")
+        self.assertEqual(evidence["transport"]["tailscale_path"], "direct-wireguard")
+        self.assertTrue(evidence["discovery"]["authentication_required"])
+        self.assertEqual(evidence["credential_lookup"]["legacy_project_status"], "not-found")
+        self.assertEqual(evidence["credential_lookup"]["status"], "authenticated-task-private-test-exception")
+        self.assertEqual(evidence["credential_lookup"]["ssh_port"], 2222)
+        self.assertEqual(evidence["credential_lookup"]["host_key_status"], "user-confirmed-rescan-matched-task-private")
+        self.assertEqual(evidence["credential_lookup"]["task_private_known_hosts"]["mode"], "0600")
+        self.assertFalse(evidence["credential_lookup"]["global_ssh_trust_changed"])
+        self.assertTrue(evidence["credential_lookup"]["public_key_auth_reached"])
+        self.assertTrue(evidence["credential_lookup"]["public_key_auth_succeeded"])
+        self.assertEqual(evidence["credential_lookup"]["configured_public_identity_count"], 0)
+        self.assertEqual(evidence["credential_lookup"]["dedicated_public_identity"]["private_mode"], "0600")
+        self.assertEqual(evidence["credential_lookup"]["dedicated_public_identity"]["public_mode"], "0644")
+        self.assertTrue(evidence["credential_lookup"]["dedicated_public_identity"]["remote_installation_confirmed"])
+        self.assertFalse(evidence["credential_lookup"]["private_identity_files_read"])
+        self.assertTrue(evidence["credential_lookup"]["sudo_reached"])
+        self.assertFalse(evidence["credential_lookup"]["remote_source_exists"])
+        self.assertEqual(evidence["credential_lookup"]["remote_failure_class"], "FileNotFoundError")
+        self.assertFalse(evidence["credential_lookup"]["remote_file_read"])
+        self.assertFalse(evidence["credential_lookup"]["task_private_token_file_created"])
+        self.assertTrue(evidence["credential_lookup"]["task_private_token_file_present"])
+        self.assertEqual(evidence["credential_lookup"]["task_private_token_file_mode"], "0600")
+        self.assertEqual(evidence["model_selection"]["discovered_alias_count"], 6)
+        self.assertEqual(evidence["model_selection"]["selected_alias"], "deepseek-v4-flash")
+        self.assertEqual(evidence["model_selection"]["underlying_provider"], "DeepSeek route (operator-attested)")
+        self.assertEqual(evidence["model_selection"]["selected_alias_mapping"]["matching_route_count"], 0)
+        self.assertFalse(evidence["model_selection"]["selected_alias_mapping"]["active_config_proved_mapping"])
+        self.assertEqual(evidence["privacy"]["prompt_request_count"], 0)
+        self.assertFalse(evidence["privacy"]["ambient_credential_sources_read"])
+
+    def test_superseding_cloud_preregistration_is_test_only_and_single_alias(self) -> None:
+        preregistration = json.loads((BENCHMARKS / "config" / "preregistration.cloud.v2.json").read_text())
+        self.assertEqual(preregistration["provider"]["allowed_aliases"], ["deepseek-v4-flash"])
+        self.assertEqual(preregistration["provider"]["routing_provenance"], "operator-attested; active config did not prove the mapping")
+        self.assertFalse(preregistration["provider"]["automatic_fallback"])
+        self.assertFalse(preregistration["provider"]["cloud_stt_tts"])
+        self.assertFalse(preregistration["scope_exceptions"]["production_approval"])
+        self.assertFalse(preregistration["scope_exceptions"]["private_or_live_content"])
+        self.assertTrue(preregistration["integrity"]["results_require_ancestor_commit"])
+        self.assertFalse(preregistration["integrity"]["completion_results_viewed"])
+
+    def test_cloud_request_guard_allows_only_selected_alias_and_public_fixture(self) -> None:
+        prompt = json.loads((BENCHMARKS / "fixtures" / "llm-russian.v1.json").read_text())["samples"][0]["prompt"]
+        payload = _payload(prompt)
+        _validate_payload(payload)
+        with self.assertRaises(ValueError):
+            _validate_payload({**payload, "model": "qwen3.6-35b-a3b"})
+        with self.assertRaises(ValueError):
+            _validate_payload({**payload, "tools": []})
+        private_payload = json.loads(json.dumps(payload))
+        private_payload["messages"][1]["content"] = "private"
+        with self.assertRaises(ValueError):
+            _validate_payload(private_payload)
 
     def test_candidate_screen_is_local_with_explicit_single_llm_exception(self) -> None:
         manifest = json.loads((BENCHMARKS / "config" / "candidates.v1.json").read_text())

@@ -9,7 +9,11 @@ import sys
 from typing import Any
 
 from .acquire import acquire_candidates, acquire_stt_corpus, candidate_plan, prepare_runtime
+from .cloud_measure import measure_cloud
+from .cloud_scoring import score_cloud_automated
 from .host import write_capture
+from .measure import measure_llm, measure_stt, measure_tts
+from .results import write_failed_selection
 from .safety import assert_privacy_safe_result
 from .schema import validate
 from .scoring import aggregate_human_score_card, score_stt
@@ -26,12 +30,14 @@ def validate_committed() -> dict[str, Any]:
     pairs = {
         ROOT / "config" / "candidates.v1.json": SCHEMA_DIR / "candidates.v1.schema.json",
         ROOT / "config" / "preregistration.v1.json": SCHEMA_DIR / "preregistration.v1.schema.json",
+        ROOT / "config" / "preregistration.cloud.v2.json": SCHEMA_DIR / "cloud-preregistration.v2.schema.json",
         ROOT / "config" / "runtime-artifacts.v1.json": SCHEMA_DIR / "runtime-artifacts.v1.schema.json",
         ROOT / "fixtures" / "stt-russian-ruls.v1.json": SCHEMA_DIR / "stt-corpus.v1.schema.json",
         ROOT / "fixtures" / "llm-russian.v1.json": SCHEMA_DIR / "llm-rubric.v1.schema.json",
         ROOT / "fixtures" / "llm-parallel-russian.v1.json": SCHEMA_DIR / "llm-parallel.v1.schema.json",
         ROOT / "fixtures" / "tts-russian.v1.json": SCHEMA_DIR / "tts-rubric.v1.schema.json",
         ROOT / "evidence" / "host-live.v1.json": SCHEMA_DIR / "host.v1.schema.json",
+        ROOT / "evidence" / "litellm-discovery.v1.json": SCHEMA_DIR / "cloud-discovery.v1.schema.json",
     }
     validated = []
     for instance_path, schema_path in pairs.items():
@@ -83,9 +89,18 @@ def parse_args() -> argparse.Namespace:
     stt = commands.add_parser("score-stt", help="score cached public-corpus hypotheses without emitting content")
     stt.add_argument("--raw-output", type=Path, required=True)
 
+    cloud_score = commands.add_parser("score-cloud", help="evaluate preregistered automated cloud gates without emitting content")
+    cloud_score.add_argument("--raw-output", type=Path, required=True)
+
     human = commands.add_parser("score-human", help="aggregate a cached numeric blind-review card")
     human.add_argument("--role", choices=("llm", "tts"), required=True)
     human.add_argument("--score-card", type=Path, required=True)
+
+    measure = commands.add_parser("measure", help="run one approved candidate into cache-local raw evidence")
+    measure.add_argument("role", choices=("stt", "llm", "tts", "cloud"))
+    measure.add_argument("candidate_id")
+    measure.add_argument("--run-label", choices=("primary", "repeat"), default="primary")
+    commands.add_parser("finalize-failure", help="write fail-closed results after measured hard-gate failure")
     return parser.parse_args()
 
 
@@ -106,8 +121,25 @@ def main() -> int:
             _print(acquire_stt_corpus(args.confirm_max_bytes))
         elif args.command == "score-stt":
             _print(score_stt(args.raw_output))
+        elif args.command == "score-cloud":
+            _print(score_cloud_automated(args.raw_output))
         elif args.command == "score-human":
             _print(aggregate_human_score_card(args.score_card, args.role))
+        elif args.command == "measure":
+            if args.role != "cloud" and args.run_label != "primary":
+                raise ValueError("run labels apply only to cloud measurement")
+            if args.role == "stt":
+                _print(measure_stt(args.candidate_id))
+            elif args.role == "llm":
+                _print(measure_llm(args.candidate_id))
+            elif args.role == "tts":
+                _print(measure_tts(args.candidate_id))
+            else:
+                if args.candidate_id != "deepseek-v4-flash":
+                    raise ValueError("cloud measurement is approved only for deepseek-v4-flash")
+                _print(measure_cloud(args.run_label))
+        elif args.command == "finalize-failure":
+            _print(write_failed_selection())
         else:  # pragma: no cover - argparse closes the command set
             raise AssertionError(args.command)
     except (AssertionError, KeyError, OSError, RuntimeError, ValueError) as error:

@@ -1,0 +1,247 @@
+{
+  "artifact": {
+    "files": [
+      {
+        "bytes": 2394,
+        "name": "config.json",
+        "sha256": "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9"
+      },
+      {
+        "bytes": 3087284237,
+        "name": "model.bin",
+        "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"
+      },
+      {
+        "bytes": 340,
+        "name": "preprocessor_config.json",
+        "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+      },
+      {
+        "bytes": 2480617,
+        "name": "tokenizer.json",
+        "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"
+      },
+      {
+        "bytes": 1068114,
+        "name": "vocabulary.json",
+        "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+      }
+    ],
+    "license": "MIT",
+    "quantization": "float16 weights; CTranslate2 compute_type=float16",
+    "repository": "https://huggingface.co/Systran/faster-whisper-large-v3",
+    "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478"
+  },
+  "cancellation_recovery": {
+    "cancel_to_last_output_ms": 113.65396999462973,
+    "recovery_latency_ms": 605.5946139968,
+    "recovery_passed": true,
+    "recovery_ready_ms": 969.2139419930754,
+    "resource_release_ms": 26.846281994949095,
+    "stale_output_count": 0
+  },
+  "candidate_id": "stt-whisper-large-v3",
+  "configuration": {
+    "concurrency_levels": [
+      1
+    ],
+    "context_size": 0,
+    "maximum_active_requests": 1,
+    "maximum_generated_tokens": 0,
+    "resident": true,
+    "sampling": "fixed deterministic adapter configuration"
+  },
+  "gates": [
+    {
+      "comparison": "less_or_equal",
+      "name": "word_error_rate",
+      "observed": 0.13312693498452013,
+      "passed": false,
+      "threshold": 0.12
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "empty_hypotheses",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 0
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "cold_load",
+      "observed": 1027.0434280100744,
+      "passed": true,
+      "threshold": 30000
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "warm_finalization_p95",
+      "observed": 662.3595409910195,
+      "passed": true,
+      "threshold": 1500
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "warm_realtime_factor_p95",
+      "observed": 0.09544570135886363,
+      "passed": true,
+      "threshold": 0.5
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "cpu_p95",
+      "observed": 76.92307692307692,
+      "passed": true,
+      "threshold": 83.33
+    },
+    {
+      "comparison": "greater_or_equal",
+      "name": "host_ram_available",
+      "observed": 23961,
+      "passed": true,
+      "threshold": 6144
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "swap_consumption",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 0
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "cancel_to_last_output",
+      "observed": 113.65396999462973,
+      "passed": true,
+      "threshold": 300
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "resource_release",
+      "observed": 26.846281994949095,
+      "passed": true,
+      "threshold": 2000
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "recovery_ready",
+      "observed": 969.2139419930754,
+      "passed": true,
+      "threshold": 30000
+    },
+    {
+      "comparison": "less_or_equal",
+      "name": "sustained_latency_regression",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 0.15
+    }
+  ],
+  "host_capture_sha256": "430d94b8ace8e1cb35f142ef47930a8d66645174fe12449af597940703030347",
+  "input_revision": "af7d25c199239f7a67de2dbc2d8b4a2c88d9dcc6ae15836624433964405fd93e",
+  "outcome": "fail",
+  "phases": [
+    {
+      "failure_count": 0,
+      "iterations": 1,
+      "metrics": [
+        {
+          "name": "model_load",
+          "statistic": "maximum",
+          "unit": "milliseconds",
+          "value": 1027.0434280100744
+        },
+        {
+          "name": "cpu_utilization",
+          "statistic": "p95",
+          "unit": "percent",
+          "value": 76.92307692307692
+        },
+        {
+          "name": "gpu_vram",
+          "statistic": "peak",
+          "unit": "mib",
+          "value": 4667.0
+        },
+        {
+          "name": "host_ram_available",
+          "statistic": "minimum",
+          "unit": "mib",
+          "value": 23961.0
+        },
+        {
+          "name": "swap_consumption",
+          "statistic": "maximum",
+          "unit": "mib",
+          "value": 0.0
+        }
+      ],
+      "name": "cold"
+    },
+    {
+      "failure_count": 0,
+      "iterations": 24,
+      "metrics": [
+        {
+          "name": "finalization_latency",
+          "statistic": "p95",
+          "unit": "milliseconds",
+          "value": 662.3595409910195
+        },
+        {
+          "name": "realtime_factor",
+          "statistic": "p95",
+          "unit": "ratio",
+          "value": 0.09544570135886363
+        }
+      ],
+      "name": "warm"
+    },
+    {
+      "failure_count": 0,
+      "iterations": 72,
+      "metrics": [
+        {
+          "name": "latency_regression",
+          "statistic": "maximum",
+          "unit": "ratio",
+          "value": 0.0
+        }
+      ],
+      "name": "sustained"
+    }
+  ],
+  "preregistration_commit": "f11f6caa42301376b96063cea61a617b94ecaad1",
+  "quality": {
+    "blind_reviewed": false,
+    "critical_failure_count": 0,
+    "metrics": [
+      {
+        "name": "word_error_rate",
+        "value": 0.13312693498452013
+      },
+      {
+        "name": "empty_hypotheses",
+        "value": 0.0
+      }
+    ],
+    "rubric_revision": "af7d25c199239f7a67de2dbc2d8b4a2c88d9dcc6ae15836624433964405fd93e",
+    "sample_count": 24
+  },
+  "raw_evidence": {
+    "bytes": 197471,
+    "outside_git": true,
+    "sha256": "9fd42233c8c0098796698959c235f15d68973ca16ee67295254c524850181d5e"
+  },
+  "role": "stt",
+  "run_id": "run-20260810-stt-whisper-large-v3",
+  "runtime": {
+    "dependency_lock_sha256": "70e41706b1b647062eddec88ab2768fa7747ab233b206ce4bb61e76b21798e20",
+    "device_api": "CUDA",
+    "driver_version": "610.57.04",
+    "name": "faster-whisper",
+    "revision": "65882eee9f5cdbeeb2d877f1131d48cf241b327d",
+    "version": "1.2.1"
+  },
+  "schema_version": "voice-agent.slice2-result.v1"
+}

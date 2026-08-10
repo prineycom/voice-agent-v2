@@ -1,0 +1,168 @@
+{
+  "captured_at": "2026-08-10T21:56:58+02:00",
+  "credential_lookup": {
+    "authorized_remote_source": "rpi:/etc/voice-agent/litellm.env",
+    "authorized_scope": "/home/priney/Projects/mymate/projects/voice-agent",
+    "configured_identity_paths": [
+      "/home/priney/.ssh/id_rsa",
+      "/home/priney/.ssh/id_ecdsa",
+      "/home/priney/.ssh/id_ecdsa_sk",
+      "/home/priney/.ssh/id_ed25519",
+      "/home/priney/.ssh/id_ed25519_sk"
+    ],
+    "configured_public_identity_count": 0,
+    "dedicated_public_identity": {
+      "algorithm": "ED25519",
+      "comment": "voice-agent-v2-litellm@priney-arch",
+      "fingerprint": "SHA256:85c6cJp2Ybv+otOTuID2l1zDxOOkFtd6sb498wWMKi4",
+      "private_mode": "0600",
+      "private_path": "/home/priney/.ssh/id_ed25519_rpi_litellm",
+      "public_mode": "0644",
+      "public_path": "/home/priney/.ssh/id_ed25519_rpi_litellm.pub",
+      "remote_installation_confirmed": true,
+      "tailscale_source_ipv4": "100.78.238.32"
+    },
+    "global_ssh_trust_changed": false,
+    "host_key_status": "user-confirmed-rescan-matched-task-private",
+    "legacy_project_status": "not-found",
+    "likely_files_scanned": 11,
+    "presented_host_key_fingerprints": {
+      "ecdsa": "SHA256:MhjxS7QLwXLg+L9/J12cp1fLtzRxlRfwverJrJXi36Y",
+      "ed25519": "SHA256:TEsmlVCLgPk9AMsZ3cE+1b0DaTV4m9ZxM3eNlHf2Dgw",
+      "rsa": "SHA256:vnxGN93CgELgaAhQltzJdf5q/FUmEVNUhJnIUh+eFY8"
+    },
+    "private_identity_files_read": false,
+    "public_key_auth_reached": true,
+    "public_key_auth_succeeded": true,
+    "reference_sources": [
+      "infra/pi/litellm/config.yaml",
+      "infra/pi/agent/deploy/litellm.service"
+    ],
+    "remote_failure_class": "FileNotFoundError",
+    "remote_file_read": false,
+    "remote_source_exists": false,
+    "ssh_agent_public_identity_count": 0,
+    "ssh_exit_code": 1,
+    "ssh_port": 2222,
+    "status": "authenticated-task-private-test-exception",
+    "sudo_reached": true,
+    "task_private_known_hosts": {
+      "algorithm": "ED25519",
+      "mode": "0600",
+      "path": "/home/priney/.cache/voice-agent-v2/slice-2/secrets/rpi-2222.known_hosts"
+    },
+    "task_private_token_file_created": false,
+    "task_private_token_file_mode": "0600",
+    "task_private_token_file_present": true,
+    "variable_name": "LITELLM_MASTER_KEY"
+  },
+  "discovery": {
+    "authenticated_model_list_status": 200,
+    "authentication_required": true,
+    "liveliness_status": 200,
+    "model_list_error_class": "auth_error",
+    "model_list_status": 401,
+    "readiness_status": 200
+  },
+  "gateway": {
+    "allowlisted_endpoint": "http://rpi:4000",
+    "credential_exception_scope": "closed-circuit-slice2-test-only",
+    "credential_source": "task-private-mode-0600-file",
+    "credential_supplied": true,
+    "implementation": "LiteLLM"
+  },
+  "model_selection": {
+    "aliases": [
+      "qwen3.6-35b-a3b",
+      "gpt-oss:120b",
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+      "glm-5.2",
+      "kimi-k2.7-code"
+    ],
+    "discovered_alias_count": 6,
+    "selected_alias": "deepseek-v4-flash",
+    "selected_alias_mapping": {
+      "active_config_path": "/home/priney/selfhost/litellm/config.yaml",
+      "active_config_proved_mapping": false,
+      "compose_service": "litellm",
+      "container_config_path": "/app/config.yaml",
+      "cost_privacy_metadata_evaluated": false,
+      "credential_values_read": false,
+      "fallback_sections_present": [],
+      "image": "ghcr.io/berriai/litellm:v1.87.0",
+      "matching_route_count": 0,
+      "operator_attestation_accepted": true,
+      "route_shape": "operator-attested opaque single selected alias",
+      "runtime": "docker",
+      "unrelated_aliases_reported": false,
+      "upstream_endpoint": null
+    },
+    "status": "selected-operator-attested",
+    "underlying_model": "opaque operator-attested route behind deepseek-v4-flash",
+    "underlying_provider": "DeepSeek route (operator-attested)"
+  },
+  "privacy": {
+    "ambient_credential_sources_read": false,
+    "credential_value_exposed_by_harness": false,
+    "disclosure_risk_exception": "user-accepted-for-closed-circuit-test-only",
+    "permitted_surfaces": [
+      "/health/liveliness",
+      "/health/readiness",
+      "/v1/models"
+    ],
+    "private_content_sent": false,
+    "prompt_request_count": 0
+  },
+  "raw_evidence": {
+    "directory": "/home/priney/.cache/voice-agent-v2/slice-2/discovery/litellm-rpi-4000",
+    "outside_git": true,
+    "sha256": {
+      "active-litellm-container-candidates.json": "d025874a1c3397bd9ec4da35be4a9aaea4aafcf21619cd07ea1a8cbc1c2a587b",
+      "active-litellm-container-candidates.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "active-litellm-container-metadata.json": "f0392b6db75b1211ce379b4b5a4970ceb9d30b55b224c5137c2827892f74bd71",
+      "active-litellm-container-metadata.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "active-litellm-metadata-attempt1.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "active-litellm-metadata-attempt1.stderr.log": "d72325273ddd9682c54b596dd3099067de71ae8af3cf131a775837d0dc6ed785",
+      "active-litellm-metadata.json": "23d96e6d6fd23c7525d1f5307d7fde421ecaf7d947e7219caadbec2722af4105",
+      "active-litellm-metadata.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "credential-lookup-redacted.json": "b3258cba70a0b892a3f0db62cd323d3a1416c718dbc0bc4489fbd23cdc396761",
+      "credential-ssh-attempt-redacted.json": "c80e2e75e5bee69929a3b79999f6364d98592aceece1db857a1933da7f228f96",
+      "deepseek-v4-flash-mapping.json": "36339dd7026f371ffca7a04be607b14817c7b68dce0b996fe13a84823fff1eed",
+      "deepseek-v4-flash-mapping.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dns.txt": "415095f6b8c44beae60cc0399cbb07a02be5312929560ccf7cca9857a50798ea",
+      "liveliness.body": "531eb97e0a03229b5b063cd6be4449bb5231ecbd28402be9186d8b8c84956d04",
+      "liveliness.headers": "00bde415e4e4ae5415aa24c97df5d207a326b58859cdd412955187a4d1ce7623",
+      "liveliness.status": "3fb83f4f33f67d723070625c97579bac1ac0f9698228f09e75d0d02b5c7b2629",
+      "models-authenticated-filtered.json": "372568768cdf13a357494d8c9d0c7ade7fa86d73d99162502bd2f316f76c8dd7",
+      "models.body": "813bab40854eb9723e00dcabe26ad7f3e9c35d8650dad9ca457bb6e57a0bf872",
+      "models.headers": "675df6d48cc53473c5a98c9000fad84de369344deebd6279a54333ca1a38df6e",
+      "models.status": "0109a7954fd1f4e128b603b4332993883977600697a92b51e00c8faf2dcd00a0",
+      "readiness.body": "7b1404a26974404218494ba12d1f2abb945f347c9faca91b8c7ed6d4cf8979c2",
+      "readiness.headers": "4763675ef29974970b0a5caba05720c78771e08351add6c270c7840ca25a2451",
+      "readiness.status": "d1e8fb873d9e2f7344f4d156f09f4f9e9399586098e7d53f3c42da7a11e992b4",
+      "route.txt": "536c52cbf281bb8a9c4329413f1f0734884f073d1c82b199be3a4cc7964c3ef3",
+      "ssh-2222-confirmed.stderr.log": "fc3871abe2da3f0f3e8e80c165ffe4e5709b47be0a1bfa0bcb2730e48cc4a816",
+      "ssh-2222-dedicated.stderr.log": "f275236fee64990168d540c70855835a6f3de15264edc142b32722ec398f66a3",
+      "ssh-2222-ed25519-rescan.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ssh-2222-keyscan.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ssh-2222-presented-host-keys.pub": "1807c354dfbf45f3ef542bfb5928e77b81f768b3078c546b94d4d99e5fc85ad1",
+      "ssh-2222.stderr.log": "d42ff8c0a7fdc06b8710dcf1589e01a8d764d58a28bcf9500c29b681329c4a89",
+      "ssh-agent-list.stderr.log": "84b8eb561e5d34d856acb140340cdbe4f49d4a59bb36aea28d920e7e1d806a29",
+      "tailscale-peer-filtered.json": "505db1fa974b23302f7c90bd999715c7b8f92ed3b78f64462b2ddfeb73f3d21f",
+      "tailscale-ping-2222-confirmed.txt": "71613eb5de7c26e699c5202b090bb174a56d284dbeaab53bd835e02dfdcb0ed3",
+      "tailscale-ping-2222-keyscan.txt": "f9c9dee1d00eb52d1350a78f2536da599969f9f834849a9fc8b0f3c792165845",
+      "tailscale-ping-authenticated-model-list.txt": "f9c9dee1d00eb52d1350a78f2536da599969f9f834849a9fc8b0f3c792165845",
+      "tailscale-ping.txt": "f9c9dee1d00eb52d1350a78f2536da599969f9f834849a9fc8b0f3c792165845"
+    }
+  },
+  "schema_version": "voice-agent.slice2-cloud-discovery.v1",
+  "transport": {
+    "dns_address_class": "tailscale-cgnat-ipv4",
+    "fail_closed_condition": "Do not send prompt or context if rpi stops resolving to a Tailscale address, the route is not tailscale0, or the Tailscale peer/path proof fails.",
+    "kernel_route_interface": "tailscale0",
+    "payload_transport_assessment": "Plain HTTP application payload is carried inside the verified direct Tailscale WireGuard path.",
+    "tailscale_path": "direct-wireguard",
+    "tailscale_peer_online": true
+  }
+}
