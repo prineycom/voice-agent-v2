@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Slice 2 measurement in progress.** Slice 1's dependency-free deterministic tracer remains executable. The sole local LFM candidate and both local STT candidates failed at least one hard Slice 2 gate, and their evidence is preserved. The user selected only LiteLLM alias `deepseek-v4-flash` at `http://rpi:4000` under operator-attested opaque DeepSeek routing for public synthetic testing. Transport/discovery pass; a superseding preregistration is prepared for commit before the first completion. Cost/privacy/provider provenance are intentionally unevaluated, so this exception cannot authorize private/live or production use.
+**Cumulative Slices 2–5 branch ready for final human acceptance.** The deterministic Slice 1 tracer remains executable. The branch now runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` over Tailscale, and local Qwen3 CustomVoice/`ryan`. Automated public-corpus full turns pass, while every Slice 2 gate failure and operator exception remains documented. Physical microphone and subjective listening are intentionally pending for one final command.
 
 ## Root verification
 
@@ -23,6 +23,16 @@ It uses only POSIX `sh` and the Python 3.11+ standard library, creates isolated 
 ```
 
 The command reports each preserved path. Both PCM files use signed 16-bit little-endian mono samples at 16 kHz; `output.pcm` contains the deterministic audible tone. The destination must not already exist, preventing accidental replacement of prior evidence. The toolchain is a Slice 1 reproducibility choice only; it does not select the future production application or inference framework.
+
+## Final Slice 5 human acceptance
+
+After the automated verifiers pass, run exactly one microphone/listening turn:
+
+```sh
+./run-voice-turn --microphone --duration 8 --play
+```
+
+Speak one Russian utterance during the capture window. Check the printed transcript and response, listen for intelligibility, pronunciation, and naturalness, and confirm `Terminal: turn.completed`. The command deletes temporary microphone PCM, streams Qwen output without an output file, and writes only content-free evidence under the authorized cache. A live transcript crosses the approved Tailscale LiteLLM boundary; no fallback alias is permitted.
 
 ## Current scope
 

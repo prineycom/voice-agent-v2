@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 product delivery
 >
-> **Last updated:** 2026-08-10
+> **Last updated:** 2026-08-11
 
 This roadmap is a sequence of independently deliverable vertical slices. It contains no calendar estimates. A slice starts only when its dependencies and incoming evidence gate are satisfied; it finishes only with the stated user-visible behavior and evidence.
 
@@ -144,6 +144,8 @@ Preserve the completed LFM and local STT/TTS runs. Re-prove the Tailscale route,
 
 ## Slice 3 — Real local STT voice turn
 
+> **Checkpoint:** automated public-corpus real Whisper path passes. Physical microphone acceptance is intentionally deferred to the one Slice 5 human command.
+
 ### User-visible outcome
 
 A user can speak Russian to a host-local capture path and see an accurate final transcript produced by the selected local STT model; deterministic substitutes finish the rest of the turn.
@@ -184,6 +186,8 @@ Run corpus scoring, public tracer success/failure cases, capture-format/non-rete
 - One redacted trace proving a real STT result completes the tracer.
 
 ## Slice 4 — Selected LLM-provider response
+
+> **Checkpoint:** the single-alias real provider adapter, bounded context, filtering, isolation, redaction, cancellation, and public real-STT tracer pass. Slice 2 provider performance/quality gates remain failed under the cumulative operator override.
 
 ### User-visible outcome
 
@@ -230,6 +234,8 @@ Run the fixed evaluation set, multi-turn session-isolation cases, permitted-fiel
 
 ## Slice 5 — Real local-STT/TTS spoken conversation
 
+> **Checkpoint:** cumulative public diagnostics proved complete real Whisper → `deepseek-v4-flash` → Qwen3 turns and interruption, with peak VRAM at most `7,600 MiB`. The final contract-format run transparently completed two of three turns and hit the already-known empty provider response on the third; its cancellation case also stopped at provider failure before TTS. The final physical microphone and subjective listening command is ready but remains unrun; Slice 6 is therefore not started.
+
 ### User-visible outcome
 
 A user can speak through a host-local path and hear a locally synthesized spoken answer from real local STT, the selected LLM provider, and local TTS—the first complete real-inference voice conversation, before LiveKit.
@@ -266,6 +272,7 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 ### Evidence required before Slice 6
 
+- Final human microphone and Qwen intelligibility/pronunciation/naturalness acceptance from `./run-voice-turn --microphone --duration 8 --play`; pending and never auto-claimed.
 - Listening/latency/resource report tied to the selected artifact.
 - Sustained-run and cancellation traces.
 - Complete real-inference turn trace and declared audio format.

@@ -2,7 +2,7 @@
 
 **Source:** https://github.com/prineycom/voice-agent-v2/issues/3
 **Parent:** —
-**Status:** ⚠️ operator-fixed checkpoint complete with measured limitations; cumulative delivery continues to Slice 5
+**Status:** ⚠️ operator-fixed measurement complete; cumulative Slices 3–5 automated and final human acceptance pending
 
 ## Changed files
 
@@ -48,7 +48,7 @@
 | `./verify` | ✅ pass | Slice 1 behavioral verification remains green; 27 tests at checkpoint. |
 | Runtime import/CUDA probe | ✅ pass | vLLM 0.26.0 / Torch 2.11 CUDA 13 and faster-whisper/CTranslate2/Piper imported; RTX 4070 visible. |
 | Hash-checked acquisition | ✅ pass | LFM/STT/TTS artifact sizes and SHA-256 values matched manifests. |
-| Qwen-artifact audit | ✅ pass | `qwen_acquired=False`; no matching model-cache path outside generic vLLM package code. |
+| Cancelled Qwen LLM audit / selected Qwen TTS | ✅ pass | No Qwen alternate LLM was acquired. The distinct approved Qwen3 CustomVoice TTS artifact is hash/size-pinned outside Git and freshly measured. |
 
 ## Failed gates
 
@@ -76,6 +76,7 @@
 - Qwen3 CustomVoice/`ryan`: automated component and repeat timing/resource/cancellation gates passed. Recovery first signal around `5.6 s` is retained as an unpreregistered cold-first-request diagnostic. Twelve playable WAVs are outside Git under the authorized cache.
 - Cloud→TTS: `196.48 ms` handoff passed; TTS regression `23.56% > 20%` and cloud completion regression `612.89% > 20%` failed.
 - Barge-in: STT submission `113.66 ms`, old TTS stop `113.65 ms`, zero stale output, GPU reserve `4,788 MiB`, CPU p95 `66.67%`; STT finalization regression failed.
+- Cumulative Slice 5 public diagnostics first completed three real turns plus interruption. After preserving the TTS v1 16 kHz contract, the final run completed two of three turns, explicitly recorded one empty provider response, and stopped its cancellation case at another provider failure. Peak VRAM was at most `7,600 MiB`, leaving `4,682 MiB`; public playable WAV diagnostics and both attempts remain outside Git.
 
 ## Unresolved uncertainty
 

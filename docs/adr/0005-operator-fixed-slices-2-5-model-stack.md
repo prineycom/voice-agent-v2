@@ -29,6 +29,8 @@ Qwen automated timing/resource/cancellation/repeat evidence passes the fixed thr
 
 Implement Slices 3–5 cumulatively with automated checkpoints. Defer physical microphone/listening acceptance and the only review/no-mistakes run until Slice 5. Never claim pending human evidence passed, and never merge without separate authority.
 
+The implemented pre-LiveKit runtime keeps Whisper and Qwen in bounded subprocesses, keeps provider context memory-only and session-scoped, admits only allowlisted provider fields, and persists no conversation content by default. Its automated public diagnostics observed a first three-turn/interruption success and a final TTS-v1-format run with two completions, one explicit empty-provider failure, and a provider failure before the cancellation seam. Peak VRAM was at most `7,600 MiB` with more than `24 GiB` RAM available. The successful and failed attempts are both preserved outside Git. These implementation results do not supersede the failed Slice 2 gates or pending human listening.
+
 ## Consequences
 
 ### Positive

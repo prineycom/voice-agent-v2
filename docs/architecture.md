@@ -209,6 +209,12 @@ On barge-in, the controller:
 4. tells the client to discard queued prior-turn media, events, and visual state;
 5. admits a new turn only after correlation prevents stale chunks from crossing turns.
 
+### 6.4 Slices 3–5 pre-LiveKit runtime
+
+The cumulative pre-LiveKit tracer now has three concrete adapters: process-isolated local Whisper large-v3-turbo, a single-alias LiteLLM `deepseek-v4-flash` HTTP adapter, and process-isolated local Qwen3 CustomVoice/`ryan`. The provider adapter admits only a final transcript and a bounded memory-only per-session context, proves its Tailscale route at readiness/request time, filters request fields, ignores hidden reasoning content, and has no fallback. Qwen's native 24 kHz stream is HQ-converted in its process boundary to the preserved TTS v1 16 kHz mono PCM contract and emitted as validated ordered chunks without an output path by default.
+
+The controller hands complete provider sentences to TTS while the provider stream remains open, but buffers audio events until `llm.final` so the public lifecycle ordering remains stable. Cancellation terminates delivery with one correlated terminal event and no later chunks. This tracer proves inference contracts; it does not implement LiveKit publication, browser behavior, or a durable conversation store. Default execution persists neither microphone input, transcript/response, nor synthesized audio.
+
 ## 7. Failure semantics
 
 No failure silently switches LLM provider, moves another inference capability to cloud, changes authorization, enables always-listening wake behavior, or selects a different avatar module.
@@ -314,7 +320,7 @@ The measured peak must account for:
 - browser/MVP-eye rendering on the canonical host;
 - host services, filesystem cache, and failure/restart transients.
 
-The cumulative delivery measurement observed a Qwen3+Whisper peak of `7,494 MiB`, leaving `4,788 MiB`, with CPU p95 `66.67%`; it also observed failed latency regressions. These values bound only the fixed ADR-0005 stack and do not erase earlier component failures. Other admission limits, residency/unload policy, and browser/LiveKit headroom remain hypotheses until the final integrated runs.
+The Slice 2 overlap measurement observed a Qwen3+Whisper peak of `7,494 MiB`, leaving `4,788 MiB`, with CPU p95 `66.67%`; it also observed failed latency regressions. The cumulative Slice 5 public diagnostics observed peak VRAM up to `7,600 MiB` (reserve `4,682 MiB`) with more than `24 GiB` RAM available. A first diagnostic completed three turns plus interruption; the final TTS-v1-format run completed two turns, explicitly failed one empty provider response, and could not reach the cancellation seam after another provider failure. These results preserve the known provider instability rather than disguising it. They bound only the fixed ADR-0005 stack and do not erase earlier component failures. Browser/LiveKit headroom remains a hypothesis until the later media slice.
 
 ### 11.3 Measurements required before model/provider selection
 
