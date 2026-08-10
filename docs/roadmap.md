@@ -89,50 +89,55 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 ### User-visible outcome
 
-The project has evidence-backed local STT/TTS selections and exactly one measured LLM provider mode. Under this slice's explicit single-LLM exception, only the user-approved LFM2.5-2.6B BF16/vLLM target is evaluated; if it fails any gate, no LLM is selected and the dependent path remains blocked pending a later explicit model/cloud decision.
+The project has evidence-backed local STT/TTS measurements and exactly one cloud LLM test candidate after the sole local LFM target failed. The user selected LiteLLM alias `deepseek-v4-flash` at `http://rpi:4000` and accepts its DeepSeek routing as operator-attested and opaque for public synthetic Slice 2 measurement only. A passing result may establish test viability, but unevaluated cost/privacy/provider provenance means private/live transfer, Slice 4 activation, and production cloud selection remain blocked.
 
 ### Included scope
 
 - A repeatable benchmark harness that records the host, driver, runtime, artifact/provider identity, and configuration.
 - A preregistered Russian STT corpus/rubric, LLM response rubric, and TTS listening set that contain no private recordings in Git.
-- At least two credible local candidates for STT and at least two for TTS. By explicit user decision, LLM has a single-model exception: evaluate only official LFM2.5-2.6B native BF16 on vLLM; no alternate local model or cloud provider is acquired, contacted, benchmarked, or substituted.
+- At least two credible local candidates for STT and at least two for TTS. Preserve the failed official LFM2.5-2.6B native BF16/vLLM result with no retry or alternate local model.
+- One explicit cloud-gateway investigation: LiteLLM at `http://rpi:4000`, carried only over a proven Tailscale WireGuard path, with no redirect, implicit model default, alternate endpoint, or fallback.
+- Before cloud inference, authenticated alias discovery, explicit selection of only `deepseek-v4-flash`, recorded operator-attested opaque DeepSeek routing, and an approved committed superseding preregistration. Cost/privacy/provider provenance are explicitly not evaluated under this temporary exception rather than silently assumed.
+- Cloud measurement with public synthetic fixtures only: permitted-field filtering, concurrency `1/2/4`, TTFT/visible/completion/throughput/fairness, cancellation, sustained behavior, safe usage/error observations, and local TTS overlap only after component gates pass.
 - Cold, warm, and sustained local measurement of load time, latency, throughput, VRAM, RAM, CPU, GPU use, cancellation, and recovery.
 - Required overlap measurements: local-LLM decode with TTS startup, plus new STT admission while prior response work is being cancelled.
-- A fail-closed LLM outcome: select LFM only if it passes every gate. If it fails any gate, record no LLM selection, stop LLM-dependent work, and escalate a separate later model/cloud decision without contacting another provider.
+- A fail-closed LLM outcome: the failed LFM result cannot be erased or disguised. Select cloud mode only if the one explicit LiteLLM alias passes every transport, identity, privacy, cost, quality, latency, concurrency, cancellation, and no-fallback gate; otherwise retain no LLM selection.
 - Selection report for local STT/TTS and one LLM provider mode, with explicit context/concurrency/admission limits and no fallback route.
 
 ### Excluded scope
 
-- Production inference services, LiveKit, browser/avatar work, deployment automation, wake training, cloud STT/TTS, automatic provider fallback, and model-quality claims beyond the fixed evaluation sets.
+- Production inference services, LiveKit, browser/avatar work, deployment automation, wake training, cloud STT/TTS, LFM retry, alternate gateways/models/providers, automatic provider fallback, and model-quality claims beyond the fixed evaluation sets.
 - Committing model weights, provider/registry tokens, private samples, or raw conversational content.
 
 ### Dependencies
 
 - Slice 1 contracts and deterministic tracer are green.
-- Approved candidate licenses/acquisition paths are reviewable without exposing credentials; any later cloud path has its own explicit privacy/provider gate.
+- Local artifact licenses/acquisition paths remain reviewable without exposing credentials. The task-private test credential authenticated over the proven transport. The user selected only `deepseek-v4-flash` and accepts an operator-attested opaque route; completion requests remain blocked until the superseding preregistration is committed. Defaults, other aliases, fallback, private/live content, and production use remain forbidden.
 
 ### Acceptance criteria
 
 - Numeric resource, latency, and quality pass/fail thresholds and scoring rules are committed before candidate results are viewed.
 - Every local result identifies artifact revision/hash, quantization, serving runtime/version, driver, context, concurrency, and benchmark input revision.
 - Measurements include idle and peak VRAM/RAM, cold and warm latency, sustained behavior, and all required overlap/cancellation cases from [`architecture.md`](architecture.md#113-measurements-required-before-modelprovider-selection).
-- LLM evaluation contains exactly one identity: approved `LiquidAI/LFM2.5-2.6B` native BF16 on vLLM. No alternate LLM is acquired, contacted, or tested.
-- If LFM2.5-2.6B fails any preregistered gate, the report selects no LLM and blocks Slice 4. Testing any additional local model, LFM quantization/runtime, or cloud LLM requires a new explicit decision and revised preregistration before contact, download, or inference.
-- Selected local STT/TTS and the selected LLM mode pass their quality/latency gates. Local mode also passes the complete measured peak with an explicit reserve; cloud mode reports the smaller local resource envelope and its network/provider budget separately.
+- Local LLM evidence contains exactly the approved failed `LiquidAI/LFM2.5-2.6B` native BF16/vLLM identity; it is never retried or replaced by another local LLM.
+- Cloud discovery is limited to `http://rpi:4000`. Before prompt/context transfer, DNS must resolve to Tailscale, the route must use `tailscale0`, a WireGuard path must succeed, redirects must be rejected, and credential discovery must remain explicitly scoped and non-echoing.
+- Cloud inference contains exactly one explicitly selected LiteLLM alias, `deepseek-v4-flash`, and records the underlying route as operator-attested/opaque rather than config-proven; gateway default, alias substitution, alternate alias, and observed fallback are hard failures.
+- A clearly superseding cloud preregistration with transport, permitted-field/privacy-safe handling, concurrency `1/2/4`, quality, latency, fairness, cancellation, sustained, and repeat gates is approved and committed before any completion request. It explicitly records that provider cost/retention/training/region/provenance are outside this temporary synthetic scope.
+- Selected local STT/TTS and the selected LLM mode pass their quality/latency gates. Cloud mode reports its local resource envelope and network/provider budget separately, and records content-free usage/cost/error observations plus provider privacy facts.
 - Repeating the winning configuration produces results inside the declared tolerance.
 - Exactly one provider mode is selected, is visible in evidence/configuration, and has no automatic failure-triggered route to another provider.
 - If neither a local LLM nor an approved cloud candidate passes, the slice ends with a failed selection report and Slice 4 cannot start.
 
 ### Validation method
 
-Run approved LFM2.5-2.6B plus both candidates for each local STT/TTS role on the canonical host from cold load through sustained cases. Run required overlap and repeat only if LFM passes its component gates. If LFM fails any gate, select no LLM and stop the dependent path; do not acquire, contact, or run another local/cloud LLM without a later explicit decision and revised preregistration.
+Preserve the completed LFM and local STT/TTS runs. Re-prove the Tailscale route, commit the superseding preregistration, then run only `deepseek-v4-flash` with committed public synthetic quality, concurrency `1/2/4`, pressure, cancellation, sustained, permitted-field, safe-usage/error, and repeat cases. Do not inspect further RPi mapping, test another alias, or send private/live content. Any measured identity, transport, request-privacy, or performance failure remains fail-closed; provider policy/cost remain intentionally unclaimed.
 
 ### Evidence required before Slice 3
 
 - Machine-readable local benchmark results and a human-readable selection rationale.
 - Precommitted thresholds/rubrics and repeat-run comparison.
 - Selected local STT/TTS artifact manifests and measured residency/admission constraints.
-- Selected LLM provider mode/identity, or an explicit failed-selection record that blocks Slice 4 and identifies the later model/cloud decision gate.
+- A synthetic-test result for the operator-attested `deepseek-v4-flash` alias, or an explicit failed-selection record. Slice 4 remains blocked until a later private/live provider privacy/provenance approval even if the synthetic benchmark passes.
 - Explicit list of hypotheses that component/provider benchmarking has not tested.
 
 ## Slice 3 — Real local STT voice turn

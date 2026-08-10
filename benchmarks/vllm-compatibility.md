@@ -1,6 +1,6 @@
 # Verified vLLM/LFM2.5 compatibility proposal
 
-> Research cutoff: 2026-08-10. No model inference, candidate result, runtime installation, or large download was performed.
+> Research cutoff: 2026-08-10. At the time of this compatibility screen no inference/download had occurred. The target was later measured and failed preregistered visible-output/isolation/pressure gates; its result is preserved and further LFM inference is stopped.
 
 ## Finding
 

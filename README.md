@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Slice 1 executable foundation.** The repository now includes the dependency-free deterministic synthetic voice-turn tracer from [`docs/roadmap.md`](docs/roadmap.md#slice-1--deterministic-zero-secret-voice-turn-tracer), but not a real voice stack. No inference model, cloud provider, production framework, renderer framework, or detailed avatar-control contract has been selected. Those choices remain gated by measured slices and a separate avatar Grill/design task rather than implementation assumptions.
+**Slice 2 measurement in progress.** Slice 1's dependency-free deterministic tracer remains executable. The sole local LFM candidate and both local STT candidates failed at least one hard Slice 2 gate, and their evidence is preserved. The user selected only LiteLLM alias `deepseek-v4-flash` at `http://rpi:4000` under operator-attested opaque DeepSeek routing for public synthetic testing. Transport/discovery pass; a superseding preregistration is prepared for commit before the first completion. Cost/privacy/provider provenance are intentionally unevaluated, so this exception cannot authorize private/live or production use.
 
 ## Root verification
 
@@ -26,7 +26,7 @@ The command reports each preserved path. Both PCM files use signed 16-bit little
 
 ## Current scope
 
-- One Arch Linux host runs every self-hosted media, orchestration, STT, TTS, application, and optional local-LLM process; there is no Pi/Desktop compute split.
+- One Arch Linux host runs every media, orchestration, STT, TTS, application, and optional local-LLM process. ADR-0004 permits only one narrow auxiliary role: an allowlisted tailnet LiteLLM relay for a measured cloud path, never Pi-side inference/control.
 - A private browser experience uses local LiveKit and local STT/TTS. LLM access uses one explicitly configured provider mode, with local preferred initially.
 - A cloud LLM may be selected only after local candidates fail preregistered resource, latency, or quality gates. It is never an automatic or silent fallback.
 - Tailscale membership is sufficient authorization during the current private stage.
@@ -39,12 +39,12 @@ The command reports each preserved path. Both PCM files use signed 16-bit little
 - The detailed avatar-module and visual-control contract requires a dedicated Grill/design task before MVP eye implementation.
 - Live2D and 3D remain possible later avatar modules; neither is an MVP renderer decision.
 - Optional wake-word activation, including any custom Russian wake model, begins only after the core MVP is reliable.
-- Exact model, quantization, inference server, cloud provider, and application-framework choices wait for their measurement gates.
+- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the current operator-attested alias is synthetic-test-only.
 - Selective migration from the legacy repository waits for a concrete vertical slice and fresh validation.
 
 ## Non-goals
 
-- A Raspberry Pi/Desktop or other required user-managed compute-host split.
+- A Raspberry Pi/Desktop inference or control split; ADR-0004's single LiteLLM relay is the only narrow topology exception.
 - Cloud STT/TTS or silent/automatic failover between local and cloud LLM providers.
 - Audio2Face (A2F) or Audio2Emotion (A2E) in the active V2 architecture.
 - Kiosk mode.

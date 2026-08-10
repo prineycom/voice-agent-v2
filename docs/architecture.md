@@ -6,7 +6,7 @@
 >
 > **Last updated:** 2026-08-10
 
-This document defines the active target architecture. It deliberately does not select model names, an LLM cloud provider, or implementation frameworks before their measurement and privacy gates.
+This document defines the active target architecture. It records user-approved candidate identities and endpoints only at their evidence gate; a gateway investigation is not a passing provider/model selection.
 
 ## 1. Evidence language
 
@@ -22,11 +22,11 @@ Untested behavior is not implied by a target diagram.
 
 | ID | Status | Statement |
 | --- | --- | --- |
-| D1 | Decision | V2 is a clean repository. Every self-hosted service runs on one Arch Linux PC; the legacy Pi/Desktop split is not part of V2. An explicitly selected managed cloud LLM is a provider exception, not another user-managed compute host. See [ADR-0001](adr/0001-clean-v2-single-host.md). |
-| D2 | Decision | LiveKit, STT, and TTS remain local. A local LLM is the initial preference; one explicit cloud LLM may be selected only if measured local candidates fail resource, latency, or quality gates. Provider failure never causes automatic fallback. See [ADR-0003](adr/0003-local-first-llm-with-explicit-cloud-option.md). |
+| D1 | Decision | V2 is a clean repository. Media, control, STT/TTS, application, and local-inference services run on one Arch Linux PC; the legacy Pi/Desktop inference split is not part of V2. After documented local-LLM failure, one user-operated tailnet LiteLLM gateway is the narrow topology exception and may relay only an approved cloud LLM path. See [ADR-0001](adr/0001-clean-v2-single-host.md) and [ADR-0004](adr/0004-tailnet-litellm-cloud-gateway-evaluation.md). |
+| D2 | Decision | LiveKit, STT, and TTS remain local. The sole local LLM failed its measured gates; one explicit cloud LLM may now be selected only after the separate gateway, model, transport, privacy, cost, and measurement gate passes. Provider failure never causes automatic fallback. See [ADR-0003](adr/0003-local-first-llm-with-explicit-cloud-option.md). |
 | D3 | Decision | The avatar boundary is renderer-agnostic. The MVP module is a deterministic custom animated AI eye; Live2D and 3D are optional later modules. The LLM never emits frames or renderer parameters. See [ADR-0002](adr/0002-renderer-agnostic-avatar-boundary.md). |
 | D4 | Decision | Tailscale membership is sufficient authorization for the private current stage. Protocol credentials are still scoped and protected, but V2 will not invent a second identity system now. |
-| D5 | Decision | Exact STT/LLM/TTS models, quantization, serving choices, and any cloud provider are selected only after repeatable resource, latency, quality, privacy, and required-concurrency gates. No preferred model name is recorded until the user supplies it to that slice. |
+| D5 | Decision | Exact STT/LLM/TTS models, quantization, serving choices, and any cloud provider are selected only after repeatable resource, latency, quality, privacy, and required-concurrency gates. User-supplied candidates may be recorded before measurement, but an endpoint or alias alone is not a provider selection. |
 | D6 | Decision | Custom wake work is optional and deferred until after the core MVP. Kiosk operation is outside current scope. |
 | D7 | Decision | The pinned [legacy repository](#34-pinned-legacy-reference) is provenance, not a dependency. A future slice may selectively migrate a proven contract, component, or test only with fresh V2 validation and recorded origin. |
 | D8 | Decision | The detailed avatar-module and visual-control contract is deferred to a separate Grill/design task that must complete before MVP eye implementation. |
@@ -35,7 +35,7 @@ Untested behavior is not implied by a target diagram.
 
 ### 3.1 Active product boundary
 
-The canonical Arch PC contains every self-hosted process required to accept speech, synthesize a reply, transport realtime media, and serve the application. In the initially preferred local-LLM mode, it also performs response generation. If local candidates fail the measured gate, one explicitly configured managed cloud LLM becomes an external provider dependency; this is not a second user-managed compute plane and never happens as fallback.
+The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The authorized cloud investigation adds one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and, only after all remaining gates pass, one explicitly configured managed cloud LLM. The relay is not a second inference/control plane and never acts as fallback.
 
 The ordinary browser may run on the canonical PC. A browser on another tailnet device is an optional presentation endpoint: it performs no required inference or orchestration, but it runs the selected avatar module.
 
@@ -48,7 +48,8 @@ flowchart LR
     C["Session controller<br/>turn lifecycle and contracts"]
     S["Local STT service"]
     P["LLM provider adapter<br/>one configured mode"]
-    L["Local LLM<br/>initial preference"]
+    L["Local LLM<br/>measured failed path"]
+    Q["Allowlisted LiteLLM gateway<br/>tailnet candidate"]
     X["Approved cloud LLM<br/>explicit measured option"]
     V["Local TTS service"]
 
@@ -60,7 +61,8 @@ flowchart LR
     C <--> S
     C <--> P
     P <--> L
-    P -.->|explicit cloud mode only| X
+    P -.->|explicit cloud mode only| Q
+    Q -.->|one approved model| X
     C <--> V
     C -->|lifecycle and bounded avatar inputs| K
     K --> B
@@ -78,6 +80,7 @@ The diagram expresses logical boundaries, not a framework or container decision.
 | STT inference service | Turn bounded or streaming audio into transcript results. | Canonical host | GPU/CPU/RAM, as measured |
 | LLM provider adapter | Present one provider-neutral request/result contract and route only to the explicitly configured provider. | Canonical host | CPU/RAM |
 | Local LLM inference service | Produce response text when local mode passes and is selected. | Canonical host; initially preferred | GPU/CPU/RAM, as measured |
+| LiteLLM gateway | Relay only to the explicitly selected cloud alias; expose safe health/model/usage/error metadata; never choose a default or fallback. | Allowlisted user-operated tailnet node; optional and gated | Network/CPU/RAM |
 | Managed cloud LLM | Produce response text only when cloud mode has been explicitly measured, approved, and selected. | Approved external provider; optional | External network/service |
 | TTS inference service | Stream synthesized speech for validated response text. | Canonical host | GPU/CPU/RAM, as measured |
 | Browser client | Capture/play media, show session state, host the selected avatar module, and derive speech-synchronous visual input from actual playout. | Local browser by default; tailnet browser optional | Client CPU/GPU |
@@ -86,7 +89,7 @@ The diagram expresses logical boundaries, not a framework or container decision.
 ### 3.3 Outside the active boundary
 
 - Cloud STT/TTS and any unapproved or automatically selected cloud LLM.
-- A dedicated Pi, external inference desktop, or other required user-managed compute node.
+- Any auxiliary inference/control host or user-managed node beyond ADR-0004's single allowlisted LiteLLM relay.
 - Live2D and 3D as MVP renderers. They remain possible later avatar modules.
 - A2F and A2E.
 - Kiosk boot/session management.
@@ -114,7 +117,7 @@ Media and control remain distinct even when LiveKit transports both.
 2. The browser joins a realtime session and publishes microphone audio to local LiveKit.
 3. The session controller consumes the audio. It owns utterance boundaries and creates one turn correlation ID per accepted utterance.
 4. The controller streams or submits audio to local STT. Partial transcript events may improve feedback; only a final transcript can advance the turn to response generation.
-5. The controller sends the final transcript and permitted conversation context through the LLM provider adapter to the one explicitly configured provider. In local mode the request stays on-host. In cloud mode only approved fields cross outbound TLS to the allowlisted provider.
+5. The controller sends the final transcript and permitted conversation context through the LLM provider adapter to the one explicitly configured provider. In local mode the request stays on-host. In cloud mode only approved fields traverse the allowlisted encrypted path: TLS by default, or the exact HTTP LiteLLM endpoint only while its Tailscale WireGuard route proof is valid; the gateway's onward provider hop must also be approved.
 6. The selected LLM provider returns response text. Provider identity and the external-transfer fact, when applicable, remain associated with the turn; provider failure cannot select another provider.
 7. The controller sends validated response text to local TTS and publishes ordered transcript/lifecycle events. LLM generation and TTS may overlap only in a way proven safe by the measured budget.
 8. TTS audio is published through LiveKit. The controller publishes turn/lifecycle state, while the browser derives a bounded speech envelope from actual playout.
@@ -149,13 +152,13 @@ Contract versions change for semantic compatibility, not every implementation re
 
 - Exactly one provider mode is configured for a deployment/session; request failure never changes it.
 - Local mode uses a host-local endpoint and locally managed model artifact.
-- Cloud mode uses an allowlisted TLS endpoint/model identity and a server-side credential from untracked secret storage.
+- Cloud mode uses one allowlisted encrypted endpoint, explicit gateway alias and underlying provider/model identity, and a server-side credential from an explicitly authorized untracked source. The ADR-0004 HTTP endpoint is allowed only inside a freshly proven Tailscale WireGuard path with redirects rejected.
 - Cloud requests contain only final transcript and explicitly permitted context fields—never raw microphone/TTS audio, arbitrary local files, environment values, or credentials.
 - Before activation, cloud-provider retention/training policy, privacy terms, cost model, and region where relevant are recorded and approved.
 - Provider mode/identity, correlation, external-transfer fact, latency, usage/cost when available, and error class are observable without logging request/response content.
 - Switching provider is an explicit configuration and readiness transition, not transparent retry behavior.
 
-The provider name and the user's preferred local model are **not yet supplied decisions**. The measurement slice records them without guessing.
+The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement only, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. Therefore any passing benchmark can establish only synthetic test viability; private/live transcript transfer, Slice 4 activation, and production use remain unapproved until the normal privacy/provider gates are restored.
 
 ### 5.2 Avatar-boundary constraints
 
@@ -270,7 +273,7 @@ Local model artifacts require identity, revision/hash, license/provenance, expec
 
 - Expose only the HTTPS application entry point and the minimum LiveKit signaling/media paths needed by a tailnet browser.
 - Bind STT, TTS, any selected local LLM, health details, model lifecycle controls, and controller administration to loopback or an equally host-local transport.
-- Permit outbound controller traffic only to the explicitly configured cloud LLM endpoint when cloud mode is selected; do not expose inference management inbound.
+- Permit provider-adapter traffic only to the explicitly configured cloud endpoint. ADR-0004's LiteLLM endpoint is tailnet-only and readiness must re-prove DNS, `tailscale0`, and WireGuard before content; do not expose inference management or add LAN/public fallback.
 - Keep LiveKit signing material in the web gateway; issue narrow room capabilities because LiveKit requires them as protocol credentials, not as a second user-auth subsystem.
 - Do not publish a public fallback route or alternate provider route.
 - Record the actual tailnet ports and transport behavior in the LiveKit slice after loopback and remote-client validation.

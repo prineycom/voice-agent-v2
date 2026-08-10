@@ -4,11 +4,15 @@ This directory is the evidence-and-selection harness for [Issue #3](https://gith
 
 ## Gate state
 
-`config/preregistration.v1.json` is approved for the official LFM BF16/vLLM primary as the only LLM and for staged LFM/STT/TTS acquisition. No runtime/model installation, large download, candidate inference, or candidate result occurred before approval. Acquisition commands require the approved proposal to be committed; later results must name that ancestor commit.
+`config/preregistration.v1.json` is the immutable local-plan preregistration committed before acquisition/inference. The official LFM BF16/vLLM candidate and both STT candidates later failed at least one hard gate; `results/` and `selection/` preserve that failed evidence. Further LFM inference is stopped.
 
-The runtime-priority decision preserves the LFM2.5-2.6B family and requires strong parallel behavior. The target is now the smallest provenance-safe artifact with verified native vLLM support, not the formerly mandatory GGUF quantization. Full compatibility evidence is in [`vllm-compatibility.md`](vllm-compatibility.md).
+The user then authorized only the LiteLLM gateway at `http://rpi:4000` for cloud investigation. DNS, `tailscale0` routing, and a direct WireGuard path prove that the plaintext HTTP hop is carried inside Tailscale. The user-confirmed `rpi:2222` ED25519 host key is isolated in task-private trust, and the dedicated source-restricted identity authenticates with remote `sudo -n`; the referenced remote env file was absent and no alternate remote path was searched. For this closed-circuit test only, the user accepted the disclosure risk and placed a credential out-of-band in the task-private mode-`0600` file. Authenticated `/v1/models` returned six aliases without prompts; generic `owned_by=openai` metadata does not establish underlying provider/model. `evidence/litellm-discovery.v1.json` records the privacy-safe state.
 
-### Approved priority #1
+`config/preregistration.cloud.v2.json` now clearly supersedes v1 for exactly alias `deepseek-v4-flash`. The user accepts its DeepSeek routing as operator-attested and opaque, stops further mapping/provenance/cost/privacy investigation, and limits the exception to committed public synthetic fixtures. The preregistration must be committed before the first completion request; its harness refuses network I/O while uncommitted. This is not private/live or production approval.
+
+The local runtime-priority decision and compatibility evidence remain in [`vllm-compatibility.md`](vllm-compatibility.md).
+
+### Completed local candidate
 
 - official `LiquidAI/LFM2.5-2.6B` native BF16 checkpoint;
 - immutable revision `ab00687315bc1298e9d54e9c4b611dde9867ccc2`;
@@ -17,9 +21,9 @@ The runtime-priority decision preserves the LFM2.5-2.6B family and requires stro
 - official architecture `Lfm2ForCausalLM`, native in vLLM `0.26.0`;
 - LFM Open License v1.0: notice obligations and a USD 10 million annual-revenue condition for commercial use.
 
-GGUF/llama.cpp, community GPTQ, every alternate local LLM, and cloud are excluded. If LFM fails any preregistered gate, no LLM is selected and the dependent path stops for a new explicit user decision.
+Under local preregistration v1, GGUF/llama.cpp, community GPTQ, every alternate local LLM, and cloud were excluded. LFM failure correctly produced no LLM selection; the later LiteLLM decision is a separate gated path and does not rewrite v1.
 
-## Compact preregistration proposal
+## Local preregistration v1
 
 vLLM is pinned to `0.26.0` / commit `568afb3…`, PyTorch `2.11.0`, cache-local CUDA 13, `max_model_len=4096`, `max_num_seqs=4`, and `gpu_memory_utilization=0.58`. The analytical 12 GB preflight is plausible but is not a result: the cap leaves `5,158 MiB` outside vLLM and about `3,103 MiB` after current display use plus the `1,536 MiB` reserve. Full STT/TTS overlap must prove the remainder.
 
@@ -35,7 +39,7 @@ vLLM is pinned to `0.26.0` / commit `568afb3…`, PyTorch `2.11.0`, cache-local 
 | Required overlap | Four LLM requests remain active during TTS startup; component regression `≤20%`. During affected LLM/TTS cancellation, new resident-STT admission `≤250 ms`, old output stops `≤300 ms`, unaffected peers regress `≤15%`, zero stale output, and complete resource gates remain active. |
 | Repeat | All `1/2/4` levels, context pressure, quality, sustained, overlap, and cancellation repeat: latency/throughput regression `≤15%`; VRAM peak `+≤256 MiB`; RAM peak `+≤512 MiB`; quality decline `≤0.25`; every gate still passes. |
 
-Selection is gate-first. LFM is selected only if it passes every gate. If it fails, select no LLM and block Slice 4. Exactly local provider mode, one identity, maximum four active requests, no alternate candidate, no cloud, and no fallback are recorded.
+Selection was gate-first. LFM failed and `selection/selection.v1.json` records no provider. Any future cloud result must retain that failure, use exactly one explicit LiteLLM alias, and prohibit defaults/fallback.
 
 ## Fixed public/generated material
 
@@ -77,4 +81,4 @@ Planning is read-only and safe before approval:
   tts-piper-denis-medium tts-piper-dmitri-medium
 ```
 
-After the approved preregistration commit, the controlled sequence is runtime preparation, staged LFM acquisition and measurement, STT/TTS candidate acquisition and measurement, blind review, selected-stack worst-case overlap, and complete repeat. The root `./verify` remains the final required repository check.
+The approved local acquisition/measurement sequence has completed through its fail-closed component gate; selected-stack overlap/repeat correctly did not run. Cloud work remains blocked before inference at credential/model discovery. The root `./verify` remains the final required repository check.

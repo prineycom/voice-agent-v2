@@ -10,7 +10,7 @@ The canonical RTX 4070 has 12 GB VRAM shared by STT, LLM, TTS, browser rendering
 
 Refusing every cloud option could force an unacceptably weak or slow assistant. Conversely, a silent cloud fallback would move private transcript/context data across a new provider boundary without a deliberate choice and would make failures, cost, and behavior difficult to explain.
 
-The user has a preferred local candidate in mind, but its name has not been supplied. This foundation must not guess or record one.
+Slice 2 later preregistered the user's sole local candidate, official `LiquidAI/LFM2.5-2.6B` native BF16 on vLLM. It failed hard gates and the user declined accepting the failed selection, stopped further LFM inference, and explicitly activated this ADR's cloud-evaluation branch through [ADR-0004](0004-tailnet-litellm-cloud-gateway-evaluation.md).
 
 ## Decision
 
@@ -25,9 +25,12 @@ The session controller owns the provider-neutral request/result contract. In clo
 - only the final transcript and explicitly permitted conversation/context fields cross the provider boundary;
 - raw microphone audio and TTS audio remain on the canonical host and authorized LiveKit path;
 - the cloud credential stays server-side in untracked secret storage and never reaches the browser, logs, traces, or repository;
-- the provider endpoint and model identity are allowlisted configuration, not LLM-generated values;
+- the provider endpoint, gateway endpoint when used, model alias, and underlying provider/model identity are allowlisted configuration, not LLM-generated or implicit default values;
 - default observations record provider mode/identity, request correlation, latency, token/usage and cost data when available, error class, and that an external transfer occurred, without prompt/response content;
-- the approved provider privacy/retention assumptions are recorded before activation.
+- the approved provider privacy/retention assumptions are recorded before activation;
+- every provider/gateway hop has proven encrypted transport: TLS by default, or plaintext HTTP only inside a freshly verified Tailscale WireGuard path under ADR-0004's fail-closed conditions.
+
+The only authorized cloud investigation path is currently LiteLLM at `http://rpi:4000`. This is not yet a passing cloud provider selection: unauthenticated health succeeded, model listing requires a credential, no model alias or underlying provider/model has been approved, and no completion request has been sent. Authentication must be explicitly authorized without searching ambient credential sources; a new superseding preregistration must be approved and committed before inference.
 
 STT and TTS remain local in both modes.
 
@@ -52,7 +55,7 @@ STT and TTS remain local in both modes.
 - **Local-only regardless of measurements:** rejected because resource, latency, or quality evidence may show that the available local model is inadequate.
 - **Cloud-primary:** rejected because local remains the user's initial preference and must be measured first.
 - **Automatic local↔cloud fallback:** rejected because it silently changes privacy, cost, latency, and behavior during failure.
-- **Name the preferred local model now:** rejected because the user has not supplied its identifier and documentation must not invent it.
+- **Retry or silently replace the failed local model:** rejected after measurement because the user stopped further LFM inference and explicitly chose the separate cloud gate.
 
 ## Provenance
 
