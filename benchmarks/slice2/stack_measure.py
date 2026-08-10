@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -109,7 +110,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
                 })
                 observations.append(result)
         process.close()
-    resources = sampler.result()
+    resources = {"summary": sampler.summary(), "samples": [asdict(sample) for sample in sampler.samples]}
 
     baseline_mib = resources["summary"]["gpu_vram_idle_mib"]
     cancellation_process = _process("cancel")
