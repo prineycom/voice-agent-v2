@@ -1,0 +1,42 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+secrets/
+*.key
+*.pem
+
+# Editor and operating-system state
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Language and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+node_modules/
+
+# Runtime output
+.cache/
+logs/
+tmp/
+artifacts/
+captures/
+recordings/
+
+# Local inference-model artifacts
+.models/
+model-cache/
+*.gguf
+*.onnx
+*.safetensors
+*.pt
+*.pth
