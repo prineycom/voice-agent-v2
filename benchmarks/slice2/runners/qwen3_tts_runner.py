@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 import sys
@@ -34,10 +35,10 @@ def output_path(value: str) -> Path:
     return path
 
 
-def pcm16(chunk, sample_rate: int) -> bytes:
+def pcm16(chunk, sample_rate: int, output_sample_rate: int = SAMPLE_RATE) -> bytes:
     values = np.asarray(chunk, dtype=np.float32).reshape(-1)
-    if int(sample_rate) != SAMPLE_RATE:
-        values = soxr.resample(values, int(sample_rate), SAMPLE_RATE, quality="HQ")
+    if int(sample_rate) != output_sample_rate:
+        values = soxr.resample(values, int(sample_rate), output_sample_rate, quality="HQ")
     return (np.clip(values, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
 
@@ -65,27 +66,42 @@ def main() -> int:
         if command.get("command") != "synthesize":
             emit({"event": "error", "request_id": request_id, "error_class": "unsupported_command"})
             continue
-        path = output_path(str(command["output_path"]))
+        path = output_path(str(command["output_path"])) if command.get("output_path") else None
+        emit_pcm_chunks = command.get("emit_pcm") is True
+        output_sample_rate = int(command.get("output_sample_rate_hz", SAMPLE_RATE))
+        if output_sample_rate not in {16_000, SAMPLE_RATE}:
+            emit({"event": "error", "request_id": request_id, "error_class": "unsupported_output_sample_rate"})
+            continue
         begin = time.monotonic()
         first = None
         chunks = 0
         total_bytes = 0
         try:
-            with path.open("xb") as handle:
+            handle = path.open("xb") if path is not None else None
+            try:
                 stream = model.generate_custom_voice_streaming(
                     text=str(command["text"]), speaker="ryan", language="Russian", instruct=None,
                     max_new_tokens=2048, min_new_tokens=2, temperature=0.8, top_k=50,
                     top_p=0.9, do_sample=True, repetition_penalty=1.05, chunk_size=4,
                 )
                 for audio, sample_rate, _metadata in stream:
-                    data = pcm16(audio, int(sample_rate))
+                    data = pcm16(audio, int(sample_rate), output_sample_rate)
                     if not data:
                         continue
                     first = first or time.monotonic()
-                    handle.write(data)
-                    handle.flush()
+                    if handle is not None:
+                        handle.write(data)
+                        handle.flush()
                     chunks += 1
                     total_bytes += len(data)
+                    if emit_pcm_chunks:
+                        emit({
+                            "event": "chunk", "request_id": request_id, "sequence": chunks,
+                            "pcm_base64": base64.b64encode(data).decode("ascii"), "bytes": len(data),
+                        })
+            finally:
+                if handle is not None:
+                    handle.close()
             torch.cuda.synchronize()
             end = time.monotonic()
             emit({
@@ -93,12 +109,13 @@ def main() -> int:
                 "first_audio_ms": ((first or end) - begin) * 1000,
                 "total_ms": (end - begin) * 1000,
                 "audio_bytes": total_bytes, "chunk_count": chunks,
-                "audio_duration_seconds": total_bytes / (SAMPLE_RATE * 2),
-                "sample_rate_hz": SAMPLE_RATE, "channels": 1, "encoding": "pcm_s16le",
+                "audio_duration_seconds": total_bytes / (output_sample_rate * 2),
+                "sample_rate_hz": output_sample_rate, "channels": 1, "encoding": "pcm_s16le",
             })
         except Exception as error:  # adapter boundary: class only, no content or environment
             try:
-                path.unlink(missing_ok=True)
+                if path is not None:
+                    path.unlink(missing_ok=True)
             except OSError:
                 pass
             emit({"event": "error", "request_id": request_id, "error_class": type(error).__name__})

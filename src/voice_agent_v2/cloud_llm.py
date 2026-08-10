@@ -32,7 +32,7 @@ class LiteLLMProvider:
     provider_identity = "litellm/deepseek-v4-flash"
 
     def __init__(self, executor: Callable[[dict], dict] | None = None) -> None:
-        self._executor = executor or self._execute
+        self._executor = executor
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._cancelled = threading.Event()
         self._connection: http.client.HTTPConnection | None = None
@@ -40,22 +40,34 @@ class LiteLLMProvider:
 
     @staticmethod
     def _transport_gate() -> dict[str, str]:
-        addresses = {item[4][0] for item in socket.getaddrinfo(HOST, PORT, type=socket.SOCK_STREAM)}
-        network = ipaddress.ip_network("100.64.0.0/10")
-        if not addresses or any(ipaddress.ip_address(address) not in network for address in addresses):
-            raise StageFailure("llm_provider", "endpoint_not_tailscale")
-        address = sorted(addresses)[0]
-        route = subprocess.run(["ip", "route", "get", address], check=True, capture_output=True, text=True).stdout
+        try:
+            addresses = {item[4][0] for item in socket.getaddrinfo(HOST, PORT, type=socket.SOCK_STREAM)}
+            network = ipaddress.ip_network("100.64.0.0/10")
+            if not addresses or any(ipaddress.ip_address(address) not in network for address in addresses):
+                raise StageFailure("llm_provider", "endpoint_not_tailscale")
+            address = sorted(addresses)[0]
+            route = subprocess.run(
+                ["ip", "route", "get", address], check=True, capture_output=True, text=True
+            ).stdout
+        except StageFailure:
+            raise
+        except (OSError, socket.gaierror, subprocess.SubprocessError, ValueError) as error:
+            raise StageFailure("llm_provider", "endpoint_transport_unavailable") from error
         if " dev tailscale0 " not in f" {route.strip()} ":
             raise StageFailure("llm_provider", "endpoint_route_not_tailscale")
         return {"address_class": "tailscale-cgnat-ipv4", "route_interface": "tailscale0"}
 
     @staticmethod
     def _token() -> str:
-        info = TOKEN_PATH.stat()
-        if not TOKEN_PATH.is_file() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
-            raise StageFailure("llm_provider", "credential_file_invalid")
-        value = TOKEN_PATH.read_text(encoding="utf-8").strip()
+        try:
+            info = TOKEN_PATH.stat()
+            if not TOKEN_PATH.is_file() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+                raise StageFailure("llm_provider", "credential_file_invalid")
+            value = TOKEN_PATH.read_text(encoding="utf-8").strip()
+        except StageFailure:
+            raise
+        except (OSError, UnicodeError) as error:
+            raise StageFailure("llm_provider", "credential_file_invalid") from error
         if not value:
             raise StageFailure("llm_provider", "credential_file_empty")
         return value
@@ -85,7 +97,7 @@ class LiteLLMProvider:
             raise StageFailure("llm_provider", "forbidden_context_field")
         return payload
 
-    def _execute(self, payload: dict) -> dict:
+    def _execute(self, payload: dict, on_sentence: Callable[[str], None] | None = None) -> dict:
         self._transport_gate()
         token = self._token()
         connection = http.client.HTTPConnection(HOST, PORT, timeout=40)
@@ -97,6 +109,7 @@ class LiteLLMProvider:
         raw_first = visible_first = None
         usage: dict[str, int] = {}
         response_models: set[str] = set()
+        handoff_offset = 0
         try:
             connection.request(
                 "POST", "/v1/chat/completions", body=json.dumps(payload).encode(),
@@ -140,6 +153,14 @@ class LiteLLMProvider:
                 if content_piece:
                     visible_first = visible_first or now
                     visible.append(content_piece)
+                    if on_sentence is not None:
+                        current = "".join(visible)
+                        punctuation = max((current.rfind(mark) for mark in (".", "!", "?", "。", "！", "？")), default=-1)
+                        if punctuation >= handoff_offset:
+                            sentence = current[handoff_offset:punctuation + 1].strip()
+                            handoff_offset = punctuation + 1
+                            if sentence:
+                                on_sentence(sentence)
         except StageFailure:
             raise
         except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError) as error:
@@ -151,6 +172,10 @@ class LiteLLMProvider:
             self._connection = None
             del token
         output = "".join(visible).strip()
+        if on_sentence is not None and handoff_offset < len("".join(visible)):
+            remaining = "".join(visible)[handoff_offset:].strip()
+            if remaining:
+                on_sentence(remaining)
         if not output:
             raise StageFailure("llm_provider", "empty_selected_provider_response")
         return {
@@ -164,13 +189,21 @@ class LiteLLMProvider:
             "reasoning_event_count": reasoning_events,
         }
 
-    def respond(self, *, session_id: str, turn_id: str, transcript: str) -> str:
+    def _respond(
+        self, *, session_id: str, turn_id: str, transcript: str,
+        on_sentence: Callable[[str], None] | None,
+    ) -> str:
         del turn_id
         self._cancelled.clear()
         payload = self._payload(session_id, transcript)
         started = time.monotonic()
         try:
-            result = self._executor(payload)
+            if self._executor is None:
+                result = self._execute(payload, on_sentence)
+            else:
+                result = self._executor(payload)
+                if on_sentence is not None and isinstance(result.get("text"), str) and result["text"].strip():
+                    on_sentence(result["text"].strip())
         except StageFailure as error:
             self.observations.append({
                 "provider_mode": self.provider_mode, "provider_identity": self.provider_identity,
@@ -194,6 +227,14 @@ class LiteLLMProvider:
             "usage": result.get("usage", {}), "response_models": result.get("response_models", []),
         })
         return text.strip()
+
+    def respond(self, *, session_id: str, turn_id: str, transcript: str) -> str:
+        return self._respond(session_id=session_id, turn_id=turn_id, transcript=transcript, on_sentence=None)
+
+    def respond_with_handoff(
+        self, *, session_id: str, turn_id: str, transcript: str, on_sentence: Callable[[str], None]
+    ) -> str:
+        return self._respond(session_id=session_id, turn_id=turn_id, transcript=transcript, on_sentence=on_sentence)
 
     def cancel(self) -> None:
         self._cancelled.set()

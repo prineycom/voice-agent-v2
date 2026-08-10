@@ -9,6 +9,8 @@ from unittest.mock import patch
 from voice_agent_v2.cloud_llm import ALIAS, LiteLLMProvider
 from voice_agent_v2.contracts import AudioFormat, StageFailure
 from voice_agent_v2.local_stt import WhisperSTT
+from voice_agent_v2.local_tts import OUTPUT_FORMAT, Qwen3TTS
+from voice_agent_v2.real_turn import RealTurnController
 
 
 class FailingProcess:
@@ -33,6 +35,50 @@ class StubProcess:
 
     def close(self) -> None:
         return None
+
+
+class StubStreamingProcess:
+    def stream(self, value: dict, timeout: float):
+        del timeout
+        self.request = value
+        yield {"event": "chunk", "request_id": value["request_id"], "sequence": 1, "pcm_base64": "AAE=", "bytes": 2}
+        yield {
+            "event": "final", "request_id": value["request_id"], "audio_bytes": 2, "chunk_count": 1,
+            "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le",
+        }
+
+    def cancel(self) -> float:
+        return 10.0
+
+    def close(self) -> None:
+        return None
+
+
+class LocalTTSContractTests(unittest.TestCase):
+    def test_streaming_pcm_is_ordered_and_not_retained(self) -> None:
+        tts = Qwen3TTS()
+        process = StubStreamingProcess()
+        tts._process = process
+        tts.ready_metadata = {"event": "ready"}
+        chunks = tuple(tts.stream_synthesize(
+            session_id="session-test-0001", turn_id="turn-test-0001",
+            text="Публичный ответ.", audio_format=OUTPUT_FORMAT,
+        ))
+        self.assertEqual(chunks, (b"\x00\x01",))
+        self.assertTrue(process.request["emit_pcm"])
+        self.assertEqual(process.request["output_sample_rate_hz"], 16000)
+        self.assertNotIn("output_path", process.request)
+        self.assertFalse(tts.observations[-1]["retained_by_adapter"])
+        self.assertNotIn("text", tts.observations[-1])
+
+    def test_tts_format_and_text_bounds_fail_before_start(self) -> None:
+        tts = Qwen3TTS()
+        with self.assertRaises(StageFailure):
+            tuple(tts.stream_synthesize(
+                session_id="session-test-0001", turn_id="turn-test-0001",
+                text="Публичный ответ.", audio_format=AudioFormat(sample_rate_hz=24_000),
+            ))
+        self.assertIsNone(tts._process)
 
 
 class LiteLLMProviderContractTests(unittest.TestCase):
@@ -75,6 +121,78 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         with self.assertRaises(StageFailure) as raised:
             provider.respond(session_id="session-a", turn_id="turn-a", transcript="x" * 4097)
         self.assertEqual(raised.exception.code, "transcript_out_of_bounds")
+
+
+class FakeSTT:
+    version = "voice-agent.stt.v1"
+
+    def transcribe(self, **_kwargs) -> str:
+        return "Публичный запрос"
+
+
+class FakeLLM:
+    version = "voice-agent.llm-provider.v1"
+    provider_mode = "cloud"
+    provider_identity = "litellm/deepseek-v4-flash"
+
+    def respond_with_handoff(self, *, on_sentence, **_kwargs) -> str:
+        on_sentence("Первое предложение.")
+        on_sentence("Второе предложение.")
+        return "Первое предложение. Второе предложение."
+
+    def cancel(self) -> None:
+        return None
+
+
+class FakeTTS:
+    version = "voice-agent.tts.v1"
+    output_format = OUTPUT_FORMAT
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    def stream_synthesize(self, **_kwargs):
+        if self.fail:
+            raise StageFailure("tts", "injected_real_tts_failure")
+        yield b"\0\0" * 10
+
+    def cancel(self) -> float:
+        return 0.0
+
+
+class RealTurnControllerTests(unittest.TestCase):
+    def test_real_turn_keeps_lifecycle_order_while_inference_overlaps(self) -> None:
+        result = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS()).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+        )
+        types = [event["type"] for event in result.events]
+        self.assertEqual(result.terminal_event["type"], "turn.completed")
+        self.assertLess(types.index("llm.final"), types.index("tts.audio"))
+        self.assertEqual(types.count("tts.audio"), 2)
+
+    def test_tts_failure_preserves_llm_text_event_but_fails_spoken_turn(self) -> None:
+        result = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS(fail=True)).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+        )
+        self.assertEqual(result.terminal_event["type"], "turn.failed")
+        self.assertIn("llm.final", [event["type"] for event in result.events])
+        self.assertNotIn("tts.audio", [event["type"] for event in result.events])
+
+    def test_incompatible_real_adapter_version_is_rejected(self) -> None:
+        tts = FakeTTS()
+        tts.version = "voice-agent.tts.v999"
+        with self.assertRaises(ValueError):
+            RealTurnController(FakeSTT(), FakeLLM(), tts)
+
+    def test_cancellation_emits_no_chunks_after_interrupted_terminal(self) -> None:
+        result = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS()).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+            cancel_after_output_chunks=1,
+        )
+        self.assertEqual(result.terminal_event["type"], "turn.interrupted")
+        terminal_index = [event["terminal"] for event in result.events].index(True)
+        self.assertEqual(terminal_index, len(result.events) - 1)
+        self.assertEqual(sum(event["type"] == "tts.audio" for event in result.events), 1)
 
 
 class LocalSTTContractTests(unittest.TestCase):
