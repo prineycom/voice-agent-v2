@@ -1,3 +1,2 @@
-# Documentation-only bootstrap: manual PR review is authoritative until the
-# first executable vertical slice adds behavioral CI and removes this opt-out.
-no_ci: true
+# Behavioral CI is required for executable slices; see .github/workflows/behavioral.yml.
+{}

@@ -1,6 +1,6 @@
 # Project agent memory
 
-Voice Agent v2 is pre-implementation; do not infer a runnable stack or selected model/framework from this repository.
+Voice Agent v2 has only the executable Slice 1 deterministic tracer; do not infer a production stack or selected model/framework from it. Run the required root verification with `./verify`.
 
 - Use [`CONTEXT.md`](CONTEXT.md) for stable terminology.
 - Use [`docs/architecture.md`](docs/architecture.md) for boundaries, contract ownership, lifecycle, failure policy, security, and resource gates.

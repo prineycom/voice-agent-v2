@@ -1,0 +1,18 @@
+{
+  "schema_version": "voice-agent.tts.v1",
+  "session_id": "session-synthetic-0001",
+  "turn_id": "turn-synthetic-0001",
+  "request": {
+    "text": "Здравствуйте! Детерминированный голосовой ответ готов."
+  },
+  "chunk": {
+    "sequence": 0,
+    "audio": {
+      "encoding": "pcm_s16le",
+      "sample_rate_hz": 16000,
+      "channels": 1,
+      "sample_width_bytes": 2,
+      "byte_count": 1600
+    }
+  }
+}

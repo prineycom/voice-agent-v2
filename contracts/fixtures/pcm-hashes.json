@@ -1,0 +1,20 @@
+{
+  "format": {
+    "channels": 1,
+    "encoding": "pcm_s16le",
+    "sample_rate_hz": 16000,
+    "sample_width_bytes": 2
+  },
+  "input": {
+    "amplitude": 4000,
+    "bytes": 6400,
+    "sha256": "9ee9638a619b160078dc8d86ca32a01bc5c32536eb9698c59b01b16c789ac844",
+    "tone_hz": 250
+  },
+  "output": {
+    "amplitude": 10000,
+    "bytes": 6400,
+    "sha256": "69935a91444eaca69d96477a0de66aea7640fd476ea5858fcdd1f2143a46131e",
+    "tone_hz": 500
+  }
+}

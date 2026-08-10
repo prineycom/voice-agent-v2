@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+mkdir -p "$ROOT/tmp"
+RUN_ROOT=$(mktemp -d "$ROOT/tmp/verify.XXXXXX")
+trap 'rm -rf "$RUN_ROOT"' EXIT HUP INT TERM
+mkdir -p "$RUN_ROOT/home" "$RUN_ROOT/temp"
+
+HOME="$RUN_ROOT/home" \
+XDG_CACHE_HOME="$RUN_ROOT/cache" \
+TMPDIR="$RUN_ROOT/temp" \
+LC_ALL=C.UTF-8 \
+python3 -I -B "$ROOT/scripts/verify.py"

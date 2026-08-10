@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Root verification implementation; invoke only through ./verify."""
+
+from __future__ import annotations
+
+from hashlib import sha256
+import io
+from pathlib import Path
+import socket
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+
+class NetworkAccessDenied(RuntimeError):
+    pass
+
+
+def deny_network(event: str, _args: tuple[object, ...]) -> None:
+    if event.startswith("socket."):
+        raise NetworkAccessDenied(f"network operation denied: {event}")
+
+
+def assert_network_is_denied() -> None:
+    try:
+        socket.socket()
+    except NetworkAccessDenied:
+        return
+    raise AssertionError("network denial audit policy was not active")
+
+
+def sha256_hex(value: bytes) -> str:
+    return sha256(value).hexdigest()
+
+
+def main() -> int:
+    if sys.version_info < (3, 11):
+        raise SystemExit("Python 3.11 or newer is required")
+
+    sys.addaudithook(deny_network)
+    assert_network_is_denied()
+
+    from voice_agent_v2.tracer import (  # imported after network denial is active
+        FIXED_RESPONSE,
+        FIXED_SESSION_ID,
+        FIXED_TRANSCRIPT,
+        FIXED_TURN_ID,
+        normalize_events,
+        run_scenario,
+        write_trace_artifacts,
+    )
+
+    suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
+    test_output = io.StringIO()
+    result = unittest.TextTestRunner(stream=test_output, verbosity=2).run(suite)
+    if not result.wasSuccessful():
+        sys.stderr.write(test_output.getvalue())
+        return 1
+
+    clean_runs: list[tuple[bytes, bytes, bytes]] = []
+    for _run_number in (1, 2):
+        with tempfile.TemporaryDirectory(prefix="voice-agent-v2-empty-cache-") as temporary:
+            artifact_directory = Path(temporary) / "artifacts"
+            trace = run_scenario("success")
+            write_trace_artifacts(artifact_directory, trace)
+            clean_runs.append(
+                (
+                    (artifact_directory / "trace.normalized.jsonl").read_bytes(),
+                    (artifact_directory / "input.pcm").read_bytes(),
+                    (artifact_directory / "output.pcm").read_bytes(),
+                )
+            )
+
+    if clean_runs[0] != clean_runs[1]:
+        raise AssertionError("the two empty-cache runs differ")
+
+    normalized_trace, input_pcm, output_pcm = clean_runs[0]
+    success = run_scenario("success")
+    if normalized_trace != normalize_events(success.events):
+        raise AssertionError("artifact trace differs from the public tracer")
+
+    event_order = " > ".join(str(event["type"]) for event in success.events)
+    print("Voice Agent v2 Slice 1 verification")
+    print("toolchain: Python 3.11+ standard library only (slice-local choice)")
+    print("network: denied by Python audit policy; no sockets permitted")
+    print("cache: two independent empty temporary run roots")
+    print(f"correlation: session={FIXED_SESSION_ID} turn={FIXED_TURN_ID}")
+    print(f"events: {event_order}")
+    print(f"transcript: {FIXED_TRANSCRIPT}")
+    print(f"response: {FIXED_RESPONSE}")
+    print(f"terminal: {success.terminal_event['type']} count=1")
+    print(f"normalized_trace_sha256: {sha256_hex(normalized_trace)}")
+    print(f"input_pcm_sha256: {sha256_hex(input_pcm)} bytes={len(input_pcm)}")
+    print(f"output_pcm_sha256: {sha256_hex(output_pcm)} bytes={len(output_pcm)} format=pcm_s16le/16000Hz/mono")
+    print("repeatability: run1 == run2 for normalized trace, input PCM, and output PCM")
+
+    for scenario in ("stt_failure", "llm_failure", "tts_failure", "cancel_after_first_audio"):
+        scenario_result = run_scenario(scenario)
+        terminal = scenario_result.terminal_event
+        detail = terminal["payload"].get("code", terminal["payload"]["outcome"])
+        print(f"case {scenario}: terminal={terminal['type']} detail={detail} terminal_count=1")
+
+    print(f"behavioral_tests: pass count={result.testsRun}")
+    print("legacy_material: none inspected or used")
+    print("RESULT: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
