@@ -98,7 +98,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
                 output = GENERATED / f"{request_id}.pcm"
                 result = process.request({
                     "command": "synthesize", "request_id": request_id,
-                    "text": item["text"], "output_path": str(output),
+                    "text": item["utterance"], "output_path": str(output),
                 }, timeout_seconds=180)
                 if result["event"] != "final":
                     raise RuntimeError(f"Qwen3 TTS request failed: {result.get('error_class', 'unknown')}")
@@ -117,7 +117,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
     cancel_output = GENERATED / "cancelled-request.pcm"
     cancellation_process.send({
         "command": "synthesize", "request_id": "cancelled-request",
-        "text": fixture["samples"][-1]["text"] * 8, "output_path": str(cancel_output),
+        "text": fixture["samples"][-1]["utterance"] * 8, "output_path": str(cancel_output),
     })
     time.sleep(0.25)
     cancel_requested = time.monotonic()
@@ -131,7 +131,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
     recovery_output = GENERATED / "recovery-request.pcm"
     recovery_result = recovery.request({
         "command": "synthesize", "request_id": "recovery-request",
-        "text": fixture["samples"][0]["text"], "output_path": str(recovery_output),
+        "text": fixture["samples"][0]["utterance"], "output_path": str(recovery_output),
     }, timeout_seconds=180)
     recovery.close()
     cancellation = {
