@@ -81,22 +81,25 @@ def _wait_for_release(baseline_mib: int, timeout_seconds: float = 5.0) -> float:
     return timeout_seconds * 1000
 
 
-def measure_qwen3_tts() -> dict[str, Any]:
+def measure_qwen3_tts(run_label: str = "primary") -> dict[str, Any]:
     preregistration, preregistration_commit = _require_committed_stack_preregistration()
     artifact_files = _artifact_records(preregistration)
     fixture = _load(ROOT / "fixtures" / "tts-russian.v1.json")
-    raw_path = cache_path(RAW / "tts-qwen3-customvoice-primary.json")
+    if run_label not in {"primary", "repeat"}:
+        raise ValueError("Qwen3 TTS run label must be primary or repeat")
+    raw_path = cache_path(RAW / f"tts-qwen3-customvoice-{run_label}.json")
     if raw_path.exists():
         raise ValueError(f"refusing to replace Qwen3 TTS raw evidence: {raw_path}")
-    GENERATED.mkdir(parents=True, exist_ok=True)
-    process = _process("primary")
+    generated = GENERATED if run_label == "primary" else GENERATED / run_label
+    generated.mkdir(parents=True, exist_ok=True)
+    process = _process(run_label)
     observations: list[dict[str, Any]] = []
     with ResourceSampler(0.05) as sampler:
         ready = process.start(timeout_seconds=180)
         for cycle in (1, 2, 3, 4):
             for item in fixture["samples"]:
                 request_id = f"cycle-{cycle}-{item['id']}"
-                output = GENERATED / f"{request_id}.pcm"
+                output = generated / f"{request_id}.pcm"
                 result = process.request({
                     "command": "synthesize", "request_id": request_id,
                     "text": item["utterance"], "output_path": str(output),
@@ -113,9 +116,9 @@ def measure_qwen3_tts() -> dict[str, Any]:
     resources = {"summary": sampler.summary(), "samples": [asdict(sample) for sample in sampler.samples]}
 
     baseline_mib = resources["summary"]["gpu_vram_idle_mib"]
-    cancellation_process = _process("cancel")
+    cancellation_process = _process(f"{run_label}-cancel")
     cancel_ready = cancellation_process.start(timeout_seconds=180)
-    cancel_output = GENERATED / "cancelled-request.pcm"
+    cancel_output = generated / "cancelled-request.pcm"
     cancellation_process.send({
         "command": "synthesize", "request_id": "cancelled-request",
         "text": fixture["samples"][-1]["utterance"] * 8, "output_path": str(cancel_output),
@@ -127,9 +130,9 @@ def measure_qwen3_tts() -> dict[str, Any]:
     release_ms = _wait_for_release(baseline_mib)
     cancelled_bytes = cancel_output.stat().st_size if cancel_output.exists() else 0
 
-    recovery = _process("recovery")
+    recovery = _process(f"{run_label}-recovery")
     recovery_ready = recovery.start(timeout_seconds=180)
-    recovery_output = GENERATED / "recovery-request.pcm"
+    recovery_output = generated / "recovery-request.pcm"
     recovery_result = recovery.request({
         "command": "synthesize", "request_id": "recovery-request",
         "text": fixture["samples"][0]["utterance"], "output_path": str(recovery_output),
@@ -150,6 +153,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
         "schema_version": "voice-agent.slice2-qwen3-tts-raw.v1",
         "preregistration_commit": preregistration_commit,
         "candidate_id": "tts-qwen3-customvoice-ryan",
+        "run_label": run_label,
         "artifact_files": artifact_files,
         "configuration": preregistration["tts"]["configuration"],
         "ready": ready,
@@ -160,4 +164,4 @@ def measure_qwen3_tts() -> dict[str, Any]:
     }
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return {"candidate_id": payload["candidate_id"], "observations": len(observations), "raw_path": str(raw_path)}
+    return {"candidate_id": payload["candidate_id"], "run_label": run_label, "observations": len(observations), "raw_path": str(raw_path)}
