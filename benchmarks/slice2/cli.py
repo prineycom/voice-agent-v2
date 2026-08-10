@@ -50,10 +50,12 @@ def validate_committed() -> dict[str, Any]:
         validated.append(str(instance_path.relative_to(ROOT.parent)))
 
     result_schema = json.loads((SCHEMA_DIR / "result.v1.schema.json").read_text(encoding="utf-8"))
+    fixed_stack_schema = json.loads((SCHEMA_DIR / "fixed-stack-evidence.v1.schema.json").read_text(encoding="utf-8"))
     result_files = sorted((ROOT / "results").glob("*.json")) if (ROOT / "results").exists() else []
     for result_path in result_files:
         result = json.loads(result_path.read_text(encoding="utf-8"))
-        validate(result, result_schema)
+        schema = fixed_stack_schema if result.get("schema_version") == "voice-agent.slice2-fixed-stack-evidence.v1" else result_schema
+        validate(result, schema)
         assert_privacy_safe_result(result)
         validated.append(str(result_path.relative_to(ROOT.parent)))
 

@@ -163,11 +163,16 @@ class Slice2CommittedEvidenceTests(unittest.TestCase):
         results = sorted((BENCHMARKS / "results").glob("*.json")) if (BENCHMARKS / "results").exists() else []
         for result_path in results:
             result = json.loads(result_path.read_text())
-            commit = result["preregistration_commit"]
-            completed = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=ROOT, check=False
+            commits = (
+                result["preregistration_commits"].values()
+                if result.get("schema_version") == "voice-agent.slice2-fixed-stack-evidence.v1"
+                else [result["preregistration_commit"]]
             )
-            self.assertEqual(completed.returncode, 0, result_path.name)
+            for commit in commits:
+                completed = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=ROOT, check=False
+                )
+                self.assertEqual(completed.returncode, 0, result_path.name)
 
     def test_fixture_revisions_are_content_addressable(self) -> None:
         for name in (

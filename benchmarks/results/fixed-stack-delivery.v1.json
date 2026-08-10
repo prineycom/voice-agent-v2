@@ -1,0 +1,437 @@
+{
+  "cloud": {
+    "primary": {
+      "failed_gate_count": 17,
+      "failed_gates": [
+        {
+          "comparison": "less_or_equal",
+          "name": "raw_first_delta_c1",
+          "observed": 10868.5050339991,
+          "passed": false,
+          "threshold": 1500
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "visible_first_content_c1",
+          "observed": 11453.09398698737,
+          "passed": false,
+          "threshold": 3000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "completion_c1",
+          "observed": 12035.16864500125,
+          "passed": false,
+          "threshold": 12000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "raw_first_delta_c2",
+          "observed": 8112.612605997128,
+          "passed": false,
+          "threshold": 2000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "visible_first_content_c2",
+          "observed": 8325.954714004183,
+          "passed": false,
+          "threshold": 4000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "raw_first_delta_c4",
+          "observed": 5449.802539995289,
+          "passed": false,
+          "threshold": 3000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "visible_first_content_c4",
+          "observed": 6672.111759005929,
+          "passed": false,
+          "threshold": 6000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "empty_visible_quality",
+          "observed": 3,
+          "passed": false,
+          "threshold": 0
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "http_acceptance_p95",
+          "observed": 10868.464051993215,
+          "passed": false,
+          "threshold": 750
+        },
+        {
+          "comparison": "greater_or_equal",
+          "name": "throughput_scale_c2",
+          "observed": 1.310892847656311,
+          "passed": false,
+          "threshold": 1.5
+        },
+        {
+          "comparison": "greater_or_equal",
+          "name": "slowest_to_median_rate",
+          "observed": 0.659851766724458,
+          "passed": false,
+          "threshold": 0.75
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "marker_isolation_failures",
+          "observed": 2,
+          "passed": false,
+          "threshold": 0
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "usage_missing",
+          "observed": 1,
+          "passed": false,
+          "threshold": 0
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "replacement_acceptance",
+          "observed": 4469.646341007319,
+          "passed": false,
+          "threshold": 750
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "unaffected_peer_regression",
+          "observed": 1.3404721092816152,
+          "passed": false,
+          "threshold": 0.2
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "sustained_latency_regression",
+          "observed": 1.145227718641949,
+          "passed": false,
+          "threshold": 0.15
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "sustained_throughput_regression",
+          "observed": 0.44188662624664454,
+          "passed": false,
+          "threshold": 0.15
+        }
+      ],
+      "raw_bytes": 582053,
+      "raw_sha256": "085c9063fcdd19ccac309d76367705a20aeb4eb94e33c270cc8b9bf8254a8a6a",
+      "status": "failed-automated-gates"
+    },
+    "repeat": {
+      "failed_gate_count": 9,
+      "failed_gates": [
+        {
+          "comparison": "less_or_equal",
+          "name": "raw_first_delta_c1",
+          "observed": 2727.6874329982093,
+          "passed": false,
+          "threshold": 1500
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "visible_first_content_c1",
+          "observed": 3938.6310120025882,
+          "passed": false,
+          "threshold": 3000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "raw_first_delta_c4",
+          "observed": 3793.6610510078026,
+          "passed": false,
+          "threshold": 3000
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "empty_visible_quality",
+          "observed": 3,
+          "passed": false,
+          "threshold": 0
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "http_acceptance_p95",
+          "observed": 3793.5843900049804,
+          "passed": false,
+          "threshold": 750
+        },
+        {
+          "comparison": "greater_or_equal",
+          "name": "slowest_to_median_rate",
+          "observed": 0.6858709958457166,
+          "passed": false,
+          "threshold": 0.75
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "marker_isolation_failures",
+          "observed": 2,
+          "passed": false,
+          "threshold": 0
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "usage_missing",
+          "observed": 1,
+          "passed": false,
+          "threshold": 0
+        },
+        {
+          "comparison": "less_or_equal",
+          "name": "replacement_acceptance",
+          "observed": 1941.6403389914194,
+          "passed": false,
+          "threshold": 750
+        }
+      ],
+      "raw_bytes": 579888,
+      "raw_sha256": "4113dea2cf57c6cedd3b9148572c8892385ddb5cb948fcf7db83be36f9e124e3",
+      "status": "failed-automated-gates"
+    }
+  },
+  "overlap": {
+    "failed_gate_count": 3,
+    "gates": [
+      {
+        "comparison": "less_or_equal",
+        "name": "cloud_to_tts_first_audio",
+        "observed": 196.4760010014288,
+        "passed": true,
+        "threshold": 500
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "tts_overlap_regression",
+        "observed": 0.23556423171682475,
+        "passed": false,
+        "threshold": 0.2
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "cloud_overlap_regression",
+        "observed": 6.128873051364011,
+        "passed": false,
+        "threshold": 0.2
+      },
+      {
+        "comparison": "greater_or_equal",
+        "name": "cloud_tts_gpu_reserve",
+        "observed": 7081,
+        "passed": true,
+        "threshold": 1536
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "cloud_tts_cpu_p95",
+        "observed": 11.842105263157897,
+        "passed": true,
+        "threshold": 90
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "barge_stt_admission",
+        "observed": 113.66235300374683,
+        "passed": true,
+        "threshold": 250
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "barge_old_tts_stop",
+        "observed": 113.6485910101328,
+        "passed": true,
+        "threshold": 500
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "barge_old_cloud_stop",
+        "observed": 0.0,
+        "passed": true,
+        "threshold": 500
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "barge_stt_finalization_regression",
+        "observed": 0.5956292765647909,
+        "passed": false,
+        "threshold": 0.2
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "barge_stale_output",
+        "observed": 0,
+        "passed": true,
+        "threshold": 0
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "barge_cpu_p95",
+        "observed": 66.66666666666667,
+        "passed": true,
+        "threshold": 90
+      },
+      {
+        "comparison": "greater_or_equal",
+        "name": "barge_gpu_reserve",
+        "observed": 4788,
+        "passed": true,
+        "threshold": 1536
+      }
+    ],
+    "raw_bytes": 153532,
+    "raw_sha256": "0a217ab4f4db00104e6eb97c5ffa07dd992c7dda60ed49587b1aee8542924035"
+  },
+  "pending_human_acceptance": [
+    "Qwen3 CustomVoice ryan intelligibility, pronunciation, and naturalness listening",
+    "Physical microphone end-to-end acceptance deferred to the final Slice 5 command"
+  ],
+  "preregistration_commits": {
+    "cloud": "f698c0029db8b68d6b8b2fd14df318d32fd965b0",
+    "fixed_stack": "6b690967b9f35224c6ebf94e9a4fa3ca4328733b",
+    "local": "f11f6caa42301376b96063cea61a617b94ecaad1"
+  },
+  "privacy": {
+    "cloud_stt_tts_used": false,
+    "private_media_used": false,
+    "raw_material_outside_git": true,
+    "sensitive_material_exposure_count": 0,
+    "tracked_payload_field_count": 0
+  },
+  "schema_version": "voice-agent.slice2-fixed-stack-evidence.v1",
+  "selections": {
+    "llm": {
+      "basis": "operator-fixed despite failed automated cloud gates; no fallback",
+      "gateway": "http://rpi:4000",
+      "identity": "deepseek-v4-flash"
+    },
+    "stt": {
+      "basis": "user-fixed postmeasurement CPU exception at 90 percent; original 83.33 percent gate remains recorded failed",
+      "identity": "stt-whisper-large-v3-turbo"
+    },
+    "tts": {
+      "basis": "pinned legacy configuration freshly measured; subjective listening pending",
+      "identity": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "speaker": "ryan"
+    }
+  },
+  "status": "operator-fixed-with-measured-limitations",
+  "stt": {
+    "adjusted_delivery_cpu_limit_percent": 90.0,
+    "combined_cpu_p95_percent": 66.66666666666667,
+    "combined_finalization_ms": 458.1504700036021,
+    "combined_finalization_regression_fraction": 0.5956292765647909,
+    "original_cpu_limit_percent": 83.33,
+    "original_cpu_p95_percent": 88.04347826086956,
+    "original_outcome": "fail",
+    "word_error_rate": 0.11455108359133127
+  },
+  "tts": {
+    "automated_gates": [
+      {
+        "comparison": "less_or_equal",
+        "name": "cold_load",
+        "observed": 3590.0856369989924,
+        "passed": true,
+        "threshold": 60000
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "first_audio_p95",
+        "observed": 160.74762000062037,
+        "passed": true,
+        "threshold": 500
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "realtime_factor_p95",
+        "observed": 0.40186194729923613,
+        "passed": true,
+        "threshold": 0.5
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "cpu_p95",
+        "observed": 14.102564102564108,
+        "passed": true,
+        "threshold": 90
+      },
+      {
+        "comparison": "greater_or_equal",
+        "name": "gpu_reserve",
+        "observed": 7077,
+        "passed": true,
+        "threshold": 1536
+      },
+      {
+        "comparison": "greater_or_equal",
+        "name": "host_ram_available",
+        "observed": 24781,
+        "passed": true,
+        "threshold": 6144
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "swap_consumption",
+        "observed": 0,
+        "passed": true,
+        "threshold": 0
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "cancel_to_stop",
+        "observed": 163.72943599708378,
+        "passed": true,
+        "threshold": 250
+      },
+      {
+        "comparison": "less_or_equal",
+        "name": "resource_release",
+        "observed": 15.036223994684406,
+        "passed": true,
+        "threshold": 2000
+      }
+    ],
+    "automated_pass": true,
+    "listening_status": "pending",
+    "primary_metrics": {
+      "cancel_to_stop_ms": 163.72943599708378,
+      "cold_load_ms": 3590.0856369989924,
+      "cpu_p95_percent": 14.102564102564108,
+      "first_signal_p95_ms": 160.74762000062037,
+      "gpu_reserve_mib": 7077,
+      "gpu_vram_peak_mib": 5205,
+      "host_ram_available_min_mib": 24781,
+      "realtime_factor_p95": 0.40186194729923613,
+      "recovery_first_signal_ms": 5631.325597001705,
+      "resource_release_ms": 15.036223994684406,
+      "swap_consumption_mib": 0
+    },
+    "raw_primary_sha256": "b2675788064ebeb844fd920c5877c77524feb2d0ee604c4f1c82f152d997f3ad",
+    "raw_repeat_sha256": "4da53888757e68f8c9cbb7a997c136b5870db44ad6e8e7bf9eb26002700d5783",
+    "recovery_first_signal_is_unpreregistered_diagnostic": true,
+    "repeat_first_signal_regression_fraction": 0.0015787543660263183,
+    "repeat_metrics": {
+      "cancel_to_stop_ms": 113.64269501063973,
+      "cold_load_ms": 3596.5012019878486,
+      "cpu_p95_percent": 13.924050632911388,
+      "first_signal_p95_ms": 161.0014010075247,
+      "gpu_reserve_mib": 7077,
+      "gpu_vram_peak_mib": 5205,
+      "host_ram_available_min_mib": 24705,
+      "realtime_factor_p95": 0.40205449966231604,
+      "recovery_first_signal_ms": 5564.414250999107,
+      "resource_release_ms": 13.300884995260276,
+      "swap_consumption_mib": 0
+    },
+    "repeat_rtf_regression_fraction": 0.0004791505251342766
+  }
+}

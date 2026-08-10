@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/fixed-stack-evidence.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "preregistration_commits", "selections", "cloud", "stt", "tts", "overlap", "pending_human_acceptance", "privacy"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-fixed-stack-evidence.v1"},
+    "status": {"type": "string", "const": "operator-fixed-with-measured-limitations"},
+    "preregistration_commits": {"type": "object"},
+    "selections": {"type": "object"},
+    "cloud": {"type": "object"},
+    "stt": {"type": "object"},
+    "tts": {"type": "object"},
+    "overlap": {"type": "object"},
+    "pending_human_acceptance": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+    "privacy": {"type": "object"}
+  }
+}
