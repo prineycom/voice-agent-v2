@@ -39,7 +39,7 @@ The canonical Arch PC contains every process required to accept speech, reason, 
 ```mermaid
 flowchart LR
     B["Browser client<br/>media, UI, avatar runtime"]
-    T["Tailscale boundary"]
+    T["Private access boundary<br/>loopback or Tailscale"]
     G["Web gateway<br/>assets and room capability"]
     K["Local LiveKit<br/>realtime media and data"]
     C["Session controller<br/>turn lifecycle and contracts"]

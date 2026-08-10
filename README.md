@@ -14,7 +14,7 @@ The legacy [`prineycom/voice-agent`](https://github.com/prineycom/voice-agent) r
 - A private browser experience uses local LiveKit for realtime media and local STT, LLM, and TTS for the active voice path.
 - Tailscale membership is sufficient authorization during the current private stage.
 - An original Live2D AI-eyes avatar consumes a small, versioned semantic animation-intent contract.
-- Deterministic avatar code validates, interpolates, schedules, and renders behavior.
+- The session controller validates semantic animation intent; deterministic avatar runtime code maps, interpolates, schedules, and renders it.
 - Interruption, explicit failure behavior, privacy-safe observability, and measured resource budgets are part of the supported product.
 
 ## Deferred
