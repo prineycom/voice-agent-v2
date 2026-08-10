@@ -34,10 +34,10 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | ✅ pass | 9 behavioral/contract tests; all five public scenarios |
+| `./verify` | ✅ pass | 11 behavioral/contract tests; all five public scenarios |
 | `./verify > .../run-1.txt` and `./verify > .../run-2.txt` | ✅ pass | Each command performs two isolated empty-cache runs under socket denial |
 | `cmp .../run-1.txt .../run-2.txt` | ✅ pass | Complete command output is byte-identical |
-| `sha256sum .../run-1.txt .../run-2.txt contracts/fixtures/traces/success.jsonl` | ✅ pass | Output hash matches twice; normalized trace hash is `9b607f8f…f305f` |
+| `sha256sum .../run-1.txt .../run-2.txt contracts/fixtures/traces/success.jsonl` | ✅ pass | Output hash is `f2f6c1c4…41a2904` twice; normalized trace hash is `9b607f8f…f305f` |
 
 ## Unresolved uncertainty
 

@@ -25,10 +25,10 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | Pass | 9 behavioral/contract tests; success, three hard failures, and cancellation; two clean normalized runs |
+| `./verify` | Pass | 11 behavioral/contract tests; success, three hard failures, and cancellation; two clean normalized runs |
 | `sh -n verify` | Pass | Root wrapper syntax is valid POSIX shell |
 | `git diff --check` | Pass | No whitespace errors |
-| `cmp docs/ai/2-deterministic-zero-secret-voice-turn-tracer/evidence/run-1.txt docs/ai/2-deterministic-zero-secret-voice-turn-tracer/evidence/run-2.txt` | Pass | Checked-in outputs are byte-identical |
+| `cmp docs/ai/2-deterministic-zero-secret-voice-turn-tracer/evidence/run-1.txt docs/ai/2-deterministic-zero-secret-voice-turn-tracer/evidence/run-2.txt` | Pass | Checked-in outputs are byte-identical with SHA-256 `f2f6c1c4…41a2904` |
 | Complete `gh-axi issue view --full` comparison for Issues #2–#12 | Pass | Every remote body matches its complete local publication body; all issues remain open |
 | Scope review | Pass | No model/provider selection, real inference, microphone/GPU/secret access, LiveKit/avatar/deployment/wake work, or legacy inspection |
 

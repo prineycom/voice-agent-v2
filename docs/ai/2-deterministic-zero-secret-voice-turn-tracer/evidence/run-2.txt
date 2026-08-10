@@ -15,6 +15,6 @@ case stt_failure: terminal=turn.failed detail=injected_stt_failure terminal_coun
 case llm_failure: terminal=turn.failed detail=injected_selected_provider_failure terminal_count=1
 case tts_failure: terminal=turn.failed detail=injected_tts_failure terminal_count=1
 case cancel_after_first_audio: terminal=turn.interrupted detail=interrupted terminal_count=1
-behavioral_tests: pass count=9
+behavioral_tests: pass count=11
 legacy_material: none inspected or used
 RESULT: PASS
