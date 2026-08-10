@@ -30,6 +30,7 @@ Untested behavior is not implied by a target diagram.
 | D6 | Decision | Custom wake work is optional and deferred until after the core MVP. Kiosk operation is outside current scope. |
 | D7 | Decision | The pinned [legacy repository](#34-pinned-legacy-reference) is provenance, not a dependency. A future slice may selectively migrate a proven contract, component, or test only with fresh V2 validation and recorded origin. |
 | D8 | Decision | The detailed avatar-module and visual-control contract is deferred to a separate Grill/design task that must complete before MVP eye implementation. |
+| D9 | Decision | For the cumulative Slice 2–5 delivery branch, Pasha fixes Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and Qwen3-TTS CustomVoice/`ryan` despite recorded gate failures. Exceptions and pending human evidence remain visible; no fallback or false pass is allowed. See [ADR-0005](adr/0005-operator-fixed-slices-2-5-model-stack.md). |
 
 ## 3. System boundary
 
@@ -313,7 +314,7 @@ The measured peak must account for:
 - browser/MVP-eye rendering on the canonical host;
 - host services, filesystem cache, and failure/restart transients.
 
-No fixed per-service VRAM allocation is accepted yet. Admission limits, model residency, unload policy, CPU offload, quantization, and context limits are **hypotheses** until measured together.
+The cumulative delivery measurement observed a Qwen3+Whisper peak of `7,494 MiB`, leaving `4,788 MiB`, with CPU p95 `66.67%`; it also observed failed latency regressions. These values bound only the fixed ADR-0005 stack and do not erase earlier component failures. Other admission limits, residency/unload policy, and browser/LiveKit headroom remain hypotheses until the final integrated runs.
 
 ### 11.3 Measurements required before model/provider selection
 

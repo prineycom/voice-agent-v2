@@ -87,15 +87,17 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 ## Slice 2 — Measured host/model and LLM-provider budget
 
+> **Cumulative-delivery override (2026-08-11):** Pasha fixed Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and pinned-legacy Qwen3 CustomVoice/`ryan` for Slices 2–5 despite recorded hard-gate misses. Failed gates remain failed and are never relabelled. The branch proceeds through Slice 5 for one final human microphone/listening test; intermediate microphone acceptance, review, no-mistakes, PR, and merge are deferred.
+
 ### User-visible outcome
 
-The project has evidence-backed local STT/TTS measurements and exactly one cloud LLM test candidate after the sole local LFM target failed. The user selected LiteLLM alias `deepseek-v4-flash` at `http://rpi:4000` and accepts its DeepSeek routing as operator-attested and opaque for public synthetic Slice 2 measurement only. A passing result may establish test viability, but unevaluated cost/privacy/provider provenance means private/live transfer, Slice 4 activation, and production cloud selection remain blocked.
+The project has repeatable measurements and a transparent operator-fixed delivery stack. LFM remains a failed local candidate. `deepseek-v4-flash` failed primary/repeat automated cloud gates but is fixed with no fallback. Whisper large-v3-turbo keeps its passed WER/latency and uses an explicit postmeasurement CPU ceiling of 90% after its 88.04% result missed the original 83.33% gate. Qwen3 CustomVoice/`ryan` passed automated timing/resource/repeat gates, with listening pending. Overlap failures remain recorded; this checkpoint is not an evidence-backed all-gates-pass claim.
 
 ### Included scope
 
-- A repeatable benchmark harness that records the host, driver, runtime, artifact/provider identity, and configuration.
+- A repeatable benchmark harness that records the host, driver, runtime, artifact/provider identity, configuration, postmeasurement exceptions, and failed gates without rewriting them.
 - A preregistered Russian STT corpus/rubric, LLM response rubric, and TTS listening set that contain no private recordings in Git.
-- At least two credible local candidates for STT and at least two for TTS. Preserve the failed official LFM2.5-2.6B native BF16/vLLM result with no retry or alternate local model.
+- Preserve both measured Whisper/Piper candidate sets and failed official LFM evidence. The delivery override selects Whisper large-v3-turbo and freshly validates pinned-legacy `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` with `faster-qwen3-tts` 0.2.6, speaker `ryan`, Russian, chunk 4, temperature 0.8, top-p 0.9, top-k 50, repetition penalty 1.05, max 2048, and no fixed seed.
 - One explicit cloud-gateway investigation: LiteLLM at `http://rpi:4000`, carried only over a proven Tailscale WireGuard path, with no redirect, implicit model default, alternate endpoint, or fallback.
 - Before cloud inference, authenticated alias discovery, explicit selection of only `deepseek-v4-flash`, recorded operator-attested opaque DeepSeek routing, and an approved committed superseding preregistration. Cost/privacy/provider provenance are explicitly not evaluated under this temporary exception rather than silently assumed.
 - Cloud measurement with public synthetic fixtures only: permitted-field filtering, concurrency `1/2/4`, TTFT/visible/completion/throughput/fairness, cancellation, sustained behavior, safe usage/error observations, and local TTS overlap only after component gates pass.
@@ -159,12 +161,12 @@ A user can speak Russian to a host-local capture path and see an accurate final 
 
 ### Dependencies
 
-- Slice 2 selected STT artifact, limits, and quality/latency thresholds.
+- Slice 2 operator-fixed Whisper large-v3-turbo artifact and transparent 90% CPU delivery exception; original failed 83.33% gate remains recorded.
 
 ### Acceptance criteria
 
 - The fixed Russian corpus meets the preregistered accuracy and finalization thresholds on the canonical host.
-- A manual microphone turn displays partial feedback if supported and exactly one final transcript.
+- Automated/public-corpus capture-contract coverage produces exactly one final transcript; physical microphone acceptance is deferred to the single final Slice 5 command and remains pending here.
 - Audio format mismatch, model unavailable, cancellation, and process loss have the architecture's explicit terminal behavior.
 - No raw audio is retained by default; diagnostic capture requires an explicit bounded mode outside Git.
 - STT identity/readiness and per-turn latency/resource observations are available without transcript content in default logs.
@@ -172,7 +174,7 @@ A user can speak Russian to a host-local capture path and see an accurate final 
 
 ### Validation method
 
-Run corpus scoring, public tracer success/failure cases, live microphone acceptance, and a cancellation during transcription. Compare resource/latency results with Slice 2 tolerances.
+Run corpus scoring, public tracer success/failure cases, capture-format/non-retention checks, and cancellation during transcription. Compare resource/latency results with the transparent Slice 2 delivery limits. Defer physical microphone acceptance to Slice 5.
 
 ### Evidence required before Slice 4
 
@@ -203,7 +205,7 @@ After a real local transcript, the user receives a relevant response from the on
 ### Dependencies
 
 - Slice 3 real STT path is green.
-- Slice 2 selected LLM provider mode, model/provider identity, context/admission limits, rubric, and any cloud privacy approval.
+- Slice 2 operator-fixed `deepseek-v4-flash` alias, context/admission limits, failed measurement record, operator-attested opaque routing, and no-fallback policy. Cumulative delivery authorizes implementation/final user test but not a claim that the failed cloud gates passed.
 
 ### Acceptance criteria
 
@@ -247,7 +249,7 @@ A user can speak through a host-local path and hear a locally synthesized spoken
 ### Dependencies
 
 - Slice 4 real-STT/selected-provider path is green.
-- Slice 2 selected TTS artifact, voice/license provenance, listening rubric, and resource limits.
+- Slice 2 operator-fixed Qwen3 CustomVoice artifact/runtime/configuration, Apache-2.0 provenance, automated timing/resource evidence, and pending human listening rubric.
 
 ### Acceptance criteria
 
