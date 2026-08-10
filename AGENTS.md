@@ -6,7 +6,7 @@ Voice Agent v2 is pre-implementation; do not infer a runnable stack or selected 
 - Use [`docs/architecture.md`](docs/architecture.md) for boundaries, contract ownership, lifecycle, failure policy, security, and resource gates.
 - Use [`docs/roadmap.md`](docs/roadmap.md) for the mandatory dependency order and slice acceptance evidence.
 - Use [`docs/adr/`](docs/adr/) only for accepted decisions that meet the project's ADR bar.
-- Treat `prineycom/voice-agent` as read-only provenance. Follow the selective-migration rule in the architecture and roadmap rather than copying legacy source or assumptions wholesale.
+- Inspect legacy evidence only at pinned [`prineycom/voice-agent@93c5c397`](https://github.com/prineycom/voice-agent/tree/93c5c39786ff790d7ae436772d2cf37a2eeb32c6). Follow the read-only selective-revalidation procedure in [`docs/architecture.md`](docs/architecture.md#34-pinned-legacy-reference); never copy legacy source or assumptions wholesale.
 
 ## Maintaining this file
 

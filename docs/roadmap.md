@@ -13,48 +13,49 @@ The architecture and contract ownership are defined in [`architecture.md`](archi
 ## Delivery rules for every slice
 
 - Exercise the thinnest end-to-end user path; do not build an unused horizontal platform first.
-- Keep inference local. No cloud fallback may make an acceptance test pass.
-- Never commit secrets, private recordings, conversation content, model weights, caches, generated engines, or local environment values.
+- Keep LiveKit, STT, and TTS local. Evaluate local LLM candidates first; use a cloud LLM only after documented local-gate failure and explicit provider/privacy approval. No automatic fallback may make an acceptance test pass.
+- Never commit secrets, private recordings, conversation content, model weights, caches, generated engines, provider credentials, or local environment values.
 - Give each new wire contract one owner, a version, limits, terminal semantics, and executable producer/consumer tests.
 - Record model and artifact identity by revision/hash and provenance.
 - Treat subjective hardware behavior as unproven until the slice captures measurements on the canonical host.
-- Migrate legacy material only when the slice needs it. Record the source commit/path, bring only the smallest useful unit, and prove it again under V2 contracts.
+- Inspect legacy material only at the pinned read-only [`prineycom/voice-agent@93c5c397`](https://github.com/prineycom/voice-agent/tree/93c5c39786ff790d7ae436772d2cf37a2eeb32c6) tree when a slice needs it. Record the source commit/path, bring only the smallest useful unit, and prove it again under V2 contracts.
 - A unit suite alone cannot close a vertical slice; the validation method below must observe the described public behavior.
 
 ## Dependency order
 
 ```text
 1 Deterministic zero-secret tracer
-└─ 2 Measured host/model budget
+└─ 2 Measured host/model and LLM-provider budget
    └─ 3 Real local STT turn
-      └─ 4 Real local LLM response
-         └─ 5 Real local TTS conversation
+      └─ 4 Selected LLM-provider response
+         └─ 5 Real local-STT/TTS conversation
             └─ 6 LiveKit media and interruption
-               └─ 7 Live2D eyes and semantic intent v1
-                  └─ 8 Failure semantics and observability
-                     └─ 9 Single-host operational reliability  ← core MVP exit
-                        └─ 10 Optional wake activation
+               └─ V Avatar/module Grill and design gate
+                  └─ 7 Deterministic MVP eye module
+                     └─ 8 Failure semantics and observability
+                        └─ 9 Single-host operational reliability  ← core MVP exit
+                           └─ 10 Optional wake activation
 ```
 
 ## Slice 1 — Deterministic zero-secret voice-turn tracer
 
 ### User-visible outcome
 
-A developer can run one documented root command on a clean checkout and observe one complete synthetic voice turn: fixed transcript, fixed response text, a deterministic audible tone artifact, one bounded animation-intent fixture, and one terminal result tied to the same turn.
+A developer can run one documented root command on a clean checkout and observe one complete synthetic voice turn: fixed transcript, fixed response text, a deterministic audible tone artifact, ordered lifecycle state, and one terminal result tied to the same turn.
 
 ### Included scope
 
 - Minimal executable session-controller seam and versioned event envelope.
 - Deterministic fake STT, LLM, and TTS implementations behind the intended contracts.
 - Programmatically generated PCM input and output; no recording or model download.
-- Session/turn correlation, ordered lifecycle events, terminal outcomes, cancellation seam, and neutral animation fallback.
+- Session/turn correlation, ordered lifecycle events, terminal outcomes, and a cancellation seam; no avatar contract is designed in this slice.
 - One root verification command that exercises the tracer and contract tests.
 - Behavioral CI that runs the root verification command and replaces the documentation-only `no_ci` opt-out.
 - Repository/toolchain declarations only as needed to run this slice reproducibly.
 
 ### Excluded scope
 
-- Real models, GPU inference, microphones, LiveKit, WebRTC, browser UI, Live2D assets, wake, deployment, and legacy source migration.
+- Real models/providers, GPU inference, microphones, LiveKit, WebRTC, browser UI/avatar modules, wake, deployment, and legacy source migration.
 - Claims about production latency or quality.
 
 ### Dependencies
@@ -64,11 +65,10 @@ A developer can run one documented root command on a clean checkout and observe 
 ### Acceptance criteria
 
 - A clean checkout completes the tracer without network access, secrets, GPU access, or pre-existing model/cache state.
-- Generated input deterministically yields a fixed Russian transcript, fixed response, valid bounded intent fixture, declared PCM output, and exactly one `completed` terminal event.
+- Generated input deterministically yields a fixed Russian transcript, fixed response, ordered lifecycle events, declared PCM output, and exactly one `completed` terminal event.
 - Session ID, turn ID, sequence, and contract versions correlate every emitted observation.
 - Repeated runs are byte-identical after explicitly nondeterministic diagnostic timestamps are normalized.
-- Injected invalid animation intent yields the neutral fallback while the voice turn still completes.
-- Injected hard STT, LLM, and TTS failures each yield exactly one documented failed outcome with no downstream fabrication.
+- Injected hard STT, selected-provider LLM, and TTS failures each yield exactly one documented failed outcome with no downstream fabrication.
 - Cancellation produces one interrupted outcome and no post-cancel chunks.
 - The root verification command exits nonzero on any contract or tracer failure.
 - Pull requests run that command as required behavioral CI; the documentation-only `no_ci` opt-out is removed in the same slice.
@@ -85,51 +85,55 @@ Run the root verification command from an empty-cache, network-denied environmen
 - Normalized trace and PCM hashes from two clean runs.
 - A short statement of any legacy material considered; expected evidence is “none” for this slice.
 
-## Slice 2 — Measured host and model budget
+## Slice 2 — Measured host/model and LLM-provider budget
 
 ### User-visible outcome
 
-The project has an evidence-backed local STT/LLM/TTS candidate set that can fit and perform on the RTX 4070 host under the voice product's real overlap, rather than a model list chosen by assertion.
+The project has evidence-backed local STT/TTS selections and exactly one measured LLM provider mode. A capable local LLM is selected when it passes; an approved cloud LLM is selected only if local candidates demonstrably cannot meet the real VRAM, latency, or quality budget.
 
 ### Included scope
 
-- A repeatable benchmark harness that records the host, driver, runtime, artifact identity, and configuration.
+- A repeatable benchmark harness that records the host, driver, runtime, artifact/provider identity, and configuration.
 - A preregistered Russian STT corpus/rubric, LLM response rubric, and TTS listening set that contain no private recordings in Git.
-- At least two credible candidates per inference role, unless a documented compatibility/license screen leaves only one testable candidate.
-- Cold, warm, and sustained measurement of load time, latency, throughput, VRAM, RAM, CPU, GPU use, cancellation, and recovery.
-- Required overlap measurements: LLM decode with TTS startup, plus new STT admission while prior response work is being cancelled.
-- Selection report for one compatible initial STT/LLM/TTS set, including quantization/context/concurrency limits and a measured safety margin.
+- At least two credible local candidates per inference role, unless a documented compatibility/license screen leaves only one testable candidate. The user's preferred local LLM candidate is added first when the user supplies its exact identity; this roadmap does not guess it.
+- Cold, warm, and sustained local measurement of load time, latency, throughput, VRAM, RAM, CPU, GPU use, cancellation, and recovery.
+- Required overlap measurements: local-LLM decode with TTS startup, plus new STT admission while prior response work is being cancelled.
+- A conditional cloud-LLM evaluation only if no local LLM passes, covering response quality/latency, streaming/cancellation, provider availability, credential flow, endpoint/model allowlist, data retention/training policy, region where relevant, usage/cost, and privacy-safe observability.
+- Selection report for local STT/TTS and one LLM provider mode, with explicit context/concurrency/admission limits and no fallback route.
 
 ### Excluded scope
 
-- Production inference services, LiveKit, browser/avatar work, deployment automation, wake training, and model-quality claims beyond the fixed evaluation sets.
-- Committing model weights, registry tokens, private samples, or raw conversational content.
+- Production inference services, LiveKit, browser/avatar work, deployment automation, wake training, cloud STT/TTS, automatic provider fallback, and model-quality claims beyond the fixed evaluation sets.
+- Committing model weights, provider/registry tokens, private samples, or raw conversational content.
 
 ### Dependencies
 
 - Slice 1 contracts and deterministic tracer are green.
-- Candidate licenses and acquisition paths are reviewable without exposing credentials.
+- Candidate licenses/acquisition paths and any conditional cloud privacy terms are reviewable without exposing credentials.
 
 ### Acceptance criteria
 
-- Numeric pass/fail thresholds and scoring rules are committed before candidate results are viewed.
-- Every result identifies artifact revision/hash, quantization, serving runtime/version, driver, context, concurrency, and benchmark input revision.
-- Measurements include idle and peak VRAM/RAM, cold and warm latency, sustained behavior, and all required overlap/cancellation cases from [`architecture.md`](architecture.md#113-measurements-required-before-model-selection).
-- The selected trio passes the preregistered STT, LLM, and TTS quality gates and the latency gates without out-of-memory recovery or an unmeasured unload trick.
-- The complete measured peak leaves an explicit, evidence-derived reserve for display/rendering and transient allocations.
+- Numeric resource, latency, and quality pass/fail thresholds and scoring rules are committed before candidate results are viewed.
+- Every local result identifies artifact revision/hash, quantization, serving runtime/version, driver, context, concurrency, and benchmark input revision.
+- Measurements include idle and peak VRAM/RAM, cold and warm latency, sustained behavior, and all required overlap/cancellation cases from [`architecture.md`](architecture.md#113-measurements-required-before-modelprovider-selection).
+- Local LLM candidates are tested first; a passing local LLM remains the initial selection.
+- A cloud LLM can be selected only with recorded evidence that all tested local LLM candidates fail at least one preregistered gate and with an approved provider/model/endpoint/privacy/cost record.
+- Selected local STT/TTS and the selected LLM mode pass their quality/latency gates. Local mode also passes the complete measured peak with an explicit reserve; cloud mode reports the smaller local resource envelope and its network/provider budget separately.
 - Repeating the winning configuration produces results inside the declared tolerance.
-- If no trio passes, the slice ends with a failed selection report and the next slice does not start; documentation does not promote a “least bad” model to proven.
+- Exactly one provider mode is selected, is visible in evidence/configuration, and has no automatic failure-triggered route to another provider.
+- If neither a local LLM nor an approved cloud candidate passes, the slice ends with a failed selection report and Slice 4 cannot start.
 
 ### Validation method
 
-Run the harness on the canonical host from cold load through sustained and overlap scenarios. Independently review the blind/fixed quality scoring and rerun the winning configuration. Verify the report can be reproduced from artifact identities without embedding secrets.
+Run local candidates first on the canonical host from cold load through sustained and overlap scenarios. Independently review the blind/fixed quality scoring and rerun the winning configuration. Only after recorded local failure, run the cloud-provider privacy/credential/latency/quality/usage evaluation without embedding secrets or content in evidence.
 
 ### Evidence required before Slice 3
 
-- Machine-readable benchmark results and a human-readable selection rationale.
+- Machine-readable local benchmark results and a human-readable selection rationale.
 - Precommitted thresholds/rubrics and repeat-run comparison.
-- Selected artifact manifests and measured residency/admission constraints.
-- Explicit list of hypotheses that remain untested by component benchmarking.
+- Selected local STT/TTS artifact manifests and measured residency/admission constraints.
+- Selected LLM provider mode/identity; if cloud, local rejection evidence plus provider privacy/retention/endpoint/cost approval.
+- Explicit list of hypotheses that component/provider benchmarking has not tested.
 
 ## Slice 3 — Real local STT voice turn
 
@@ -172,60 +176,62 @@ Run corpus scoring, public tracer success/failure cases, live microphone accepta
 - Privacy check showing default non-retention.
 - One redacted trace proving a real STT result completes the tracer.
 
-## Slice 4 — Real local LLM response
+## Slice 4 — Selected LLM-provider response
 
 ### User-visible outcome
 
-After a real local transcript, the user receives a relevant local text response from the selected LLM; deterministic TTS still makes completion audible without pretending it is speech quality.
+After a real local transcript, the user receives a relevant response from the one measured LLM provider mode. The app/operator can identify whether that mode is local or approved cloud; deterministic TTS still makes completion audible without pretending it is speech quality.
 
 ### Included scope
 
-- Selected local LLM artifact and service contract.
+- Provider-neutral LLM request/result contract owned by the session controller/provider adapter.
+- The Slice 2 selected local artifact or explicitly approved cloud provider/model/endpoint—never both as runtime fallbacks.
 - Bounded conversation context for one realtime session.
-- Streaming text if supported, cancellation, readiness, correlation, and response limits.
-- A minimal neutral animation-intent candidate compatible with the existing tracer invariants; expressive vocabulary remains deferred to Slice 7.
+- Streaming text if supported, cancellation, readiness, correlation, response limits, provider identity, and external-transfer/usage observations.
+- Cloud credential injection/redaction and permitted-context filtering if cloud mode was selected.
 - Replacement of the fake LLM leg after real STT.
 
 ### Excluded scope
 
-- Real TTS, tools/agent delegation, long-term memory, retrieval, cloud fallback, avatar rendering, prompt-content logging, and broad assistant-feature expansion.
+- Real TTS, tools/agent delegation, long-term memory, retrieval, automatic/per-request provider fallback, avatar control, prompt-content logging, cloud STT/TTS, and broad assistant-feature expansion.
 
 ### Dependencies
 
 - Slice 3 real STT path is green.
-- Slice 2 selected LLM artifact, context/admission limits, and rubric.
+- Slice 2 selected LLM provider mode, model/provider identity, context/admission limits, rubric, and any cloud privacy approval.
 
 ### Acceptance criteria
 
 - The fixed response set meets the preregistered relevance, language, safety, latency, and response-length rubric.
-- First-token, completion, context, resource, and cancellation observations remain within the selected budget.
-- Invalid structured output cannot bypass the controller's response and intent validation; valid text can use the neutral intent fallback.
+- First-token, completion, context, resource/network, usage/cost where available, and cancellation observations remain within the selected budget.
+- Provider mode/model identity is explicit in safe configuration, readiness, and metadata while credentials and prompt/response content remain absent.
+- In cloud mode only final transcript and permitted context cross the allowlisted TLS endpoint; raw audio, local files, environment values, and secrets do not.
 - Session context never crosses session IDs and is not durably persisted by default.
-- Model/process failure yields no fabricated answer or downstream TTS request.
-- Real STT → real LLM → deterministic TTS completes one correlated turn through the public tracer.
+- Selected-provider failure yields no fabricated answer, alternate-provider request, or downstream TTS request.
+- Real STT → selected LLM provider → deterministic TTS completes one correlated turn through the public tracer.
 
 ### Validation method
 
-Run the fixed evaluation set, multi-turn session-isolation cases, malformed-output injection, mid-generation cancellation, and the real-STT/real-LLM tracer on the canonical host.
+Run the fixed evaluation set, multi-turn session-isolation cases, permitted-field filtering, secret-redaction checks, mid-generation cancellation, provider failure with no fallback, and the real-STT/selected-provider tracer. In cloud mode, also verify the endpoint allowlist and external-transfer observations without recording content.
 
 ### Evidence required before Slice 5
 
-- Fixed response-rubric results tied to artifact/runtime identity.
-- Context isolation, malformed output, and cancellation contract results.
-- One privacy-safe trace showing STT final through LLM terminal output.
-- Updated overlap budget using observed LLM runtime behavior.
+- Fixed response-rubric results tied to local artifact/runtime or approved cloud provider/model identity.
+- Context isolation, permitted-field, secret-redaction, no-fallback, and cancellation contract results.
+- One privacy-safe trace showing STT final through selected-provider terminal output.
+- Updated overlap/resource or cloud-network budget using observed provider behavior.
 
-## Slice 5 — Real local spoken conversation
+## Slice 5 — Real local-STT/TTS spoken conversation
 
 ### User-visible outcome
 
-A user can speak through a host-local path and hear a locally synthesized spoken answer from real STT, LLM, and TTS—the first complete real-inference voice conversation, before LiveKit.
+A user can speak through a host-local path and hear a locally synthesized spoken answer from real local STT, the selected LLM provider, and local TTS—the first complete real-inference voice conversation, before LiveKit.
 
 ### Included scope
 
 - Selected TTS artifact and local streaming-service contract.
 - Declared output audio format, ordered chunks, first-audio behavior, terminal semantics, and cancellation.
-- Safe overlap of LLM generation and TTS startup within the measured budget.
+- Safe overlap of selected-provider response streaming and local TTS startup within the measured local/network budget.
 - Text remains visible if synthesis fails.
 - Replacement of the deterministic TTS leg in the tracer.
 
@@ -235,14 +241,14 @@ A user can speak through a host-local path and hear a locally synthesized spoken
 
 ### Dependencies
 
-- Slice 4 real STT/LLM path is green.
+- Slice 4 real-STT/selected-provider path is green.
 - Slice 2 selected TTS artifact, voice/license provenance, listening rubric, and resource limits.
 
 ### Acceptance criteria
 
 - Fixed listening material meets the preregistered Russian intelligibility/naturalness and first-audio/real-time-factor thresholds.
 - A live microphone turn produces an audible answer with exactly one correlated completion.
-- Required LLM→TTS overlap remains within the measured GPU/RAM reserve; sustained turns do not show unbounded memory growth.
+- Required selected-provider→TTS overlap remains within the measured GPU/RAM reserve in local mode or the measured network/TTS reserve in cloud mode; sustained turns do not show unbounded memory growth.
 - Cancellation stops synthesis and output within the declared bound and emits no stale chunks.
 - TTS failure preserves valid text but cannot mark the spoken turn successfully completed.
 - Default operation retains neither microphone input nor synthesized audio.
@@ -262,19 +268,19 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 ### User-visible outcome
 
-A user opens the private web app, speaks over LiveKit, hears the local answer, sees transcript/turn state, and can interrupt the answer by speaking again.
+A user opens the private web app, speaks over LiveKit, hears the locally synthesized answer, sees transcript/turn state, and can interrupt the answer by speaking again.
 
 ### Included scope
 
 - Local LiveKit server, minimal web gateway, and minimal browser conversation UI.
 - Tailscale/loopback HTTPS entry, scoped room capability, WebRTC microphone/agent audio, and versioned control events.
-- Session reconnect behavior and full barge-in cancellation across controller, LLM, TTS, published audio, and queued client output.
+- Session reconnect behavior and full barge-in cancellation across controller, selected LLM provider, TTS, published audio, and queued client output.
 - Headless deterministic media test plus real browser validation.
 - Minimum tailnet port/exposure documentation based on actual results.
 
 ### Excluded scope
 
-- Live2D rendering, wake, kiosk, public internet exposure, a separate auth subsystem, cloud TURN chosen without evidence, and general UI polish.
+- Avatar host/modules, wake, kiosk, public internet exposure, a separate auth subsystem, cloud TURN chosen without evidence, and general UI polish.
 
 ### Dependencies
 
@@ -283,7 +289,7 @@ A user opens the private web app, speaks over LiveKit, hears the local answer, s
 ### Acceptance criteria
 
 - Loopback browser and a second tailnet browser can connect using only tailnet membership plus protocol-required room capability.
-- Inference services and management endpoints remain host-local; the signing secret never reaches the browser.
+- STT/TTS/local-model inference and all management endpoints remain host-local; an explicitly selected cloud LLM is outbound-only to its allowlisted endpoint. LiveKit and cloud-provider credentials never reach the browser.
 - Published microphone audio yields one correlated transcript and audible agent response over LiveKit.
 - Barge-in marks the prior turn interrupted, stops prior audio within the declared bound, discards old queued events, and completes a new turn without correlation leaks.
 - Disconnect/reconnect cannot replay a stale answer as a new turn.
@@ -292,59 +298,80 @@ A user opens the private web app, speaks over LiveKit, hears the local answer, s
 
 ### Validation method
 
-Run network-denied deterministic headless media tests, then real-model loopback and tailnet browser sessions. Capture endpoint-to-playout timing and a scripted/observed barge-in trace. Review actual bind addresses and tailnet exposure.
+Run network-denied deterministic headless media tests, then selected-provider real-inference loopback and tailnet browser sessions. Capture endpoint-to-playout timing and a scripted/observed barge-in trace. Review actual bind addresses and tailnet exposure.
 
-### Evidence required before Slice 7
+### Evidence required before Design Gate V
 
 - Headless success/fault/interruption results.
 - Real loopback and second-tailnet-client latency traces.
 - Redacted bind/port and scoped-capability review.
 - Browser capture showing conversation, transcript state, and successful barge-in.
 
-## Slice 7 — Original Live2D eyes and semantic intent v1
+## Design Gate V — Grill the avatar module and MVP eye
+
+This is a required design task, not an implementation slice. Run a dedicated `/skill:grill-docs` session after Slice 6 evidence is available and before Slice 7 starts.
+
+### Required decisions
+
+- Avatar-host/module capabilities, versioning, selection, fallback, and failure contract.
+- MVP eye visual grammar: pupil bounds, blink timing, palette/state map, thinking loader, speech-pulse mapping, and return-to-neutral.
+- Input precedence and staleness rules for lifecycle, actual-playout speech envelope, external tracking target, seeded idle movement, interruption, and reduced motion.
+- Determinism/replay rules and browser performance/accessibility budgets.
+- Whether any future LLM semantic visual input is useful. The MVP does not require it; if admitted later, it must remain bounded, renderer-neutral, validated, and never contain frame/renderer data.
+
+### Gate acceptance and evidence
+
+- Accepted updates to [ADR-0002](adr/0002-renderer-agnostic-avatar-boundary.md), the architecture boundary, glossary, and a versioned contract plan with one owner.
+- Original design references/provenance and preregistered visual-review scenarios without proprietary/copied assets.
+- Explicit non-goals for the MVP module, including no Live2D/3D implementation and no camera-tracking producer.
+- Slice 7 acceptance fixtures and visual/performance rubric are defined before runtime implementation.
+
+## Slice 7 — Renderer-agnostic host and deterministic MVP eye
 
 ### User-visible outcome
 
-During the private LiveKit conversation, an original Live2D AI-eyes avatar visibly attends, thinks, speaks, reacts with bounded semantic cues, handles interruption, and returns smoothly to neutral.
+During the private LiveKit conversation, an original animated AI eye visibly listens, thinks, speaks, handles interruption, and returns smoothly to neutral. Its pupil uses bounded external targeting or bounded idle movement, it blinks, its outer ring/pattern pulses with actual speech, and its palette/pupil representation reflects state.
 
 ### Included scope
 
-- Original AI-eyes design and Live2D asset with documented authorship/license/provenance.
-- `AnimationIntent` v1 vocabulary, bounds, size/cue limits, semantic timing anchors, schema, fixtures, and compatibility rules.
-- LLM production of candidate v1 intent; controller validation and neutral fallback; realtime delivery tied to turn state.
-- Deterministic avatar mapping, interpolation, blink/gaze/idle, cue scheduling, cancellation, reduced-motion mode, and render health.
+- The Gate V renderer-agnostic avatar host/module contract and capability/fallback behavior.
+- One original custom MVP eye module with documented authorship/license/provenance.
+- Bounded external pupil target input plus seeded deterministic idle movement when no valid target exists; the tracking producer itself is not included.
+- Deterministic blink, state-specific pupil behavior including a thinking loader, palette changes, actual-playout speech-envelope pulsing, interruption, return-to-neutral, reduced motion, and render health.
 - Offline fixture replay and real-conversation visual review.
 
 ### Excluded scope
 
-- Proprietary or copied character assets, 3D, A2F, A2E, per-frame LLM output, arbitrary Live2D parameter output, a second renderer, advanced full-body animation, and wake.
+- Live2D or 3D module implementations, A2F, A2E, camera/object tracking, LLM visual output, proprietary/copied assets, full-body animation, and wake.
 
 ### Dependencies
 
-- Slice 6 correlated LiveKit control path and interruption behavior are green.
-- Original asset provenance is approved for repository use.
+- Slice 6 correlated LiveKit state/playout path and interruption behavior are green.
+- Design Gate V is accepted with the detailed contract, fixtures, precedence rules, and visual rubric.
+- Original eye asset/design provenance is approved for repository use.
 
 ### Acceptance criteria
 
-- Contract v1 meets every invariant in [`architecture.md`](architecture.md#51-animation-intent-invariants) and has executable producer, validator, transport, and consumer tests.
-- An explicit hard limit bounds serialized size, cue count, vocabulary, intensity, and duration-like values.
-- Unknown, malformed, late, duplicate, and out-of-range intent cannot reach render parameters; neutral fallback preserves voice.
-- Replaying the same fixture and lifecycle timing yields the same normalized render-state sequence.
-- The LLM never emits or controls Live2D parameter names, keyframes, or frames.
-- Interruption cancels old cues and returns within the declared motion bound; the new turn is visually distinct by correlation.
+- The avatar host/module boundary has one owner, version/capabilities, bounded validated inputs, cancellation, fallback, and executable producer/consumer tests.
+- The same fixtures, lifecycle timing, speech envelope, tracking targets, and idle seed yield the same normalized render-state sequence.
+- Missing/stale/malformed targets use the designed bounded idle behavior; no unvalidated input reaches render state.
+- Blink and pupil motion remain within the approved bounds; thinking uses the approved loader representation.
+- The outer ring/pattern follows actual audio playout rather than generated text or LLM timing.
+- Palette/state transitions and interruption return to a safe state within declared bounds.
+- The LLM emits no renderer parameters, keyframes, executable content, or frames and is not required for visual control.
 - Reduced-motion mode avoids nonessential motion while preserving understandable state.
-- Human visual review accepts the original design as deliberately simple, readable, and not a copy of the inspiration.
+- Human visual review accepts the original eye as deliberately simple, readable, and not a copy of another character.
 - Browser frame timing and host resource use stay within preregistered limits during a real voice session.
 
 ### Validation method
 
-Run schema/property/bounds tests, deterministic fixture replay, malformed/late-event fault cases, browser performance capture, and recorded A/B visual review for neutral, listening, thinking, speaking, emphasis, failure, and interruption states.
+Run module-contract bounds/property tests, seeded deterministic fixture replay, stale/malformed tracking cases, speech-envelope replay against actual audio timing, browser performance capture, and recorded visual review for neutral, listening, thinking, speaking, failure, tracking, idle, reduced-motion, and interruption states.
 
 ### Evidence required before Slice 8
 
-- V1 schema, fixtures, compatibility policy, and contract-test report.
-- Asset provenance/license record and approved visual captures.
-- Deterministic replay hash/normalized state report.
+- Gate V decisions, versioned module contract/fixtures, and producer/consumer test report.
+- Asset/design provenance and approved visual captures.
+- Deterministic replay hash/normalized state report across tracking, idle, speech, palette, and lifecycle inputs.
 - Browser performance/resource results and interruption capture.
 
 ## Slice 8 — Failure semantics and privacy-safe observability
@@ -355,10 +382,10 @@ When any core capability fails, the app tells the user whether it is unavailable
 
 ### Included scope
 
-- Liveness/readiness for LiveKit, controller, STT, LLM, TTS, and avatar runtime.
-- Structured session/turn timing, terminal outcomes, queue/drop/cancellation counts, and GPU/CPU/RAM measurements from the architecture.
+- Liveness/readiness for LiveKit, controller, STT, selected LLM provider, TTS, avatar host, and active module.
+- Structured session/turn timing, selected-provider identity/external-transfer/usage metadata, terminal outcomes, queue/drop/cancellation counts, and GPU/CPU/RAM measurements from the architecture.
 - User-visible degraded states and the complete hard/soft failure matrix.
-- Fault injection for process loss, GPU allocation failure, malformed contracts, network interruption, and browser render failure.
+- Fault injection for process/provider loss, cloud credential/allowlist failure when applicable, GPU allocation failure, malformed avatar inputs, network interruption, and browser render failure.
 - Explicit diagnostic-capture opt-in and retention boundary.
 
 ### Excluded scope
@@ -374,7 +401,7 @@ When any core capability fails, the app tells the user whether it is unavailable
 - One turn produces one correlated timeline from utterance through terminal delivery without logging raw audio, transcript, prompt, or response by default.
 - Every failure row in [`architecture.md`](architecture.md#7-failure-semantics) has an executable or controlled validation and the documented user-visible state.
 - Readiness differs from process liveness and identifies incompatible/unloaded model or contract state.
-- No fault silently switches model, host, cloud, auth mode, wake behavior, or visual architecture.
+- No fault silently switches LLM provider/model, moves STT/TTS to cloud, changes host/auth/wake behavior, or selects another avatar module.
 - Failure retries are bounded; GPU/process crash cannot create an admission or restart loop.
 - Operators can compute the preregistered latency/resource percentiles and identify the slow stage from emitted observations.
 - Diagnostic content capture is off by default, bounded when enabled, outside Git, and has an exercised deletion path.
@@ -401,7 +428,7 @@ After a normal host boot or a bounded service failure, the private app reaches a
 - Reproducible, idempotent local service supervision and configuration validation.
 - Declared start/stop ordering, graceful turn drain, bounded restart policy, and no orphan inference.
 - Artifact manifest verification, disk/cache bounds, version/build reporting, and rollback to the last known compatible configuration.
-- LiveKit, web gateway, controller, STT, LLM, and TTS recovery on the one host.
+- LiveKit, web gateway, controller, local STT/TTS, any selected local LLM, provider-adapter state, avatar host, and MVP eye recovery on the one host; explicit cloud mode reports external provider readiness without pretending to supervise it.
 - Sustained voice/avatar session, reboot validation, and rollback rehearsal.
 
 ### Excluded scope
@@ -465,7 +492,7 @@ If explicitly authorized after the core MVP, a user can activate the ready voice
 - Missing, corrupt, or incompatible wake artifacts report degraded wake capability; they never silently enable always-listening behavior.
 - Activation/deactivation cannot leak audio into an unadmitted turn and respects current interruption/session lifecycle.
 - Private evaluation/training audio is never committed and follows an explicit retention/deletion policy.
-- The complete core voice/avatar path still meets its Slice 9 thresholds with wake enabled.
+- The complete core voice/MVP-eye path still meets its Slice 9 thresholds with wake enabled.
 - Disabling or rolling back wake restores the unchanged core MVP.
 
 ### Validation method
@@ -481,4 +508,4 @@ Run fixed positive/negative/noise corpora, a sustained ambient false-accept sess
 
 ## What is intentionally not on this roadmap
 
-3D, A2F, A2E, kiosk mode, a multi-host topology, public deployment, a separate auth project, and wholesale legacy migration have no active slices. Adding one requires a new product decision, architecture impact review, and dependency-ordered vertical slice rather than reopening stale legacy backlog assumptions.
+Live2D and 3D are optional later avatar modules, not MVP paths; each requires a separate post-MVP vertical slice against the renderer-agnostic contract. A2F, A2E, kiosk mode, additional user-managed compute hosts, public deployment, a separate auth project, cloud STT/TTS, automatic LLM fallback, and wholesale legacy migration have no active slices. Adding one requires a new product decision, architecture impact review, and dependency-ordered slice rather than reopening stale legacy backlog assumptions.
