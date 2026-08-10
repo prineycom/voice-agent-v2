@@ -17,7 +17,7 @@
 
 > **Roadmap node:** `Slice 1 — Deterministic zero-secret voice-turn tracer`
 > **Execution:** `AFK`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -81,7 +81,7 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 > **Roadmap node:** `Slice 2 — Measured host/model and LLM-provider budget`
 > **Execution:** `HITL`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -106,7 +106,7 @@ The project has evidence-backed local STT/TTS selections and exactly one measure
 
 - Numeric resource, latency, and quality pass/fail thresholds and scoring rules are committed before candidate results are viewed.
 - Every local result identifies artifact revision/hash, quantization, serving runtime/version, driver, context, concurrency, and benchmark input revision.
-- Measurements include idle and peak VRAM/RAM, cold and warm latency, sustained behavior, and all required overlap/cancellation cases from [`architecture.md`](architecture.md#113-measurements-required-before-modelprovider-selection).
+- Measurements include idle and peak VRAM/RAM, cold and warm latency, sustained behavior, and all required overlap/cancellation cases from [`architecture.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/architecture.md#113-measurements-required-before-modelprovider-selection).
 - Local LLM candidates are tested first; a passing local LLM remains the initial selection.
 - A cloud LLM can be selected only with recorded evidence that all tested local LLM candidates fail at least one preregistered gate and with an approved provider/model/endpoint/privacy/cost record.
 - Selected local STT/TTS and the selected LLM mode pass their quality/latency gates. Local mode also passes the complete measured peak with an explicit reserve; cloud mode reports the smaller local resource envelope and its network/provider budget separately.
@@ -147,7 +147,7 @@ Run local candidates first on the canonical host from cold load through sustaine
 
 > **Roadmap node:** `Slice 3 — Real local STT voice turn`
 > **Execution:** `HITL`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -205,7 +205,7 @@ Run corpus scoring, public tracer success/failure cases, live microphone accepta
 
 > **Roadmap node:** `Slice 4 — Selected LLM-provider response`
 > **Execution:** `AFK`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -267,7 +267,7 @@ Run the fixed evaluation set, multi-turn session-isolation cases, permitted-fiel
 
 > **Roadmap node:** `Slice 5 — Real local-STT/TTS spoken conversation`
 > **Execution:** `HITL`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -326,7 +326,7 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 > **Roadmap node:** `Slice 6 — Local LiveKit media and interruption`
 > **Execution:** `HITL`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -385,7 +385,7 @@ Run network-denied deterministic headless media tests, then selected-provider re
 
 > **Roadmap node:** `Design Gate V — Grill the avatar module and MVP eye`
 > **Execution:** `HITL`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## What to build
 
@@ -408,7 +408,7 @@ The roadmap does not define separate user-visible outcome, included-scope, or ex
 
 ## Acceptance criteria and required evidence
 
-- Accepted updates to [ADR-0002](adr/0002-renderer-agnostic-avatar-boundary.md), the architecture boundary, glossary, and a versioned contract plan with one owner.
+- Accepted updates to [ADR-0002](https://github.com/prineycom/voice-agent-v2/blob/main/docs/adr/0002-renderer-agnostic-avatar-boundary.md), the architecture boundary, glossary, and a versioned contract plan with one owner.
 - Original design references/provenance and preregistered visual-review scenarios without proprietary/copied assets.
 - Explicit non-goals for the MVP module, including no Live2D/3D implementation and no camera-tracking producer.
 - Slice 7 acceptance fixtures and visual/performance rubric are defined before runtime implementation.
@@ -438,7 +438,7 @@ Run a dedicated `/skill:grill-docs` session after Slice 6 evidence is available 
 
 > **Roadmap node:** `Slice 7 — Renderer-agnostic host and deterministic MVP eye`
 > **Execution:** `HITL`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -502,7 +502,7 @@ Run module-contract bounds/property tests, seeded deterministic fixture replay, 
 
 > **Roadmap node:** `Slice 8 — Failure semantics and privacy-safe observability`
 > **Execution:** `AFK`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -523,7 +523,7 @@ When any core capability fails, the app tells the user whether it is unavailable
 ## Acceptance criteria
 
 - One turn produces one correlated timeline from utterance through terminal delivery without logging raw audio, transcript, prompt, or response by default.
-- Every failure row in [`architecture.md`](architecture.md#7-failure-semantics) has an executable or controlled validation and the documented user-visible state.
+- Every failure row in [`architecture.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/architecture.md#7-failure-semantics) has an executable or controlled validation and the documented user-visible state.
 - Readiness differs from process liveness and identifies incompatible/unloaded model or contract state.
 - No fault silently switches LLM provider/model, moves STT/TTS to cloud, changes host/auth/wake behavior, or selects another avatar module.
 - Failure retries are bounded; GPU/process crash cannot create an admission or restart loop.
@@ -561,7 +561,7 @@ Run the deterministic fault matrix, real-process kill/recovery cases, resource-p
 
 > **Roadmap node:** `Slice 9 — Single-host operational reliability`
 > **Execution:** `AFK`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 
@@ -622,7 +622,7 @@ Perform idempotence checks, controlled reboot, one-at-a-time service failure/rec
 
 > **Roadmap node:** `Slice 10 — Optional wake activation`
 > **Execution:** `HITL`
-> **Authoritative source:** [`docs/roadmap.md`](../../blob/main/docs/roadmap.md)
+> **Authoritative source:** [`docs/roadmap.md`](https://github.com/prineycom/voice-agent-v2/blob/main/docs/roadmap.md)
 
 ## User-visible outcome
 

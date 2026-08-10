@@ -11,4 +11,4 @@ HOME="$RUN_ROOT/home" \
 XDG_CACHE_HOME="$RUN_ROOT/cache" \
 TMPDIR="$RUN_ROOT/temp" \
 LC_ALL=C.UTF-8 \
-python3 -I -B "$ROOT/scripts/verify.py"
+python3 -I -B "$ROOT/scripts/verify.py" "$@"

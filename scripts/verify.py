@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 from hashlib import sha256
 import io
 from pathlib import Path
@@ -36,9 +37,26 @@ def sha256_hex(value: bytes) -> str:
     return sha256(value).hexdigest()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Verify the deterministic Slice 1 voice-turn tracer.")
+    parser.add_argument(
+        "--output-directory",
+        type=Path,
+        help="preserve the verified trace and playable PCM artifacts in a new directory",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
     if sys.version_info < (3, 11):
         raise SystemExit("Python 3.11 or newer is required")
+
+    args = parse_args()
+    output_directory = args.output_directory
+    if output_directory is not None:
+        output_directory = output_directory.resolve()
+        if output_directory.exists():
+            raise SystemExit(f"output directory already exists: {output_directory}")
 
     sys.addaudithook(deny_network)
     assert_network_is_denied()
@@ -82,6 +100,16 @@ def main() -> int:
     if normalized_trace != normalize_events(success.events):
         raise AssertionError("artifact trace differs from the public tracer")
 
+    scenario_summaries: list[tuple[str, str, object]] = []
+    for scenario in ("stt_failure", "llm_failure", "tts_failure", "cancel_after_first_audio"):
+        scenario_result = run_scenario(scenario)
+        terminal = scenario_result.terminal_event
+        detail = terminal["payload"].get("code", terminal["payload"]["outcome"])
+        scenario_summaries.append((scenario, str(terminal["type"]), detail))
+
+    if output_directory is not None:
+        write_trace_artifacts(output_directory, success)
+
     event_order = " > ".join(str(event["type"]) for event in success.events)
     print("Voice Agent v2 Slice 1 verification")
     print("toolchain: Python 3.11+ standard library only (slice-local choice)")
@@ -96,12 +124,13 @@ def main() -> int:
     print(f"input_pcm_sha256: {sha256_hex(input_pcm)} bytes={len(input_pcm)}")
     print(f"output_pcm_sha256: {sha256_hex(output_pcm)} bytes={len(output_pcm)} format=pcm_s16le/16000Hz/mono")
     print("repeatability: run1 == run2 for normalized trace, input PCM, and output PCM")
+    if output_directory is not None:
+        print(f"artifact_trace: {output_directory / 'trace.normalized.jsonl'}")
+        print(f"artifact_input_pcm: {output_directory / 'input.pcm'}")
+        print(f"artifact_output_pcm: {output_directory / 'output.pcm'}")
 
-    for scenario in ("stt_failure", "llm_failure", "tts_failure", "cancel_after_first_audio"):
-        scenario_result = run_scenario(scenario)
-        terminal = scenario_result.terminal_event
-        detail = terminal["payload"].get("code", terminal["payload"]["outcome"])
-        print(f"case {scenario}: terminal={terminal['type']} detail={detail} terminal_count=1")
+    for scenario, terminal_type, detail in scenario_summaries:
+        print(f"case {scenario}: terminal={terminal_type} detail={detail} terminal_count=1")
 
     print(f"behavioral_tests: pass count={result.testsRun}")
     print("legacy_material: none inspected or used")
