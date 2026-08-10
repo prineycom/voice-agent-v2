@@ -98,7 +98,7 @@ Media and control remain distinct even when LiveKit transports both.
 9. The browser plays audio. Its avatar runtime maps semantic cues and lifecycle signals to local Live2D parameters, interpolation curves, and frames.
 10. Completion, interruption, or failure emits exactly one terminal turn event. All work for the turn is released or cancelled.
 
-**Decision:** raw microphone audio and synthesized audio do not leave the canonical host except as media delivered to an authorized session participant. Inference calls use host-local endpoints.
+**Decision:** remote microphone audio may travel only from an authorized tailnet client to LiveKit on the canonical host. Once received, it remains on that host: it is sent only to host-local inference and is neither retained by default nor sent to an external inference or storage service. Synthesized audio may leave the host only through LiveKit to authorized session participants.
 
 **Hypothesis:** streaming STT and streaming TTS will meet the latency target with fewer resources than batch operation. The model-budget and real-inference slices must test this.
 
