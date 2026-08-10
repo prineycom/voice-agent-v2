@@ -13,7 +13,7 @@ The architecture and contract ownership are defined in [`architecture.md`](archi
 ## Delivery rules for every slice
 
 - Exercise the thinnest end-to-end user path; do not build an unused horizontal platform first.
-- Keep LiveKit, STT, and TTS local. Evaluate local LLM candidates first; use a cloud LLM only after documented local-gate failure and explicit provider/privacy approval. No automatic fallback may make an acceptance test pass.
+- Keep LiveKit, STT, and TTS local. Evaluate only explicitly approved LLM candidates; use a cloud LLM only after documented local-gate failure and a separate explicit model/provider/privacy approval. No automatic fallback may make an acceptance test pass.
 - Never commit secrets, private recordings, conversation content, model weights, caches, generated engines, provider credentials, or local environment values.
 - Give each new wire contract one owner, a version, limits, terminal semantics, and executable producer/consumer tests.
 - Record model and artifact identity by revision/hash and provenance.
@@ -89,16 +89,16 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 ### User-visible outcome
 
-The project has evidence-backed local STT/TTS selections and exactly one measured LLM provider mode. A capable local LLM is selected when it passes; an approved cloud LLM is selected only if local candidates demonstrably cannot meet the real VRAM, latency, or quality budget.
+The project has evidence-backed local STT/TTS selections and exactly one measured LLM provider mode. Under this slice's explicit single-LLM exception, only the user-approved LFM2.5-2.6B BF16/vLLM target is evaluated; if it fails any gate, no LLM is selected and the dependent path remains blocked pending a later explicit model/cloud decision.
 
 ### Included scope
 
 - A repeatable benchmark harness that records the host, driver, runtime, artifact/provider identity, and configuration.
 - A preregistered Russian STT corpus/rubric, LLM response rubric, and TTS listening set that contain no private recordings in Git.
-- At least two credible local candidates per inference role, unless a documented compatibility/license screen leaves only one testable candidate. The user's preferred local LLM candidate is added first when the user supplies its exact identity; this roadmap does not guess it.
+- At least two credible local candidates for STT and at least two for TTS. By explicit user decision, LLM has a single-model exception: evaluate only official LFM2.5-2.6B native BF16 on vLLM; no alternate local model or cloud provider is acquired, contacted, benchmarked, or substituted.
 - Cold, warm, and sustained local measurement of load time, latency, throughput, VRAM, RAM, CPU, GPU use, cancellation, and recovery.
 - Required overlap measurements: local-LLM decode with TTS startup, plus new STT admission while prior response work is being cancelled.
-- A conditional cloud-LLM evaluation only if no local LLM passes, covering response quality/latency, streaming/cancellation, provider availability, credential flow, endpoint/model allowlist, data retention/training policy, region where relevant, usage/cost, and privacy-safe observability.
+- A fail-closed LLM outcome: select LFM only if it passes every gate. If it fails any gate, record no LLM selection, stop LLM-dependent work, and escalate a separate later model/cloud decision without contacting another provider.
 - Selection report for local STT/TTS and one LLM provider mode, with explicit context/concurrency/admission limits and no fallback route.
 
 ### Excluded scope
@@ -109,15 +109,15 @@ The project has evidence-backed local STT/TTS selections and exactly one measure
 ### Dependencies
 
 - Slice 1 contracts and deterministic tracer are green.
-- Candidate licenses/acquisition paths and any conditional cloud privacy terms are reviewable without exposing credentials.
+- Approved candidate licenses/acquisition paths are reviewable without exposing credentials; any later cloud path has its own explicit privacy/provider gate.
 
 ### Acceptance criteria
 
 - Numeric resource, latency, and quality pass/fail thresholds and scoring rules are committed before candidate results are viewed.
 - Every local result identifies artifact revision/hash, quantization, serving runtime/version, driver, context, concurrency, and benchmark input revision.
 - Measurements include idle and peak VRAM/RAM, cold and warm latency, sustained behavior, and all required overlap/cancellation cases from [`architecture.md`](architecture.md#113-measurements-required-before-modelprovider-selection).
-- Local LLM candidates are tested first; a passing local LLM remains the initial selection.
-- A cloud LLM can be selected only with recorded evidence that all tested local LLM candidates fail at least one preregistered gate and with an approved provider/model/endpoint/privacy/cost record.
+- LLM evaluation contains exactly one identity: approved `LiquidAI/LFM2.5-2.6B` native BF16 on vLLM. No alternate LLM is acquired, contacted, or tested.
+- If LFM2.5-2.6B fails any preregistered gate, the report selects no LLM and blocks Slice 4. Testing any additional local model, LFM quantization/runtime, or cloud LLM requires a new explicit decision and revised preregistration before contact, download, or inference.
 - Selected local STT/TTS and the selected LLM mode pass their quality/latency gates. Local mode also passes the complete measured peak with an explicit reserve; cloud mode reports the smaller local resource envelope and its network/provider budget separately.
 - Repeating the winning configuration produces results inside the declared tolerance.
 - Exactly one provider mode is selected, is visible in evidence/configuration, and has no automatic failure-triggered route to another provider.
@@ -125,14 +125,14 @@ The project has evidence-backed local STT/TTS selections and exactly one measure
 
 ### Validation method
 
-Run local candidates first on the canonical host from cold load through sustained and overlap scenarios. Independently review the blind/fixed quality scoring and rerun the winning configuration. Only after recorded local failure, run the cloud-provider privacy/credential/latency/quality/usage evaluation without embedding secrets or content in evidence.
+Run approved LFM2.5-2.6B plus both candidates for each local STT/TTS role on the canonical host from cold load through sustained cases. Run required overlap and repeat only if LFM passes its component gates. If LFM fails any gate, select no LLM and stop the dependent path; do not acquire, contact, or run another local/cloud LLM without a later explicit decision and revised preregistration.
 
 ### Evidence required before Slice 3
 
 - Machine-readable local benchmark results and a human-readable selection rationale.
 - Precommitted thresholds/rubrics and repeat-run comparison.
 - Selected local STT/TTS artifact manifests and measured residency/admission constraints.
-- Selected LLM provider mode/identity; if cloud, local rejection evidence plus provider privacy/retention/endpoint/cost approval.
+- Selected LLM provider mode/identity, or an explicit failed-selection record that blocks Slice 4 and identifies the later model/cloud decision gate.
 - Explicit list of hypotheses that component/provider benchmarking has not tested.
 
 ## Slice 3 — Real local STT voice turn
