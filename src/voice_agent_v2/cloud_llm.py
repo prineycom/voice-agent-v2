@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Callable
 
-from .contracts import LLM_VERSION, StageFailure
+from .contracts import LLM_VERSION, StageFailure, valid_correlation_id
 
 ENDPOINT = "http://rpi:4000"
 HOST = "rpi"
@@ -55,7 +55,10 @@ class LiteLLMProvider:
             raise StageFailure("llm_provider", "endpoint_transport_unavailable") from error
         if " dev tailscale0 " not in f" {route.strip()} ":
             raise StageFailure("llm_provider", "endpoint_route_not_tailscale")
-        return {"address_class": "tailscale-cgnat-ipv4", "route_interface": "tailscale0"}
+        return {
+            "address_class": "tailscale-cgnat-ipv4", "route_interface": "tailscale0",
+            "resolved_address": address,
+        }
 
     @staticmethod
     def _token() -> str:
@@ -98,9 +101,9 @@ class LiteLLMProvider:
         return payload
 
     def _execute(self, payload: dict, on_sentence: Callable[[str], None] | None = None) -> dict:
-        self._transport_gate()
+        transport = self._transport_gate()
         token = self._token()
-        connection = http.client.HTTPConnection(HOST, PORT, timeout=40)
+        connection = http.client.HTTPConnection(transport["resolved_address"], PORT, timeout=40)
         self._connection = connection
         submitted = time.monotonic()
         accepted = None
@@ -113,7 +116,10 @@ class LiteLLMProvider:
         try:
             connection.request(
                 "POST", "/v1/chat/completions", body=json.dumps(payload).encode(),
-                headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "text/event-stream", "Connection": "close"},
+                headers={
+                    "Authorization": "Bearer " + token, "Content-Type": "application/json",
+                    "Accept": "text/event-stream", "Connection": "close", "Host": HOST,
+                },
             )
             response = connection.getresponse()
             accepted = time.monotonic()
@@ -163,7 +169,9 @@ class LiteLLMProvider:
                                 on_sentence(sentence)
         except StageFailure:
             raise
-        except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError) as error:
+        except (UnicodeError, json.JSONDecodeError, AttributeError, TypeError, IndexError) as error:
+            raise StageFailure("llm_provider", "selected_provider_protocol_error") from error
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
             code = "selected_provider_cancelled" if self._cancelled.is_set() else "selected_provider_transport_error"
             raise StageFailure("llm_provider", code) from error
         finally:
@@ -193,7 +201,8 @@ class LiteLLMProvider:
         self, *, session_id: str, turn_id: str, transcript: str,
         on_sentence: Callable[[str], None] | None,
     ) -> str:
-        del turn_id
+        if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
+            raise StageFailure("llm_provider", "invalid_correlation_id")
         self._cancelled.clear()
         payload = self._payload(session_id, transcript)
         started = time.monotonic()

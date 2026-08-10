@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Callable
 
 from .audio import DEFAULT_AUDIO_FORMAT
-from .contracts import EventEnvelope, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure
+from .contracts import (
+    EventEnvelope, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure, valid_correlation_id,
+)
 from .tracer import CancellationToken, TraceResult
 
 
@@ -33,6 +35,8 @@ class RealTurnController:
         diagnostic_clock: Callable[[], str] | None = None,
     ) -> TraceResult:
         self._validate_contract_versions()
+        if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
+            raise ValueError("session_id and turn_id must satisfy the correlation-ID contract")
         events: list[dict[str, object]] = []
         output_chunks: list[bytes] = []
         token = cancellation or CancellationToken()

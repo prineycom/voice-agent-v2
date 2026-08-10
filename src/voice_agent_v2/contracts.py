@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Protocol, Sequence
 
 EVENT_ENVELOPE_VERSION = "voice-agent.event-envelope.v1"
@@ -19,6 +20,11 @@ CONTRACT_VERSIONS = {
 }
 
 TERMINAL_TYPES = frozenset({"turn.completed", "turn.interrupted", "turn.failed"})
+CORRELATION_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
+
+
+def valid_correlation_id(value: str) -> bool:
+    return isinstance(value, str) and CORRELATION_ID_PATTERN.fullmatch(value) is not None
 
 
 class StageFailure(RuntimeError):

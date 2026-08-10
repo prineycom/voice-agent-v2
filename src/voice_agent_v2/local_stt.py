@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 import wave
 
-from .contracts import AudioFormat, STT_VERSION, StageFailure
+from .contracts import AudioFormat, STT_VERSION, StageFailure, valid_correlation_id
 from .process_adapter import AdapterProcess, AdapterProcessError
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
@@ -51,9 +51,11 @@ class WhisperSTT:
         return dict(self.ready_metadata)
 
     def transcribe(self, *, session_id: str, turn_id: str, pcm: bytes, audio_format: AudioFormat) -> str:
+        if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
+            raise StageFailure("stt", "invalid_correlation_id")
         if audio_format != EXPECTED_FORMAT:
             raise StageFailure("stt", "unsupported_audio_format")
-        if not pcm or len(pcm) % 2:
+        if not pcm or len(pcm) % 2 or len(pcm) > 30 * 16_000 * 2:
             raise StageFailure("stt", "invalid_audio_payload")
         self.start()
         assert self._process is not None

@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 from typing import Iterator
 
-from .contracts import AudioFormat, StageFailure, TTS_VERSION
+from .contracts import AudioFormat, StageFailure, TTS_VERSION, valid_correlation_id
 from .process_adapter import AdapterProcess, AdapterProcessError
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
@@ -47,6 +47,8 @@ class Qwen3TTS:
     def stream_synthesize(
         self, *, session_id: str, turn_id: str, text: str, audio_format: AudioFormat = OUTPUT_FORMAT
     ) -> Iterator[bytes]:
+        if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
+            raise StageFailure("tts", "invalid_correlation_id")
         if audio_format != OUTPUT_FORMAT:
             raise StageFailure("tts", "unsupported_tts_audio_format")
         if not text.strip() or len(text) > 4096:

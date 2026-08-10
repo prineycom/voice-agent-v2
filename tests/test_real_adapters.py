@@ -71,8 +71,14 @@ class LocalTTSContractTests(unittest.TestCase):
         self.assertFalse(tts.observations[-1]["retained_by_adapter"])
         self.assertNotIn("text", tts.observations[-1])
 
-    def test_tts_format_and_text_bounds_fail_before_start(self) -> None:
+    def test_tts_format_text_and_correlation_bounds_fail_before_start(self) -> None:
         tts = Qwen3TTS()
+        with self.assertRaises(StageFailure) as invalid_id:
+            tuple(tts.stream_synthesize(
+                session_id="../escape", turn_id="turn-test-0001",
+                text="Публичный ответ.", audio_format=OUTPUT_FORMAT,
+            ))
+        self.assertEqual(invalid_id.exception.code, "invalid_correlation_id")
         with self.assertRaises(StageFailure):
             tuple(tts.stream_synthesize(
                 session_id="session-test-0001", turn_id="turn-test-0001",
@@ -116,8 +122,11 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         self.assertEqual(provider.provider_identity, "litellm/deepseek-v4-flash")
         self.assertFalse(provider.observations[-1]["success"])
 
-    def test_transcript_bound_is_checked_before_executor(self) -> None:
+    def test_transcript_and_correlation_bounds_are_checked_before_executor(self) -> None:
         provider = LiteLLMProvider(executor=lambda _payload: self.fail("executor must not run"))
+        with self.assertRaises(StageFailure) as invalid_id:
+            provider.respond(session_id="../escape", turn_id="turn-a", transcript="Публичный запрос")
+        self.assertEqual(invalid_id.exception.code, "invalid_correlation_id")
         with self.assertRaises(StageFailure) as raised:
             provider.respond(session_id="session-a", turn_id="turn-a", transcript="x" * 4097)
         self.assertEqual(raised.exception.code, "transcript_out_of_bounds")
@@ -178,6 +187,11 @@ class RealTurnControllerTests(unittest.TestCase):
         self.assertIn("llm.final", [event["type"] for event in result.events])
         self.assertNotIn("tts.audio", [event["type"] for event in result.events])
 
+    def test_invalid_correlation_id_is_rejected_before_events(self) -> None:
+        controller = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS())
+        with self.assertRaises(ValueError):
+            controller.run_turn(session_id="../escape", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160)
+
     def test_incompatible_real_adapter_version_is_rejected(self) -> None:
         tts = FakeTTS()
         tts.version = "voice-agent.tts.v999"
@@ -196,8 +210,13 @@ class RealTurnControllerTests(unittest.TestCase):
 
 
 class LocalSTTContractTests(unittest.TestCase):
-    def test_format_mismatch_fails_before_model_start(self) -> None:
+    def test_format_and_correlation_mismatch_fail_before_model_start(self) -> None:
         stt = WhisperSTT()
+        with self.assertRaises(StageFailure) as invalid_id:
+            stt.transcribe(
+                session_id="../escape", turn_id="turn-test-0001", pcm=b"\0\0", audio_format=AudioFormat(),
+            )
+        self.assertEqual(invalid_id.exception.code, "invalid_correlation_id")
         with self.assertRaises(StageFailure) as raised:
             stt.transcribe(
                 session_id="session-test-0001", turn_id="turn-test-0001", pcm=b"\0\0",
