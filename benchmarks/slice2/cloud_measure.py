@@ -16,7 +16,7 @@ import stat
 import subprocess
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .safety import cache_path
 
@@ -158,6 +158,7 @@ def _chat_request(
     barrier: threading.Barrier | None = None,
     cancel: threading.Event | None = None,
     observable: threading.Event | None = None,
+    visible_handoff: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     payload = _payload(prompt)
     headers = {
@@ -184,6 +185,7 @@ def _chat_request(
     response_models: set[str] = set()
     usage: dict[str, int] = {}
     cancelled = False
+    handoff_sent = False
     try:
         connection.request("POST", "/v1/chat/completions", body=json.dumps(payload).encode(), headers=headers)
         response = connection.getresponse()
@@ -240,6 +242,13 @@ def _chat_request(
                     visible_first = visible_first or now
                     visible.append(content_piece)
                     visible_events += 1
+                    current_visible = "".join(visible)
+                    if visible_handoff is not None and not handoff_sent and (
+                        any(mark in current_visible for mark in (".", "!", "?", "。", "！", "？"))
+                        or visible_events >= 24
+                    ):
+                        visible_handoff(current_visible)
+                        handoff_sent = True
     except (ConnectionError, OSError, TimeoutError, http.client.HTTPException):
         error_class = "transport_error"
     finally:
@@ -265,6 +274,7 @@ def _chat_request(
         "usage": usage,
         "completion_tokens_per_second": usage.get("completion_tokens", 0) / completion_seconds,
         "cancelled": cancelled,
+        "visible_handoff_sent": handoff_sent,
     }
 
 

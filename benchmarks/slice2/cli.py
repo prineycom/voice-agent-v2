@@ -13,6 +13,7 @@ from .cloud_measure import measure_cloud
 from .cloud_scoring import score_cloud_automated
 from .host import write_capture
 from .measure import measure_llm, measure_stt, measure_tts
+from .overlap_measure import measure_fixed_stack_overlap
 from .results import write_failed_selection
 from .safety import assert_privacy_safe_result
 from .schema import validate
@@ -103,6 +104,7 @@ def parse_args() -> argparse.Namespace:
     measure.add_argument("candidate_id")
     measure.add_argument("--run-label", choices=("primary", "repeat"), default="primary")
     commands.add_parser("measure-qwen-tts", help="measure the committed fixed Qwen3 TTS configuration")
+    commands.add_parser("measure-fixed-stack-overlap", help="measure delegated cloud/TTS and barge-in/STT overlap")
     commands.add_parser("finalize-failure", help="write fail-closed results after measured hard-gate failure")
     return parser.parse_args()
 
@@ -143,6 +145,8 @@ def main() -> int:
                 _print(measure_cloud(args.run_label))
         elif args.command == "measure-qwen-tts":
             _print(measure_qwen3_tts())
+        elif args.command == "measure-fixed-stack-overlap":
+            _print(measure_fixed_stack_overlap())
         elif args.command == "finalize-failure":
             _print(write_failed_selection())
         else:  # pragma: no cover - argparse closes the command set
