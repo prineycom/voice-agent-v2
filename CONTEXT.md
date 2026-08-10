@@ -1,0 +1,26 @@
+# Domain glossary
+
+- **Agent response** — The assistant content produced for one voice turn, including response text and synthesized speech.
+- **Avatar control contract** — The future bounded, renderer-neutral interface by which validated session, speech, and optional semantic inputs reach an avatar module. Its detailed design is not yet decided.
+- **Avatar host** — The renderer-agnostic component that loads one avatar module and routes validated inputs, lifecycle, cancellation, and failure state to it.
+- **Avatar module** — A replaceable visual implementation behind the avatar host boundary, such as the MVP eye or a later custom, Live2D, or 3D renderer.
+- **Barge-in** — A user interruption that occurs while an agent response is being delivered.
+- **Cloud LLM mode** — An explicitly configured mode in which permitted transcript and context data are sent to one approved cloud LLM provider; it is never entered automatically as fallback.
+- **Control event** — A versioned non-media message that reports or changes session, turn, response, or avatar state.
+- **Core MVP** — An interruptible voice conversation using local LiveKit, local STT/TTS, the selected LLM provider, the MVP eye, and enough operational behavior to run reliably.
+- **External tracking trigger** — An optional bounded target supplied to the avatar host for pupil direction; the system that derives that target is separate from the eye renderer.
+- **Hard dependency** — A capability whose loss prevents the current operation from completing correctly.
+- **Inference service** — A bounded capability that performs STT, LLM, or TTS inference behind an explicit contract.
+- **Legacy reference** — The legacy `prineycom/voice-agent` repository frozen at the pinned audit commit and used only as read-only evidence for selective revalidation.
+- **LLM provider** — The single explicitly selected response-generation backend for a deployment, either host-local or an approved cloud service.
+- **MVP eye** — The initial custom animated-eye avatar module with deterministic pupil, blink, speech-pulse, palette, and state behavior.
+- **Provider selection** — The deliberate configured choice of one LLM provider after measurement and privacy review, never a per-request or failure-triggered fallback.
+- **Realtime session** — The bounded period in which a client and the agent share media, control events, and conversation state.
+- **Render state** — Renderer-internal values and frames owned exclusively by an avatar module, never supplied by an LLM.
+- **Soft dependency** — A capability whose loss permits an explicitly degraded but still correct experience.
+- **Speech envelope** — A bounded timing/amplitude signal derived from actual audio playout for deterministic speech-synchronous visual behavior.
+- **Tailnet** — The private network formed by devices that are members of the project's Tailscale network.
+- **Tracer** — The smallest end-to-end path that crosses the intended boundaries with deterministic substitutes and produces inspectable evidence.
+- **Turn correlation ID** — An opaque identifier used to associate all media, events, inference work, and observations belonging to one voice turn.
+- **Voice turn** — One user utterance and the resulting agent response, ending in completion, interruption, or failure.
+- **Utterance** — A bounded span of user speech treated as input to a voice turn.
