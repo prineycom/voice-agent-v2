@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -7,7 +8,7 @@ import unittest
 
 from voice_agent_v2.audio import DEFAULT_AUDIO_FORMAT, generated_input_pcm, generated_output_pcm
 from voice_agent_v2.contracts import CONTRACT_VERSIONS, EVENT_ENVELOPE_VERSION, TERMINAL_TYPES
-from voice_agent_v2.schema import validate
+from voice_agent_v2.schema import SchemaViolation, validate
 from voice_agent_v2.tracer import (
     AUDIO_CHUNK_BYTES,
     FIXED_RESPONSE,
@@ -98,6 +99,21 @@ class TracerBehaviorTests(unittest.TestCase):
         self.assertEqual(result.terminal_event["payload"]["outcome"], "interrupted")
         self.assertEqual(result.events[-1], result.terminal_event)
 
+    def test_controller_rejects_incompatible_adapter_contract_versions(self) -> None:
+        cases = (("stt", 0), ("llm_provider", 1), ("tts", 2))
+        for stage, incompatible_index in cases:
+            with self.subTest(stage=stage):
+                adapters = [DeterministicSTT(), DeterministicLLMProvider(), DeterministicTTS()]
+                adapters[incompatible_index].version = "voice-agent.unsupported.v2"
+                with self.assertRaisesRegex(ValueError, f"incompatible {stage} contract version"):
+                    SessionController(*adapters)
+
+        stt = DeterministicSTT()
+        controller = SessionController(stt, DeterministicLLMProvider(), DeterministicTTS())
+        stt.version = "voice-agent.unsupported.v2"
+        with self.assertRaisesRegex(ValueError, "incompatible stt contract version"):
+            controller.run_turn(input_pcm=generated_input_pcm())
+
     def test_normalization_removes_only_explicit_diagnostic_timestamps(self) -> None:
         counter_a = iter([f"2099-01-01T00:00:{index:02d}Z" for index in range(30)])
         counter_b = iter([f"2100-02-02T00:00:{index:02d}Z" for index in range(30)])
@@ -126,6 +142,30 @@ class ContractFixtureTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 for event in run_scenario(scenario).events:
                     validate(event, schema)
+
+    def test_identifier_constraints_enforce_whole_value_and_length(self) -> None:
+        contracts = {
+            "event-envelope": json.loads(
+                (FIXTURES / "traces" / "success.jsonl").read_text().splitlines()[0]
+            ),
+            "stt": json.loads((FIXTURES / "stt.v1.json").read_text()),
+            "llm-provider": json.loads((FIXTURES / "llm-provider.v1.json").read_text()),
+            "tts": json.loads((FIXTURES / "tts.v1.json").read_text()),
+        }
+        for name, fixture in contracts.items():
+            schema = json.loads((ROOT / "contracts" / f"{name}.v1.schema.json").read_text())
+            for field in ("session_id", "turn_id"):
+                for valid_identifier in ("a", "a" * 64):
+                    with self.subTest(contract=name, field=field, value=valid_identifier):
+                        candidate = deepcopy(fixture)
+                        candidate[field] = valid_identifier
+                        validate(candidate, schema)
+                for invalid_identifier in ("", "A", "a/", "a\n", "a" * 65):
+                    with self.subTest(contract=name, field=field, value=invalid_identifier):
+                        candidate = deepcopy(fixture)
+                        candidate[field] = invalid_identifier
+                        with self.assertRaises(SchemaViolation):
+                            validate(candidate, schema)
 
     def test_every_scenario_matches_its_canonical_trace_fixture(self) -> None:
         for scenario in SCENARIOS:

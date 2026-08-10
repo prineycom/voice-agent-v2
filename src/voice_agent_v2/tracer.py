@@ -128,6 +128,21 @@ class SessionController:
         self.stt = stt
         self.llm = llm
         self.tts = tts
+        self._validate_contract_versions()
+
+    def _validate_contract_versions(self) -> None:
+        adapters = (
+            ("stt", self.stt, STT_VERSION),
+            ("llm_provider", self.llm, LLM_VERSION),
+            ("tts", self.tts, TTS_VERSION),
+        )
+        for stage, adapter, expected_version in adapters:
+            actual_version = getattr(adapter, "version", None)
+            if actual_version != expected_version:
+                raise ValueError(
+                    f"incompatible {stage} contract version: "
+                    f"expected {expected_version!r}, got {actual_version!r}"
+                )
 
     def run_turn(
         self,
@@ -137,6 +152,7 @@ class SessionController:
         cancellation: CancellationToken | None = None,
         diagnostic_clock: Callable[[], str] | None = None,
     ) -> TraceResult:
+        self._validate_contract_versions()
         events: list[dict[str, object]] = []
         output_chunks: list[bytes] = []
         token = cancellation or CancellationToken()

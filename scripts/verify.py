@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 from hashlib import sha256
 import io
+import os
 from pathlib import Path
 import socket
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -81,9 +83,18 @@ def main() -> int:
     clean_runs: list[tuple[bytes, bytes, bytes]] = []
     for _run_number in (1, 2):
         with tempfile.TemporaryDirectory(prefix="voice-agent-v2-empty-cache-") as temporary:
-            artifact_directory = Path(temporary) / "artifacts"
-            trace = run_scenario("success")
-            write_trace_artifacts(artifact_directory, trace)
+            run_root = Path(temporary)
+            run_environment = {
+                "HOME": str(run_root / "home"),
+                "XDG_CACHE_HOME": str(run_root / "cache"),
+                "TMPDIR": str(run_root / "temp"),
+            }
+            for directory in run_environment.values():
+                Path(directory).mkdir()
+            artifact_directory = run_root / "artifacts"
+            with patch.dict(os.environ, run_environment):
+                trace = run_scenario("success")
+                write_trace_artifacts(artifact_directory, trace)
             clean_runs.append(
                 (
                     (artifact_directory / "trace.normalized.jsonl").read_bytes(),

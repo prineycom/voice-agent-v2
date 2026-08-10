@@ -33,7 +33,7 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
             raise SchemaViolation(f"{path}: string is too short")
         if "maxLength" in schema and len(instance) > schema["maxLength"]:
             raise SchemaViolation(f"{path}: string is too long")
-        if "pattern" in schema and re.fullmatch(schema["pattern"], instance) is None:
+        if "pattern" in schema and re.search(schema["pattern"], instance) is None:
             raise SchemaViolation(f"{path}: string does not match pattern")
 
     if isinstance(instance, int) and not isinstance(instance, bool):

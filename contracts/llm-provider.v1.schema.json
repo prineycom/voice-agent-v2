@@ -6,8 +6,8 @@
   "required": ["schema_version", "session_id", "turn_id", "provider", "request", "result"],
   "properties": {
     "schema_version": {"const": "voice-agent.llm-provider.v1"},
-    "session_id": {"type": "string", "pattern": "[a-z0-9][a-z0-9-]{0,63}"},
-    "turn_id": {"type": "string", "pattern": "[a-z0-9][a-z0-9-]{0,63}"},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "turn_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
     "provider": {
       "type": "object",
       "required": ["mode", "identity"],
