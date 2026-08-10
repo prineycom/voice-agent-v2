@@ -1,0 +1,209 @@
+{
+  "approval": {
+    "authority": "user fixed Whisper large-v3-turbo, LiteLLM deepseek-v4-flash, and the pinned legacy Qwen3 TTS configuration for cumulative Slices 2-5",
+    "decided_at": "2026-08-11T00:12:00+02:00",
+    "reference": "phase-5-delivery-update"
+  },
+  "cloud": {
+    "alias": "deepseek-v4-flash",
+    "endpoint": "http://rpi:4000",
+    "fallback": false,
+    "operator_delivery_override": "Continue only this fixed alias through integration while preserving every failed cloud gate; never relabel it as a passing Slice 2 component.",
+    "primary_automated_outcome": "failed-automated-gates",
+    "private_live_or_production_approval": false,
+    "repeat_required_by_delivery_override": true,
+    "thresholds_changed_after_results": false
+  },
+  "decision_key": "slice2-fixed-stack-delivery",
+  "integrity": {
+    "candidate_results_viewed_before_this_amendment": [
+      "local STT results",
+      "cloud primary and repeat results"
+    ],
+    "human_listening_pending_allowed": true,
+    "new_tts_or_overlap_results_viewed": false,
+    "physical_microphone_deferred_to_slice5": true,
+    "raw_evidence_outside_git": true,
+    "results_require_ancestor_commit": true
+  },
+  "overlap": {
+    "barge_in": {
+      "cancel_cloud_and_tts_then_submit_resident_stt_same_scheduler_interval": true,
+      "new_stt_admission_ms_max": 250,
+      "old_output_stop_ms_max": 500,
+      "stale_output_count_max": 0,
+      "stt_finalization_regression_max_fraction": 0.2
+    },
+    "cloud_to_tts": {
+      "cloud_peer_regression_max_fraction": 0.2,
+      "first_complete_visible_sentence_to_first_audio_ms_max": 500,
+      "tts_latency_regression_max_fraction": 0.2
+    },
+    "repeat": {
+      "latency_regression_max_fraction": 0.15,
+      "new_failures_max": 0,
+      "required_by_delivery_update": true,
+      "resource_peak_increase_max_mib": 512
+    },
+    "resources": {
+      "cpu_p95_max_percent": 90.0,
+      "gpu_reserve_min_mib": 1536,
+      "host_ram_available_min_mib": 6144,
+      "swap_consumption_max_mib": 0
+    },
+    "scope": "diagnostic fixed-stack delivery evidence even though cloud component gates failed; cannot convert failed cloud evidence into pass"
+  },
+  "schema_version": "voice-agent.slice2-stack-preregistration.v3",
+  "state": "approved",
+  "stt": {
+    "artifact": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "candidate_id": "stt-whisper-large-v3-turbo",
+    "preserved_evidence": {
+      "cpu_p95_percent": 88.04347826086956,
+      "finalization_p95_ms": 294.39250599534716,
+      "original_cpu_gate_percent": 83.33,
+      "original_outcome": "fail",
+      "realtime_factor_p95": 0.05102730191981372,
+      "word_error_rate": 0.11455108359133127
+    },
+    "resource_adjustment": {
+      "cpu_p95_max_percent": 90.0,
+      "kind": "explicit postmeasurement delivery exception, not a retroactive preregistered pass",
+      "must_revalidate_in_combined_stack": true,
+      "rationale": "smallest whole-percent ceiling above the measured 88.04% CPU-only miss; all RAM, swap, latency, WER, cancellation and sustained gates remain unchanged"
+    },
+    "revision": "0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11"
+  },
+  "supersedes": [
+    "benchmarks/config/preregistration.v1.json",
+    "benchmarks/config/preregistration.cloud.v2.json only for post-failure diagnostic repeat and combined-stack delivery; original outcomes and gates remain immutable"
+  ],
+  "tts": {
+    "configuration": {
+      "audio_format": {
+        "channels": 1,
+        "encoding": "pcm_s16le",
+        "sample_rate_hz": 24000
+      },
+      "chunk_size": 4,
+      "emotion_for_slice2": "neutral / no instruct",
+      "engine": "custom_voice",
+      "language": "Russian",
+      "max_new_tokens": 2048,
+      "private_reference_audio_required": false,
+      "repetition_penalty": 1.05,
+      "seed": null,
+      "speaker": "ryan",
+      "temperature": 0.8,
+      "top_k": 50,
+      "top_p": 0.9
+    },
+    "files": [
+      {
+        "bytes": 1519,
+        "path": ".gitattributes",
+        "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361"
+      },
+      {
+        "bytes": 57846,
+        "path": "README.md",
+        "sha256": "64f65e809b51cc0c35f393fbbfcc2d735c0cb3fdbbc6f3fdc4a5e6ce55e9d088"
+      },
+      {
+        "bytes": 4908,
+        "path": "config.json",
+        "sha256": "17a07f527a1c25ea30b4e023a184482a23d3e279d697b1dc81b1bde498d29cf9"
+      },
+      {
+        "bytes": 245,
+        "path": "generation_config.json",
+        "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa"
+      },
+      {
+        "bytes": 1671839,
+        "path": "merges.txt",
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      {
+        "bytes": 3833402552,
+        "path": "model.safetensors",
+        "sha256": "38b1d5971bdbd982b561cccec982669a53b0537c3cf5e9bd4778ed07bb2f5137"
+      },
+      {
+        "bytes": 127,
+        "path": "preprocessor_config.json",
+        "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119"
+      },
+      {
+        "bytes": 2336,
+        "path": "speech_tokenizer/config.json",
+        "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+      },
+      {
+        "bytes": 76,
+        "path": "speech_tokenizer/configuration.json",
+        "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+      },
+      {
+        "bytes": 682293092,
+        "path": "speech_tokenizer/model.safetensors",
+        "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+      },
+      {
+        "bytes": 234,
+        "path": "speech_tokenizer/preprocessor_config.json",
+        "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+      },
+      {
+        "bytes": 7344,
+        "path": "tokenizer_config.json",
+        "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670"
+      },
+      {
+        "bytes": 2776833,
+        "path": "vocab.json",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    ],
+    "identity": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "legacy_provenance": {
+      "commit": "93c5c39786ff790d7ae436772d2cf37a2eeb32c6",
+      "migration": "configuration/provenance only; no legacy source, private reference audio, secret, weight, cache, service topology, or stale result is copied",
+      "paths": [
+        "infra/desktop/tts/.env.example",
+        "infra/desktop/tts/engines.py",
+        "infra/desktop/tts/requirements.txt",
+        "docs/adr/0020-customvoice-emotion-and-voice-switcher.md"
+      ],
+      "repository": "prineycom/voice-agent"
+    },
+    "license": "Apache-2.0",
+    "repository_bytes": 4520218951,
+    "revision": "0c0e3051f131929182e2c023b9537f8b1c68adfe",
+    "runtime": {
+      "adapter": "faster-qwen3-tts",
+      "official_package": "qwen-tts",
+      "official_package_version": "0.1.1",
+      "official_wheel_sha256": "11a290d8dabc7ef91a90c54478c8ab19b3edb1d85c0882313721892bdc4af15d",
+      "system_mutation": false,
+      "torch": "2.11.0 CUDA 13.0 cache-local",
+      "version": "0.2.6",
+      "wheel_sha256": "3881a41dc189f0a6e93fa047f376deffeb2fa84e888e7d570f79b3e2267765cc"
+    },
+    "thresholds": {
+      "cancel_to_last_audio_ms_max": 250,
+      "cold_load_ms_max": 60000,
+      "cpu_p95_max_percent": 90.0,
+      "critical_failure_count_max": 0,
+      "failure_count_max": 0,
+      "gpu_reserve_min_mib": 1536,
+      "host_ram_available_min_mib": 6144,
+      "resource_release_ms_max": 2000,
+      "stale_audio_chunk_count_max": 0,
+      "sustained_latency_regression_max_fraction": 0.15,
+      "swap_consumption_max_mib": 0,
+      "warm_first_audio_p95_ms_max": 500,
+      "warm_realtime_factor_p95_max": 0.5
+    }
+  }
+}

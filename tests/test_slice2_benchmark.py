@@ -74,6 +74,18 @@ class Slice2CommittedEvidenceTests(unittest.TestCase):
         self.assertTrue(preregistration["integrity"]["results_require_ancestor_commit"])
         self.assertFalse(preregistration["integrity"]["completion_results_viewed"])
 
+    def test_fixed_stack_amendment_is_transparent_about_postmeasurement_overrides(self) -> None:
+        preregistration = json.loads((BENCHMARKS / "config" / "preregistration.stack.v3.json").read_text())
+        self.assertEqual(preregistration["stt"]["candidate_id"], "stt-whisper-large-v3-turbo")
+        self.assertEqual(preregistration["stt"]["resource_adjustment"]["cpu_p95_max_percent"], 90.0)
+        self.assertIn("not a retroactive", preregistration["stt"]["resource_adjustment"]["kind"])
+        self.assertEqual(preregistration["tts"]["identity"], "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+        self.assertEqual(preregistration["tts"]["configuration"]["speaker"], "ryan")
+        self.assertEqual(preregistration["tts"]["legacy_provenance"]["commit"], "93c5c39786ff790d7ae436772d2cf37a2eeb32c6")
+        self.assertFalse(preregistration["tts"]["configuration"]["private_reference_audio_required"])
+        self.assertEqual(preregistration["cloud"]["primary_automated_outcome"], "failed-automated-gates")
+        self.assertFalse(preregistration["cloud"]["thresholds_changed_after_results"])
+
     def test_cloud_request_guard_allows_only_selected_alias_and_public_fixture(self) -> None:
         prompt = json.loads((BENCHMARKS / "fixtures" / "llm-russian.v1.json").read_text())["samples"][0]["prompt"]
         payload = _payload(prompt)

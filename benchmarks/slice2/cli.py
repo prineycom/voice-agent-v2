@@ -31,6 +31,7 @@ def validate_committed() -> dict[str, Any]:
         ROOT / "config" / "candidates.v1.json": SCHEMA_DIR / "candidates.v1.schema.json",
         ROOT / "config" / "preregistration.v1.json": SCHEMA_DIR / "preregistration.v1.schema.json",
         ROOT / "config" / "preregistration.cloud.v2.json": SCHEMA_DIR / "cloud-preregistration.v2.schema.json",
+        ROOT / "config" / "preregistration.stack.v3.json": SCHEMA_DIR / "stack-preregistration.v3.schema.json",
         ROOT / "config" / "runtime-artifacts.v1.json": SCHEMA_DIR / "runtime-artifacts.v1.schema.json",
         ROOT / "fixtures" / "stt-russian-ruls.v1.json": SCHEMA_DIR / "stt-corpus.v1.schema.json",
         ROOT / "fixtures" / "llm-russian.v1.json": SCHEMA_DIR / "llm-rubric.v1.schema.json",
