@@ -1,6 +1,6 @@
 # Voice Agent v2 architecture
 
-> **Status:** Authoritative pre-implementation architecture
+> **Status:** Authoritative target architecture
 >
 > **Owner:** Voice Agent v2 project architecture
 >

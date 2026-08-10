@@ -36,5 +36,4 @@
 ## Recommendations
 
 - Commit the documentation correction without adding runtime code.
-- Run the full no-mistakes path with the complete updated intent and trusted docs-only `no_ci` policy.
 - Use the PR as the manual review surface; do not merge it.
