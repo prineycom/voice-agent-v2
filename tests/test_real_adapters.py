@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from voice_agent_v2.cloud_llm import ALIAS, LiteLLMProvider
 from voice_agent_v2.contracts import AudioFormat, StageFailure
 from voice_agent_v2.local_stt import WhisperSTT
 
@@ -31,6 +33,48 @@ class StubProcess:
 
     def close(self) -> None:
         return None
+
+
+class LiteLLMProviderContractTests(unittest.TestCase):
+    def test_exact_alias_context_isolation_and_safe_observation(self) -> None:
+        payloads = []
+
+        def execute(payload: dict) -> dict:
+            payloads.append(payload)
+            return {
+                "text": "Публичный ответ.", "http_acceptance_ms": 1.0,
+                "raw_first_delta_ms": 2.0, "visible_first_content_ms": 3.0,
+                "completion_ms": 4.0, "usage": {"total_tokens": 5},
+                "response_models": [ALIAS],
+            }
+
+        provider = LiteLLMProvider(executor=execute)
+        provider.respond(session_id="session-a", turn_id="turn-a", transcript="Публичный запрос А")
+        provider.respond(session_id="session-b", turn_id="turn-b", transcript="Публичный запрос Б")
+        self.assertEqual(payloads[0]["model"], ALIAS)
+        self.assertEqual(payloads[1]["model"], ALIAS)
+        self.assertNotIn("Публичный запрос А", json.dumps(payloads[1], ensure_ascii=False))
+        self.assertEqual(set(payloads[0]), {"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options"})
+        self.assertFalse({"text", "transcript", "response", "messages"}.intersection(provider.observations[-1]))
+        provider.reset_session("session-a")
+        self.assertNotIn("session-a", provider._contexts)
+
+    def test_failure_is_explicit_and_never_changes_alias(self) -> None:
+        def fail(_payload: dict) -> dict:
+            raise StageFailure("llm_provider", "selected_provider_http_503")
+
+        provider = LiteLLMProvider(executor=fail)
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond(session_id="session-a", turn_id="turn-a", transcript="Публичный запрос")
+        self.assertEqual(raised.exception.code, "selected_provider_http_503")
+        self.assertEqual(provider.provider_identity, "litellm/deepseek-v4-flash")
+        self.assertFalse(provider.observations[-1]["success"])
+
+    def test_transcript_bound_is_checked_before_executor(self) -> None:
+        provider = LiteLLMProvider(executor=lambda _payload: self.fail("executor must not run"))
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond(session_id="session-a", turn_id="turn-a", transcript="x" * 4097)
+        self.assertEqual(raised.exception.code, "transcript_out_of_bounds")
 
 
 class LocalSTTContractTests(unittest.TestCase):
