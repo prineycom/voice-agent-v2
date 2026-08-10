@@ -38,7 +38,7 @@ Preserve the legacy repository unchanged as provenance. Migrate only the smalles
 
 - **Modernize the legacy repository in place:** rejected because stale active assumptions and historical experiments would continue to obscure the supported architecture.
 - **Nest V2 inside the legacy repository:** rejected because ownership, history, tooling, and source-of-truth boundaries would remain ambiguous.
-- **Retain a Pi/Desktop split:** rejected because the external desktop is unavailable and the canonical PC can host the whole target pending measurement.
+- **Retain a Pi/Desktop split:** rejected because the external desktop is unavailable and the canonical PC is the sole supported compute target; its full-stack feasibility remains gated by measurement.
 
 ## Provenance and supersession
 

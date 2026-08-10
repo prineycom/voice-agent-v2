@@ -49,6 +49,7 @@ A developer can run one documented root command on a clean checkout and observe 
 - Programmatically generated PCM input and output; no recording or model download.
 - Session/turn correlation, ordered lifecycle events, terminal outcomes, cancellation seam, and neutral animation fallback.
 - One root verification command that exercises the tracer and contract tests.
+- Behavioral CI that runs the root verification command and replaces the documentation-only `no_ci` opt-out.
 - Repository/toolchain declarations only as needed to run this slice reproducibly.
 
 ### Excluded scope
@@ -70,6 +71,7 @@ A developer can run one documented root command on a clean checkout and observe 
 - Injected hard STT, LLM, and TTS failures each yield exactly one documented failed outcome with no downstream fabrication.
 - Cancellation produces one interrupted outcome and no post-cancel chunks.
 - The root verification command exits nonzero on any contract or tracer failure.
+- Pull requests run that command as required behavioral CI; the documentation-only `no_ci` opt-out is removed in the same slice.
 
 ### Validation method
 
@@ -79,6 +81,7 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 - Checked-in contract schemas/fixtures and ownership notes.
 - Root verification output showing all deterministic success/failure cases.
+- A green behavioral CI run with the documentation-only opt-out absent.
 - Normalized trace and PCM hashes from two clean runs.
 - A short statement of any legacy material considered; expected evidence is “none” for this slice.
 
