@@ -93,7 +93,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
     with ResourceSampler(0.05) as sampler:
         ready = process.start(timeout_seconds=180)
         for cycle in (1, 2, 3, 4):
-            for item in fixture["items"]:
+            for item in fixture["samples"]:
                 request_id = f"cycle-{cycle}-{item['id']}"
                 output = GENERATED / f"{request_id}.pcm"
                 result = process.request({
@@ -117,7 +117,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
     cancel_output = GENERATED / "cancelled-request.pcm"
     cancellation_process.send({
         "command": "synthesize", "request_id": "cancelled-request",
-        "text": fixture["items"][-1]["text"] * 8, "output_path": str(cancel_output),
+        "text": fixture["samples"][-1]["text"] * 8, "output_path": str(cancel_output),
     })
     time.sleep(0.25)
     cancel_requested = time.monotonic()
@@ -131,7 +131,7 @@ def measure_qwen3_tts() -> dict[str, Any]:
     recovery_output = GENERATED / "recovery-request.pcm"
     recovery_result = recovery.request({
         "command": "synthesize", "request_id": "recovery-request",
-        "text": fixture["items"][0]["text"], "output_path": str(recovery_output),
+        "text": fixture["samples"][0]["text"], "output_path": str(recovery_output),
     }, timeout_seconds=180)
     recovery.close()
     cancellation = {
