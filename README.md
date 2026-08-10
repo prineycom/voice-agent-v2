@@ -6,7 +6,23 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Pre-implementation.** This repository currently contains the architectural foundation and ordered roadmap, not a runnable voice stack. No inference model, cloud provider, renderer framework, or detailed avatar-control contract has been selected. Those choices are gated by measured slices and a separate avatar Grill/design task rather than documentation claims.
+**Slice 1 executable foundation.** The repository now includes the dependency-free deterministic synthetic voice-turn tracer from [`docs/roadmap.md`](docs/roadmap.md#slice-1--deterministic-zero-secret-voice-turn-tracer), but not a real voice stack. No inference model, cloud provider, production framework, renderer framework, or detailed avatar-control contract has been selected. Those choices remain gated by measured slices and a separate avatar Grill/design task rather than implementation assumptions.
+
+## Root verification
+
+Run this single command from the repository root:
+
+```sh
+./verify
+```
+
+It uses only POSIX `sh` and the Python 3.11+ standard library, creates isolated empty temporary cache/home directories, denies socket creation with a Python audit policy, exercises success/failure/cancellation behavior, and compares two normalized traces and generated PCM artifacts byte-for-byte. Default runs remove their temporary artifacts. To preserve the verified trace and playable raw PCM files in a new directory, run:
+
+```sh
+./verify --output-directory ./slice-1-artifacts
+```
+
+The command reports each preserved path. Both PCM files use signed 16-bit little-endian mono samples at 16 kHz; `output.pcm` contains the deterministic audible tone. The destination must not already exist, preventing accidental replacement of prior evidence. The toolchain is a Slice 1 reproducibility choice only; it does not select the future production application or inference framework.
 
 ## Current scope
 

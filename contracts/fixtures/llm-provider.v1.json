@@ -1,0 +1,15 @@
+{
+  "schema_version": "voice-agent.llm-provider.v1",
+  "session_id": "session-synthetic-0001",
+  "turn_id": "turn-synthetic-0001",
+  "provider": {
+    "mode": "deterministic-fake",
+    "identity": "slice-1-fixed-provider"
+  },
+  "request": {
+    "transcript": "Привет, это синтетический тест."
+  },
+  "result": {
+    "text": "Здравствуйте! Детерминированный голосовой ответ готов."
+  }
+}

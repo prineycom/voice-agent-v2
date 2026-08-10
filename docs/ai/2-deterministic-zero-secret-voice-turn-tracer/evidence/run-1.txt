@@ -1,0 +1,20 @@
+Voice Agent v2 Slice 1 verification
+toolchain: Python 3.11+ standard library only (slice-local choice)
+network: denied by Python audit policy; no sockets permitted
+cache: two independent empty temporary run roots
+correlation: session=session-synthetic-0001 turn=turn-synthetic-0001
+events: turn.listening > turn.transcribing > stt.final > turn.thinking > llm.final > turn.speaking > tts.audio > tts.audio > tts.audio > tts.audio > turn.completed
+transcript: Привет, это синтетический тест.
+response: Здравствуйте! Детерминированный голосовой ответ готов.
+terminal: turn.completed count=1
+normalized_trace_sha256: 9b607f8f17878c9d1caf3caf85b106c896140a2f9ecd44e33dd39ef47d2f305f
+input_pcm_sha256: 9ee9638a619b160078dc8d86ca32a01bc5c32536eb9698c59b01b16c789ac844 bytes=6400
+output_pcm_sha256: 69935a91444eaca69d96477a0de66aea7640fd476ea5858fcdd1f2143a46131e bytes=6400 format=pcm_s16le/16000Hz/mono
+repeatability: run1 == run2 for normalized trace, input PCM, and output PCM
+case stt_failure: terminal=turn.failed detail=injected_stt_failure terminal_count=1
+case llm_failure: terminal=turn.failed detail=injected_selected_provider_failure terminal_count=1
+case tts_failure: terminal=turn.failed detail=injected_tts_failure terminal_count=1
+case cancel_after_first_audio: terminal=turn.interrupted detail=interrupted terminal_count=1
+behavioral_tests: pass count=11
+legacy_material: none inspected or used
+RESULT: PASS

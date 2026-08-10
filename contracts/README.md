@@ -1,0 +1,19 @@
+# Slice 1 contract ownership
+
+These machine-readable V1 contracts are the executable Slice 1 seam. They are deliberately limited to the deterministic tracer and do **not** select production frameworks, models, provider modes, or transports. [`docs/architecture.md`](../docs/architecture.md#5-contracts-and-ownership) remains authoritative for system boundaries.
+
+| Contract | Owner | Producer → consumer | Limits and terminal semantics |
+| --- | --- | --- | --- |
+| `event-envelope.v1` | Session controller | Session controller → trace consumer | Every observation carries the same bounded session/turn IDs, all contract versions, and a contiguous sequence. A turn ends in exactly one `turn.completed`, `turn.failed`, or `turn.interrupted`; nothing follows it. Optional diagnostic timestamps are not part of normalized evidence. |
+| `stt.v1` | STT seam | Session controller ↔ deterministic STT | Slice-local PCM is mono signed 16-bit little-endian at 16 kHz and at most 1 MiB per request. A final transcript or an explicit hard failure advances/ends the turn; failure fabricates no transcript. |
+| `llm-provider.v1` | Session controller/provider adapter seam | Session controller ↔ deterministic fake provider | Request/response text is bounded to 4096 characters. `deterministic-fake` is a test identity, not the provider selection reserved for Slice 2. Provider failure fabricates no answer and sends nothing to TTS. |
+| `tts.v1` | TTS seam | Session controller ↔ deterministic TTS | Text is bounded to 4096 characters. PCM chunks are ordered from zero, each is at most 64 KiB, and share the declared format. Failure emits no audio; cancellation emits no chunks after interruption. |
+
+The JSON Schema files are checked by `./verify` using the dependency-free validator. Python `Protocol` definitions in `src/voice_agent_v2/contracts.py` exercise the same producer/consumer ownership in the public tracer.
+
+## Fixture policy
+
+- `fixtures/*.v1.json` are valid producer/consumer examples.
+- `fixtures/traces/*.jsonl` are canonical normalized public traces for success, injected hard failures, and cancellation.
+- `fixtures/pcm-hashes.json` declares the raw generated PCM identities and format. PCM bytes are regenerated, not stored as recordings.
+- Changing a contract, fixture, or tracer without updating the others makes `./verify` fail.

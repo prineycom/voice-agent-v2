@@ -1,0 +1,16 @@
+{
+  "schema_version": "voice-agent.stt.v1",
+  "session_id": "session-synthetic-0001",
+  "turn_id": "turn-synthetic-0001",
+  "audio": {
+    "encoding": "pcm_s16le",
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "byte_count": 6400
+  },
+  "result": {
+    "kind": "final",
+    "text": "Привет, это синтетический тест."
+  }
+}

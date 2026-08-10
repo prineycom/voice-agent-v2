@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.invalid/contracts/event-envelope.v1.schema.json",
+  "title": "Voice Agent v2 realtime event envelope v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_versions",
+    "session_id",
+    "turn_id",
+    "sequence",
+    "type",
+    "terminal",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {"const": "voice-agent.event-envelope.v1"},
+    "contract_versions": {
+      "type": "object",
+      "required": ["turn_lifecycle", "stt", "llm_provider", "tts"],
+      "properties": {
+        "turn_lifecycle": {"const": "voice-agent.turn-lifecycle.v1"},
+        "stt": {"const": "voice-agent.stt.v1"},
+        "llm_provider": {"const": "voice-agent.llm-provider.v1"},
+        "tts": {"const": "voice-agent.tts.v1"}
+      },
+      "additionalProperties": false
+    },
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "turn_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "type": {
+      "enum": [
+        "turn.listening",
+        "turn.transcribing",
+        "stt.final",
+        "turn.thinking",
+        "llm.final",
+        "turn.speaking",
+        "tts.audio",
+        "turn.completed",
+        "turn.interrupted",
+        "turn.failed"
+      ]
+    },
+    "terminal": {"type": "boolean"},
+    "payload": {"type": "object"},
+    "diagnostic_timestamp": {"type": "string", "minLength": 1, "maxLength": 64}
+  },
+  "additionalProperties": false
+}
