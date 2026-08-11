@@ -174,15 +174,25 @@ class LiveKitRoomController:
             runner=self.runner,
             event_sink=LiveKitEventSink(self.room, browser_identity),
             audio_sink=LiveKitAudioSink(self.audio_source),
+            failure_handler=self._session_failed,
         )
         self._audio_task: asyncio.Task[None] | None = None
         self._browser_join_task: asyncio.Task[None] | None = None
+        self._runner_start_task: asyncio.Task[None] | None = None
+        self._close_lock = asyncio.Lock()
         self._closed = False
+        self._cleanup_complete = False
+        self._close_notified = False
         self._browser_ready = False
 
     async def start(self) -> None:
         try:
-            await asyncio.to_thread(self.runner.start)
+            self._runner_start_task = asyncio.create_task(
+                asyncio.to_thread(self.runner.start), name=f"startup-{self.session_id}"
+            )
+            await asyncio.shield(self._runner_start_task)
+            if self._closed:
+                raise RuntimeError("room closed during runner startup")
             self._register_handlers()
             token = self._agent_token()
             await self.room.connect(self.settings.livekit_internal_url, token)
@@ -195,6 +205,9 @@ class LiveKitRoomController:
         except Exception:
             await self.close(notify=False)
             raise
+
+    def _session_failed(self, _stage: str, _code: str) -> None:
+        asyncio.create_task(self.close(), name=f"failed-session-{self.session_id}")
 
     def arm_browser_join_timeout(self) -> None:
         if self._closed or self._browser_ready or self._browser_join_task is not None:
@@ -330,42 +343,47 @@ class LiveKitRoomController:
             await stream.aclose()
 
     async def close(self, *, notify: bool = True) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if (
-            self._browser_join_task is not None
-            and self._browser_join_task is not asyncio.current_task()
-        ):
-            self._browser_join_task.cancel()
-            try:
-                await self._browser_join_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        if self._audio_task is not None and self._audio_task is not asyncio.current_task():
-            self._audio_task.cancel()
-            try:
-                await self._audio_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        try:
-            await self.session.disconnect()
-        except Exception:
-            pass
-        try:
-            await self.room.disconnect()
-        except Exception:
-            pass
-        try:
-            await self.audio_source.aclose()
-        except Exception:
-            pass
-        try:
-            await asyncio.to_thread(self.runner.close, self.session_id)
-        except Exception:
-            pass
-        if notify:
-            await self.on_closed(self.session_id)
+        async with self._close_lock:
+            self._closed = True
+            if not self._cleanup_complete:
+                errors: list[Exception] = []
+                startup = self._runner_start_task
+                if startup is not None and startup is not asyncio.current_task():
+                    try:
+                        await asyncio.shield(startup)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                for task in (self._browser_join_task, self._audio_task):
+                    if task is None or task is asyncio.current_task():
+                        continue
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as error:
+                        errors.append(error)
+                for cleanup in (
+                    self.session.disconnect,
+                    self.room.disconnect,
+                    self.audio_source.aclose,
+                ):
+                    try:
+                        await cleanup()
+                    except Exception as error:
+                        errors.append(error)
+                try:
+                    await asyncio.to_thread(self.runner.close, self.session_id)
+                except Exception as error:
+                    errors.append(error)
+                if errors:
+                    raise ExceptionGroup("room resource cleanup failed", errors)
+                self._cleanup_complete = True
+            if notify and not self._close_notified:
+                await self.on_closed(self.session_id)
+                self._close_notified = True
 
 
 class SessionRegistry:
@@ -397,9 +415,9 @@ class SessionRegistry:
             await controller.start()
             controller.arm_browser_join_timeout()
         except BaseException:
+            await controller.close(notify=False)
             async with self._lock:
                 self._controllers.pop(session_id, None)
-            await controller.close(notify=False)
             raise
         return {
             "session_id": session_id,
@@ -417,8 +435,10 @@ class SessionRegistry:
     async def close(self) -> None:
         async with self._lock:
             controllers = list(self._controllers.values())
-            self._controllers.clear()
-        await asyncio.gather(
-            *(controller.close(notify=False) for controller in controllers),
+        results = await asyncio.gather(
+            *(controller.close() for controller in controllers),
             return_exceptions=True,
         )
+        errors = [result for result in results if isinstance(result, Exception)]
+        if errors:
+            raise ExceptionGroup("session registry cleanup failed", errors)

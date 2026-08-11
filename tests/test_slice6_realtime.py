@@ -42,6 +42,17 @@ class MemoryEventSink:
         self.events.append(event)
 
 
+class FailingEventSink(MemoryEventSink):
+    def __init__(self, fail_type: str) -> None:
+        super().__init__()
+        self.fail_type = fail_type
+
+    async def send(self, event: dict[str, object]) -> None:
+        if event["type"] == self.fail_type:
+            raise RuntimeError("control transport failed")
+        await super().send(event)
+
+
 class MemoryAudioSink:
     def __init__(
         self,
@@ -175,6 +186,38 @@ class CancellationRaceRunner(FakeRunner):
         super().discard_turn(session_id, turn_id)
         self.context.clear()
         self.operations.append("rollback")
+        self.rollback_done.set()
+
+
+class TransportFailureRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+        self.context = ["prior context"]
+        self.rollback_done = threading.Event()
+
+    def run_turn(self, *, session_id, turn_id, input_pcm, cancellation, event_observer):
+        del input_pcm
+        event = EventEnvelope(
+            session_id=session_id,
+            turn_id=turn_id,
+            sequence=1,
+            event_type="turn.transcribing",
+            payload={"stage": "stt"},
+            terminal=False,
+        ).as_dict()
+        event_observer(event)
+        self.release.wait(2)
+        self.context.append("late assistant response")
+        return TraceResult((event,), b"", b"")
+
+    def cancel(self) -> None:
+        super().cancel()
+        self.release.set()
+
+    def discard_turn(self, session_id: str, turn_id: str) -> None:
+        super().discard_turn(session_id, turn_id)
+        self.context[:] = ["prior context"]
         self.rollback_done.set()
 
 
@@ -339,6 +382,52 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.discarded_turns, [("session-test-0001", turn_id)])
         self.assertEqual(events.events[-1]["type"], "turn.failed")
         self.assertEqual(events.events[-1]["payload"]["code"], "audio_playout_exception")
+
+    async def test_control_transport_failure_stops_worker_and_rolls_back_context(self) -> None:
+        events = FailingEventSink("turn.transcribing")
+        runner = TransportFailureRunner()
+        failures: list[tuple[str, str]] = []
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+            failure_handler=lambda stage, code: failures.append((stage, code)),
+        )
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        await wait_for_turn(session)
+
+        self.assertTrue(runner.rollback_done.is_set())
+        self.assertEqual(runner.context, ["prior context"])
+        self.assertEqual(runner.discarded_turns, [("session-test-0001", turn_id)])
+        self.assertGreaterEqual(runner.cancel_count, 1)
+        self.assertEqual(failures, [("transport", "control_publish_failed")])
+        with self.assertRaisesRegex(RuntimeError, "session is closed"):
+            await session.start_utterance()
+
+    async def test_closed_session_reconnect_stays_degraded_without_reset(self) -> None:
+        events = MemoryEventSink()
+        runner = FakeRunner()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudioSink(fail_clear=True),
+        )
+        await session.start_utterance()
+        await session.interrupt()
+        reconnected = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": "session-test-0001",
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+
+        self.assertTrue(await session.handle_client_control(reconnected))
+        self.assertEqual(events.events[-1]["type"], "session.degraded")
+        self.assertEqual(events.events[-1]["stream_epoch"], 2)
+        self.assertEqual(events.events[-1]["payload"]["code"], "session_closed")
+        self.assertEqual(runner.reset_sessions, [])
 
     async def test_completion_is_ordered_before_admission_of_the_next_turn(self) -> None:
         events = MemoryEventSink()

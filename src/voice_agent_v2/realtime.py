@@ -85,6 +85,8 @@ class TurnContext:
     terminal: bool = False
     rollback_complete: bool = False
     rollback_error: str | None = None
+    cancellation_cleanup: asyncio.Task[str | None] | None = None
+    worker: asyncio.Task[TraceResult] | None = None
 
 
 def _bounded_json_value(value: object, depth: int = 0) -> bool:
@@ -194,6 +196,7 @@ class RealtimeSession:
         runner: TurnRunner,
         event_sink: EventSink,
         audio_sink: AudioSink,
+        failure_handler: Callable[[str, str], None] | None = None,
     ) -> None:
         if not valid_correlation_id(session_id):
             raise ValueError("invalid realtime session ID")
@@ -201,14 +204,18 @@ class RealtimeSession:
         self.runner = runner
         self.event_sink = event_sink
         self.audio_sink = audio_sink
+        self.failure_handler = failure_handler
         self.stream_epoch = 1
         self._event_sequence = 0
         self._turn_sequence = 0
         self._client_sequence = 0
         self._active: TurnContext | None = None
         self._closed = False
+        self._failure_reported = False
+        self._disconnect_complete = False
         self._lock = asyncio.Lock()
         self._runner_lock = asyncio.Lock()
+        self._disconnect_lock = asyncio.Lock()
         self.drop_counts = {"stale_event": 0, "client_control": 0}
 
     @property
@@ -297,15 +304,25 @@ class RealtimeSession:
         context.rollback_complete = True
         return context.rollback_error
 
+    def _report_failure(self, stage: str, code: str) -> None:
+        if self._failure_reported:
+            return
+        self._failure_reported = True
+        if self.failure_handler is not None:
+            self.failure_handler(stage, code)
+
     async def _degrade_locked(self, stage: str, code: str) -> None:
         if self._closed:
             return
         self._closed = True
-        await self._emit(
-            SESSION_TURN_ID,
-            "session.degraded",
-            {"state": "degraded", "stage": stage, "code": code},
-        )
+        try:
+            await self._emit(
+                SESSION_TURN_ID,
+                "session.degraded",
+                {"state": "degraded", "stage": stage, "code": code},
+            )
+        finally:
+            self._report_failure(stage, code)
 
     def _watch_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
         async def finish() -> None:
@@ -348,6 +365,7 @@ class RealtimeSession:
             drain_error = await self._clear_audio(context.turn_id)
         finally:
             cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
+            context.cancellation_cleanup = cleanup
         drain_ms = min((time.monotonic() - started) * 1000, float(BARGE_IN_DRAIN_BOUND_MS))
         await self._emit(
             context.turn_id,
@@ -363,6 +381,29 @@ class RealtimeSession:
         return cleanup, drain_error
 
     async def _run_turn(self, context: TurnContext, pcm: bytes) -> None:
+        try:
+            await self._run_turn_body(context, pcm)
+        except Exception:
+            await self._abort_failed_transport(context)
+
+    async def _abort_failed_transport(self, context: TurnContext) -> None:
+        context.cancellation.cancel()
+        try:
+            await asyncio.to_thread(self.runner.cancel)
+        except Exception:
+            pass
+        worker = context.worker
+        if worker is not None and worker is not asyncio.current_task():
+            try:
+                await worker
+            except Exception:
+                pass
+        context.rollback_error = await self._rollback_context(context)
+        context.terminal = True
+        self._closed = True
+        self._report_failure("transport", "control_publish_failed")
+
+    async def _run_turn_body(self, context: TurnContext, pcm: bytes) -> None:
         if context.prior_cleanup is not None:
             cleanup_error: str | None = None
             try:
@@ -405,6 +446,7 @@ class RealtimeSession:
                 ),
                 name=f"inference-{context.turn_id}",
             )
+            context.worker = worker
             while not worker.done() or not observed.empty():
                 try:
                     event = await asyncio.wait_for(observed.get(), timeout=0.01)
@@ -470,12 +512,16 @@ class RealtimeSession:
                     try:
                         await asyncio.to_thread(delivered, self.session_id, context.turn_id)
                     except Exception:
+                        context.rollback_error = await self._rollback_context(context)
                         context.terminal = True
                         await self._emit(
                             context.turn_id,
                             "turn.failed",
                             {"outcome": "failed", "stage": "controller", "code": "context_commit_failed"},
                             terminal=True,
+                        )
+                        await self._degrade_locked(
+                            "controller", context.rollback_error or "context_commit_failed"
                         )
                         return
                 context.terminal = True
@@ -566,6 +612,15 @@ class RealtimeSession:
             return False
         self._client_sequence = sequence
         async with self._lock:
+            if self._closed:
+                self.stream_epoch += 1
+                await self._emit(
+                    SESSION_TURN_ID,
+                    "session.degraded",
+                    {"state": "degraded", "stage": "controller", "code": "session_closed"},
+                )
+                self._report_failure("controller", "session_closed")
+                return True
             cleanup, reset_error = await self._interrupt_locked("client_reconnected")
             try:
                 async with asyncio.timeout(CANCELLATION_CLEANUP_BOUND_MS / 1000):
@@ -593,34 +648,38 @@ class RealtimeSession:
                     },
                 )
             else:
-                self._closed = True
-                await self._emit(
-                    SESSION_TURN_ID,
-                    "session.degraded",
-                    {"state": "degraded", "stage": "controller", "code": reset_error},
-                )
+                await self._degrade_locked("controller", reset_error)
         return True
 
     async def disconnect(self) -> None:
-        async with self._lock:
-            if self._closed:
+        async with self._disconnect_lock:
+            if self._disconnect_complete:
                 return
-            cleanup, _drain_error = await self._interrupt_locked("client_disconnected")
-            self._closed = True
-        if cleanup is not None:
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(cleanup),
-                    timeout=CANCELLATION_CLEANUP_BOUND_MS / 1000,
-                )
-            except TimeoutError:
-                pass
-        context = self._active
-        if context is not None and context.task is not None:
-            try:
-                await asyncio.wait_for(asyncio.shield(context.task), timeout=1.25)
-            except TimeoutError:
-                pass
+            async with self._lock:
+                context = self._active
+                cleanup = context.cancellation_cleanup if context is not None else None
+                drain_error: str | None = None
+                if context is not None and not context.terminal:
+                    cleanup, drain_error = await self._interrupt_locked("client_disconnected")
+                self._closed = True
+            if drain_error is not None:
+                raise RuntimeError(drain_error)
+            if cleanup is not None:
+                try:
+                    cleanup_error = await asyncio.wait_for(
+                        asyncio.shield(cleanup),
+                        timeout=CANCELLATION_CLEANUP_BOUND_MS / 1000,
+                    )
+                except TimeoutError as error:
+                    raise RuntimeError("cancellation_cleanup_timeout") from error
+                if cleanup_error is not None:
+                    raise RuntimeError(cleanup_error)
+            if context is not None and context.task is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(context.task), timeout=1.25)
+                except TimeoutError as error:
+                    raise RuntimeError("turn_cleanup_timeout") from error
+            self._disconnect_complete = True
 
     async def _emit(
         self,
@@ -635,16 +694,21 @@ class RealtimeSession:
         self._event_sequence += 1
         if self._event_sequence > MAX_EVENT_SEQUENCE:
             raise RuntimeError("session event sequence exhausted")
-        await self.event_sink.send({
-            "schema_version": CONTROL_EVENT_VERSION,
-            "session_id": self.session_id,
-            "turn_id": turn_id,
-            "stream_epoch": self.stream_epoch,
-            "sequence": self._event_sequence,
-            "type": event_type,
-            "terminal": terminal,
-            "payload": payload,
-        })
+        try:
+            await self.event_sink.send({
+                "schema_version": CONTROL_EVENT_VERSION,
+                "session_id": self.session_id,
+                "turn_id": turn_id,
+                "stream_epoch": self.stream_epoch,
+                "sequence": self._event_sequence,
+                "type": event_type,
+                "terminal": terminal,
+                "payload": payload,
+            })
+        except Exception:
+            self._closed = True
+            self._report_failure("transport", "control_publish_failed")
+            raise
 
 
 class EnergyEndpoint:

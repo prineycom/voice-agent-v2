@@ -9,6 +9,7 @@ from importlib.metadata import version
 from pathlib import Path
 import socket
 import sys
+import threading
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +31,11 @@ sys.addaudithook(deny_network)
 
 from livekit import api
 
-from voice_agent_v2.livekit_runtime import LiveKitRoomController, SessionRegistry
+from voice_agent_v2.livekit_runtime import (
+    LiveKitRoomController,
+    SessionCapacityError,
+    SessionRegistry,
+)
 from voice_agent_v2.slice6_config import Slice6Settings
 
 EXPECTED = {
@@ -68,6 +73,24 @@ class RunnerStub:
         self.closed_sessions.append(session_id)
 
 
+class BlockingStartupRunner(RunnerStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.started = False
+
+    def start(self) -> None:
+        self.entered.set()
+        self.release.wait(2)
+        self.started = True
+
+
+class FailingSession(SessionStub):
+    async def disconnect(self) -> None:
+        raise RuntimeError("injected session cleanup failure")
+
+
 async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     bounded = replace(settings, browser_join_timeout_seconds=0.01)
     registry = SessionRegistry(bounded)
@@ -75,6 +98,10 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     controller.settings = bounded
     controller.session_id = "session-unclaimed"
     controller._closed = False
+    controller._cleanup_complete = False
+    controller._close_notified = False
+    controller._close_lock = asyncio.Lock()
+    controller._runner_start_task = None
     controller._browser_ready = False
     controller._browser_join_task = None
     controller._audio_task = None
@@ -93,43 +120,87 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     if not controller.session.closed or not controller.room.closed or not controller.audio_source.closed:
         raise AssertionError("unclaimed room did not close all owned resources")
 
-    created = []
+    startup_runner = BlockingStartupRunner()
+    startup_controller = object.__new__(LiveKitRoomController)
+    startup_controller.settings = settings
+    startup_controller.session_id = "session-startup"
+    startup_controller.runner = startup_runner
+    startup_controller.session = SessionStub()
+    startup_controller.room = AsyncCloser()
+    startup_controller.audio_source = AsyncCloser()
+    startup_controller.on_closed = lambda _session_id: asyncio.sleep(0)
+    startup_controller._closed = False
+    startup_controller._cleanup_complete = False
+    startup_controller._close_notified = False
+    startup_controller._close_lock = asyncio.Lock()
+    startup_controller._runner_start_task = None
+    startup_controller._browser_ready = False
+    startup_controller._browser_join_task = None
+    startup_controller._audio_task = None
 
-    class BlockingController:
-        def __init__(self, **values) -> None:
-            self.session_id = values["session_id"]
-            self.started = asyncio.Event()
-            self.closed = False
-            created.append(self)
+    def refuse_join_timer() -> None:
+        raise AssertionError("cancelled request must not arm a join timer")
 
-        async def start(self) -> None:
-            self.started.set()
-            await asyncio.Event().wait()
-
-        def arm_browser_join_timeout(self) -> None:
-            raise AssertionError("cancelled request must not arm a join timer")
-
-        async def close(self, *, notify: bool = True) -> None:
-            del notify
-            self.closed = True
+    startup_controller.arm_browser_join_timeout = refuse_join_timer
 
     cancelled_registry = SessionRegistry(settings)
     with patch(
-        "voice_agent_v2.livekit_runtime.LiveKitRoomController", BlockingController
+        "voice_agent_v2.livekit_runtime.LiveKitRoomController",
+        return_value=startup_controller,
     ):
         request = asyncio.create_task(cancelled_registry.create())
-        while not created:
-            await asyncio.sleep(0)
-        await created[0].started.wait()
+        if not await asyncio.to_thread(startup_runner.entered.wait, 1):
+            raise AssertionError("runner startup worker did not begin")
         request.cancel()
+        await asyncio.sleep(0.02)
+        if startup_runner.closed_sessions:
+            raise AssertionError("runner closed before its startup worker finished")
+        startup_runner.release.set()
         try:
             await request
         except asyncio.CancelledError:
             pass
         else:
             raise AssertionError("cancelled registry request unexpectedly completed")
-    if cancelled_registry.active_count != 0 or not created[0].closed:
-        raise AssertionError("cancelled registry request leaked its controller")
+    if (
+        cancelled_registry.active_count != 0
+        or not startup_runner.started
+        or startup_runner.closed_sessions != [startup_controller.session_id]
+    ):
+        raise AssertionError("cancelled registry request leaked startup resources")
+
+    failed_controller = object.__new__(LiveKitRoomController)
+    failed_controller.settings = settings
+    failed_controller.session_id = "session-cleanup-failure"
+    failed_controller.runner = RunnerStub()
+    failed_controller.session = FailingSession()
+    failed_controller.room = AsyncCloser()
+    failed_controller.audio_source = AsyncCloser()
+    failed_controller._closed = False
+    failed_controller._cleanup_complete = False
+    failed_controller._close_notified = False
+    failed_controller._close_lock = asyncio.Lock()
+    failed_controller._runner_start_task = None
+    failed_controller._browser_ready = True
+    failed_controller._browser_join_task = None
+    failed_controller._audio_task = None
+    failed_registry = SessionRegistry(settings)
+    failed_controller.on_closed = failed_registry.remove
+    failed_registry._controllers[failed_controller.session_id] = failed_controller
+    try:
+        await failed_controller.close()
+    except ExceptionGroup:
+        pass
+    else:
+        raise AssertionError("cleanup failure unexpectedly released the controller")
+    if failed_registry.active_count != 1:
+        raise AssertionError("cleanup failure released session capacity")
+    try:
+        await failed_registry.create()
+    except SessionCapacityError:
+        pass
+    else:
+        raise AssertionError("cleanup failure admitted a replacement session")
 
 
 def main() -> int:
@@ -175,7 +246,7 @@ def main() -> int:
     print("Slice 6 installed-runtime contract: PASS")
     print("SDK pins: " + ", ".join(f"{name}={value}" for name, value in observed.items()))
     print("capability: one room, microphone publish, agent subscribe/data; no management grants")
-    print("room lifecycle: unclaimed and request-cancelled sessions release all resources")
+    print("room lifecycle: startup cancellation drains; incomplete cleanup retains capacity")
     print("network: no sockets opened; no model, provider, microphone, or physical browser used")
     return 0
 
