@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/slice2-selection.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "issue", "preregistration_commit", "status", "selected_stt", "selected_tts", "llm_provider", "admission", "reserve", "repeat", "tested_candidates", "automatic_fallback_disabled", "result_files", "untested_hypotheses"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-selection.v1"},
+    "issue": {"type": "string", "const": "https://github.com/prineycom/voice-agent-v2/issues/3"},
+    "preregistration_commit": {"type": "string", "pattern": "[0-9a-f]{40}"},
+    "status": {"type": "string", "enum": ["pass", "failed-selection"]},
+    "selected_stt": {"type": "object"},
+    "selected_tts": {"type": "object"},
+    "llm_provider": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "identity", "external_transfer", "endpoint", "selection_reason"],
+      "properties": {
+        "mode": {"type": "string", "enum": ["local", "cloud", "none"]},
+        "identity": {"type": "string", "minLength": 3},
+        "external_transfer": {"type": "boolean"},
+        "endpoint": {"type": "string", "minLength": 3},
+        "selection_reason": {"type": "string", "minLength": 20}
+      }
+    },
+    "admission": {"type": "object"},
+    "reserve": {"type": "object"},
+    "repeat": {"type": "object"},
+    "tested_candidates": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "string", "minLength": 3}},
+    "automatic_fallback_disabled": {"type": "boolean", "const": true},
+    "result_files": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "[a-z0-9][a-z0-9_.-]+\\.json"}},
+    "untested_hypotheses": {"type": "array", "minItems": 4, "items": {"type": "string", "minLength": 10}}
+  }
+}

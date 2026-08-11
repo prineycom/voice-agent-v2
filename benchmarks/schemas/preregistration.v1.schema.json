@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/preregistration.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "decision_key", "approval", "llm_scope", "download_boundary", "integrity", "execution_order", "measurement", "thresholds", "selection_rules", "untested_by_design"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-preregistration.v1"},
+    "state": {"type": "string", "enum": ["proposal", "approved"]},
+    "decision_key": {"type": "string", "const": "slice2-preregistration"},
+    "approval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "authority", "reference", "decided_at"],
+      "properties": {
+        "status": {"type": "string", "enum": ["pending", "approved"]},
+        "authority": {"type": "string", "minLength": 3},
+        "reference": {"type": "string", "minLength": 5},
+        "decided_at": {"type": "string", "minLength": 3}
+      }
+    },
+    "llm_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["maximum_candidates", "primary", "failure_policy"],
+      "properties": {
+        "maximum_candidates": {"type": "integer", "const": 1},
+        "primary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "identity", "revision", "format", "runtime"],
+          "properties": {
+            "status": {"type": "string", "const": "approved"},
+            "identity": {"type": "string", "minLength": 5},
+            "revision": {"type": "string", "pattern": "[0-9a-f]{40}"},
+            "format": {"type": "string", "minLength": 3},
+            "runtime": {"type": "string", "minLength": 3}
+          }
+        },
+        "failure_policy": {"type": "string", "minLength": 20}
+      }
+    },
+    "download_boundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "shared_runtime_bytes", "primary_lfm_bytes", "stt_tts_artifact_bytes", "stt_corpus_upper_bound_bytes", "required_maximum_bytes"],
+      "properties": {
+        "status": {"type": "string", "const": "approved"},
+        "shared_runtime_bytes": {"type": "integer", "minimum": 1},
+        "primary_lfm_bytes": {"type": "integer", "minimum": 1},
+        "stt_tts_artifact_bytes": {"type": "integer", "minimum": 1},
+        "stt_corpus_upper_bound_bytes": {"type": "integer", "minimum": 1},
+        "required_maximum_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "integrity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["results_require_ancestor_commit", "candidate_results_viewed", "raw_evidence_outside_git", "privacy_rule"],
+      "properties": {
+        "results_require_ancestor_commit": {"type": "boolean", "const": true},
+        "candidate_results_viewed": {"type": "boolean", "const": false},
+        "raw_evidence_outside_git": {"type": "boolean", "const": true},
+        "privacy_rule": {"type": "string", "minLength": 20}
+      }
+    },
+    "execution_order": {
+      "type": "array", "minItems": 6,
+      "items": {"type": "string", "minLength": 10}
+    },
+    "measurement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sampling_interval_ms", "percentile_method", "cold", "warm", "sustained", "parallel_requests", "cancellation", "llm_tts_overlap", "barge_in_admission", "repeat"],
+      "properties": {
+        "sampling_interval_ms": {"type": "integer", "minimum": 20, "maximum": 1000},
+        "percentile_method": {"type": "string", "minLength": 10},
+        "cold": {"type": "string", "minLength": 20},
+        "warm": {"type": "string", "minLength": 20},
+        "sustained": {"type": "string", "minLength": 20},
+        "parallel_requests": {"type": "string", "minLength": 20},
+        "cancellation": {"type": "string", "minLength": 20},
+        "llm_tts_overlap": {"type": "string", "minLength": 20},
+        "barge_in_admission": {"type": "string", "minLength": 20},
+        "repeat": {"type": "string", "minLength": 20}
+      }
+    },
+    "thresholds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["resource", "stt", "llm", "tts", "cancellation_recovery", "overlap", "repeat_tolerance"],
+      "properties": {
+        "resource": {"type": "object"},
+        "stt": {"type": "object"},
+        "llm": {"type": "object"},
+        "tts": {"type": "object"},
+        "cancellation_recovery": {"type": "object"},
+        "overlap": {"type": "object"},
+        "repeat_tolerance": {"type": "object"}
+      }
+    },
+    "selection_rules": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eligibility", "stt", "tts", "llm", "cloud"],
+      "properties": {
+        "eligibility": {"type": "string", "minLength": 20},
+        "stt": {"type": "string", "minLength": 20},
+        "tts": {"type": "string", "minLength": 20},
+        "llm": {"type": "string", "minLength": 20},
+        "cloud": {"type": "string", "minLength": 20}
+      }
+    },
+    "untested_by_design": {"type": "array", "minItems": 4, "items": {"type": "string", "minLength": 10}}
+  }
+}

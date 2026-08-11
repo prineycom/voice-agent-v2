@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/stt-corpus.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "title", "source", "selection", "acquisition", "scoring", "samples"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-stt-corpus.v1"},
+    "title": {"type": "string", "minLength": 5},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dataset", "revision", "split", "license", "origin", "attribution"],
+      "properties": {
+        "dataset": {"type": "string", "minLength": 3},
+        "revision": {"type": "string", "pattern": "[0-9a-f]{40}"},
+        "split": {"type": "string", "const": "test"},
+        "license": {"type": "string", "minLength": 3},
+        "origin": {"type": "string", "minLength": 10},
+        "attribution": {"type": "string", "minLength": 10}
+      }
+    },
+    "selection": {"type": "string", "minLength": 20},
+    "acquisition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["outside_git", "maximum_download_bytes", "retention"],
+      "properties": {
+        "outside_git": {"type": "boolean", "const": true},
+        "maximum_download_bytes": {"type": "integer", "minimum": 1},
+        "retention": {"type": "string", "minLength": 10}
+      }
+    },
+    "scoring": {
+      "type": "object", "additionalProperties": false,
+      "required": ["metric", "normalization", "aggregation"],
+      "properties": {
+        "metric": {"type": "string", "const": "word-error-rate"},
+        "normalization": {"type": "string", "minLength": 10},
+        "aggregation": {"type": "string", "minLength": 10}
+      }
+    },
+    "samples": {
+      "type": "array", "minItems": 20,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "row_index", "duration_seconds", "reference", "source_audio_path"],
+        "properties": {
+          "id": {"type": "string", "pattern": "stt-[0-9]{2}"},
+          "row_index": {"type": "integer", "minimum": 0},
+          "duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+          "reference": {"type": "string", "minLength": 3},
+          "source_audio_path": {"type": "string", "minLength": 3}
+        }
+      }
+    }
+  }
+}

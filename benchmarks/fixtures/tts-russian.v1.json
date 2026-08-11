@@ -1,0 +1,32 @@
+{
+  "schema_version": "voice-agent.slice2-tts-rubric.v1",
+  "origin": "Freshly authored synthetic Russian listening text for this project, dedicated as CC0-1.0; it contains no private speech, cloned voice, or conversation material.",
+  "audio_contract": {
+    "output": "Candidate-native mono PCM at 22050 Hz, wrapped as WAV only for cache-local listening review",
+    "normalization": "No denoising, time stretching, loudness matching, trimming, or post-processing before timing or listening review",
+    "retention": "Generated audio and randomized review mapping stay only under the authorized Slice 2 cache; Git stores numeric aggregate scores and hashes only"
+  },
+  "blind_review": "Candidate voice names are replaced by randomized opaque labels. One human reviewer uses headphones at a fixed comfortable volume, scores every sample in one sitting, and marks critical empty, clipped, or unintelligible output before labels are revealed.",
+  "scale": {
+    "0": "Empty, clipped, or unintelligible",
+    "1": "Mostly difficult to understand or strongly unnatural",
+    "2": "Understandable only with effort or with material pronunciation defects",
+    "3": "Clearly understandable and acceptable for a voice assistant",
+    "4": "Effortless to understand, natural, and consistently pronounced"
+  },
+  "dimensions": ["intelligibility", "pronunciation", "naturalness"],
+  "samples": [
+    {"id": "tts-01", "category": "greeting", "utterance": "Доброе утро! Чем я могу помочь?", "listen_for": ["Natural greeting intonation", "Clear word boundaries"]},
+    {"id": "tts-02", "category": "numbers", "utterance": "В корзине осталось тридцать семь яблок из ста двадцати.", "listen_for": ["Correct number pronunciation", "No skipped words"]},
+    {"id": "tts-03", "category": "date-time", "utterance": "Встреча назначена на двадцать первое августа, на девять часов тридцать минут.", "listen_for": ["Ordinal date agreement", "Natural pause before time"]},
+    {"id": "tts-04", "category": "question", "utterance": "Ты хочешь поехать поездом или полететь самолётом?", "listen_for": ["Question intonation", "Clear ё vowel in самолётом"]},
+    {"id": "tts-05", "category": "navigation", "utterance": "Через двести метров поверните направо, затем держитесь левой полосы.", "listen_for": ["Imperative clarity", "Natural phrase break"]},
+    {"id": "tts-06", "category": "names", "utterance": "Алексей встретил Екатерину у станции «Площадь Революции».", "listen_for": ["Name stress and clarity", "Quoted place-name phrasing"]},
+    {"id": "tts-07", "category": "abbreviation", "utterance": "Файл в формате Пи-Ди-Эф сохранён на эс-эс-ди.", "listen_for": ["All spelled letters audible", "No fused or omitted segments"]},
+    {"id": "tts-08", "category": "warning", "utterance": "Осторожно: поверхность горячая. Не прикасайтесь к ней руками.", "listen_for": ["Warning emphasis without shouting", "Sentence boundary"]},
+    {"id": "tts-09", "category": "long-sentence", "utterance": "Когда дождь закончится, мы откроем окно, проветрим комнату и спокойно продолжим работу.", "listen_for": ["Breath and clause pacing", "Stable clarity through the final word"]},
+    {"id": "tts-10", "category": "consonants", "utterance": "Шесть шустрых щенков шуршат сухими листьями.", "listen_for": ["Distinction among ш, щ, and с", "No consonant collapse"]},
+    {"id": "tts-11", "category": "softness", "utterance": "Юлия налила чай, добавила мёд и поставила чашку на тёплый стол.", "listen_for": ["Clear йотated vowels", "Natural ё pronunciation"]},
+    {"id": "tts-12", "category": "assistant-response", "utterance": "Я не могу проверить погоду без доступа к свежим данным, но помогу выбрать надёжный прогноз.", "listen_for": ["Conversational pacing", "No monotone or final clipping"]}
+  ]
+}

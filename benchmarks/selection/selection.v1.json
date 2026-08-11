@@ -1,0 +1,53 @@
+{
+  "admission": {
+    "maximum_active_llm_requests": 0,
+    "reason": "No LLM selected."
+  },
+  "automatic_fallback_disabled": true,
+  "issue": "https://github.com/prineycom/voice-agent-v2/issues/3",
+  "llm_provider": {
+    "endpoint": "none",
+    "external_transfer": false,
+    "identity": "none",
+    "mode": "none",
+    "selection_reason": "The only approved LFM candidate emitted empty visible answers in fixed and concurrency cases, violating critical-failure, isolation, and context-pressure gates; policy forbids substitution."
+  },
+  "preregistration_commit": "f11f6caa42301376b96063cea61a617b94ecaad1",
+  "repeat": {
+    "performed": false,
+    "reason": "There is no winning configuration to repeat."
+  },
+  "reserve": {
+    "complete_stack_measured": false,
+    "reason": "Dependent overlap is prohibited after component hard-gate failure."
+  },
+  "result_files": [
+    "llm-preferred-lfm25-26b-vllm-bf16.json",
+    "stt-whisper-large-v3-turbo.json",
+    "stt-whisper-large-v3.json"
+  ],
+  "schema_version": "voice-agent.slice2-selection.v1",
+  "selected_stt": {
+    "identity": "none",
+    "reason": "Both measured STT candidates failed at least one preregistered hard gate."
+  },
+  "selected_tts": {
+    "identity": "none",
+    "reason": "Listening quality was not requested after upstream LLM and STT hard failures stopped the dependent selection path."
+  },
+  "status": "failed-selection",
+  "tested_candidates": [
+    "llm-preferred-lfm25-26b-vllm-bf16",
+    "stt-whisper-large-v3-turbo",
+    "stt-whisper-large-v3",
+    "tts-piper-denis-medium-automated-only",
+    "tts-piper-dmitri-medium-automated-only"
+  ],
+  "untested_hypotheses": [
+    "TTS listening quality remains unscored because the upstream failed-selection gate stopped the dependent path.",
+    "Complete LLM and TTS overlap was not run after LFM component failure.",
+    "New STT admission during LLM and TTS cancellation was not run after LFM component failure.",
+    "No winning complete-stack repeat exists after the failed selection.",
+    "Real microphone acoustics and production inference-service contracts remain for later slices."
+  ]
+}

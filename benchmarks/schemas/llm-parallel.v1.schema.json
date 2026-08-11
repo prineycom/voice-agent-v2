@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/llm-parallel.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "origin", "levels", "rounds", "maximum_output_tokens", "context_pressure", "requests"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-llm-parallel.v1"},
+    "origin": {"type": "string", "minLength": 20},
+    "levels": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true, "items": {"type": "integer", "minimum": 1, "maximum": 4}},
+    "rounds": {"type": "integer", "minimum": 3},
+    "maximum_output_tokens": {"type": "integer", "minimum": 1, "maximum": 512},
+    "context_pressure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "maximum_input_tokens", "construction"],
+      "properties": {
+        "enabled": {"type": "boolean", "const": true},
+        "maximum_input_tokens": {"type": "integer", "minimum": 512, "maximum": 4095},
+        "construction": {"type": "string", "minLength": 20}
+      }
+    },
+    "requests": {
+      "type": "array", "minItems": 12, "maxItems": 12,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "marker", "prompt"],
+        "properties": {
+          "id": {"type": "string", "pattern": "parallel-[0-9]{2}"},
+          "marker": {"type": "string", "pattern": "ПАРУС-[0-9]{2}"},
+          "prompt": {"type": "string", "minLength": 20}
+        }
+      }
+    }
+  }
+}

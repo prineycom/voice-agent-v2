@@ -1,0 +1,163 @@
+{
+  "schema_version": "voice-agent.slice2-candidates.v1",
+  "policy": {
+    "local_only": true,
+    "cloud_contacted": false,
+    "preferred_llm_status": "supplied",
+    "llm_single_model_exception": "Explicit user decision: evaluate only official LiquidAI/LFM2.5-2.6B native BF16 on vLLM 0.26.0. Acquire or benchmark no alternate LLM and contact no cloud provider. If LFM fails any preregistered gate, select no LLM, stop the dependent path, and wait for a new explicit user decision without automatic substitution."
+  },
+  "shared_runtime": {
+    "python": "CPython 3.14.6 cache-local venvs; no system mutation",
+    "stt": "faster-whisper 1.2.1 / CTranslate2 4.8.1 / CUDA 12 user-space libraries",
+    "tts": "piper-tts 1.6.0 / ONNX Runtime 1.28.0 on CPU",
+    "llm": "vLLM 0.26.0 / PyTorch 2.11.0 / cache-local CUDA 13; approved only for official LFM2.5-2.6B native BF16",
+    "expected_download_bytes": 5482352882
+  },
+  "candidates": [
+    {
+      "id": "stt-whisper-large-v3-turbo",
+      "role": "stt",
+      "priority": "fixed",
+      "artifact": {
+        "repository": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo",
+        "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+        "provenance": "CTranslate2 conversion of OpenAI Whisper large-v3-turbo; repository redirect resolved and pinned to dropbox-dash.",
+        "quantization": "float16 weights; CTranslate2 compute_type=float16",
+        "license": "MIT",
+        "files": [
+          {"path": "config.json", "url": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/config.json", "size_bytes": 2263, "git_blob_sha1": "0351d1d6870005e865747b781b5d7c23ea0459cd"},
+          {"path": "model.bin", "url": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/model.bin", "size_bytes": 1617884929, "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"},
+          {"path": "preprocessor_config.json", "url": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/preprocessor_config.json", "size_bytes": 340, "git_blob_sha1": "931c77a740890c46365c7ae0c9d350ba3cca908f"},
+          {"path": "tokenizer.json", "url": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/tokenizer.json", "size_bytes": 2710337, "git_blob_sha1": "17456db595adc78a973f97d69d8cb50bc87c0b1c"},
+          {"path": "vocabulary.json", "url": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/vocabulary.json", "size_bytes": 1068114, "git_blob_sha1": "0adcd01e7c237205d593b707e66dd5d7bc785d2d"}
+        ]
+      },
+      "runtime": {"name": "faster-whisper", "version": "1.2.1", "revision": "65882eee9f5cdbeeb2d877f1131d48cf241b327d", "license": "MIT", "device_api": "CUDA"},
+      "configuration": {"context_size": 0, "concurrency_levels": [1], "maximum_active_requests": 1, "resident": true},
+      "screen": {
+        "testable": true,
+        "ungated_acquisition": true,
+        "license_review": "Artifact and conversion metadata declare MIT. The source is public and ungated. Retain revision and hashes in selection evidence.",
+        "compatibility_evidence": "Russian is supported by multilingual Whisper; float16 CUDA execution is compatible with the live RTX 4070 driver through user-space CUDA 12 libraries."
+      }
+    },
+    {
+      "id": "stt-whisper-large-v3",
+      "role": "stt",
+      "priority": "fixed",
+      "artifact": {
+        "repository": "https://huggingface.co/Systran/faster-whisper-large-v3",
+        "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+        "provenance": "SYSTRAN CTranslate2 conversion of OpenAI Whisper large-v3, pinned to the public model revision.",
+        "quantization": "float16 weights; CTranslate2 compute_type=float16",
+        "license": "MIT",
+        "files": [
+          {"path": "config.json", "url": "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/config.json", "size_bytes": 2394, "git_blob_sha1": "75336feae814999bae6ccccdecf177639ffc6f9d"},
+          {"path": "model.bin", "url": "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin", "size_bytes": 3087284237, "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"},
+          {"path": "preprocessor_config.json", "url": "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/preprocessor_config.json", "size_bytes": 340, "git_blob_sha1": "931c77a740890c46365c7ae0c9d350ba3cca908f"},
+          {"path": "tokenizer.json", "url": "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/tokenizer.json", "size_bytes": 2480617, "git_blob_sha1": "3a5e2ba63acdcac9a19ba56cf9bd27f185bfff61"},
+          {"path": "vocabulary.json", "url": "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/vocabulary.json", "size_bytes": 1068114, "git_blob_sha1": "0adcd01e7c237205d593b707e66dd5d7bc785d2d"}
+        ]
+      },
+      "runtime": {"name": "faster-whisper", "version": "1.2.1", "revision": "65882eee9f5cdbeeb2d877f1131d48cf241b327d", "license": "MIT", "device_api": "CUDA"},
+      "configuration": {"context_size": 0, "concurrency_levels": [1], "maximum_active_requests": 1, "resident": true},
+      "screen": {
+        "testable": true,
+        "ungated_acquisition": true,
+        "license_review": "Artifact and conversion metadata declare MIT. The source is public and ungated. Retain revision and hashes in selection evidence.",
+        "compatibility_evidence": "The model card explicitly lists Russian. Its larger decoder provides a credible accuracy/resource contrast with large-v3-turbo on the same runtime."
+      }
+    },
+    {
+      "id": "tts-piper-denis-medium",
+      "role": "tts",
+      "priority": "fixed",
+      "artifact": {
+        "repository": "https://huggingface.co/rhasspy/piper-voices",
+        "revision": "ea046e8458f6acd997706d6e6066a022b42f6fb1",
+        "provenance": "Piper ru_RU denis medium voice; model card names the OHF-Voice CC0 Russian dataset.",
+        "quantization": "ONNX float32, medium quality, 22050 Hz",
+        "license": "Repository MIT; source dataset CC0; runtime GPL-3.0",
+        "files": [
+          {"path": "ru_RU-denis-medium.onnx", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/ea046e8458f6acd997706d6e6066a022b42f6fb1/ru/ru_RU/denis/medium/ru_RU-denis-medium.onnx", "size_bytes": 63201294, "sha256": "15fab56e11a097858ee115545d0f697fc2a316c41a291a5362349fb870411b0a"},
+          {"path": "ru_RU-denis-medium.onnx.json", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/ea046e8458f6acd997706d6e6066a022b42f6fb1/ru/ru_RU/denis/medium/ru_RU-denis-medium.onnx.json", "size_bytes": 4823}
+        ]
+      },
+      "runtime": {"name": "piper-tts", "version": "1.6.0", "revision": "f04d52c5528ac7cf2d73757f57990ff490f75005", "license": "GPL-3.0", "device_api": "CPU"},
+      "configuration": {"context_size": 0, "concurrency_levels": [1], "maximum_active_requests": 1, "resident": true},
+      "screen": {
+        "testable": true,
+        "ungated_acquisition": true,
+        "license_review": "The model card identifies a CC0 source dataset and the model repository declares MIT. Piper 1.6.0 is GPL-3.0; redistribution must preserve copyleft obligations.",
+        "compatibility_evidence": "The public ONNX voice and CPython abi3 Piper wheel support local CPU inference, avoiding additional GPU residency during LLM overlap."
+      }
+    },
+    {
+      "id": "tts-piper-dmitri-medium",
+      "role": "tts",
+      "priority": "fixed",
+      "artifact": {
+        "repository": "https://huggingface.co/rhasspy/piper-voices",
+        "revision": "ea046e8458f6acd997706d6e6066a022b42f6fb1",
+        "provenance": "Piper ru_RU dmitri medium voice; model card names the OHF-Voice CC0 Russian dataset.",
+        "quantization": "ONNX float32, medium quality, 22050 Hz",
+        "license": "Repository MIT; source dataset CC0; runtime GPL-3.0",
+        "files": [
+          {"path": "ru_RU-dmitri-medium.onnx", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/ea046e8458f6acd997706d6e6066a022b42f6fb1/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx", "size_bytes": 63201294, "sha256": "f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb"},
+          {"path": "ru_RU-dmitri-medium.onnx.json", "url": "https://huggingface.co/rhasspy/piper-voices/resolve/ea046e8458f6acd997706d6e6066a022b42f6fb1/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json", "size_bytes": 4824}
+        ]
+      },
+      "runtime": {"name": "piper-tts", "version": "1.6.0", "revision": "f04d52c5528ac7cf2d73757f57990ff490f75005", "license": "GPL-3.0", "device_api": "CPU"},
+      "configuration": {"context_size": 0, "concurrency_levels": [1], "maximum_active_requests": 1, "resident": true},
+      "screen": {
+        "testable": true,
+        "ungated_acquisition": true,
+        "license_review": "The model card identifies a CC0 source dataset and the model repository declares MIT. Piper 1.6.0 is GPL-3.0; redistribution must preserve copyleft obligations.",
+        "compatibility_evidence": "This is a distinct public Russian voice on the same reproducible CPU runtime, allowing voice quality rather than framework overhead to decide selection."
+      }
+    },
+    {
+      "id": "llm-preferred-lfm25-26b-vllm-bf16",
+      "role": "llm",
+      "priority": "preferred-first",
+      "artifact": {
+        "repository": "https://huggingface.co/LiquidAI/LFM2.5-2.6B",
+        "revision": "ab00687315bc1298e9d54e9c4b611dde9867ccc2",
+        "provenance": "Official LiquidAI native checkpoint. Its config declares Lfm2ForCausalLM; vLLM 0.26.0 lists that architecture, and LiquidAI documents native LFM2.5 support in vLLM 0.23.0 and later.",
+        "quantization": "native BF16 safetensors (no weight quantization)",
+        "license": "LFM Open License v1.0",
+        "files": [
+          {"path": ".gitattributes", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/.gitattributes", "size_bytes": 1570, "git_blob_sha1": "52373fe24473b1aa44333d318f578ae6bf04b49b"},
+          {"path": "LICENSE", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/LICENSE", "size_bytes": 10574, "git_blob_sha1": "25e731c697c4fe4c52ee654cedf7106a827748d2"},
+          {"path": "README.md", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/README.md", "size_bytes": 16168, "git_blob_sha1": "d588bf51e63f55a7ebf9c48ff281d8ecaa910f03"},
+          {"path": "chat_template.jinja", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/chat_template.jinja", "size_bytes": 5443, "git_blob_sha1": "d63583bce992413df713a04cc14b6a3bfe31617a"},
+          {"path": "config.json", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/config.json", "size_bytes": 1467, "git_blob_sha1": "71bdf63d60a624e2e0b3c966a8cd08da75df0ac0"},
+          {"path": "generation_config.json", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/generation_config.json", "size_bytes": 327, "git_blob_sha1": "f7fa1ba9c1615d195965fc239520f209fc4b6617"},
+          {"path": "model-00001-of-00002.safetensors", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/model-00001-of-00002.safetensors", "size_bytes": 5329406264, "sha256": "05be188e6570a7642b4690545ab22ebf4d0a6068775dd776a452eebf738854cc"},
+          {"path": "model-00002-of-00002.safetensors", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/model-00002-of-00002.safetensors", "size_bytes": 65021192, "sha256": "532f803a9e6f127adc124d977503b438d8cc9c18f96e0862bf6835e38867bca8"},
+          {"path": "model.safetensors.index.json", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/model.safetensors.index.json", "size_bytes": 21425, "git_blob_sha1": "3d927a617f885785479c530a003346d76e5fd5a9"},
+          {"path": "tokenizer.json", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/tokenizer.json", "size_bytes": 17905598, "sha256": "695be7802a0e4b8a81048f0ff5ebb7fc811a0ba5a6be63dbb24deb5a81096f41"},
+          {"path": "tokenizer_config.json", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/resolve/ab00687315bc1298e9d54e9c4b611dde9867ccc2/tokenizer_config.json", "size_bytes": 363, "git_blob_sha1": "e3eefcd570bd438293cf1e1819c016077d5aa842"}
+        ]
+      },
+      "runtime": {"name": "vLLM", "version": "0.26.0", "revision": "568afb3a13806beb53bb2e6bd518269357b237c0", "license": "Apache-2.0", "device_api": "CUDA"},
+      "configuration": {"context_size": 4096, "concurrency_levels": [1, 2, 4], "maximum_active_requests": 4, "resident": true},
+      "screen": {
+        "testable": true,
+        "ungated_acquisition": true,
+        "license_review": "The official repository is public and ungated under LFM Open License v1.0. Commercial use is conditioned on the user/legal entity remaining below USD 10 million annual revenue; redistribution must include the license and notices. This is not legal advice.",
+        "compatibility_evidence": "Verified native architecture support, not inferred GGUF support. BF16 weights occupy 5,394,427,456 bytes; a proposed vLLM 0.58 GPU-memory cap leaves about 5,158 MiB outside vLLM on the live 12,282 MiB GPU, making four 4K sequences plus STT/TTS overlap credible but still a measured hard gate."
+      }
+    }
+  ],
+  "screened_out": [
+    {"identity": "rhasspy/piper-voices ru_RU irina medium", "role": "tts", "reason": "The pinned model card says the source dataset license is unknown, so it is not a selectable artifact."},
+    {"identity": "rhasspy/piper-voices ru_RU ruslan medium", "role": "tts", "reason": "The pinned model card identifies CC-BY-NC-SA-4.0 source data; equally compatible CC0-source voices are available."},
+    {"identity": "facebook/mms-tts-rus", "role": "tts", "reason": "The public model is CC-BY-NC-4.0, so it is screened out in favor of two candidates without a non-commercial model restriction."},
+    {"identity": "coqui/XTTS-v2", "role": "tts", "reason": "Its model card declares a custom license and the voice-cloning workflow requires an additional speaker sample, expanding privacy and acquisition scope unnecessarily."},
+    {"identity": "LiquidAI/LFM2.5-2.6B-GGUF Q4_K_M on llama.cpp or vLLM plugin", "role": "llm", "reason": "The user approved the official native BF16/vLLM artifact instead. The GGUF runtime is outside the finalized primary path; vLLM plugin support is additionally experimental and unverified for LFM2."},
+    {"identity": "pierjoe/LFM2.5-2.6B-W4A16-GPTQ", "role": "llm", "reason": "The 2.35 GB community compressed-tensors checkpoint has no model card, no declared license, only two recorded downloads, and no authoritative vLLM/LFM quantized test evidence. It is smaller than BF16 but fails provenance/license credibility."},
+    {"identity": "bartowski/Mistral-Nemo-Instruct-2407-GGUF Q4_K_M", "role": "llm", "reason": "Outside the explicit single-LFM scope; it must not be acquired, benchmarked, or used as failure fallback."},
+    {"identity": "google/gemma-3-12b-it", "role": "llm", "reason": "Outside the explicit single-LFM scope; it must not be acquired, benchmarked, or used as failure fallback."}
+  ]
+}

@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 product delivery
 >
-> **Last updated:** 2026-08-10
+> **Last updated:** 2026-08-11
 
 This roadmap is a sequence of independently deliverable vertical slices. It contains no calendar estimates. A slice starts only when its dependencies and incoming evidence gate are satisfied; it finishes only with the stated user-visible behavior and evidence.
 
@@ -13,7 +13,7 @@ The architecture and contract ownership are defined in [`architecture.md`](archi
 ## Delivery rules for every slice
 
 - Exercise the thinnest end-to-end user path; do not build an unused horizontal platform first.
-- Keep LiveKit, STT, and TTS local. Evaluate local LLM candidates first; use a cloud LLM only after documented local-gate failure and explicit provider/privacy approval. No automatic fallback may make an acceptance test pass.
+- Keep LiveKit, STT, and TTS local. Evaluate only explicitly approved LLM candidates; use a cloud LLM only after documented local-gate failure and a separate explicit model/provider/privacy approval. No automatic fallback may make an acceptance test pass.
 - Never commit secrets, private recordings, conversation content, model weights, caches, generated engines, provider credentials, or local environment values.
 - Give each new wire contract one owner, a version, limits, terminal semantics, and executable producer/consumer tests.
 - Record model and artifact identity by revision/hash and provenance.
@@ -87,55 +87,66 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 ## Slice 2 — Measured host/model and LLM-provider budget
 
+> **Cumulative-delivery override (2026-08-11):** Pasha fixed Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and pinned-legacy Qwen3 CustomVoice/`ryan` for Slices 2–5 despite recorded hard-gate misses. Failed gates remain failed and are never relabelled. The branch proceeded through Slice 5 and Pasha attested the final human microphone/listening test on 2026-08-11. Slice 6 has not started.
+>
+> **Post-review runtime transport correction (2026-08-11):** historical Slice 2 Tailscale discovery/measurement evidence remains unchanged, but Slice 4–5 runtime readiness and request admission no longer perform DNS/route/TSMP/WireGuard proof. Pasha accepts exact temporary HTTP endpoint `http://rpi:4000` for the private test setup; bearer-authenticated alias capability, redirect rejection, output bounds, cancellation, redaction, and no fallback remain required. HTTPS is deferred.
+
 ### User-visible outcome
 
-The project has evidence-backed local STT/TTS selections and exactly one measured LLM provider mode. A capable local LLM is selected when it passes; an approved cloud LLM is selected only if local candidates demonstrably cannot meet the real VRAM, latency, or quality budget.
+The project has repeatable measurements and a transparent operator-fixed delivery stack. LFM remains a failed local candidate. `deepseek-v4-flash` failed primary/repeat automated cloud gates but is fixed with no fallback. Whisper large-v3-turbo keeps its passed WER/latency and uses an explicit postmeasurement CPU ceiling of 90% after its 88.04% result missed the original 83.33% gate. Qwen3 CustomVoice/`ryan` passed automated timing/resource/repeat gates; its separate blind rubric remains unscored, while Pasha later accepted the overall Slice 5 listening experience. Overlap failures remain recorded; this checkpoint is not an evidence-backed all-gates-pass claim.
 
 ### Included scope
 
-- A repeatable benchmark harness that records the host, driver, runtime, artifact/provider identity, and configuration.
+- A repeatable benchmark harness that records the host, driver, runtime, artifact/provider identity, configuration, postmeasurement exceptions, and failed gates without rewriting them.
 - A preregistered Russian STT corpus/rubric, LLM response rubric, and TTS listening set that contain no private recordings in Git.
-- At least two credible local candidates per inference role, unless a documented compatibility/license screen leaves only one testable candidate. The user's preferred local LLM candidate is added first when the user supplies its exact identity; this roadmap does not guess it.
+- Preserve both measured Whisper/Piper candidate sets and failed official LFM evidence. The delivery override selects Whisper large-v3-turbo and freshly validates pinned-legacy `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` with `faster-qwen3-tts` 0.2.6, speaker `ryan`, Russian, chunk 4, temperature 0.8, top-p 0.9, top-k 50, repetition penalty 1.05, max 2048, and no fixed seed.
+- One explicit cloud-gateway investigation: LiteLLM at `http://rpi:4000`, carried only over a proven Tailscale WireGuard path, with no redirect, implicit model default, alternate endpoint, or fallback.
+- Before cloud inference, authenticated alias discovery, explicit selection of only `deepseek-v4-flash`, recorded operator-attested opaque DeepSeek routing, and an approved committed superseding preregistration. Cost/privacy/provider provenance are explicitly not evaluated under this temporary exception rather than silently assumed.
+- Cloud measurement with public synthetic fixtures only: permitted-field filtering, concurrency `1/2/4`, TTFT/visible/completion/throughput/fairness, cancellation, sustained behavior, safe usage/error observations, and local TTS overlap only after component gates pass.
 - Cold, warm, and sustained local measurement of load time, latency, throughput, VRAM, RAM, CPU, GPU use, cancellation, and recovery.
 - Required overlap measurements: local-LLM decode with TTS startup, plus new STT admission while prior response work is being cancelled.
-- A conditional cloud-LLM evaluation only if no local LLM passes, covering response quality/latency, streaming/cancellation, provider availability, credential flow, endpoint/model allowlist, data retention/training policy, region where relevant, usage/cost, and privacy-safe observability.
+- A fail-closed LLM outcome: the failed LFM result cannot be erased or disguised. Select cloud mode only if the one explicit LiteLLM alias passes every transport, identity, privacy, cost, quality, latency, concurrency, cancellation, and no-fallback gate; otherwise retain no LLM selection.
 - Selection report for local STT/TTS and one LLM provider mode, with explicit context/concurrency/admission limits and no fallback route.
 
 ### Excluded scope
 
-- Production inference services, LiveKit, browser/avatar work, deployment automation, wake training, cloud STT/TTS, automatic provider fallback, and model-quality claims beyond the fixed evaluation sets.
+- Production inference services, LiveKit, browser/avatar work, deployment automation, wake training, cloud STT/TTS, LFM retry, alternate gateways/models/providers, automatic provider fallback, and model-quality claims beyond the fixed evaluation sets.
 - Committing model weights, provider/registry tokens, private samples, or raw conversational content.
 
 ### Dependencies
 
 - Slice 1 contracts and deterministic tracer are green.
-- Candidate licenses/acquisition paths and any conditional cloud privacy terms are reviewable without exposing credentials.
+- Local artifact licenses/acquisition paths remain reviewable without exposing credentials. The task-private test credential authenticated over the proven transport. The user selected only `deepseek-v4-flash` and accepts an operator-attested opaque route; completion requests were blocked until the superseding preregistration was committed. Defaults, other aliases, fallback, and production use remain forbidden; ADR-0005 covered only the cumulative diagnostics and final live human turn completed on 2026-08-11.
 
 ### Acceptance criteria
 
 - Numeric resource, latency, and quality pass/fail thresholds and scoring rules are committed before candidate results are viewed.
 - Every local result identifies artifact revision/hash, quantization, serving runtime/version, driver, context, concurrency, and benchmark input revision.
 - Measurements include idle and peak VRAM/RAM, cold and warm latency, sustained behavior, and all required overlap/cancellation cases from [`architecture.md`](architecture.md#113-measurements-required-before-modelprovider-selection).
-- Local LLM candidates are tested first; a passing local LLM remains the initial selection.
-- A cloud LLM can be selected only with recorded evidence that all tested local LLM candidates fail at least one preregistered gate and with an approved provider/model/endpoint/privacy/cost record.
-- Selected local STT/TTS and the selected LLM mode pass their quality/latency gates. Local mode also passes the complete measured peak with an explicit reserve; cloud mode reports the smaller local resource envelope and its network/provider budget separately.
+- Local LLM evidence contains exactly the approved failed `LiquidAI/LFM2.5-2.6B` native BF16/vLLM identity; it is never retried or replaced by another local LLM.
+- Cloud discovery is limited to `http://rpi:4000`. Before prompt/context transfer, DNS must resolve to Tailscale, the route must use `tailscale0`, a WireGuard path must succeed, redirects must be rejected, and credential discovery must remain explicitly scoped and non-echoing.
+- Cloud inference contains exactly one explicitly selected LiteLLM alias, `deepseek-v4-flash`, and records the underlying route as operator-attested/opaque rather than config-proven; gateway default, alias substitution, alternate alias, and observed fallback are hard failures.
+- A clearly superseding cloud preregistration with transport, permitted-field/privacy-safe handling, concurrency `1/2/4`, quality, latency, fairness, cancellation, sustained, and repeat gates is approved and committed before any completion request. It explicitly records that provider cost/retention/training/region/provenance are outside this temporary synthetic scope.
+- Selected local STT/TTS and the selected LLM mode pass their quality/latency gates. Cloud mode reports its local resource envelope and network/provider budget separately, and records content-free usage/cost/error observations plus provider privacy facts.
 - Repeating the winning configuration produces results inside the declared tolerance.
 - Exactly one provider mode is selected, is visible in evidence/configuration, and has no automatic failure-triggered route to another provider.
 - If neither a local LLM nor an approved cloud candidate passes, the slice ends with a failed selection report and Slice 4 cannot start.
 
 ### Validation method
 
-Run local candidates first on the canonical host from cold load through sustained and overlap scenarios. Independently review the blind/fixed quality scoring and rerun the winning configuration. Only after recorded local failure, run the cloud-provider privacy/credential/latency/quality/usage evaluation without embedding secrets or content in evidence.
+Preserve the completed LFM and local STT/TTS runs. Re-prove the Tailscale route, commit the superseding preregistration, then run only `deepseek-v4-flash` with committed public synthetic quality, concurrency `1/2/4`, pressure, cancellation, sustained, permitted-field, safe-usage/error, and repeat cases. Do not inspect further RPi mapping, test another alias, or send private/live content. Any measured identity, transport, request-privacy, or performance failure remains fail-closed; provider policy/cost remain intentionally unclaimed.
 
 ### Evidence required before Slice 3
 
 - Machine-readable local benchmark results and a human-readable selection rationale.
 - Precommitted thresholds/rubrics and repeat-run comparison.
 - Selected local STT/TTS artifact manifests and measured residency/admission constraints.
-- Selected LLM provider mode/identity; if cloud, local rejection evidence plus provider privacy/retention/endpoint/cost approval.
+- A synthetic-test result for the operator-attested `deepseek-v4-flash` alias, or an explicit failed-selection record. The normal Slice 4 gate remains failed; ADR-0005 covered only cumulative Slices 3–5 and the final live human turn completed on 2026-08-11, not production use or Slice 6.
 - Explicit list of hypotheses that component/provider benchmarking has not tested.
 
 ## Slice 3 — Real local STT voice turn
+
+> **Checkpoint:** automated public-corpus real Whisper path passes. The deferred physical microphone path was later accepted by Pasha through the complete Slice 5 human command on 2026-08-11.
 
 ### User-visible outcome
 
@@ -154,12 +165,12 @@ A user can speak Russian to a host-local capture path and see an accurate final 
 
 ### Dependencies
 
-- Slice 2 selected STT artifact, limits, and quality/latency thresholds.
+- Slice 2 operator-fixed Whisper large-v3-turbo artifact and transparent 90% CPU delivery exception; original failed 83.33% gate remains recorded.
 
 ### Acceptance criteria
 
 - The fixed Russian corpus meets the preregistered accuracy and finalization thresholds on the canonical host.
-- A manual microphone turn displays partial feedback if supported and exactly one final transcript.
+- Automated/public-corpus capture-contract coverage produces exactly one final transcript; downstream physical microphone acceptance is recorded by the dated Slice 5 operator attestation.
 - Audio format mismatch, model unavailable, cancellation, and process loss have the architecture's explicit terminal behavior.
 - No raw audio is retained by default; diagnostic capture requires an explicit bounded mode outside Git.
 - STT identity/readiness and per-turn latency/resource observations are available without transcript content in default logs.
@@ -167,7 +178,7 @@ A user can speak Russian to a host-local capture path and see an accurate final 
 
 ### Validation method
 
-Run corpus scoring, public tracer success/failure cases, live microphone acceptance, and a cancellation during transcription. Compare resource/latency results with Slice 2 tolerances.
+Run corpus scoring, public tracer success/failure cases, capture-format/non-retention checks, and cancellation during transcription. Compare resource/latency results with the transparent Slice 2 delivery limits. Physical microphone acceptance is owned by and now recorded in Slice 5.
 
 ### Evidence required before Slice 4
 
@@ -177,6 +188,8 @@ Run corpus scoring, public tracer success/failure cases, live microphone accepta
 - One redacted trace proving a real STT result completes the tracer.
 
 ## Slice 4 — Selected LLM-provider response
+
+> **Checkpoint:** the single-alias real provider adapter, bounded context, filtering, isolation, redaction, cancellation, and public real-STT tracer pass. Slice 2 provider performance/quality gates remain failed under the cumulative operator override.
 
 ### User-visible outcome
 
@@ -198,16 +211,16 @@ After a real local transcript, the user receives a relevant response from the on
 ### Dependencies
 
 - Slice 3 real STT path is green.
-- Slice 2 selected LLM provider mode, model/provider identity, context/admission limits, rubric, and any cloud privacy approval.
+- Slice 2 operator-fixed `deepseek-v4-flash` alias, context/admission limits, failed measurement record, operator-attested opaque routing, and no-fallback policy. Cumulative delivery authorizes implementation/final user test but not a claim that the failed cloud gates passed.
 
 ### Acceptance criteria
 
 - The fixed response set meets the preregistered relevance, language, safety, latency, and response-length rubric.
 - First-token, completion, context, resource/network, usage/cost where available, and cancellation observations remain within the selected budget.
 - Provider mode/model identity is explicit in safe configuration, readiness, and metadata while credentials and prompt/response content remain absent.
-- In cloud mode only final transcript and permitted context cross the allowlisted TLS endpoint; raw audio, local files, environment values, and secrets do not.
+- In cloud mode only final transcript and permitted context cross exact temporary endpoint `http://rpi:4000`; raw audio, local files, environment values, and secrets do not. Runtime Tailscale proof is intentionally absent under the post-review exception, while redirects remain rejected.
 - Session context never crosses session IDs and is not durably persisted by default.
-- Selected-provider failure yields no fabricated answer, alternate-provider request, or downstream TTS request.
+- Selected-provider failure yields no fabricated answer or alternate-provider request. TTS handoff waits for the exact selected response identity; a later stream failure discards buffered synthesis and emits no public TTS audio.
 - Real STT → selected LLM provider → deterministic TTS completes one correlated turn through the public tracer.
 
 ### Validation method
@@ -222,6 +235,8 @@ Run the fixed evaluation set, multi-turn session-isolation cases, permitted-fiel
 - Updated overlap/resource or cloud-network budget using observed provider behavior.
 
 ## Slice 5 — Real local-STT/TTS spoken conversation
+
+> **Checkpoint:** cumulative public diagnostics proved complete real Whisper → `deepseek-v4-flash` → Qwen3 turns and interruption, with peak VRAM at most `7,600 MiB`. The final contract-format run transparently completed two of three turns and hit the already-known empty provider response on the third; its cancellation case also stopped at provider failure before TTS. After the PipeWire correction, Pasha ran the final physical microphone/listening command and attested overall success on 2026-08-11. The automated failures remain failed, and Slice 6 is not started.
 
 ### User-visible outcome
 
@@ -242,12 +257,13 @@ A user can speak through a host-local path and hear a locally synthesized spoken
 ### Dependencies
 
 - Slice 4 real-STT/selected-provider path is green.
-- Slice 2 selected TTS artifact, voice/license provenance, listening rubric, and resource limits.
+- Slice 2 operator-fixed Qwen3 CustomVoice artifact/runtime/configuration, Apache-2.0 provenance, automated timing/resource evidence, and the dated overall Slice 5 human acceptance; no granular listening-rubric score is inferred.
 
 ### Acceptance criteria
 
 - Fixed listening material meets the preregistered Russian intelligibility/naturalness and first-audio/real-time-factor thresholds.
 - A live microphone turn produces an audible answer with exactly one correlated completion.
+- Microphone capture stays within 1–30 seconds and accepts PipeWire status 1 only for exact-size bounded PCM; recorder availability/setup/startup/nonzero/timeout/output and cleanup failures stop before STT with content-free failure output, no traceback, and explicit input-retention status.
 - Required selected-provider→TTS overlap remains within the measured GPU/RAM reserve in local mode or the measured network/TTS reserve in cloud mode; sustained turns do not show unbounded memory growth.
 - Cancellation stops synthesis and output within the declared bound and emits no stale chunks.
 - TTS failure preserves valid text but cannot mark the spoken turn successfully completed.
@@ -259,12 +275,15 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 ### Evidence required before Slice 6
 
+- Final human microphone/listening acceptance using the single command in [`README.md`](../README.md#final-slice-5-human-acceptance): ✅ Pasha attested overall success on 2026-08-11; no transcript, response, timing, pronunciation detail, adjective, or granular score is claimed.
 - Listening/latency/resource report tied to the selected artifact.
 - Sustained-run and cancellation traces.
 - Complete real-inference turn trace and declared audio format.
 - Updated headroom calculation for LiveKit and browser addition.
 
 ## Slice 6 — Local LiveKit media and interruption
+
+> **Not started:** the Slice 5 human gate is accepted, but this documentation update does not authorize or begin Slice 6.
 
 ### User-visible outcome
 

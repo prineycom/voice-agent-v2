@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/slice2-runtime-artifacts.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "expected_download_bytes", "python", "vllm", "stt_tts"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-runtime-artifacts.v1"},
+    "expected_download_bytes": {"type": "integer", "minimum": 1},
+    "python": {"type": "object"},
+    "vllm": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "revision", "license", "requires_python", "wheel", "resolved_dependency_count", "resolved_download_bytes", "resolution_evidence_sha256", "size_evidence_sha256", "major_dependencies", "server_limits"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "pattern": "[0-9a-f]{40}"},
+        "license": {"type": "string", "minLength": 3},
+        "requires_python": {"type": "string", "minLength": 3},
+        "wheel": {"type": "object"},
+        "resolved_dependency_count": {"type": "integer", "minimum": 1},
+        "resolved_download_bytes": {"type": "integer", "minimum": 1},
+        "resolution_evidence_sha256": {"type": "string", "pattern": "[0-9a-f]{64}"},
+        "size_evidence_sha256": {"type": "string", "pattern": "[0-9a-f]{64}"},
+        "major_dependencies": {"type": "array", "minItems": 3, "items": {"type": "string", "minLength": 3}},
+        "server_limits": {"type": "object"}
+      }
+    },
+    "stt_tts": {"type": "object"}
+  }
+}

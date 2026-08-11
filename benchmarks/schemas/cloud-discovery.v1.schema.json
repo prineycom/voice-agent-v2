@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/cloud-discovery.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "captured_at", "gateway", "transport", "discovery", "credential_lookup", "model_selection", "privacy", "raw_evidence"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-cloud-discovery.v1"},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "gateway": {
+      "type": "object", "additionalProperties": false,
+      "required": ["implementation", "allowlisted_endpoint", "credential_supplied", "credential_source", "credential_exception_scope"],
+      "properties": {
+        "implementation": {"type": "string", "const": "LiteLLM"},
+        "allowlisted_endpoint": {"type": "string", "const": "http://rpi:4000"},
+        "credential_supplied": {"type": "boolean", "const": true},
+        "credential_source": {"type": "string", "const": "task-private-mode-0600-file"},
+        "credential_exception_scope": {"type": "string", "const": "closed-circuit-slice2-test-only"}
+      }
+    },
+    "transport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dns_address_class", "kernel_route_interface", "tailscale_peer_online", "tailscale_path", "payload_transport_assessment", "fail_closed_condition"],
+      "properties": {
+        "dns_address_class": {"type": "string", "const": "tailscale-cgnat-ipv4"},
+        "kernel_route_interface": {"type": "string", "const": "tailscale0"},
+        "tailscale_peer_online": {"type": "boolean", "const": true},
+        "tailscale_path": {"type": "string", "enum": ["direct-wireguard", "derp-wireguard"]},
+        "payload_transport_assessment": {"type": "string", "minLength": 20},
+        "fail_closed_condition": {"type": "string", "minLength": 20}
+      }
+    },
+    "discovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["liveliness_status", "readiness_status", "model_list_status", "model_list_error_class", "authentication_required", "authenticated_model_list_status"],
+      "properties": {
+        "liveliness_status": {"type": "integer", "const": 200},
+        "readiness_status": {"type": "integer", "const": 200},
+        "model_list_status": {"type": "integer", "const": 401},
+        "model_list_error_class": {"type": "string", "const": "auth_error"},
+        "authentication_required": {"type": "boolean", "const": true},
+        "authenticated_model_list_status": {"type": "integer", "const": 200}
+      }
+    },
+    "credential_lookup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["authorized_scope", "legacy_project_status", "status", "likely_files_scanned", "variable_name", "reference_sources", "authorized_remote_source", "ssh_port", "ssh_exit_code", "host_key_status", "presented_host_key_fingerprints", "task_private_known_hosts", "global_ssh_trust_changed", "public_key_auth_reached", "public_key_auth_succeeded", "configured_identity_paths", "configured_public_identity_count", "ssh_agent_public_identity_count", "dedicated_public_identity", "private_identity_files_read", "sudo_reached", "remote_source_exists", "remote_failure_class", "remote_file_read", "task_private_token_file_created", "task_private_token_file_present", "task_private_token_file_mode"],
+      "properties": {
+        "authorized_scope": {"type": "string", "const": "/home/priney/Projects/mymate/projects/voice-agent"},
+        "legacy_project_status": {"type": "string", "const": "not-found"},
+        "status": {"type": "string", "const": "authenticated-task-private-test-exception"},
+        "likely_files_scanned": {"type": "integer", "const": 11},
+        "variable_name": {"type": "string", "const": "LITELLM_MASTER_KEY"},
+        "reference_sources": {
+          "type": "array", "const": ["infra/pi/litellm/config.yaml", "infra/pi/agent/deploy/litellm.service"]
+        },
+        "authorized_remote_source": {"type": "string", "const": "rpi:/etc/voice-agent/litellm.env"},
+        "ssh_port": {"type": "integer", "const": 2222},
+        "ssh_exit_code": {"type": "integer", "const": 1},
+        "host_key_status": {"type": "string", "const": "user-confirmed-rescan-matched-task-private"},
+        "presented_host_key_fingerprints": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ed25519", "ecdsa", "rsa"],
+          "properties": {
+            "ed25519": {"type": "string", "const": "SHA256:TEsmlVCLgPk9AMsZ3cE+1b0DaTV4m9ZxM3eNlHf2Dgw"},
+            "ecdsa": {"type": "string", "const": "SHA256:MhjxS7QLwXLg+L9/J12cp1fLtzRxlRfwverJrJXi36Y"},
+            "rsa": {"type": "string", "const": "SHA256:vnxGN93CgELgaAhQltzJdf5q/FUmEVNUhJnIUh+eFY8"}
+          }
+        },
+        "task_private_known_hosts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["path", "mode", "algorithm"],
+          "properties": {
+            "path": {"type": "string", "const": "/home/priney/.cache/voice-agent-v2/slice-2/secrets/rpi-2222.known_hosts"},
+            "mode": {"type": "string", "const": "0600"},
+            "algorithm": {"type": "string", "const": "ED25519"}
+          }
+        },
+        "global_ssh_trust_changed": {"type": "boolean", "const": false},
+        "public_key_auth_reached": {"type": "boolean", "const": true},
+        "public_key_auth_succeeded": {"type": "boolean", "const": true},
+        "configured_identity_paths": {
+          "type": "array",
+          "const": ["/home/priney/.ssh/id_rsa", "/home/priney/.ssh/id_ecdsa", "/home/priney/.ssh/id_ecdsa_sk", "/home/priney/.ssh/id_ed25519", "/home/priney/.ssh/id_ed25519_sk"]
+        },
+        "configured_public_identity_count": {"type": "integer", "const": 0},
+        "ssh_agent_public_identity_count": {"type": "integer", "const": 0},
+        "dedicated_public_identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["private_path", "public_path", "algorithm", "fingerprint", "comment", "tailscale_source_ipv4", "private_mode", "public_mode", "remote_installation_confirmed"],
+          "properties": {
+            "private_path": {"type": "string", "const": "/home/priney/.ssh/id_ed25519_rpi_litellm"},
+            "public_path": {"type": "string", "const": "/home/priney/.ssh/id_ed25519_rpi_litellm.pub"},
+            "algorithm": {"type": "string", "const": "ED25519"},
+            "fingerprint": {"type": "string", "const": "SHA256:85c6cJp2Ybv+otOTuID2l1zDxOOkFtd6sb498wWMKi4"},
+            "comment": {"type": "string", "const": "voice-agent-v2-litellm@priney-arch"},
+            "tailscale_source_ipv4": {"type": "string", "const": "100.78.238.32"},
+            "private_mode": {"type": "string", "const": "0600"},
+            "public_mode": {"type": "string", "const": "0644"},
+            "remote_installation_confirmed": {"type": "boolean", "const": true}
+          }
+        },
+        "private_identity_files_read": {"type": "boolean", "const": false},
+        "sudo_reached": {"type": "boolean", "const": true},
+        "remote_source_exists": {"type": "boolean", "const": false},
+        "remote_failure_class": {"type": "string", "const": "FileNotFoundError"},
+        "remote_file_read": {"type": "boolean", "const": false},
+        "task_private_token_file_created": {"type": "boolean", "const": false},
+        "task_private_token_file_present": {"type": "boolean", "const": true},
+        "task_private_token_file_mode": {"type": "string", "const": "0600"}
+      }
+    },
+    "model_selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "discovered_alias_count", "aliases", "selected_alias", "underlying_provider", "underlying_model", "selected_alias_mapping"],
+      "properties": {
+        "status": {"type": "string", "const": "selected-operator-attested"},
+        "discovered_alias_count": {"type": "integer", "const": 6},
+        "aliases": {"type": "array", "const": ["qwen3.6-35b-a3b", "gpt-oss:120b", "deepseek-v4-pro", "deepseek-v4-flash", "glm-5.2", "kimi-k2.7-code"]},
+        "selected_alias": {"type": "string", "const": "deepseek-v4-flash"},
+        "underlying_provider": {"type": "string", "const": "DeepSeek route (operator-attested)"},
+        "underlying_model": {"type": "string", "const": "opaque operator-attested route behind deepseek-v4-flash"},
+        "selected_alias_mapping": {
+          "type": "object", "additionalProperties": false,
+          "required": ["runtime", "image", "compose_service", "active_config_path", "container_config_path", "matching_route_count", "fallback_sections_present", "route_shape", "upstream_endpoint", "operator_attestation_accepted", "active_config_proved_mapping", "cost_privacy_metadata_evaluated", "credential_values_read", "unrelated_aliases_reported"],
+          "properties": {
+            "runtime": {"type": "string", "const": "docker"},
+            "image": {"type": "string", "const": "ghcr.io/berriai/litellm:v1.87.0"},
+            "compose_service": {"type": "string", "const": "litellm"},
+            "active_config_path": {"type": "string", "const": "/home/priney/selfhost/litellm/config.yaml"},
+            "container_config_path": {"type": "string", "const": "/app/config.yaml"},
+            "matching_route_count": {"type": "integer", "const": 0},
+            "fallback_sections_present": {"type": "array", "const": []},
+            "route_shape": {"type": "string", "const": "operator-attested opaque single selected alias"},
+            "upstream_endpoint": {"type": "null"},
+            "operator_attestation_accepted": {"type": "boolean", "const": true},
+            "active_config_proved_mapping": {"type": "boolean", "const": false},
+            "cost_privacy_metadata_evaluated": {"type": "boolean", "const": false},
+            "credential_values_read": {"type": "boolean", "const": false},
+            "unrelated_aliases_reported": {"type": "boolean", "const": false}
+          }
+        }
+      }
+    },
+    "privacy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["prompt_request_count", "private_content_sent", "ambient_credential_sources_read", "credential_value_exposed_by_harness", "disclosure_risk_exception", "permitted_surfaces"],
+      "properties": {
+        "prompt_request_count": {"type": "integer", "const": 0},
+        "private_content_sent": {"type": "boolean", "const": false},
+        "ambient_credential_sources_read": {"type": "boolean", "const": false},
+        "credential_value_exposed_by_harness": {"type": "boolean", "const": false},
+        "disclosure_risk_exception": {"type": "string", "const": "user-accepted-for-closed-circuit-test-only"},
+        "permitted_surfaces": {"type": "array", "const": ["/health/liveliness", "/health/readiness", "/v1/models"]}
+      }
+    },
+    "raw_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["outside_git", "directory", "sha256"],
+      "properties": {
+        "outside_git": {"type": "boolean", "const": true},
+        "directory": {"type": "string", "const": "/home/priney/.cache/voice-agent-v2/slice-2/discovery/litellm-rpi-4000"},
+        "sha256": {"type": "object", "minProperties": 36, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+      }
+    }
+  }
+}

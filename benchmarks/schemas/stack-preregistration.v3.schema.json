@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/schemas/stack-preregistration.v3.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "decision_key", "approval", "supersedes", "cloud", "stt", "tts", "overlap", "integrity"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "voice-agent.slice2-stack-preregistration.v3"},
+    "state": {"type": "string", "const": "approved"},
+    "decision_key": {"type": "string", "const": "slice2-fixed-stack-delivery"},
+    "approval": {"type": "object", "required": ["authority", "reference", "decided_at"], "additionalProperties": false, "properties": {"authority": {"type": "string", "minLength": 20}, "reference": {"type": "string", "const": "phase-5-delivery-update"}, "decided_at": {"type": "string", "format": "date-time"}}},
+    "supersedes": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 10}},
+    "cloud": {"type": "object"},
+    "stt": {"type": "object"},
+    "tts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "revision", "license", "repository_bytes", "files", "runtime", "legacy_provenance", "configuration", "thresholds"],
+      "properties": {
+        "identity": {"type": "string", "const": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"},
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "license": {"type": "string", "const": "Apache-2.0"},
+        "repository_bytes": {"type": "integer", "minimum": 4000000000},
+        "files": {"type": "array", "minItems": 13, "items": {"type": "object", "required": ["path", "bytes", "sha256"], "additionalProperties": false, "properties": {"path": {"type": "string"}, "bytes": {"type": "integer", "minimum": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}},
+        "runtime": {"type": "object"},
+        "legacy_provenance": {"type": "object"},
+        "configuration": {"type": "object"},
+        "thresholds": {"type": "object"}
+      }
+    },
+    "overlap": {"type": "object"},
+    "integrity": {"type": "object"}
+  }
+}

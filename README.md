@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Slice 1 executable foundation.** The repository now includes the dependency-free deterministic synthetic voice-turn tracer from [`docs/roadmap.md`](docs/roadmap.md#slice-1--deterministic-zero-secret-voice-turn-tracer), but not a real voice stack. No inference model, cloud provider, production framework, renderer framework, or detailed avatar-control contract has been selected. Those choices remain gated by measured slices and a separate avatar Grill/design task rather than implementation assumptions.
+**Cumulative Slices 2–5 delivery accepted by Pasha on 2026-08-11.** The deterministic Slice 1 tracer remains executable. The branch runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` at the exact temporary endpoint `http://rpi:4000`, and local Qwen3 CustomVoice/`ryan`. After the PipeWire correction, Pasha completed the documented microphone/listening command and attested that the full physical-microphone → Whisper → selected LLM → Qwen playback experience worked. Automated public-corpus diagnostics still include the recorded provider and overlap failures; this human acceptance does not reclassify any failed gate. Slice 6 has not started.
 
 ## Root verification
 
@@ -24,9 +24,21 @@ It uses only POSIX `sh` and the Python 3.11+ standard library, creates isolated 
 
 The command reports each preserved path. Both PCM files use signed 16-bit little-endian mono samples at 16 kHz; `output.pcm` contains the deterministic audible tone. The destination must not already exist, preventing accidental replacement of prior evidence. The toolchain is a Slice 1 reproducibility choice only; it does not select the future production application or inference framework.
 
+## Final Slice 5 human acceptance
+
+Pasha ran this canonical-host command against PR 14 head `f1a3de997296e6dac87203cf5c2e157945a865b8` on 2026-08-11:
+
+```sh
+./run-voice-turn --microphone --duration 8 --play
+```
+
+Pasha attested that the complete physical microphone capture, Whisper → `deepseek-v4-flash` → Qwen3 `ryan` turn, audible playback, and overall manual Slice 5 experience succeeded. No transcript, response, latency, pronunciation detail, quality adjective, or granular score was provided or inferred.
+
+Microphone capture is bounded to 1–30 seconds. The command removes temporary microphone PCM before admitting inference, streams Qwen output without an output file, and writes only content-free evidence under the authorized cache. On this host PipeWire 1.6.8 may return status 1 after producing the exact requested bounded capture; the CLI accepts that case only when byte count is exact. Recorder availability/setup/startup, timeout, nonzero-without-complete-output, missing/unreadable/wrong-size output, and cleanup failures produce content-free `Failure: microphone_capture/<code>` and `Terminal: turn.failed` evidence without a traceback or model admission. Cleanup failure also reports whether microphone bytes may remain after deletion and scrubbing attempts. A live transcript crosses the exact operator-approved HTTP LiteLLM boundary; runtime DNS/route/TSMP proof is not enforced, redirects and fallback aliases remain forbidden, and HTTPS is deferred.
+
 ## Current scope
 
-- One Arch Linux host runs every self-hosted media, orchestration, STT, TTS, application, and optional local-LLM process; there is no Pi/Desktop compute split.
+- One Arch Linux host runs every media, orchestration, STT, TTS, application, and optional local-LLM process. ADR-0004 permits only one narrow auxiliary role: an allowlisted tailnet LiteLLM relay for a measured cloud path, never Pi-side inference/control.
 - A private browser experience uses local LiveKit and local STT/TTS. LLM access uses one explicitly configured provider mode, with local preferred initially.
 - A cloud LLM may be selected only after local candidates fail preregistered resource, latency, or quality gates. It is never an automatic or silent fallback.
 - Tailscale membership is sufficient authorization during the current private stage.
@@ -39,12 +51,12 @@ The command reports each preserved path. Both PCM files use signed 16-bit little
 - The detailed avatar-module and visual-control contract requires a dedicated Grill/design task before MVP eye implementation.
 - Live2D and 3D remain possible later avatar modules; neither is an MVP renderer decision.
 - Optional wake-word activation, including any custom Russian wake model, begins only after the core MVP is reliable.
-- Exact model, quantization, inference server, cloud provider, and application-framework choices wait for their measurement gates.
+- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the narrow operator-attested alias exception covered public diagnostics and the now-completed single final human turn, not further live or production use.
 - Selective migration from the legacy repository waits for a concrete vertical slice and fresh validation.
 
 ## Non-goals
 
-- A Raspberry Pi/Desktop or other required user-managed compute-host split.
+- A Raspberry Pi/Desktop inference or control split; ADR-0004's single LiteLLM relay is the only narrow topology exception.
 - Cloud STT/TTS or silent/automatic failover between local and cloud LLM providers.
 - Audio2Face (A2F) or Audio2Emotion (A2E) in the active V2 architecture.
 - Kiosk mode.

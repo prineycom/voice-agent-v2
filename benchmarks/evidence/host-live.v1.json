@@ -1,0 +1,40 @@
+{
+  "schema_version": "voice-agent.slice2-host.v1",
+  "captured_at": "2026-08-10T15:55:33+00:00",
+  "redaction": "hostname, user identity, device UUIDs, process command lines, and environment omitted",
+  "os": {
+    "pretty_name": "EndeavourOS",
+    "id": "endeavouros",
+    "kernel": "7.1.6-arch1-1",
+    "machine": "x86_64"
+  },
+  "cpu": {
+    "architecture": "x86_64",
+    "model": "Intel(R) Core(TM) i5-10600KF CPU @ 4.10GHz",
+    "logical_cpus": 12,
+    "physical_cores": 6,
+    "threads_per_core": 2
+  },
+  "memory": {
+    "total_bytes": 33537937408,
+    "available_at_capture_bytes": 29100744704,
+    "swap_total_bytes": 536866816,
+    "swap_free_at_capture_bytes": 536866816
+  },
+  "gpu": {
+    "model": "NVIDIA GeForce RTX 4070",
+    "driver_version": "610.57.04",
+    "vram_total_mib": 12282,
+    "vram_used_at_capture_mib": 519,
+    "gpu_utilization_at_capture_percent": 0,
+    "memory_utilization_at_capture_percent": 0
+  },
+  "benchmark_capabilities": {
+    "python": "3.14.6",
+    "ffmpeg": "n9.0",
+    "podman": "6.0.2",
+    "vulkan_instance": "1.4.357",
+    "cmake": null,
+    "nvidia_toolkit_compiler": null
+  }
+}

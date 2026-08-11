@@ -12,6 +12,7 @@
 - **Hard dependency** — A capability whose loss prevents the current operation from completing correctly.
 - **Inference service** — A bounded capability that performs STT, LLM, or TTS inference behind an explicit contract.
 - **Legacy reference** — The legacy `prineycom/voice-agent` repository frozen at the pinned audit commit and used only as read-only evidence for selective revalidation.
+- **LLM gateway** — An allowlisted server-side relay to one explicitly selected cloud model alias; it is not itself proof of the underlying provider/model and may not choose an implicit default or fallback.
 - **LLM provider** — The single explicitly selected response-generation backend for a deployment, either host-local or an approved cloud service.
 - **MVP eye** — The initial custom animated-eye avatar module with deterministic pupil, blink, speech-pulse, palette, and state behavior.
 - **Provider selection** — The deliberate configured choice of one LLM provider after measurement and privacy review, never a per-request or failure-triggered fallback.

@@ -1,0 +1,182 @@
+{
+  "schema_version": "voice-agent.slice2-cloud-preregistration.v2",
+  "state": "approved",
+  "decision_key": "slice2-litellm-cloud-preregistration",
+  "supersedes": {
+    "path": "benchmarks/config/preregistration.v1.json",
+    "commit": "f11f6caa42301376b96063cea61a617b94ecaad1",
+    "local_outcome": "failed-selection",
+    "preserve_failed_evidence": true
+  },
+  "approval": {
+    "status": "approved",
+    "authority": "user selected deepseek-v4-flash and directed acceptance of operator-attested opaque DeepSeek routing for this temporary synthetic test",
+    "reference": "decision:slice2-litellm-model-selection",
+    "decided_at": "2026-08-10T23:40:36+02:00"
+  },
+  "provider": {
+    "mode": "cloud",
+    "gateway": "LiteLLM",
+    "gateway_version": "1.87.0",
+    "endpoint": "http://rpi:4000",
+    "transport": "HTTP carried only inside a freshly proven Tailscale WireGuard path; redirects rejected",
+    "selected_alias": "deepseek-v4-flash",
+    "allowed_aliases": ["deepseek-v4-flash"],
+    "underlying_provider": "DeepSeek route (operator-attested)",
+    "underlying_model": "opaque operator-attested route behind deepseek-v4-flash",
+    "routing_provenance": "operator-attested; active config did not prove the mapping",
+    "routing_shape": "one explicitly requested alias; gateway internals intentionally opaque for this test",
+    "automatic_fallback": false,
+    "cloud_stt_tts": false
+  },
+  "credential": {
+    "source": "/home/priney/.cache/voice-agent-v2/slice-2/secrets/litellm.token",
+    "required_mode": "0600",
+    "exception_scope": "user-accepted disclosed test credential for this closed-circuit Slice 2 benchmark only",
+    "never_log": true,
+    "never_send_elsewhere": true
+  },
+  "fixtures": [
+    {
+      "path": "benchmarks/fixtures/llm-russian.v1.json",
+      "sha256": "91afd4d58cfd27116f1f15b67f01771639590a655cb896bcb80dbfd3649dd029",
+      "public_synthetic": true
+    },
+    {
+      "path": "benchmarks/fixtures/llm-parallel-russian.v1.json",
+      "sha256": "f0e9714028b2466b2055949ed05f98d51a6aa6e6a3522635223525ed63b8af55",
+      "public_synthetic": true
+    }
+  ],
+  "request_contract": {
+    "allowed_body_fields": ["model", "messages", "temperature", "top_p", "max_tokens", "seed", "stream", "stream_options"],
+    "allowed_message_roles": ["system", "user"],
+    "allowed_headers": ["Authorization", "Content-Type", "Accept", "Connection"],
+    "forbidden_data": [
+      "private or live transcripts",
+      "microphone or TTS audio",
+      "conversation history from a user session",
+      "local files or file contents",
+      "environment values",
+      "credentials or authorization material",
+      "user identity or account metadata",
+      "tools, retrieval results, or arbitrary context",
+      "any LiteLLM alias other than deepseek-v4-flash"
+    ],
+    "maximum_context_tokens": 4096,
+    "maximum_generated_tokens": 512,
+    "sampling": {"temperature": 0.1, "top_p": 0.9},
+    "seed": 20260810,
+    "stream": true,
+    "usage_observation": "stream_options.include_usage=true; numeric token counts only"
+  },
+  "execution_order": [
+    "Commit this superseding cloud preregistration, schemas, fixtures, provider policy, and network/privacy guards before the first completion request.",
+    "At every run, require the exact task-private credential file mode 0600 and re-prove rpi resolves only to Tailscale, the route uses tailscale0, and Tailscale ping succeeds.",
+    "Send only the committed public synthetic fixtures to model alias deepseek-v4-flash; reject redirects, any other alias, extra request field, forbidden role, or non-fixture content before network I/O.",
+    "Run the 14 fixed quality prompts once, then all 12 marked prompts for three complete rounds at concurrency 1, 2, and 4.",
+    "Run four deterministic 3584-input-token pressure requests, then cancellation of one request during a four-request batch with peer and replacement observations.",
+    "Store content-bearing output only under the authorized Slice 2 cache; track numeric aggregates, identities, gate results, hashes, safe usage counts, and content-free error classes only.",
+    "If every component gate passes, request blind quality scoring and then repeat the complete winning configuration; otherwise record no cloud selection and do not try another alias/provider.",
+    "Never extend this test exception to private/live transcripts, production activation, another endpoint, another alias, cloud STT/TTS, implicit defaults, or fallback."
+  ],
+  "measurement": {
+    "percentile_method": "Nearest-rank percentile over each complete preregistered set; p95 rank ceil(0.95 × N), p50 rank ceil(0.50 × N), and lower-tail p05 rank ceil(0.05 × N).",
+    "quality": "Run all 14 committed Russian prompts sequentially with one unscored public priming prompt; retain visible output only in the cache for blind 0-4 rubric scoring.",
+    "parallel": "For each concurrency level 1, 2, and 4, submit all 12 marked public requests in complete batches for three rounds; record submit, HTTP acceptance, raw-first-delta, visible-first-content, every output event, completion, numeric usage, response model, and content-free error class.",
+    "context_pressure": "Submit four concurrent deterministic requests built only from committed public fixture text to approximately 3584 input tokens each, bounded by the 4096-token context declaration and 512 generated tokens.",
+    "cancellation": "At concurrency four, close one streaming response after observable output begins while three peers continue, then submit one replacement; record cancel-to-last-output, peer regression, admission, stale output, marker isolation, and gateway recovery without alias change.",
+    "sustained": "Use the three complete parallel rounds as the sustained window; report per-round success, latency, throughput, fairness, and monotonic client RAM trend without provider-content logging.",
+    "repeat": "After all component and blind-quality gates pass, rerun quality, every 1/2/4 round, context pressure, cancellation, and privacy/identity checks with the exact endpoint, alias, fixture hashes, request fields, and credential source.",
+    "raw_evidence": "Content-bearing responses and sanitized transport diagnostics remain under /home/priney/.cache/voice-agent-v2/slice-2/raw/cloud/; tracked results contain no prompt, response, token, environment, request ID, or user/session content."
+  },
+  "thresholds": {
+    "quality": {
+      "critical_failure_count_max": 0,
+      "empty_visible_response_count_max": 0,
+      "overall_dimension_mean_min": 3.1,
+      "relevance_mean_min": 3.0,
+      "correctness_mean_min": 3.0,
+      "russian_naturalness_mean_min": 3.0,
+      "voice_concision_mean_min": 2.75,
+      "safety_honesty_mean_min": 3.5,
+      "visible_word_count_p95_max": 140
+    },
+    "latency": {
+      "concurrency_levels": [1, 2, 4],
+      "raw_first_delta_p95_ms_max_by_concurrency": {"1": 1500, "2": 2000, "4": 3000},
+      "visible_first_content_p95_ms_max_by_concurrency": {"1": 3000, "2": 4000, "4": 6000},
+      "completion_p95_ms_max_by_concurrency": {"1": 12000, "2": 15000, "4": 20000},
+      "http_acceptance_p95_ms_max": 750,
+      "inter_output_gap_p95_ms_max": 750,
+      "context_pressure_failure_count_max": 0
+    },
+    "throughput_fairness": {
+      "per_request_completion_tokens_p05_per_second_min_by_concurrency": {"1": 15.0, "2": 10.0, "4": 8.0},
+      "aggregate_throughput_scale_min": {"concurrency_2_over_1": 1.5, "concurrency_4_over_1": 2.25},
+      "jain_fairness_index_min": 0.9,
+      "slowest_to_median_rate_min": 0.75,
+      "starved_request_count_max": 0,
+      "marker_isolation_failure_count_max": 0
+    },
+    "cancellation": {
+      "cancel_to_last_output_ms_max": 500,
+      "replacement_http_acceptance_ms_max": 750,
+      "unaffected_peer_regression_max_fraction": 0.2,
+      "stale_output_count_max": 0,
+      "recovery_failure_count_max": 0
+    },
+    "identity_transport": {
+      "dns_address_class": "tailscale-cgnat-ipv4",
+      "route_interface": "tailscale0",
+      "tailscale_ping_required": true,
+      "redirect_count_max": 0,
+      "request_alias_mismatch_count_max": 0,
+      "response_model_missing_count_max": 0,
+      "distinct_response_model_values_max": 1,
+      "alternate_alias_request_count_max": 0,
+      "fallback_observation_count_max": 0,
+      "http_error_count_max": 0
+    },
+    "privacy_observability": {
+      "nonfixture_prompt_count_max": 0,
+      "forbidden_request_field_count_max": 0,
+      "forbidden_message_role_count_max": 0,
+      "credential_mode_mismatch_count_max": 0,
+      "credential_log_or_argv_exposure_count_max": 0,
+      "tracked_content_bearing_field_count_max": 0,
+      "usage_missing_count_max": 0,
+      "content_bearing_error_observation_count_max": 0
+    },
+    "sustained": {
+      "failure_count_max": 0,
+      "latency_regression_max_fraction": 0.15,
+      "throughput_regression_max_fraction": 0.15,
+      "client_ram_growth_max_mib_per_round": 64
+    },
+    "repeat_tolerance": {
+      "latency_percentile_regression_max_fraction": 0.15,
+      "throughput_regression_max_fraction": 0.15,
+      "quality_dimension_decline_max": 0.25,
+      "new_critical_failures_max": 0,
+      "new_identity_privacy_failures_max": 0,
+      "gate_status_must_remain_pass": true
+    }
+  },
+  "selection_rule": "Select cloud mode with deepseek-v4-flash only if every preregistered quality, identity, transport, privacy, latency, throughput, fairness, cancellation, sustained, context-pressure, and repeat gate passes. Any failure preserves no LLM selection; never test another alias or fallback automatically.",
+  "scope_exceptions": {
+    "operator_attestation_accepted": true,
+    "cost_evaluated": false,
+    "retention_training_region_evaluated": false,
+    "production_approval": false,
+    "private_or_live_content": false,
+    "reason": "The user explicitly stopped provenance, cost, retention, training, region, and further mapping investigation and accepted an operator-attested opaque DeepSeek route solely for temporary public synthetic Slice 2 measurement."
+  },
+  "integrity": {
+    "results_require_ancestor_commit": true,
+    "completion_results_viewed": false,
+    "discovery_only_before_commit": true,
+    "raw_evidence_outside_git": true,
+    "privacy_rule": "The harness sends only exact committed public fixtures and writes content-bearing cloud responses only to the authorized cache; Git receives numeric aggregates, hashes, approved identities, gate outcomes, and content-free error/usage observations."
+  }
+}
