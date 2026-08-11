@@ -30,7 +30,7 @@ The session controller owns the provider-neutral request/result contract. In clo
 - the approved provider privacy/retention assumptions are recorded before activation;
 - encrypted transport remains the production target; [ADR-0005](0005-operator-fixed-slices-2-5-model-stack.md) records Pasha's narrow acceptance of the exact temporary HTTP gateway without runtime DNS/route/TSMP proof while HTTPS is deferred.
 
-The only authorized cloud path is LiteLLM at `http://rpi:4000`. Authenticated discovery and public-synthetic measurements selected only alias `deepseek-v4-flash`, while its underlying route remains operator-attested and opaque and its automated gates remain failed. ADR-0005 authorizes that failed alias only for cumulative Slices 3–5 and one final human turn; it does not grant production approval or permit another alias or fallback. Runtime still checks bearer-authenticated alias capability and rejects redirects, but it deliberately performs no Tailscale transport proof.
+The only authorized cloud path for the cumulative delivery was LiteLLM at `http://rpi:4000`. Authenticated discovery and public-synthetic measurements selected only alias `deepseek-v4-flash`, while its underlying route remains operator-attested and opaque and its automated gates remain failed. ADR-0005 authorized that failed alias only for cumulative Slices 3–5 and the final human turn completed on 2026-08-11; it does not grant further live/production approval or permit another alias or fallback. Runtime checks bearer-authenticated alias capability and rejects redirects, but deliberately performs no Tailscale transport proof.
 
 STT and TTS remain local in both modes.
 

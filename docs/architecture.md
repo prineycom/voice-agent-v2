@@ -30,13 +30,13 @@ Untested behavior is not implied by a target diagram.
 | D6 | Decision | Custom wake work is optional and deferred until after the core MVP. Kiosk operation is outside current scope. |
 | D7 | Decision | The pinned [legacy repository](#34-pinned-legacy-reference) is provenance, not a dependency. A future slice may selectively migrate a proven contract, component, or test only with fresh V2 validation and recorded origin. |
 | D8 | Decision | The detailed avatar-module and visual-control contract is deferred to a separate Grill/design task that must complete before MVP eye implementation. |
-| D9 | Decision | For the cumulative Slice 2–5 delivery branch, Pasha fixes Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and Qwen3-TTS CustomVoice/`ryan` despite recorded gate failures. Exceptions and pending human evidence remain visible; no fallback or false pass is allowed. See [ADR-0005](adr/0005-operator-fixed-slices-2-5-model-stack.md). |
+| D9 | Decision | For the cumulative Slice 2–5 delivery branch, Pasha fixes Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and Qwen3-TTS CustomVoice/`ryan` despite recorded gate failures. Pasha attested the final human microphone/listening turn on 2026-08-11; every automated failure and exception remains visible, and no fallback or false pass is allowed. See [ADR-0005](adr/0005-operator-fixed-slices-2-5-model-stack.md). |
 
 ## 3. System boundary
 
 ### 3.1 Active product boundary
 
-The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The authorized cloud path adds one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and one explicitly configured operator-attested cloud route. Normal production activation still requires the remaining provider/privacy gates; ADR-0005 alone authorizes the failed alias for cumulative Slices 3–5 and one final human turn. The relay is not a second inference/control plane and never acts as fallback.
+The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The cumulative cloud path added one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and one explicitly configured operator-attested cloud route. Normal production activation still requires the remaining provider/privacy gates; ADR-0005 authorized the failed alias only for cumulative Slices 3–5 and the final human turn completed on 2026-08-11. The relay is not a second inference/control plane and never acts as fallback.
 
 The ordinary browser may run on the canonical PC. A browser on another tailnet device is an optional presentation endpoint: it performs no required inference or orchestration, but it runs the selected avatar module.
 
@@ -159,7 +159,7 @@ Contract versions change for semantic compatibility, not every implementation re
 - Provider mode/identity, correlation, external-transfer fact, latency, usage/cost when available, and error class are observable without logging request/response content.
 - Switching provider is an explicit configuration and readiness transition, not transparent retry behavior.
 
-The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. ADR-0005 subsequently authorizes the same failed alias only for cumulative Slices 3–5 and one final live microphone/listening turn. That exception does not approve general private transcript transfer, production use, or Slice 6.
+The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. ADR-0005 subsequently authorized the same failed alias only for cumulative Slices 3–5 and the single final live microphone/listening turn attested on 2026-08-11. That consumed exception does not approve general private transcript transfer, production use, or Slice 6.
 
 ### 5.2 Avatar-boundary constraints
 

@@ -87,13 +87,13 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 ## Slice 2 — Measured host/model and LLM-provider budget
 
-> **Cumulative-delivery override (2026-08-11):** Pasha fixed Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and pinned-legacy Qwen3 CustomVoice/`ryan` for Slices 2–5 despite recorded hard-gate misses. Failed gates remain failed and are never relabelled. The branch proceeds through Slice 5 for one final human microphone/listening test; intermediate microphone acceptance, review, no-mistakes, PR, and merge are deferred.
+> **Cumulative-delivery override (2026-08-11):** Pasha fixed Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and pinned-legacy Qwen3 CustomVoice/`ryan` for Slices 2–5 despite recorded hard-gate misses. Failed gates remain failed and are never relabelled. The branch proceeded through Slice 5 and Pasha attested the final human microphone/listening test on 2026-08-11. Slice 6 has not started.
 >
 > **Post-review runtime transport correction (2026-08-11):** historical Slice 2 Tailscale discovery/measurement evidence remains unchanged, but Slice 4–5 runtime readiness and request admission no longer perform DNS/route/TSMP/WireGuard proof. Pasha accepts exact temporary HTTP endpoint `http://rpi:4000` for the private test setup; bearer-authenticated alias capability, redirect rejection, output bounds, cancellation, redaction, and no fallback remain required. HTTPS is deferred.
 
 ### User-visible outcome
 
-The project has repeatable measurements and a transparent operator-fixed delivery stack. LFM remains a failed local candidate. `deepseek-v4-flash` failed primary/repeat automated cloud gates but is fixed with no fallback. Whisper large-v3-turbo keeps its passed WER/latency and uses an explicit postmeasurement CPU ceiling of 90% after its 88.04% result missed the original 83.33% gate. Qwen3 CustomVoice/`ryan` passed automated timing/resource/repeat gates, with listening pending. Overlap failures remain recorded; this checkpoint is not an evidence-backed all-gates-pass claim.
+The project has repeatable measurements and a transparent operator-fixed delivery stack. LFM remains a failed local candidate. `deepseek-v4-flash` failed primary/repeat automated cloud gates but is fixed with no fallback. Whisper large-v3-turbo keeps its passed WER/latency and uses an explicit postmeasurement CPU ceiling of 90% after its 88.04% result missed the original 83.33% gate. Qwen3 CustomVoice/`ryan` passed automated timing/resource/repeat gates; its separate blind rubric remains unscored, while Pasha later accepted the overall Slice 5 listening experience. Overlap failures remain recorded; this checkpoint is not an evidence-backed all-gates-pass claim.
 
 ### Included scope
 
@@ -116,7 +116,7 @@ The project has repeatable measurements and a transparent operator-fixed deliver
 ### Dependencies
 
 - Slice 1 contracts and deterministic tracer are green.
-- Local artifact licenses/acquisition paths remain reviewable without exposing credentials. The task-private test credential authenticated over the proven transport. The user selected only `deepseek-v4-flash` and accepts an operator-attested opaque route; completion requests were blocked until the superseding preregistration was committed. Defaults, other aliases, fallback, and production use remain forbidden; ADR-0005 separately authorizes only the cumulative public diagnostics and one final live human turn.
+- Local artifact licenses/acquisition paths remain reviewable without exposing credentials. The task-private test credential authenticated over the proven transport. The user selected only `deepseek-v4-flash` and accepts an operator-attested opaque route; completion requests were blocked until the superseding preregistration was committed. Defaults, other aliases, fallback, and production use remain forbidden; ADR-0005 covered only the cumulative diagnostics and final live human turn completed on 2026-08-11.
 
 ### Acceptance criteria
 
@@ -141,12 +141,12 @@ Preserve the completed LFM and local STT/TTS runs. Re-prove the Tailscale route,
 - Machine-readable local benchmark results and a human-readable selection rationale.
 - Precommitted thresholds/rubrics and repeat-run comparison.
 - Selected local STT/TTS artifact manifests and measured residency/admission constraints.
-- A synthetic-test result for the operator-attested `deepseek-v4-flash` alias, or an explicit failed-selection record. The normal Slice 4 gate remains failed; ADR-0005 separately authorizes only cumulative Slices 3–5 and one final live human turn, not production use or Slice 6.
+- A synthetic-test result for the operator-attested `deepseek-v4-flash` alias, or an explicit failed-selection record. The normal Slice 4 gate remains failed; ADR-0005 covered only cumulative Slices 3–5 and the final live human turn completed on 2026-08-11, not production use or Slice 6.
 - Explicit list of hypotheses that component/provider benchmarking has not tested.
 
 ## Slice 3 — Real local STT voice turn
 
-> **Checkpoint:** automated public-corpus real Whisper path passes. Physical microphone acceptance is intentionally deferred to the one Slice 5 human command.
+> **Checkpoint:** automated public-corpus real Whisper path passes. The deferred physical microphone path was later accepted by Pasha through the complete Slice 5 human command on 2026-08-11.
 
 ### User-visible outcome
 
@@ -170,7 +170,7 @@ A user can speak Russian to a host-local capture path and see an accurate final 
 ### Acceptance criteria
 
 - The fixed Russian corpus meets the preregistered accuracy and finalization thresholds on the canonical host.
-- Automated/public-corpus capture-contract coverage produces exactly one final transcript; physical microphone acceptance is deferred to the single final Slice 5 command and remains pending here.
+- Automated/public-corpus capture-contract coverage produces exactly one final transcript; downstream physical microphone acceptance is recorded by the dated Slice 5 operator attestation.
 - Audio format mismatch, model unavailable, cancellation, and process loss have the architecture's explicit terminal behavior.
 - No raw audio is retained by default; diagnostic capture requires an explicit bounded mode outside Git.
 - STT identity/readiness and per-turn latency/resource observations are available without transcript content in default logs.
@@ -178,7 +178,7 @@ A user can speak Russian to a host-local capture path and see an accurate final 
 
 ### Validation method
 
-Run corpus scoring, public tracer success/failure cases, capture-format/non-retention checks, and cancellation during transcription. Compare resource/latency results with the transparent Slice 2 delivery limits. Defer physical microphone acceptance to Slice 5.
+Run corpus scoring, public tracer success/failure cases, capture-format/non-retention checks, and cancellation during transcription. Compare resource/latency results with the transparent Slice 2 delivery limits. Physical microphone acceptance is owned by and now recorded in Slice 5.
 
 ### Evidence required before Slice 4
 
@@ -236,7 +236,7 @@ Run the fixed evaluation set, multi-turn session-isolation cases, permitted-fiel
 
 ## Slice 5 — Real local-STT/TTS spoken conversation
 
-> **Checkpoint:** cumulative public diagnostics proved complete real Whisper → `deepseek-v4-flash` → Qwen3 turns and interruption, with peak VRAM at most `7,600 MiB`. The final contract-format run transparently completed two of three turns and hit the already-known empty provider response on the third; its cancellation case also stopped at provider failure before TTS. The final physical microphone and subjective listening command is ready but remains unrun; Slice 6 is therefore not started.
+> **Checkpoint:** cumulative public diagnostics proved complete real Whisper → `deepseek-v4-flash` → Qwen3 turns and interruption, with peak VRAM at most `7,600 MiB`. The final contract-format run transparently completed two of three turns and hit the already-known empty provider response on the third; its cancellation case also stopped at provider failure before TTS. After the PipeWire correction, Pasha ran the final physical microphone/listening command and attested overall success on 2026-08-11. The automated failures remain failed, and Slice 6 is not started.
 
 ### User-visible outcome
 
@@ -257,7 +257,7 @@ A user can speak through a host-local path and hear a locally synthesized spoken
 ### Dependencies
 
 - Slice 4 real-STT/selected-provider path is green.
-- Slice 2 operator-fixed Qwen3 CustomVoice artifact/runtime/configuration, Apache-2.0 provenance, automated timing/resource evidence, and pending human listening rubric.
+- Slice 2 operator-fixed Qwen3 CustomVoice artifact/runtime/configuration, Apache-2.0 provenance, automated timing/resource evidence, and the dated overall Slice 5 human acceptance; no granular listening-rubric score is inferred.
 
 ### Acceptance criteria
 
@@ -275,13 +275,15 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 ### Evidence required before Slice 6
 
-- Final human microphone and Qwen intelligibility/pronunciation/naturalness acceptance using the single command in [`README.md`](../README.md#final-slice-5-human-acceptance); pending and never auto-claimed.
+- Final human microphone/listening acceptance using the single command in [`README.md`](../README.md#final-slice-5-human-acceptance): ✅ Pasha attested overall success on 2026-08-11; no transcript, response, timing, pronunciation detail, adjective, or granular score is claimed.
 - Listening/latency/resource report tied to the selected artifact.
 - Sustained-run and cancellation traces.
 - Complete real-inference turn trace and declared audio format.
 - Updated headroom calculation for LiveKit and browser addition.
 
 ## Slice 6 — Local LiveKit media and interruption
+
+> **Not started:** the Slice 5 human gate is accepted, but this documentation update does not authorize or begin Slice 6.
 
 ### User-visible outcome
 

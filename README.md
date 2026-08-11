@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Cumulative Slices 2–5 branch ready for final human acceptance.** The deterministic Slice 1 tracer remains executable. The branch now runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` at the exact temporary endpoint `http://rpi:4000`, and local Qwen3 CustomVoice/`ryan`. Automated public-corpus diagnostics exercised complete turns and interruption, but the final contract-format run completed only two of three turns and encountered the known provider failures. Every Slice 2 gate failure and operator exception remains documented. Physical microphone and subjective listening are intentionally pending for one final command.
+**Cumulative Slices 2–5 delivery accepted by Pasha on 2026-08-11.** The deterministic Slice 1 tracer remains executable. The branch runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` at the exact temporary endpoint `http://rpi:4000`, and local Qwen3 CustomVoice/`ryan`. After the PipeWire correction, Pasha completed the documented microphone/listening command and attested that the full physical-microphone → Whisper → selected LLM → Qwen playback experience worked. Automated public-corpus diagnostics still include the recorded provider and overlap failures; this human acceptance does not reclassify any failed gate. Slice 6 has not started.
 
 ## Root verification
 
@@ -26,13 +26,15 @@ The command reports each preserved path. Both PCM files use signed 16-bit little
 
 ## Final Slice 5 human acceptance
 
-After the automated verifiers pass, run exactly one microphone/listening turn:
+Pasha ran this canonical-host command against PR 14 head `f1a3de997296e6dac87203cf5c2e157945a865b8` on 2026-08-11:
 
 ```sh
 ./run-voice-turn --microphone --duration 8 --play
 ```
 
-Speak one Russian utterance during the capture window. Check the printed transcript and response, listen for intelligibility, pronunciation, and naturalness, and confirm `Terminal: turn.completed`. Microphone capture is bounded to 1–30 seconds. The command removes temporary microphone PCM before admitting inference, streams Qwen output without an output file, and writes only content-free evidence under the authorized cache. On this host PipeWire 1.6.8 may return status 1 after producing the exact requested bounded capture; the CLI accepts that case only when byte count is exact. Recorder availability/setup/startup, timeout, nonzero-without-complete-output, missing/unreadable/wrong-size output, and cleanup failures produce content-free `Failure: microphone_capture/<code>` and `Terminal: turn.failed` evidence without a traceback or model admission. Cleanup failure also reports whether microphone bytes may remain after deletion and scrubbing attempts. A live transcript crosses the exact operator-approved HTTP LiteLLM boundary; runtime DNS/route/TSMP proof is not enforced, redirects and fallback aliases remain forbidden, and HTTPS is deferred.
+Pasha attested that the complete physical microphone capture, Whisper → `deepseek-v4-flash` → Qwen3 `ryan` turn, audible playback, and overall manual Slice 5 experience succeeded. No transcript, response, latency, pronunciation detail, quality adjective, or granular score was provided or inferred.
+
+Microphone capture is bounded to 1–30 seconds. The command removes temporary microphone PCM before admitting inference, streams Qwen output without an output file, and writes only content-free evidence under the authorized cache. On this host PipeWire 1.6.8 may return status 1 after producing the exact requested bounded capture; the CLI accepts that case only when byte count is exact. Recorder availability/setup/startup, timeout, nonzero-without-complete-output, missing/unreadable/wrong-size output, and cleanup failures produce content-free `Failure: microphone_capture/<code>` and `Terminal: turn.failed` evidence without a traceback or model admission. Cleanup failure also reports whether microphone bytes may remain after deletion and scrubbing attempts. A live transcript crosses the exact operator-approved HTTP LiteLLM boundary; runtime DNS/route/TSMP proof is not enforced, redirects and fallback aliases remain forbidden, and HTTPS is deferred.
 
 ## Current scope
 
@@ -49,7 +51,7 @@ Speak one Russian utterance during the capture window. Check the printed transcr
 - The detailed avatar-module and visual-control contract requires a dedicated Grill/design task before MVP eye implementation.
 - Live2D and 3D remain possible later avatar modules; neither is an MVP renderer decision.
 - Optional wake-word activation, including any custom Russian wake model, begins only after the core MVP is reliable.
-- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the current operator-attested alias is limited to public diagnostics and the single final human turn.
+- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the narrow operator-attested alias exception covered public diagnostics and the now-completed single final human turn, not further live or production use.
 - Selective migration from the legacy repository waits for a concrete vertical slice and fresh validation.
 
 ## Non-goals

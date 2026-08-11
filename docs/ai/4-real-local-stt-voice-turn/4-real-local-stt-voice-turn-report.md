@@ -2,7 +2,7 @@
 
 **Source:** https://github.com/prineycom/voice-agent-v2/issues/4
 **Parent:** Issue #3
-**Status:** ⚠️ automated checkpoint pass; physical microphone acceptance intentionally deferred to Slice 5
+**Status:** ✅ automated checkpoint pass; deferred physical microphone path accepted downstream in Slice 5 on 2026-08-11
 
 ## Changed files
 
@@ -22,7 +22,7 @@
 | Audio mismatch/process loss/cancellation explicit | ✅ | Unit tests produce `unsupported_audio_format`, `selected_stt_unavailable`, and bounded process cancellation. |
 | No raw audio retained by default | ✅ | WAV exists only during request and is deleted in `finally`; automated acceptance verifies empty temp directory. |
 | Safe identity/latency observations omit transcript | ✅ | Adapter observations contain identity, byte/duration, correlation-presence, latency, and retention flag only. |
-| Physical microphone turn | ⏳ | Explicitly deferred by cumulative delivery update to the one final Slice 5 command; not claimed. |
+| Physical microphone turn | ✅ downstream attestation | Pasha later ran the complete Slice 5 command and attested that physical capture and the overall voice experience succeeded; no transcript or detailed STT judgment is inferred. |
 
 ## Validation
 
@@ -33,5 +33,5 @@
 
 ## Unresolved uncertainty
 
-- Physical microphone/device selection and room acoustics remain pending until the final Slice 5 human command.
+- Pasha's dated Slice 5 attestation closes the physical microphone path; it provides no device-specific, room-acoustic, transcript, or latency detail.
 - Partial transcript UI is not exposed because selected faster-whisper adapter is bounded-final in this simplest pre-LiveKit path.

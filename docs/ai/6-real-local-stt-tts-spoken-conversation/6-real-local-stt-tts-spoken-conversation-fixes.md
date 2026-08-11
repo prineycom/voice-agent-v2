@@ -48,7 +48,7 @@
 
 ### Correction
 
-This correction introduced the exact-size PipeWire status-1 regression handling. The current capture, cleanup, retention-reporting, and STT-admission contract is owned by [`docs/architecture.md`](../../architecture.md#7-failure-semantics); the operator command and pending human acceptance are owned by [`README.md`](../../../README.md#final-slice-5-human-acceptance).
+This correction introduced the exact-size PipeWire status-1 regression handling. The current capture, cleanup, retention-reporting, and STT-admission contract is owned by [`docs/architecture.md`](../../architecture.md#7-failure-semantics); the operator command and now-attested human acceptance are owned by [`README.md`](../../../README.md#final-slice-5-human-acceptance).
 
 ### Validation at the correction checkpoint
 
@@ -59,8 +59,14 @@ This correction introduced the exact-size PipeWire status-1 regression handling.
 | Bounded real `microphone_pcm(1.0)` | ✅ pass | Canonical source returned exactly 32,000 bytes and retained no temporary PCM; STT/LLM/TTS were not started. |
 | `./verify` | ✅ pass | 58 network-denied behavioral/unit/contract tests. |
 
+## Correction 3 — dated human acceptance
+
+On 2026-08-11, after the microphone correction at PR head `f1a3de997296e6dac87203cf5c2e157945a865b8`, Pasha ran `./run-voice-turn --microphone --duration 8 --play` and reported verbatim: `все сработало! Что дальше?`
+
+This is recorded only as Pasha's acceptance that physical microphone capture, the full Whisper → `deepseek-v4-flash` → Qwen3 `ryan` turn, audible playback, and the overall manual Slice 5 experience succeeded. No transcript, response, latency, pronunciation detail, audio-quality adjective, or granular score is recorded or inferred. Every automated failure and operator limitation remains unchanged.
+
 ## Follow-ups
 
-- Pasha must rerun `./run-voice-turn --microphone --duration 8 --play`; physical microphone and subjective listening acceptance remain pending.
+- Slice 6 is not started by this acceptance update.
 - HTTPS remains explicitly deferred.
-- No merge was performed.
+- Pasha authorized merging PR 14 after this documentation update reaches green checks; the agent does not merge it.

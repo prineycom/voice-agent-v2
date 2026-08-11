@@ -2,7 +2,7 @@
 
 **Source:** https://github.com/prineycom/voice-agent-v2/issues/3
 **Parent:** —
-**Status:** ⚠️ operator-fixed measurement complete; cumulative Slices 3–5 automated and final human acceptance pending
+**Status:** ⚠️ operator-fixed measurement complete; later Slice 5 human acceptance attested without changing failed evidence
 
 ## Changed files
 
@@ -12,7 +12,7 @@
 | `benchmarks/config/`, `benchmarks/fixtures/`, `benchmarks/schemas/` | Preserved local v1/cloud v2 and added fixed-stack v3: 90% Whisper CPU delivery exception plus exact pinned-legacy Qwen3 artifact/runtime/config and overlap/repeat gates. | Precommitted new TTS/overlap evidence; transparent result-aware delivery exceptions. |
 | `benchmarks/evidence/host-live.v1.json` | Recorded whitelisted canonical-host facts. | Host/driver/resource identity. |
 | `benchmarks/evidence/litellm-discovery.v1.json` | Recorded content-free Tailscale transport, unauthenticated LiteLLM health/model-list, and scoped credential-lookup evidence. | Endpoint/transport/privacy gate before cloud inference. |
-| `benchmarks/results/` | Recorded privacy-safe local results plus fixed-stack cloud repeat, Qwen TTS, Whisper override, and overlap aggregates. | Machine-readable successes, failures, operator selections, and pending human gates. |
+| `benchmarks/results/` | Recorded privacy-safe local results plus fixed-stack cloud repeat, Qwen TTS, Whisper override, and overlap aggregates. Historical pending-human fields remain unchanged; the later overall Slice 5 attestation is documented separately. | Machine-readable successes, failures, operator selections, and historical human-gate state. |
 | `benchmarks/selection/` | Recorded failed selection and human-readable rationale. | Exactly one provider mode or failed selection; no fallback. |
 | `docs/roadmap.md`, Issue #3, `docs/adr/0001`, `0003`, `0004` | Preserved the local failure and recorded selected alias `deepseek-v4-flash` as operator-attested/opaque for synthetic testing without claiming config proof or production privacy approval. | Authoritative cloud scope, topology exception, security and dependency gates. |
 | `tests/test_slice2_benchmark.py` | Added offline schema, privacy, acquisition, fixture, and candidate-policy tests. | Reproducibility and safety guards. |
@@ -43,7 +43,7 @@
 | `./benchmark-slice2 validate` | ✅ pass | Validates local evidence plus cloud discovery and superseding preregistration schemas. |
 | `./benchmark-slice2 measure cloud deepseek-v4-flash` before commit | ✅ blocked | Exited 2 before transport/token/request; primary/repeat ran only after commit. |
 | Cloud primary/repeat | ❌ measured | Primary failed 17 automated gates; repeat failed 9. The delivery override fixes the alias without changing thresholds or claiming pass. |
-| Qwen3 TTS primary/repeat | ✅ automated | Load ~3.6 s, first-signal p95 ~161 ms, RTF p95 ~0.402, VRAM peak 5,205 MiB, repeat stable; listening remains pending. |
+| Qwen3 TTS primary/repeat | ✅ automated | Load ~3.6 s, first-signal p95 ~161 ms, RTF p95 ~0.402, VRAM peak 5,205 MiB, repeat stable. The Slice 2 blind listening rubric remained unscored; Pasha later accepted the overall Slice 5 audible experience without granular scores. |
 | Fixed-stack overlap | ⚠️ mixed | Handoff 196 ms and resource/admission/stop gates passed; TTS/cloud regression and Whisper finalization-regression gates failed. |
 | `./verify` | ✅ pass | Slice 1 behavioral verification remains green; 27 tests at checkpoint. |
 | Runtime import/CUDA probe | ✅ pass | vLLM 0.26.0 / Torch 2.11 CUDA 13 and faster-whisper/CTranslate2/Piper imported; RTX 4070 visible. |
@@ -80,6 +80,6 @@
 
 ## Unresolved uncertainty
 
-- Qwen3 Russian intelligibility/pronunciation/naturalness listening is pending and must not be fabricated.
-- Physical microphone acceptance is deferred to the single final Slice 5 command under the cumulative delivery update.
+- The Slice 2 blind Qwen3 intelligibility/pronunciation/naturalness rubric was not scored and is not retroactively fabricated; Pasha's later attestation covers only overall Slice 5 success.
+- Pasha completed and accepted the single final Slice 5 physical-microphone/listening command on 2026-08-11; no transcript, response, timing, adjective, or granular score was recorded.
 - Provider cost, retention/training, region, onward endpoint, and config-proven model provenance remain intentionally unevaluated; failed cloud gates remain failed.

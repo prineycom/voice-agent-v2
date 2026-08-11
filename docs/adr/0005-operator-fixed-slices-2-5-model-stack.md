@@ -1,6 +1,6 @@
 # ADR-0005: Operator-fixed model stack for cumulative Slices 2–5
 
-- **Status:** Accepted for cumulative delivery and one final human test
+- **Status:** Accepted for cumulative delivery; final human test attested 2026-08-11
 - **Date:** 2026-08-11
 - **Decision owner:** Pasha
 
@@ -25,11 +25,13 @@ Use exactly this fixed stack through Slices 3–5:
 
 The Qwen configuration/provenance was selectively revalidated from pinned paths `infra/desktop/tts/.env.example`, `infra/desktop/tts/engines.py`, `infra/desktop/tts/requirements.txt`, and `docs/adr/0020-customvoice-emotion-and-voice-switcher.md`. No legacy source, private clone/reference audio, credential, model weight, cache, service topology, or historical quality claim is migrated.
 
-Qwen automated timing/resource/cancellation/repeat evidence passes the fixed thresholds; subjective listening remains pending. Fixed-stack overlap has both passes and failures, all retained in `benchmarks/results/fixed-stack-delivery.v1.json`.
+Qwen automated timing/resource/cancellation/repeat evidence passes the fixed thresholds; the preregistered blind listening rubric was not separately scored. Fixed-stack overlap has both passes and failures, all retained in `benchmarks/results/fixed-stack-delivery.v1.json`.
 
-Implement Slices 3–5 cumulatively with automated checkpoints. Defer physical microphone/listening acceptance and the only review/no-mistakes run until Slice 5. Never claim pending human evidence passed, and never merge without separate authority.
+Implement Slices 3–5 cumulatively with automated checkpoints. Defer physical microphone/listening acceptance and the only review/no-mistakes run until Slice 5. Never fabricate human evidence, and never merge without separate authority.
 
-The implemented pre-LiveKit runtime keeps Whisper and Qwen in bounded subprocesses, keeps provider context memory-only and session-scoped, admits only allowlisted provider fields, and persists no conversation content by default. Provider readiness performs only a bearer-authenticated, content-free exact-alias check; request admission does not run Tailscale or shell-command proof. Its automated public diagnostics observed a first three-turn/interruption success and a final TTS-v1-format run with two completions, one explicit empty-provider failure, and a provider failure before the cancellation seam. Peak VRAM was at most `7,600 MiB` with more than `24 GiB` RAM available. The successful and failed attempts are both preserved outside Git. These implementation results do not supersede the failed Slice 2 gates or pending human listening.
+The implemented pre-LiveKit runtime keeps Whisper and Qwen in bounded subprocesses, keeps provider context memory-only and session-scoped, admits only allowlisted provider fields, and persists no conversation content by default. Provider readiness performs only a bearer-authenticated, content-free exact-alias check; request admission does not run Tailscale or shell-command proof. Its automated public diagnostics observed a first three-turn/interruption success and a final TTS-v1-format run with two completions, one explicit empty-provider failure, and a provider failure before the cancellation seam. Peak VRAM was at most `7,600 MiB` with more than `24 GiB` RAM available. The successful and failed attempts are both preserved outside Git.
+
+On 2026-08-11, after the PipeWire correction at PR head `f1a3de997296e6dac87203cf5c2e157945a865b8`, Pasha ran `./run-voice-turn --microphone --duration 8 --play` and attested that the complete physical-microphone, Whisper → `deepseek-v4-flash` → Qwen3 `ryan`, audible-playback, and overall Slice 5 experience succeeded. No transcript, response, timing, pronunciation detail, quality adjective, or granular score is claimed. This attestation closes only the final Slice 5 human gate; it does not supersede any automated failure or authorize Slice 6.
 
 ## Consequences
 
@@ -44,7 +46,7 @@ The implemented pre-LiveKit runtime keeps Whisper and Qwen in bounded subprocess
 
 - The fixed stack is not an all-gates-pass Slice 2 selection. Cloud latency/fairness/isolation and overlap regressions are known risks.
 - The 90% CPU allowance reduces host headroom and is valid only for this canonical host/delivery stack.
-- Qwen listening quality remains unknown until Pasha listens.
+- Pasha accepted the overall Qwen-backed listening experience, but no granular listening-rubric scores or quality attributes were captured.
 - Provider provenance/privacy/cost remain operator-opaque; temporary HTTP lacks a runtime transport proof; no fallback or broad production approval is inferred.
 
 ## Alternatives considered
