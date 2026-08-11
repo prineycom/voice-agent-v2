@@ -9,11 +9,21 @@ permissions:
 jobs:
   slice-1-tracer:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Run dependency-free deterministic verification
-        run: ./verify
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Acquire pinned Slice 6 test tooling outside Git
+        run: ./setup-slice6
+      - name: Run deterministic controller and browser boundaries
+        run: ./verify-slice6

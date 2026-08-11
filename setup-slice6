@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
+VENV=$CACHE/runtime/venv
+TOOLING=$CACHE/tooling
+VERSION=1.13.5
+ARCHIVE=livekit_1.13.5_linux_amd64.tar.gz
+ARCHIVE_SHA256=c020fac437b7cc9b776eef1ad5ea8af77be9acfa07602eca20a3a44930dfbc70
+URL=https://github.com/livekit/livekit/releases/download/v1.13.5/$ARCHIVE
+BINARY=$TOOLING/livekit-server-v$VERSION
+
+[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
+  echo "setup-slice6 supports only the measured Linux x86_64 host" >&2
+  exit 2
+}
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || {
+  echo "Python 3.11 or newer is required" >&2
+  exit 2
+}
+command -v curl >/dev/null && command -v sha256sum >/dev/null \
+  && command -v node >/dev/null && command -v npm >/dev/null || {
+  echo "curl, sha256sum, Node.js, and npm are required" >&2
+  exit 2
+}
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 20 && minor >= 19) || (major === 22 && minor >= 12) || major > 22 ? 0 : 1)' || {
+  echo "Node.js 20.19+, 22.12+, or newer is required by the pinned Vite runtime" >&2
+  exit 2
+}
+
+mkdir -p "$CACHE/runtime" "$TOOLING"
+if [ ! -x "$BINARY" ]; then
+  TEMP=$(mktemp -d "$CACHE/setup.XXXXXX")
+  trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+  curl --fail --location --proto '=https' --tlsv1.2 "$URL" --output "$TEMP/$ARCHIVE"
+  printf '%s  %s\n' "$ARCHIVE_SHA256" "$TEMP/$ARCHIVE" | sha256sum --check --status || {
+    echo "pinned LiveKit archive checksum mismatch" >&2
+    exit 2
+  }
+  tar -xzf "$TEMP/$ARCHIVE" -C "$TEMP" livekit-server
+  install -m 0755 "$TEMP/livekit-server" "$BINARY"
+  rm -rf "$TEMP"
+  trap - EXIT HUP INT TERM
+fi
+"$BINARY" --version | grep -F "$VERSION" >/dev/null || {
+  echo "cached LiveKit binary is not pinned v$VERSION" >&2
+  exit 2
+}
+
+if [ ! -x "$VENV/bin/python" ]; then
+  python3 -m venv "$VENV"
+fi
+"$VENV/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements-slice6.lock"
+(
+  cd "$ROOT/web"
+  npm ci --ignore-scripts
+  npm run build
+)
+
+echo "Slice 6 tooling ready outside Git: $CACHE"

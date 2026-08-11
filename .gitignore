@@ -23,6 +23,8 @@ __pycache__/
 .coverage
 coverage/
 node_modules/
+dist/
+*.tsbuildinfo
 
 # Runtime output
 .cache/
