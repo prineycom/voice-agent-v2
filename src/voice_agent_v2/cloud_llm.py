@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import http.client
 import json
 import os
@@ -10,12 +11,11 @@ import stat
 import threading
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
 from .contracts import LLM_VERSION, StageFailure, valid_correlation_id
 
-ENDPOINT = "http://rpi:4000"
-HOST = "rpi"
-PORT = 4000
+BASE_URL_ENV = "LITELLM_BASE_URL"
 ALIAS = "deepseek-v4-flash"
 TOKEN_PATH = Path("/home/priney/.cache/voice-agent-v2/slice-2/secrets/litellm.token")
 SYSTEM_PROMPT = "Отвечай по-русски, кратко, полезно и безопасно. Не раскрывай скрытые рассуждения."
@@ -27,25 +27,81 @@ MAX_VISIBLE_CHARS = 8192
 MAX_VISIBLE_BYTES = 32_768
 
 
+@dataclass(frozen=True)
+class ProviderEndpoint:
+    base_url: str
+    scheme: str
+    host: str
+    port: int
+    authority: str
+
+
+def parse_provider_endpoint(value: str | None) -> ProviderEndpoint:
+    """Parse the one required endpoint without defaults, aliases, paths, or redirects."""
+    if value is None or not value or value != value.strip():
+        raise StageFailure("llm_provider", "endpoint_configuration_invalid")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError) as error:
+        raise StageFailure("llm_provider", "endpoint_configuration_invalid") from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise StageFailure("llm_provider", "endpoint_configuration_invalid")
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    default_port = 443 if parsed.scheme == "https" else 80
+    host = parsed.hostname
+    display_host = f"[{host}]" if ":" in host else host
+    authority = display_host if port == default_port else f"{display_host}:{port}"
+    return ProviderEndpoint(
+        base_url=f"{parsed.scheme}://{authority}",
+        scheme=parsed.scheme,
+        host=host,
+        port=port,
+        authority=authority,
+    )
+
+
 class LiteLLMProvider:
     version = LLM_VERSION
     provider_mode = "cloud"
     provider_identity = "litellm/deepseek-v4-flash"
 
-    def __init__(self, executor: Callable[[dict], dict] | None = None) -> None:
+    def __init__(
+        self,
+        executor: Callable[[dict], dict] | None = None,
+        *,
+        base_url: str | None = None,
+        token_path: Path = TOKEN_PATH,
+    ) -> None:
         self._executor = executor
+        self._configured_base_url = base_url
+        self._token_path = token_path
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._cancelled = threading.Event()
-        self._connection: http.client.HTTPConnection | None = None
+        self._connection: http.client.HTTPConnection | http.client.HTTPSConnection | None = None
         self.observations: list[dict] = []
 
-    @staticmethod
-    def _token() -> str:
+    def _endpoint(self) -> ProviderEndpoint:
+        value = self._configured_base_url
+        if value is None:
+            value = os.environ.get(BASE_URL_ENV)
+        return parse_provider_endpoint(value)
+
+    def _token(self) -> str:
         try:
-            info = TOKEN_PATH.stat()
-            if not TOKEN_PATH.is_file() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+            info = self._token_path.stat()
+            if not self._token_path.is_file() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
                 raise StageFailure("llm_provider", "credential_file_invalid")
-            value = TOKEN_PATH.read_text(encoding="utf-8").strip()
+            value = self._token_path.read_text(encoding="utf-8").strip()
         except StageFailure:
             raise
         except (OSError, UnicodeError) as error:
@@ -55,12 +111,18 @@ class LiteLLMProvider:
         return value
 
     @staticmethod
-    def _capability_gate(token: str) -> None:
-        connection = http.client.HTTPConnection(HOST, PORT, timeout=10)
+    def _connection_for(endpoint: ProviderEndpoint, timeout: float):
+        connection_type = (
+            http.client.HTTPSConnection if endpoint.scheme == "https" else http.client.HTTPConnection
+        )
+        return connection_type(endpoint.host, endpoint.port, timeout=timeout)
+
+    def _capability_gate(self, token: str, endpoint: ProviderEndpoint) -> None:
+        connection = self._connection_for(endpoint, 10)
         try:
             connection.request(
                 "GET", "/v1/models",
-                headers={"Authorization": "Bearer " + token, "Connection": "close", "Host": HOST},
+                headers={"Authorization": "Bearer " + token, "Connection": "close", "Host": endpoint.authority},
             )
             response = connection.getresponse()
             body = response.read(MAX_STREAM_LINE_BYTES + 1)
@@ -82,19 +144,22 @@ class LiteLLMProvider:
             connection.close()
 
     def readiness(self) -> dict:
+        endpoint = self._endpoint()
         token = self._token()
         try:
-            self._capability_gate(token)
+            self._capability_gate(token, endpoint)
         finally:
             del token
         return {
             "ready": True, "provider_mode": self.provider_mode,
-            "provider_identity": self.provider_identity, "endpoint": ENDPOINT,
+            "provider_identity": self.provider_identity, "endpoint": endpoint.base_url,
             "selected_alias": ALIAS, "external_transfer": True,
             "automatic_fallback": False, "redirects_followed": False,
             "authenticated_alias_capability": True,
             "runtime_network_proof_enforced": False,
-            "transport_security": "temporary-operator-accepted-http",
+            "transport_security": (
+                "https" if endpoint.scheme == "https" else "temporary-operator-accepted-http"
+            ),
         }
 
     def _payload(self, session_id: str, transcript: str) -> dict:
@@ -113,8 +178,9 @@ class LiteLLMProvider:
         return payload
 
     def _execute(self, payload: dict, on_sentence: Callable[[str], None] | None = None) -> dict:
+        endpoint = self._endpoint()
         token = self._token()
-        connection = http.client.HTTPConnection(HOST, PORT, timeout=40)
+        connection = self._connection_for(endpoint, 40)
         self._connection = connection
         submitted = time.monotonic()
         accepted = None
@@ -132,7 +198,7 @@ class LiteLLMProvider:
                 "POST", "/v1/chat/completions", body=json.dumps(payload).encode(),
                 headers={
                     "Authorization": "Bearer " + token, "Content-Type": "application/json",
-                    "Accept": "text/event-stream", "Connection": "close", "Host": HOST,
+                    "Accept": "text/event-stream", "Connection": "close", "Host": endpoint.authority,
                 },
             )
             response = connection.getresponse()

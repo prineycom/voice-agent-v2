@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from voice_agent_v2.cloud_llm import ALIAS, LiteLLMProvider
+from voice_agent_v2.cloud_llm import ALIAS, LiteLLMProvider, parse_provider_endpoint
 from voice_agent_v2.contracts import AudioFormat, StageFailure
 from voice_agent_v2.local_stt import TemporaryAudioFailure, WhisperSTT
 from voice_agent_v2.local_tts import OUTPUT_FORMAT, Qwen3TTS
@@ -155,6 +155,27 @@ class LocalTTSContractTests(unittest.TestCase):
 
 
 class LiteLLMProviderContractTests(unittest.TestCase):
+    TEST_BASE_URL = "http://rpi:4000"
+
+    def test_endpoint_is_required_from_the_one_named_environment_variable(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(StageFailure) as missing:
+                LiteLLMProvider().readiness()
+        self.assertEqual(missing.exception.code, "endpoint_configuration_invalid")
+        with patch.dict(os.environ, {"LITELLM_ENDPOINT": self.TEST_BASE_URL}, clear=True):
+            with self.assertRaises(StageFailure) as alias:
+                LiteLLMProvider().readiness()
+        self.assertEqual(alias.exception.code, "endpoint_configuration_invalid")
+
+    def test_endpoint_parser_allows_configuration_only_http_to_https_migration(self) -> None:
+        http = parse_provider_endpoint(self.TEST_BASE_URL)
+        https = parse_provider_endpoint("https://llm.example.test")
+        self.assertEqual((http.scheme, http.host, http.port), ("http", "rpi", 4000))
+        self.assertEqual((https.scheme, https.host, https.port), ("https", "llm.example.test", 443))
+        for invalid in ("", "rpi:4000", "http://rpi:4000/v1", "http://user@rpi:4000", "http://rpi:4000?next=x"):
+            with self.subTest(invalid=invalid), self.assertRaises(StageFailure):
+                parse_provider_endpoint(invalid)
+
     def test_exact_alias_context_isolation_and_safe_observation(self) -> None:
         payloads = []
 
@@ -207,7 +228,7 @@ class LiteLLMProviderContractTests(unittest.TestCase):
                 "voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection,
             ) as http_connection,
         ):
-            readiness = LiteLLMProvider().readiness()
+            readiness = LiteLLMProvider(base_url=self.TEST_BASE_URL).readiness()
         self.assertTrue(readiness["authenticated_alias_capability"])
         self.assertEqual(readiness["selected_alias"], ALIAS)
         self.assertEqual(readiness["endpoint"], "http://rpi:4000")
@@ -230,14 +251,14 @@ class LiteLLMProviderContractTests(unittest.TestCase):
             patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
         ):
             with self.assertRaises(StageFailure) as raised:
-                LiteLLMProvider().readiness()
+                LiteLLMProvider(base_url=self.TEST_BASE_URL).readiness()
         self.assertEqual(raised.exception.code, "capability_http_302")
         self.assertEqual(len(connection.requests), 1)
         self.assertTrue(connection.closed)
 
     def test_completion_rejects_redirect_without_fallback(self) -> None:
         connection = StubHTTPConnection(StubHTTPResponse(b"", status=307))
-        provider = LiteLLMProvider()
+        provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)
         with (
             patch.object(LiteLLMProvider, "_token", return_value="test-token"),
             patch(
@@ -263,7 +284,7 @@ class LiteLLMProviderContractTests(unittest.TestCase):
             with self.subTest(expected_code=expected_code):
                 stream = b"data: " + json.dumps(event).encode() + b"\ndata: [DONE]\n"
                 connection = StubHTTPConnection(StubHTTPResponse(stream))
-                provider = LiteLLMProvider()
+                provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)
                 with (
                     patch.object(LiteLLMProvider, "_token", return_value="test-token"),
                     patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
@@ -285,7 +306,7 @@ class LiteLLMProviderContractTests(unittest.TestCase):
             with self.subTest(event=event):
                 stream = b"data: " + json.dumps(event).encode() + b"\ndata: [DONE]\n"
                 connection = StubHTTPConnection(StubHTTPResponse(stream))
-                provider = LiteLLMProvider()
+                provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)
                 handed_off = []
                 with (
                     patch.object(LiteLLMProvider, "_token", return_value="test-token"),
