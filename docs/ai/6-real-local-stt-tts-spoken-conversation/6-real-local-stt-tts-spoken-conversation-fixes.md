@@ -34,7 +34,35 @@
 | `./verify` | ✅ pass | 54 network-denied behavioral/unit/contract tests. |
 | `git diff --check` | ✅ pass | No whitespace errors. |
 
+## Correction 2 — PipeWire microphone capture
+
+**Source:** `/home/priney/Projects/mymate/data/voice-agent-v2-slice-2-model-budget/microphone-capture-failure.md`
+
+### Diagnosis
+
+- **Initiating trigger:** the documented CLI invoked a bounded `pw-record --sample-count` capture with `check=True`.
+- **Environment/version condition:** canonical `pw-record` is PipeWire/pw-cat 1.6.8. Both raw and WAV sample-count captures, and a raw SIGINT stop, produced audio but returned status 1.
+- **Visible symptom:** `check=True` converted that normal host-specific exit into an uncaught `CalledProcessError` traceback before STT admission.
+- **Earliest divergence/counterfactual:** the exact one-second production command returned 1 while writing exactly 32,000 expected bytes; changing raw→WAV and sample-count→SIGINT did not change the exit status, disproving flag spelling and raw mode as the cause. Pinned legacy commit `93c5c397…` contains only unrelated Pi `arecord` wakeword examples and no reusable desktop PipeWire path.
+- **Independent defect:** capture startup/nonzero/timeout/missing-output exceptions had no CLI normalization boundary.
+
+### Correction
+
+- Run bounded `pw-record` with an explicit timeout and without `check=True`.
+- Accept PipeWire status 1 only when the output exists at the exact requested PCM byte count; every incomplete/nonstandard case fails explicitly.
+- Normalize unavailable/startup/timeout/nonzero/missing/unreadable/size errors to content-free `microphone_capture/<code>`, print `Terminal: turn.failed`, write content-free evidence when possible, start no inference, and delete temporary PCM in all cases.
+
+### Validation
+
+| Command | Result | Notes |
+| ------- | ------ | ----- |
+| Exact and counterfactual diagnostic captures | ✅ reproduced | Raw sample-count wrote 32,000 bytes with status 1; WAV sample-count and raw SIGINT also returned 1. All diagnostic files were deleted without content inspection. |
+| `PYTHONPATH=src python3 -m unittest -v tests.test_run_voice_turn` | ✅ pass | Four executable regression tests cover complete status-1 capture, startup/timeout/nonzero/missing/size failures, cleanup, content-free evidence, and no traceback. |
+| Bounded real `microphone_pcm(1.0)` | ✅ pass | Canonical source returned exactly 32,000 bytes and retained no temporary PCM; STT/LLM/TTS were not started. |
+| `./verify` | ✅ pass | 58 network-denied behavioral/unit/contract tests. |
+
 ## Follow-ups
 
+- Pasha must rerun `./run-voice-turn --microphone --duration 8 --play`; physical microphone and subjective listening acceptance remain pending.
 - HTTPS remains explicitly deferred.
-- Pasha indicated that more targeted post-review corrections may follow; no new broad final review was started.
+- No merge was performed.

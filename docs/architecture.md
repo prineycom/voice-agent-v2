@@ -222,6 +222,7 @@ No failure silently switches LLM provider, moves another inference capability to
 | Failure | Dependency class | Required behavior |
 | --- | --- | --- |
 | LiveKit unavailable | Hard for realtime use | Client shows unavailable/reconnecting; no inference turn is admitted. |
+| Host microphone recorder startup/nonzero/timeout/output failure | Hard before turn admission | CLI emits a content-free capture error and `turn.failed` indication without a Python traceback; no STT/LLM/TTS starts and temporary PCM is deleted. |
 | STT unavailable or fails | Hard for the affected voice turn | No transcript is fabricated; turn fails recoverably and retained raw audio is not created by default. |
 | Selected LLM provider unavailable or fails | Hard for the affected response | No fabricated answer or alternate-provider request. No TTS handoff occurs before the selected response identity is proven; if a later stream failure follows a validated sentence handoff, buffered synthesized audio is discarded, no public audio chunk is emitted, and the turn fails with provider mode visible to the operator/user state. |
 | Cloud credential, endpoint allowlist, or approved privacy metadata invalid | Hard for cloud-mode readiness | Cloud mode remains unready; secrets are not exposed and local mode is not selected automatically. |

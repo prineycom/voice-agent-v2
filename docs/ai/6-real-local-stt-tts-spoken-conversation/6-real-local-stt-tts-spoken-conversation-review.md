@@ -32,7 +32,7 @@
 
 | Command | Result | Notes |
 | ------- | ------ | ----- |
-| `./verify` | ✅ pass | 54 behavioral/unit/contract tests under network denial after the focused runtime-transport correction. |
+| `./verify` | ✅ pass | 58 behavioral/unit/contract tests under network denial after the focused microphone correction; no new broad review was started. |
 | `./benchmark-slice2 validate` | ✅ pass | All tracked preregistration/evidence/selection artifacts validate offline. |
 | `./verify-slice3` | ✅ pass | Real Whisper public-corpus tracer; no temporary audio retained. |
 | `./verify-slice4` | ✅ historical pass | Exact real provider turn and real mid-request cancellation. Its historical route proof is preserved as evidence, not required by the corrected runtime. |

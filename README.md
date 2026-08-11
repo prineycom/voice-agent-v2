@@ -32,7 +32,7 @@ After the automated verifiers pass, run exactly one microphone/listening turn:
 ./run-voice-turn --microphone --duration 8 --play
 ```
 
-Speak one Russian utterance during the capture window. Check the printed transcript and response, listen for intelligibility, pronunciation, and naturalness, and confirm `Terminal: turn.completed`. The command deletes temporary microphone PCM, streams Qwen output without an output file, and writes only content-free evidence under the authorized cache. A live transcript crosses the exact operator-approved HTTP LiteLLM boundary; runtime DNS/route/TSMP proof is not enforced, redirects and fallback aliases remain forbidden, and HTTPS is deferred.
+Speak one Russian utterance during the capture window. Check the printed transcript and response, listen for intelligibility, pronunciation, and naturalness, and confirm `Terminal: turn.completed`. The command deletes temporary microphone PCM, streams Qwen output without an output file, and writes only content-free evidence under the authorized cache. On this host PipeWire 1.6.8 may return status 1 after producing the exact requested bounded capture; the CLI accepts that case only when byte count is exact. Recorder startup, timeout, nonzero-without-complete-output, missing-output, and size failures produce a content-free `Terminal: turn.failed` without a traceback. A live transcript crosses the exact operator-approved HTTP LiteLLM boundary; runtime DNS/route/TSMP proof is not enforced, redirects and fallback aliases remain forbidden, and HTTPS is deferred.
 
 ## Current scope
 
