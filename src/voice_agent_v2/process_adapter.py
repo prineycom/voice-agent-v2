@@ -108,7 +108,7 @@ class AdapterProcess:
             if response.get("event") == "final":
                 return
 
-    def cancel(self, timeout_seconds: float = 5.0) -> float:
+    def cancel(self, timeout_seconds: float = 0.25) -> float:
         self._cancel_requested.set()
         process = self.process
         if process is None or process.poll() is not None:

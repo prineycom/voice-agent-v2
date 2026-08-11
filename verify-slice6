@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
+PYTHON=$CACHE/runtime/venv/bin/python
+[ -x "$PYTHON" ] || {
+  echo "Slice 6 runtime is missing; run ./setup-slice6" >&2
+  exit 2
+}
+
+"$ROOT/verify"
+PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_slice6_runtime.py"
+(
+  cd "$ROOT/web"
+  npm run typecheck
+  npm test
+  npm run build
+)
+printf '%s\n' 'Slice 6 deterministic media/browser verification: PASS'
+printf '%s\n' 'Manual loopback microphone/listening and second-tailnet-client evidence: REQUIRED, not claimed'

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
+import threading
 from typing import Callable, Iterable
 
 from .audio import DEFAULT_AUDIO_FORMAT, generated_input_pcm, generated_output_pcm
@@ -59,14 +60,14 @@ class TraceResult:
 
 class CancellationToken:
     def __init__(self) -> None:
-        self._cancelled = False
+        self._cancelled = threading.Event()
 
     @property
     def cancelled(self) -> bool:
-        return self._cancelled
+        return self._cancelled.is_set()
 
     def cancel(self) -> None:
-        self._cancelled = True
+        self._cancelled.set()
 
 
 class DeterministicSTT:

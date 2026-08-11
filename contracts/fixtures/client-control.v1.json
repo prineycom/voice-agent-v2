@@ -1,0 +1,6 @@
+{
+  "schema_version": "voice-agent.client-control.v1",
+  "session_id": "session-synthetic-0001",
+  "sequence": 1,
+  "type": "client.reconnected"
+}

@@ -366,5 +366,14 @@ class LiteLLMProvider:
         if self._connection is not None:
             self._connection.close()
 
+    def snapshot_session(self, session_id: str) -> tuple[dict[str, str], ...]:
+        return tuple(dict(message) for message in self._contexts.get(session_id, ()))
+
+    def restore_session(self, session_id: str, snapshot: tuple[dict[str, str], ...]) -> None:
+        if snapshot:
+            self._contexts[session_id] = [dict(message) for message in snapshot]
+        else:
+            self._contexts.pop(session_id, None)
+
     def reset_session(self, session_id: str) -> None:
         self._contexts.pop(session_id, None)

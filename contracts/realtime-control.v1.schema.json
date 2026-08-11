@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.invalid/contracts/realtime-control.v1.schema.json",
+  "title": "Voice Agent v2 LiveKit realtime control event v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "session_id",
+    "turn_id",
+    "stream_epoch",
+    "sequence",
+    "type",
+    "terminal",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {"const": "voice-agent.realtime-control.v1"},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "turn_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "stream_epoch": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+    "type": {
+      "enum": [
+        "session.ready",
+        "session.reconnected",
+        "session.degraded",
+        "turn.listening",
+        "turn.transcribing",
+        "stt.final",
+        "turn.thinking",
+        "llm.final",
+        "turn.speaking",
+        "turn.completed",
+        "turn.interrupted",
+        "turn.failed"
+      ]
+    },
+    "terminal": {"type": "boolean"},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}

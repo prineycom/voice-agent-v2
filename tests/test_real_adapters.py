@@ -199,6 +199,14 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         provider.reset_session("session-a")
         self.assertNotIn("session-a", provider._contexts)
 
+    def test_session_context_can_rollback_an_undelivered_playout_turn(self) -> None:
+        provider = LiteLLMProvider(executor=lambda _payload: {"text": "Публичный ответ."})
+        snapshot = provider.snapshot_session("session-a")
+        provider.respond(session_id="session-a", turn_id="turn-a", transcript="Публичный запрос")
+        self.assertIn("session-a", provider._contexts)
+        provider.restore_session("session-a", snapshot)
+        self.assertNotIn("session-a", provider._contexts)
+
     def test_failure_is_explicit_and_never_changes_alias(self) -> None:
         def fail(_payload: dict) -> dict:
             raise StageFailure("llm_provider", "selected_provider_http_503")

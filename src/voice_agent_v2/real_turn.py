@@ -38,6 +38,7 @@ class RealTurnController:
         cancellation: CancellationToken | None = None,
         cancel_after_output_chunks: int | None = None,
         diagnostic_clock: Callable[[], str] | None = None,
+        event_observer: Callable[[dict[str, object]], None] | None = None,
     ) -> TraceResult:
         self._validate_contract_versions()
         if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
@@ -49,11 +50,14 @@ class RealTurnController:
         def emit(event_type: str, payload: dict[str, object], terminal: bool = False) -> None:
             if any(event["terminal"] for event in events):
                 raise AssertionError("cannot emit after terminal")
-            events.append(EventEnvelope(
+            event = EventEnvelope(
                 session_id=session_id, turn_id=turn_id, sequence=len(events) + 1,
                 event_type=event_type, payload=payload, terminal=terminal,
                 diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
-            ).as_dict())
+            ).as_dict()
+            events.append(event)
+            if event_observer is not None:
+                event_observer(event)
 
         def fail(error: StageFailure) -> TraceResult:
             payload: dict[str, object] = {

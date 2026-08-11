@@ -130,7 +130,7 @@ class TracerBehaviorTests(unittest.TestCase):
 
 class ContractFixtureTests(unittest.TestCase):
     def test_contract_examples_satisfy_their_schemas(self) -> None:
-        for name in ("stt", "llm-provider", "tts"):
+        for name in ("stt", "llm-provider", "tts", "realtime-control", "client-control"):
             with self.subTest(contract=name):
                 schema = json.loads((ROOT / "contracts" / f"{name}.v1.schema.json").read_text())
                 fixture = json.loads((FIXTURES / f"{name}.v1.json").read_text())
