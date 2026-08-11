@@ -19,6 +19,7 @@ export type ControlEventType =
   | 'turn.thinking'
   | 'llm.final'
   | 'turn.speaking'
+  | 'turn.playout-ready'
   | 'turn.completed'
   | 'turn.interrupted'
   | 'turn.failed'
@@ -26,7 +27,8 @@ export type ControlEventType =
 const EVENT_TYPES = new Set<ControlEventType>([
   'session.ready', 'session.reconnected', 'session.degraded',
   'turn.listening', 'turn.transcribing', 'stt.final', 'turn.thinking',
-  'llm.final', 'turn.speaking', 'turn.completed', 'turn.interrupted', 'turn.failed',
+  'llm.final', 'turn.speaking', 'turn.playout-ready', 'turn.completed',
+  'turn.interrupted', 'turn.failed',
 ])
 const TERMINAL_TYPES = new Set<ControlEventType>([
   'turn.completed', 'turn.interrupted', 'turn.failed',
@@ -37,7 +39,8 @@ const TURN_PREDECESSOR = new Map<ControlEventType, ControlEventType>([
   ['turn.thinking', 'stt.final'],
   ['llm.final', 'turn.thinking'],
   ['turn.speaking', 'llm.final'],
-  ['turn.completed', 'turn.speaking'],
+  ['turn.playout-ready', 'turn.speaking'],
+  ['turn.completed', 'turn.playout-ready'],
 ])
 
 export interface ControlEvent {
@@ -233,7 +236,7 @@ function phaseFor(type: ControlEventType): TurnPhase | null {
   if (type === 'turn.listening') return 'listening'
   if (type === 'turn.transcribing' || type === 'stt.final') return 'transcribing'
   if (type === 'turn.thinking' || type === 'llm.final') return 'thinking'
-  if (type === 'turn.speaking') return 'speaking'
+  if (type === 'turn.speaking' || type === 'turn.playout-ready') return 'speaking'
   if (type === 'turn.completed') return 'completed'
   if (type === 'turn.interrupted') return 'interrupted'
   if (type === 'turn.failed') return 'failed'

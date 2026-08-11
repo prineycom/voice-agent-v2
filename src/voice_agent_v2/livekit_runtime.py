@@ -274,11 +274,8 @@ class LiveKitRoomController:
     def _register_handlers(self) -> None:
         @self.room.on("participant_connected")
         def participant_connected(participant) -> None:
-            if participant.identity == self.browser_identity and not self._browser_ready:
-                self._browser_ready = True
-                if self._browser_join_task is not None:
-                    self._browser_join_task.cancel()
-                asyncio.create_task(self.session.ready())
+            if participant.identity != self.browser_identity:
+                return
 
         @self.room.on("track_subscribed")
         def track_subscribed(track, publication, participant) -> None:
@@ -288,6 +285,11 @@ class LiveKitRoomController:
                 or publication.source != rtc.TrackSource.SOURCE_MICROPHONE
             ):
                 return
+            if not self._browser_ready:
+                self._browser_ready = True
+                if self._browser_join_task is not None:
+                    self._browser_join_task.cancel()
+                asyncio.create_task(self.session.ready())
             if self._audio_task is not None and not self._audio_task.done():
                 self._audio_task.cancel()
             self._audio_task = asyncio.create_task(
@@ -318,6 +320,7 @@ class LiveKitRoomController:
             num_channels=1,
             frame_size_ms=AUDIO_FRAME_MS,
         )
+        failure_code = "microphone_stream_ended"
         try:
             async for event in stream:
                 for signal, payload in endpoint.feed(bytes(event.frame.data)):
@@ -330,17 +333,27 @@ class LiveKitRoomController:
         except asyncio.CancelledError:
             raise
         except Exception:
-            await self.session.interrupt("microphone_stream_failed")
+            failure_code = "microphone_stream_failed"
         finally:
-            for signal, payload in endpoint.flush():
-                if signal == "utterance" and payload is not None:
-                    try:
-                        await self.session.finish_utterance(payload)
-                    except (RuntimeError, ValueError):
-                        pass
-                elif signal == "speech_discarded":
-                    await self.session.discard_utterance()
-            await stream.aclose()
+            try:
+                for signal, payload in endpoint.flush():
+                    if signal == "utterance" and payload is not None:
+                        try:
+                            await self.session.finish_utterance(payload)
+                        except (RuntimeError, ValueError):
+                            pass
+                    elif signal == "speech_discarded":
+                        await self.session.discard_utterance()
+            finally:
+                try:
+                    await stream.aclose()
+                except Exception:
+                    failure_code = "microphone_stream_failed"
+                if (
+                    not self._closed
+                    and self._audio_task is asyncio.current_task()
+                ):
+                    await self.session.fail("input", failure_code)
 
     async def close(self, *, notify: bool = True) -> None:
         async with self._close_lock:

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AudioPlaybackBoundary, type AttachableAudioTrack } from './playback'
 
 class FakeTrack implements AttachableAudioTrack {
@@ -19,6 +19,8 @@ class FakeTrack implements AttachableAudioTrack {
     return []
   }
 }
+
+afterEach(() => vi.useRealTimers())
 
 describe('audio playout boundary', () => {
   it('reattaches the live track to drain browser-side stale audio', async () => {
@@ -46,5 +48,21 @@ describe('audio playout boundary', () => {
     boundary.clear()
     expect(track.detachCount).toBe(2)
     expect(container.childElementCount).toBe(0)
+  })
+
+  it('confirms drain only after the attached media clock advances', async () => {
+    vi.useFakeTimers()
+    const container = document.createElement('div')
+    const boundary = new AudioPlaybackBoundary(container, vi.fn())
+    boundary.setTrack(new FakeTrack())
+    const element = container.querySelector('audio') as HTMLAudioElement
+
+    const confirmation = boundary.confirmDrain(250, 1_000)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(await Promise.race([confirmation, Promise.resolve('pending')])).toBe('pending')
+    Object.defineProperty(element, 'currentTime', { value: 0.3, configurable: true })
+    await vi.advanceTimersByTimeAsync(20)
+
+    await expect(confirmation).resolves.toBe(true)
   })
 })

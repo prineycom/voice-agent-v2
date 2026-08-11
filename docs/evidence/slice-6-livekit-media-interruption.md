@@ -14,7 +14,7 @@ This report distinguishes executable evidence from the microphone, listening, re
 | Local media server | official LiveKit Server `1.13.5`; release archive SHA-256 `c020fac437b7cc9b776eef1ad5ea8af77be9acfa07602eca20a3a44930dfbc70` | Cached binary reports `livekit-server version 1.13.5`; current generated restricted config started successfully. |
 | Server RTC/capability | official Python `livekit==1.1.14`, `livekit-api==1.2.0` | `scripts/verify_slice6_runtime.py` verifies installed versions and decodes the generated JWT without opening a socket. |
 | Application glue | `fastapi==0.141.1`, `uvicorn==0.52.1` | Loopback-only gateway smoke returned exactly `{"available":true,"session_limit":1}` with no-store, CSP, microphone Permissions-Policy, and no provider endpoint. |
-| Browser | React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, official `livekit-client` `2.21.0` | Locked npm install, typecheck, 10 Vitest cases, and production build pass. |
+| Browser | React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, official `livekit-client` `2.21.0` | Locked npm install, typecheck, then-current Vitest suite, and production build passed at the recorded checkpoint. |
 | Inference | Existing `RealTurnController`, Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash`, Qwen3 CustomVoice/`ryan` | No replacement pipeline was added. Deterministic tests use fakes; no new private transcript was sent for this checkpoint. |
 
 `./setup-slice6` keeps the LiveKit binary/Python environment in the ignored user cache and browser dependencies/build output in ignored directories. `.env.slice6`, signing material, the provider token, models, model caches, recordings, transcripts, generated audio, and runtime logs remain outside Git. The foreground runner gives the LiveKit process only its config/signing pair, gives the gateway/controller the server configuration it owns, and removes LiveKit/LiteLLM server configuration from Tailscale Serve child environments.
@@ -31,7 +31,7 @@ Command:
 ./verify
 ```
 
-Result: **PASS**. Python's audit policy denied IP sockets while allowing only asyncio's local AF_UNIX wake-up pair. The suite completed 89 tests at the recorded checkpoint, including fake-inference realtime cases for:
+Result: **PASS** at the recorded checkpoint. Python's audit policy denied IP sockets while allowing only asyncio's local AF_UNIX wake-up pair. The then-current suite included fake-inference realtime cases for:
 
 - correlated success through audio delivery;
 - disconnect cancellation without completion;
@@ -57,7 +57,7 @@ Result: **PASS** after `./setup-slice6`:
 - decoded capability: one room, microphone publish, subscribe/data, no management grants;
 - Python runtime check: no socket opened and no model/provider/microphone/browser used;
 - React/TypeScript typecheck: pass;
-- Vitest: 4 files / 10 tests pass;
+- the then-current Vitest suite passed;
 - Vite production build: pass.
 
 Browser tests cover the typed reducer/parser, exact capability response, lifecycle/epoch/sequence/turn gates, reconnect suppression, stale event rejection, cancellable startup, React shell, autoplay failure boundary, and detach/reattach drain behavior. The installed runtime check also exercises cancellation during model startup, unclaimed-room expiry, and capacity retention after incomplete cleanup. The app intentionally remains one small bundle; Vite's size advisory is visible but is not hidden as a failure.

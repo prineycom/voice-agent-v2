@@ -19,6 +19,9 @@ import {
   type SessionCapability,
 } from './state'
 
+const RECONNECT_ACK_TIMEOUT_MS = 5_000
+const PLAYOUT_CONFIRM_TIMEOUT_MS = 2_000
+
 export interface VoiceClientCallbacks {
   onSession(capability: SessionCapability): void
   onConnection(connection: ConnectionState, error?: string): void
@@ -37,6 +40,8 @@ export class VoiceClient {
   private stopping = false
   private startAbort: AbortController | null = null
   private stopPromise: Promise<void> | null = null
+  private reconnectAckTimer: ReturnType<typeof setTimeout> | null = null
+  private playoutGeneration = 0
 
   constructor(
     audioContainer: HTMLElement,
@@ -108,7 +113,9 @@ export class VoiceClient {
     return this.stopPromise
   }
 
-  private async releaseResources(): Promise<void> {
+  private async releaseResources(notifyClosed = true): Promise<void> {
+    this.clearReconnectAckTimer()
+    this.playoutGeneration += 1
     this.microphone?.stop()
     this.microphone = null
     this.capability = null
@@ -119,7 +126,7 @@ export class VoiceClient {
     try {
       if (room !== null) await room.disconnect()
     } finally {
-      this.callbacks.onConnection('closed')
+      if (notifyClosed) this.callbacks.onConnection('closed')
     }
   }
 
@@ -161,12 +168,27 @@ export class VoiceClient {
         this.callbacks.onDrop()
         return
       }
+      if (
+        event.type === 'turn.interrupted'
+        || event.type === 'turn.failed'
+        || event.type === 'turn.completed'
+        || event.type === 'session.reconnected'
+        || event.type === 'session.degraded'
+      ) {
+        this.playoutGeneration += 1
+      }
       if (event.type === 'turn.interrupted' || event.type === 'session.reconnected') {
         this.playback.reset()
       }
+      if (event.type === 'session.reconnected' || event.type === 'session.degraded') {
+        this.clearReconnectAckTimer()
+      }
+      if (event.type === 'turn.playout-ready') void this.publishPlayoutAck(event)
       this.callbacks.onControl(event)
     })
     room.on(RoomEvent.Reconnecting, () => {
+      this.clearReconnectAckTimer()
+      this.playoutGeneration += 1
       this.controlGate?.beginReconnect()
       this.playback.suspend()
       this.callbacks.onConnection('reconnecting')
@@ -175,13 +197,14 @@ export class VoiceClient {
       void this.publishReconnect()
     })
     room.on(RoomEvent.Disconnected, () => {
+      this.clearReconnectAckTimer()
+      this.playoutGeneration += 1
       if (!this.stopping) {
-        this.playback.clear()
-        this.callbacks.onConnection('closed')
+        void this.failSession('Соединение с голосовой сессией потеряно')
       }
     })
     room.on(RoomEvent.MediaDevicesError, () => {
-      this.callbacks.onConnection('failed', 'Микрофон недоступен')
+      void this.failSession('Микрофон недоступен')
     })
   }
 
@@ -194,13 +217,64 @@ export class VoiceClient {
       sequence: this.clientSequence,
       type: 'client.reconnected',
     }))
+    this.clearReconnectAckTimer()
+    this.reconnectAckTimer = setTimeout(() => {
+      void this.failSession('Сервер не подтвердил восстановление сессии')
+    }, RECONNECT_ACK_TIMEOUT_MS)
     try {
       await this.room.localParticipant.publishData(payload, {
         reliable: true,
         topic: CLIENT_CONTROL_TOPIC,
       })
     } catch {
-      this.callbacks.onConnection('failed', 'Не удалось восстановить сессию')
+      await this.failSession('Не удалось восстановить сессию')
     }
+  }
+
+  private async publishPlayoutAck(event: ControlEvent): Promise<void> {
+    const drainMs = event.payload.drain_bound_ms
+    if (typeof drainMs !== 'number' || !Number.isFinite(drainMs) || drainMs < 0) {
+      await this.failSession('Некорректная граница воспроизведения')
+      return
+    }
+    const generation = ++this.playoutGeneration
+    const drained = await this.playback.confirmDrain(drainMs, PLAYOUT_CONFIRM_TIMEOUT_MS)
+    if (generation !== this.playoutGeneration || this.stopping) return
+    if (!drained || this.room === null || this.capability === null) {
+      await this.failSession('Не удалось подтвердить воспроизведение ответа')
+      return
+    }
+    this.clientSequence += 1
+    const payload = new TextEncoder().encode(JSON.stringify({
+      schema_version: CLIENT_CONTROL_VERSION,
+      session_id: this.capability.session_id,
+      turn_id: event.turn_id,
+      stream_epoch: event.stream_epoch,
+      sequence: this.clientSequence,
+      type: 'client.playout-completed',
+    }))
+    try {
+      await this.room.localParticipant.publishData(payload, {
+        reliable: true,
+        topic: CLIENT_CONTROL_TOPIC,
+      })
+    } catch {
+      await this.failSession('Не удалось подтвердить воспроизведение ответа')
+    }
+  }
+
+  private clearReconnectAckTimer(): void {
+    if (this.reconnectAckTimer === null) return
+    clearTimeout(this.reconnectAckTimer)
+    this.reconnectAckTimer = null
+  }
+
+  private async failSession(message: string): Promise<void> {
+    if (this.stopping) return
+    this.stopping = true
+    this.startAbort?.abort()
+    this.stopPromise = this.releaseResources(false)
+    await this.stopPromise
+    this.callbacks.onConnection('failed', message)
   }
 }

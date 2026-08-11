@@ -30,6 +30,28 @@ export class AudioPlaybackBoundary {
     this.onBlocked(false)
   }
 
+  async confirmDrain(drainMs: number, timeoutMs: number): Promise<boolean> {
+    const deadline = performance.now() + timeoutMs
+    let element: HTMLMediaElement | null = null
+    let generation = 0
+    let startTime = 0
+    while (performance.now() < deadline) {
+      if (element === null && this.element !== null) {
+        element = this.element
+        generation = this.generation
+        startTime = element.currentTime
+      }
+      if (
+        element !== null
+        && this.element === element
+        && this.generation === generation
+        && element.currentTime - startTime >= drainMs / 1000
+      ) return true
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    return false
+  }
+
   clear(): void {
     this.detachElement()
     this.track = null

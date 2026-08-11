@@ -249,8 +249,24 @@ class BlockingRunner(FakeRunner):
 
 async def wait_for_turn(session: RealtimeSession) -> None:
     context = session._active
-    if context is not None and context.task is not None:
-        await asyncio.wait_for(context.task, 2)
+    if context is None or context.task is None:
+        return
+    for _ in range(200):
+        if context.playout_ack is not None and not context.playout_ack.done():
+            payload = json.dumps({
+                "schema_version": CLIENT_CONTROL_VERSION,
+                "session_id": session.session_id,
+                "turn_id": context.turn_id,
+                "stream_epoch": session.stream_epoch,
+                "sequence": session._client_sequence + 1,
+                "type": "client.playout-completed",
+            }).encode()
+            if await session.handle_client_control(payload):
+                break
+        if context.task.done():
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.wait_for(context.task, 2)
 
 
 class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -270,10 +286,11 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         types = [event["type"] for event in events.events]
         self.assertEqual(types, [
             "session.ready", "turn.listening", "turn.transcribing", "stt.final",
-            "turn.thinking", "llm.final", "turn.speaking", "turn.completed",
+            "turn.thinking", "llm.final", "turn.speaking", "turn.playout-ready",
+            "turn.completed",
         ])
         self.assertEqual(audio.played, [turn_id])
-        self.assertEqual([event["sequence"] for event in events.events], list(range(1, 9)))
+        self.assertEqual([event["sequence"] for event in events.events], list(range(1, 10)))
         self.assertTrue(all(event["schema_version"] == CONTROL_EVENT_VERSION for event in events.events))
         self.assertEqual(events.events[-1]["turn_id"], turn_id)
         self.assertTrue(events.events[-1]["terminal"])
@@ -441,6 +458,19 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         old_turn = await session.submit_utterance(b"\0\0" * 320)
         old_task = session._active.task
         self.assertIsNotNone(old_task)
+        while session._active is not None and session._active.playout_ack is None:
+            await asyncio.sleep(0.01)
+        context = session._active
+        assert context is not None
+        playout = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": old_turn,
+            "stream_epoch": session.stream_epoch,
+            "sequence": 1,
+            "type": "client.playout-completed",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(playout))
         await asyncio.to_thread(runner.delivery_entered.wait, 1)
         next_start = asyncio.create_task(session.start_utterance())
         await asyncio.sleep(0)
@@ -504,6 +534,45 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(events.events[-1]["payload"]["conversation_context_reset"])
         self.assertEqual(session.runner.reset_sessions, ["session-test-0001"])
         self.assertEqual(session.drop_counts["client_control"], 3)
+
+    async def test_completion_waits_for_matching_client_playout_ack(self) -> None:
+        events = MemoryEventSink()
+        runner = FakeRunner()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        context = session._active
+        assert context is not None and context.task is not None
+        while context.playout_ack is None:
+            await asyncio.sleep(0.01)
+        self.assertEqual(events.events[-1]["type"], "turn.playout-ready")
+        self.assertFalse(context.task.done())
+
+        wrong = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": "turn-wrong",
+            "stream_epoch": session.stream_epoch,
+            "sequence": 1,
+            "type": "client.playout-completed",
+        }).encode()
+        self.assertFalse(await session.handle_client_control(wrong))
+        self.assertFalse(context.task.done())
+        valid = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": session.stream_epoch,
+            "sequence": 2,
+            "type": "client.playout-completed",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(valid))
+        await asyncio.wait_for(context.task, 2)
+        self.assertEqual(events.events[-1]["type"], "turn.completed")
 
 
 class ControlEventGateTests(unittest.TestCase):

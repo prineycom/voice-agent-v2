@@ -30,6 +30,7 @@
         "turn.thinking",
         "llm.final",
         "turn.speaking",
+        "turn.playout-ready",
         "turn.completed",
         "turn.interrupted",
         "turn.failed"

@@ -115,7 +115,8 @@ describe('control event boundary', () => {
       event(12, 'turn.thinking', 'turn-00000002'),
       event(13, 'llm.final', 'turn-00000002', { response: 'Новый ответ.' }),
       event(14, 'turn.speaking', 'turn-00000002'),
-      event(15, 'turn.completed', 'turn-00000002'),
+      event(15, 'turn.playout-ready', 'turn-00000002'),
+      event(16, 'turn.completed', 'turn-00000002'),
     ])
     expect(state.currentTurnId).toBe('turn-00000002')
     expect(state.phase).toBe('completed')
