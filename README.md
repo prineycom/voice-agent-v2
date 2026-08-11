@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Cumulative Slices 2–5 delivery accepted; Slice 6 implementation authorized by Pasha on 2026-08-11.** The deterministic Slice 1 tracer remains executable. The fixed stack is real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash`, and local Qwen3 CustomVoice/`ryan`. Slice 6 requires the provider endpoint only from untracked server-side `LITELLM_BASE_URL`; the current private test value remains the temporary HTTP route recorded in ADR-0006. Automated provider and overlap failures remain failed, and the new authorization is not production security/privacy approval.
+**Cumulative Slices 2–5 delivery accepted; Slice 6 implementation checkpoint awaiting physical-browser acceptance.** The network-denied fake-inference controller cases, installed LiveKit SDK contract, React state/media tests, scoped capability, loopback gateway, and restricted LiveKit bind smoke pass. Real loopback microphone/listening, second-tailnet-browser, barge-in timing, and combined resource evidence are still required and are not claimed. The fixed inference stack and every prior provider/overlap failure remain unchanged; ADR-0006 authorizes the required server-only `LITELLM_BASE_URL` route for this private test, not production security/privacy approval.
 
 ## Root verification
 
@@ -23,6 +23,37 @@ It uses only POSIX `sh` and the Python 3.11+ standard library, creates isolated 
 ```
 
 The command reports each preserved path. Both PCM files use signed 16-bit little-endian mono samples at 16 kHz; `output.pcm` contains the deterministic audible tone. The destination must not already exist, preventing accidental replacement of prior evidence. The toolchain is a Slice 1 reproducibility choice only; it does not select the future production application or inference framework.
+
+## Slice 6 development application
+
+One-time setup acquires the checksum-pinned LiveKit server, the pinned Python SDK/runtime, and locked browser packages into ignored cache/build directories. It does not download models or place configuration, credentials, recordings, or generated audio in Git:
+
+```sh
+./setup-slice6
+cp .env.slice6.example .env.slice6
+```
+
+Generate a dedicated LiveKit key pair, fill every blank in the ignored `.env.slice6`, and keep the LiteLLM token in an absolute user-owned mode-`0600` file:
+
+```sh
+"${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
+```
+
+`LITELLM_BASE_URL` has no default; the current authorized private-test value and its limitations are in [ADR-0006](docs/adr/0006-slice-6-live-transcript-and-endpoint-configuration.md). Then this is the single development start command:
+
+```sh
+./run-slice6
+```
+
+It runs in the foreground and cleans up its child processes on exit. Open `http://127.0.0.1:8000` on the host (loopback is a browser secure-context exception) or the configured tailnet HTTPS application URL. The configured paths are loopback TCP `8000` for the gateway and `7880` for LiveKit signaling, Tailscale Serve HTTPS for the application/signaling (example ports `8443`/`7443`), and only tailnet UDP `7882` for WebRTC media. ICE/TCP media, port `7881`, TURN, public exposure, model administration, and detailed health endpoints are disabled/absent. The restricted server bind was measured; the two Tailscale HTTPS paths still require the real second-client gate.
+
+Run the complete deterministic/installed-runtime/browser check with:
+
+```sh
+./verify-slice6
+```
+
+The command reports the physical-browser gates as required rather than claiming them. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
 
 ## Final Slice 5 human acceptance
 

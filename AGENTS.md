@@ -1,6 +1,6 @@
 # Project agent memory
 
-Voice Agent v2 has only the executable Slice 1 deterministic tracer; do not infer a production stack or selected model/framework from it. Run the required root verification with `./verify`.
+Voice Agent v2 has cumulative Slices 1–5 plus the Slice 6 development LiveKit/React path; physical-browser Slice 6 acceptance remains pending. Run root verification with `./verify`, and use [`README.md`](README.md#slice-6-development-application) plus [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md) for the installed runtime and remaining manual gates.
 
 - Use [`CONTEXT.md`](CONTEXT.md) for stable terminology.
 - Use [`docs/architecture.md`](docs/architecture.md) for boundaries, contract ownership, lifecycle, failure policy, security, and resource gates.

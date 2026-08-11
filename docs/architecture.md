@@ -32,6 +32,7 @@ Untested behavior is not implied by a target diagram.
 | D8 | Decision | The detailed avatar-module and visual-control contract is deferred to a separate Grill/design task that must complete before MVP eye implementation. |
 | D9 | Decision | For the cumulative Slice 2–5 delivery branch, Pasha fixes Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and Qwen3-TTS CustomVoice/`ryan` despite recorded gate failures. Pasha attested the final human microphone/listening turn on 2026-08-11; every automated failure and exception remains visible, and no fallback or false pass is allowed. See [ADR-0005](adr/0005-operator-fixed-slices-2-5-model-stack.md). |
 | D10 | Decision | Slice 6 private live transcript traffic may use the same failed, operator-opaque LiteLLM alias under Pasha's explicit exception. Its endpoint is required only from untracked server-side `LITELLM_BASE_URL`, with no code default, alternate name, redirect, alias, or fallback; the current test value is HTTP and remains non-production. See [ADR-0006](adr/0006-slice-6-live-transcript-and-endpoint-configuration.md). |
+| D11 | Decision | Slice 6 uses pinned local LiveKit Server with the low-level official Python RTC/API SDK, a loopback FastAPI gateway/controller process, and a React + TypeScript + Vite client using official `livekit-client`. One room admits one browser and one agent; no avatar contract is introduced. See [ADR-0007](adr/0007-slice-6-livekit-react-realtime-boundary.md). |
 
 ## 3. System boundary
 
@@ -117,7 +118,7 @@ Media and control remain distinct even when LiveKit transports both.
 
 1. The browser obtains application assets and a short-lived, room-scoped LiveKit capability from the web gateway over the tailnet or loopback.
 2. The browser joins a realtime session and publishes microphone audio to local LiveKit.
-3. The session controller consumes the audio. It owns utterance boundaries and creates one turn correlation ID per accepted utterance.
+3. The session controller consumes 20 ms frames resampled by the official LiveKit SDK to 16 kHz mono PCM. Slice 6 uses a bounded CPU energy endpoint (100 ms speech start, 600 ms trailing silence, 200 ms pre-roll, 15 s utterance maximum); the physical-browser gate must validate this deliberately small choice before it is treated as a quality result. The controller owns utterance boundaries and creates one turn correlation ID per accepted utterance.
 4. The controller streams or submits audio to local STT. Partial transcript events may improve feedback; only a final transcript can advance the turn to response generation.
 5. The controller sends the final transcript and permitted conversation context through the LLM provider adapter to the one explicitly configured provider. In local mode the request stays on-host. In cloud mode only approved fields traverse the endpoint required from server-only `LITELLM_BASE_URL`. TLS remains the target; for the current private test Pasha temporarily accepts exact configured value `http://rpi:4000` without runtime DNS/route/TSMP proof, while the gateway's onward provider hop remains operator-opaque.
 6. The selected LLM provider returns response text. Provider identity and the external-transfer fact, when applicable, remain associated with the turn; provider failure cannot select another provider.
@@ -141,7 +142,7 @@ Media and control remain distinct even when LiveKit transports both.
 | STT request/result | Session controller ↔ STT service | STT service | Versioned audio metadata, session/turn correlation, ordered partial/final results, terminal error/cancel. |
 | LLM provider request/result | Session controller ↔ selected LLM provider | Session controller/provider adapter | Versioned permitted-context envelope, provider mode/identity, correlated bounded response text, explicit terminal error/cancel, no fallback. |
 | TTS request/stream | Session controller ↔ TTS service | TTS service | Correlated text input, declared audio format, ordered chunks, one terminal outcome, cancellation. |
-| Realtime event envelope | Session controller → browser | Session controller | Schema version, session ID, turn ID where applicable, event sequence, event type, payload, terminal semantics. |
+| Realtime event envelope | Session controller → browser | Session controller | Schema version, session ID, turn ID where applicable, connection epoch, session-wide sequence, closed event type, bounded payload, lifecycle order, and terminal semantics. Reliable LiveKit data uses topic `voice-agent.control.v1`; wrong-version/session/epoch/turn, duplicate, late, out-of-order, oversized, and malformed events are dropped before media/UI actions. |
 | Avatar module interface | Avatar host/media adapter → selected avatar module | Avatar host | Version/capabilities, bounded validated inputs, explicit cancellation/fallback; detailed shape waits for the design gate. |
 | Speech envelope | Browser playout analyser → avatar module | Browser media adapter | Derived from actual playout, bounded rate/range, correlated lifecycle, no raw audio in the control event. |
 | External tracking target | Approved trigger producer → avatar host | Avatar host | Optional, bounded coordinates/age/confidence, stale-input rejection; producer implementation is separate. |
@@ -196,7 +197,7 @@ The exact supervisor, packaging, and start order are **hypotheses** until the op
 
 ### 6.2 Realtime-session lifecycle
 
-A session moves through `connecting`, `ready`, `degraded`, `reconnecting`, and `closed`. Conversation context is scoped to the session unless a later retention decision explicitly adds persistence. Reconnection must not replay a stale response as a new turn.
+A session moves through `connecting`, `ready`, `degraded`, `reconnecting`, and `closed`. Conversation context is scoped to the session unless a later retention decision explicitly adds persistence. On Slice 6 transport reconnection the browser detaches playout, rejects pre-reconnect epochs, and sends one bounded increasing reconnect notice. The controller cancels active work, clears publication, waits for serialized cancellation, resets the in-memory provider context, advances the stream epoch, and only then publishes `session.reconnected`; cleanup/reset failure degrades and closes admission. This intentionally sacrifices conversational context across a reconnect so an answer not known to have played cannot reappear or influence a new turn.
 
 ### 6.3 Voice-turn lifecycle
 
@@ -215,6 +216,14 @@ On barge-in, the controller:
 The cumulative pre-LiveKit tracer now has three concrete adapters: process-isolated local Whisper large-v3-turbo, a single-alias LiteLLM `deepseek-v4-flash` HTTP adapter, and process-isolated local Qwen3 CustomVoice/`ryan`. The provider adapter admits only a final transcript and a bounded memory-only per-session context, filters request fields, ignores hidden reasoning content, and has no fallback. Readiness performs a bearer-authenticated, content-free exact-alias capability check; neither readiness nor request admission runs DNS-class, route-interface, Tailscale peer, TSMP/WireGuard, freshness, TTL, or related shell-command proof. Streamed content reaches the TTS handoff only after the response has echoed exactly `deepseek-v4-flash`; a missing or alternate response identity fails the turn. Qwen's native 24 kHz stream is HQ-converted in its process boundary to the preserved TTS v1 16 kHz mono PCM contract and emitted as validated ordered chunks without an output path by default.
 
 The controller hands complete provider sentences to TTS while the provider stream remains open, but buffers audio events until `llm.final` so the public lifecycle ordering remains stable. Cancellation terminates delivery with one correlated terminal event and no later chunks. This tracer proves inference contracts; it does not implement LiveKit publication, browser behavior, or a durable conversation store. Default execution persists neither microphone input, transcript/response, nor synthesized audio.
+
+### 6.5 Slice 6 development runtime
+
+The pinned implementation is LiveKit Server `1.13.5`; Python `livekit` `1.1.14`, `livekit-api` `1.2.0`, FastAPI `0.141.1`, and Uvicorn `0.52.1`; and React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, and official `livekit-client` `2.21.0`. The gateway and controller share a Python process but retain separate static/capability, room/media, session, and inference objects. The browser capability expires after 300 seconds and grants only one generated room, microphone publication, agent subscription, and data publication; it has no room-management grant. Issuance also requires the exact loopback or configured tailnet application `Origin`, preventing a cross-site form from consuming the one-session path without inventing a second user identity system. One measured session is admitted at a time.
+
+The agent reuses `RealTurnController` and the Slice 3–5 process-isolated Whisper/Qwen adapters rather than creating a second inference pipeline. Live microphone bytes remain memory-only except for the existing fail-closed Whisper temporary-file boundary. Agent PCM is published through one LiveKit audio source with a 100 ms queue. Barge-in is detected before admitting the new turn, marks the prior turn terminal, clears queued source/browser media, cancels provider/STT/TTS work, rolls back undelivered provider context, and serializes replacement work. The deterministic drain bound is 250 ms; actual microphone-to-stop timing remains a physical-browser acceptance measurement.
+
+`./run-slice6` is a foreground development orchestrator only. Deployment supervision, reboot behavior, durable readiness and restart policy remain Slice 9.
 
 ## 7. Failure semantics
 
@@ -285,7 +294,7 @@ Local model artifacts require identity, revision/hash, license/provenance, expec
 - Permit provider-adapter traffic only to the endpoint explicitly supplied in server-side `LITELLM_BASE_URL`. Its current private-test value is `http://rpi:4000`; Pasha accepts this temporary HTTP transport without runtime Tailscale proof, while the adapter rejects missing/invalid configuration, alternate environment names, redirects, additional endpoints, and fallback. HTTPS is deferred and requires only configuration plus readiness.
 - Keep LiveKit signing material in the web gateway; issue narrow room capabilities because LiveKit requires them as protocol credentials, not as a second user-auth subsystem.
 - Do not publish a public fallback route or alternate provider route.
-- Record the actual tailnet ports and transport behavior in the LiveKit slice after loopback and remote-client validation.
+- Slice 6 configures the gateway at loopback TCP `8000` and LiveKit signaling at loopback TCP `7880`; Tailscale Serve terminates application/signaling HTTPS on explicit operator ports (the example uses `8443`/`7443`). LiveKit advertises only the host Tailscale IPv4 and binds WebRTC media to UDP `7882` on `tailscale0`; ICE/TCP media (`7881`) and TURN are disabled. A host smoke measured `127.0.0.1:7880`, tailnet UDP `7882`, and no TCP media listener. The configured Tailscale HTTPS paths remain unaccepted until the second-client browser gate.
 
 **Hypothesis:** Tailscale transport plus scoped LiveKit capabilities will meet browser microphone, WebRTC, and interruption requirements without an additional reverse-proxy identity layer. The LiveKit slice must measure this from a second tailnet client.
 
@@ -322,7 +331,7 @@ The measured peak must account for:
 - browser/MVP-eye rendering on the canonical host;
 - host services, filesystem cache, and failure/restart transients.
 
-The Slice 2 overlap measurement observed a Qwen3+Whisper peak of `7,494 MiB`, leaving `4,788 MiB`, with CPU p95 `66.67%`; it also observed failed latency regressions. The cumulative Slice 5 public diagnostics observed peak VRAM up to `7,600 MiB` (reserve `4,682 MiB`) with more than `24 GiB` RAM available. A first diagnostic completed three turns plus interruption; the final TTS-v1-format run completed two turns, explicitly failed one empty provider response, and could not reach the cancellation seam after another provider failure. These results preserve the known provider instability rather than disguising it. They bound only the fixed ADR-0005 stack and do not erase earlier component failures. Browser/LiveKit headroom remains a hypothesis until the later media slice.
+The Slice 2 overlap measurement observed a Qwen3+Whisper peak of `7,494 MiB`, leaving `4,788 MiB`, with CPU p95 `66.67%`; it also observed failed latency regressions. The cumulative Slice 5 public diagnostics observed peak VRAM up to `7,600 MiB` (reserve `4,682 MiB`) with more than `24 GiB` RAM available. A first diagnostic completed three turns plus interruption; the final TTS-v1-format run completed two turns, explicitly failed one empty provider response, and could not reach the cancellation seam after another provider failure. These results preserve the known provider instability rather than disguising it. They bound only the fixed ADR-0005 stack and do not erase earlier component failures. Slice 6 deterministic and bind smokes add no real combined browser/LiveKit/model resource measurement; the `4,682 MiB` Slice 5 reserve remains the acceptance ceiling, not a claimed Slice 6 pass.
 
 ### 11.3 Measurements required before model/provider selection
 

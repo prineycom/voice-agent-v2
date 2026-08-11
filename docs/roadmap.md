@@ -284,6 +284,8 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 ## Slice 6 — Local LiveKit media and interruption
 
 > **Authorized 2026-08-11:** Pasha explicitly authorized the failed, operator-opaque LiteLLM `deepseek-v4-flash` route for Slice 6 private live transcript testing. ADR-0006 supersedes ADR-0005's consumed live-traffic scope and requires the endpoint only from untracked server-side `LITELLM_BASE_URL`; current HTTP transport and every prior latency/reliability/privacy limitation remain visible, with no fallback or production approval.
+>
+> **Implementation checkpoint (2026-08-11):** the pinned low-level LiveKit/Python controller, scoped capability gateway, React client, reconnect context reset, and full cancellation/publication seam are implemented. Network-denied fake-inference cases, installed-SDK capability verification, React state/media tests, a loopback gateway smoke, and a restricted-bind LiveKit Server smoke pass. The configured server smoke observed signaling only on `127.0.0.1:7880`, media only on tailnet UDP `7882`, and no ICE/TCP media listener. This is not final acceptance: real loopback microphone/listening, second-tailnet browser, actual 250 ms barge-in, timing, browser capture, and combined resource evidence remain required.
 
 ### User-visible outcome
 
@@ -321,10 +323,11 @@ Run network-denied deterministic headless media tests, then selected-provider re
 
 ### Evidence required before Design Gate V
 
-- Headless success/fault/interruption results.
-- Real loopback and second-tailnet-client latency traces.
-- Redacted bind/port and scoped-capability review.
-- Browser capture showing conversation, transcript state, and successful barge-in.
+- Headless success/fault/interruption results: deterministic pass recorded in [`docs/evidence/slice-6-livekit-media-interruption.md`](evidence/slice-6-livekit-media-interruption.md).
+- Real loopback and second-tailnet-client latency traces: **pending physical-browser gate**.
+- Redacted bind/port and scoped-capability review: server bind/capability pass recorded; Tailscale HTTPS/browser path pending.
+- Browser capture showing conversation, transcript state, audible response, reconnect safety, and successful barge-in: **pending physical-browser gate**.
+- Combined LiveKit/browser/real-inference resource evidence inside the preserved Slice 5 reserve: **pending physical-browser gate**.
 
 ## Design Gate V — Grill the avatar module and MVP eye
 
