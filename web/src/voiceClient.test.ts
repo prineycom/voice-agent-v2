@@ -184,6 +184,71 @@ describe('VoiceClient startup cancellation', () => {
     })
   })
 
+  it('keeps replacement audio detached and coalesces reconnects until epoch acknowledgement', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const client = new VoiceClient(document.createElement('div'), callbacks())
+    await client.start()
+    const room = livekit.rooms[0]
+    const oldElement = document.createElement('audio')
+    oldElement.play = vi.fn().mockResolvedValue(undefined)
+    oldElement.pause = vi.fn()
+    oldElement.load = vi.fn()
+    const oldTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(oldElement),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', oldTrack, {}, { identity: 'agent-session-test-0001' })
+    const replacementElement = document.createElement('audio')
+    replacementElement.play = vi.fn().mockResolvedValue(undefined)
+    replacementElement.pause = vi.fn()
+    replacementElement.load = vi.fn()
+    const replacementTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(replacementElement),
+      detach: vi.fn().mockReturnValue([]),
+    }
+
+    room.emit('reconnecting')
+    room.emit('reconnected')
+    room.emit('reconnected')
+    room.emit('trackSubscribed', replacementTrack, {}, { identity: 'agent-session-test-0001' })
+    await Promise.resolve()
+
+    expect(room.localParticipant.publishData).toHaveBeenCalledOnce()
+    const reconnectPayload = room.localParticipant.publishData.mock.calls[0][0] as Uint8Array
+    expect(JSON.parse(new TextDecoder().decode(reconnectPayload))).toMatchObject({
+      stream_epoch: 1,
+      type: 'client.reconnected',
+    })
+    expect(replacementTrack.attach).not.toHaveBeenCalled()
+
+    room.emit(
+      'dataReceived',
+      new TextEncoder().encode(JSON.stringify({
+        schema_version: 'voice-agent.realtime-control.v1',
+        session_id: 'session-test-0001',
+        turn_id: 'session',
+        stream_epoch: 2,
+        sequence: 1,
+        type: 'session.reconnected',
+        terminal: false,
+        payload: {
+          state: 'ready',
+          stale_media_discarded: true,
+          conversation_context_reset: true,
+        },
+      })),
+      { identity: 'agent-session-test-0001' },
+      undefined,
+      'voice-agent.control.v1',
+    )
+
+    expect(replacementTrack.attach).toHaveBeenCalledOnce()
+    await client.stop()
+  })
+
   it('fails closed when reconnect receives no server epoch acknowledgement', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))

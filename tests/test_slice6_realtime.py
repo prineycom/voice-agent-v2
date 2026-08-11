@@ -436,6 +436,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         reconnected = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": "session-test-0001",
+            "stream_epoch": 1,
             "sequence": 1,
             "type": "client.reconnected",
         }).encode()
@@ -521,11 +522,20 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         valid = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": "session-test-0001",
+            "stream_epoch": 1,
             "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+        repeated_cycle = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": "session-test-0001",
+            "stream_epoch": 1,
+            "sequence": 2,
             "type": "client.reconnected",
         }).encode()
         self.assertTrue(await session.handle_client_control(valid))
         self.assertFalse(await session.handle_client_control(valid))
+        self.assertFalse(await session.handle_client_control(repeated_cycle))
         self.assertFalse(await session.handle_client_control(b"{}"))
         self.assertFalse(await session.handle_client_control(b"not-json"))
         self.assertEqual(session.stream_epoch, 2)
@@ -533,7 +543,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.events[-1]["stream_epoch"], 2)
         self.assertTrue(events.events[-1]["payload"]["conversation_context_reset"])
         self.assertEqual(session.runner.reset_sessions, ["session-test-0001"])
-        self.assertEqual(session.drop_counts["client_control"], 3)
+        self.assertEqual(session.drop_counts["client_control"], 4)
 
     async def test_completion_waits_for_matching_client_playout_ack(self) -> None:
         events = MemoryEventSink()

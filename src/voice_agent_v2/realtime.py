@@ -636,11 +636,12 @@ class RealtimeSession:
             return False
         event_type = event.get("type")
         expected_keys = (
-            {"schema_version", "session_id", "sequence", "type"}
+            {"schema_version", "session_id", "stream_epoch", "sequence", "type"}
             if event_type == "client.reconnected"
             else {"schema_version", "session_id", "turn_id", "stream_epoch", "sequence", "type"}
         )
         sequence = event.get("sequence")
+        stream_epoch = event.get("stream_epoch")
         if (
             set(event) != expected_keys
             or event.get("schema_version") != CLIENT_CONTROL_VERSION
@@ -648,8 +649,12 @@ class RealtimeSession:
             or event_type not in {"client.reconnected", "client.playout-completed"}
             or not isinstance(sequence, int)
             or isinstance(sequence, bool)
-            or sequence <= self._client_sequence
+            or sequence < 1
             or sequence > MAX_EVENT_SEQUENCE
+            or not isinstance(stream_epoch, int)
+            or isinstance(stream_epoch, bool)
+            or stream_epoch < 1
+            or stream_epoch > MAX_EVENT_SEQUENCE
         ):
             self.drop_counts["client_control"] += 1
             return False
@@ -657,8 +662,9 @@ class RealtimeSession:
             async with self._lock:
                 context = self._active
                 if (
-                    self._closed
-                    or event.get("stream_epoch") != self.stream_epoch
+                    sequence <= self._client_sequence
+                    or self._closed
+                    or stream_epoch != self.stream_epoch
                     or context is None
                     or context.terminal
                     or event.get("turn_id") != context.turn_id
@@ -670,8 +676,11 @@ class RealtimeSession:
                 self._client_sequence = sequence
                 context.playout_ack.set_result(None)
                 return True
-        self._client_sequence = sequence
         async with self._lock:
+            if sequence <= self._client_sequence or stream_epoch != self.stream_epoch:
+                self.drop_counts["client_control"] += 1
+                return False
+            self._client_sequence = sequence
             if self._closed:
                 self.stream_epoch += 1
                 await self._emit(

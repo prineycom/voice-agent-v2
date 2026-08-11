@@ -41,6 +41,10 @@ export class VoiceClient {
   private startAbort: AbortController | null = null
   private stopPromise: Promise<void> | null = null
   private reconnectAckTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnecting = false
+  private reconnectRequestPending = false
+  private pendingRemoteTrack: RemoteAudioTrack | null = null
+  private streamEpoch = 0
   private playoutGeneration = 0
 
   constructor(
@@ -68,6 +72,7 @@ export class VoiceClient {
       this.ensureStarting()
       if (capability === null) throw new Error('invalid room capability response')
       this.capability = capability
+      this.streamEpoch = capability.stream_epoch
       this.controlGate = new RealtimeControlGate(capability.session_id, capability.stream_epoch)
       this.callbacks.onSession(capability)
 
@@ -120,6 +125,10 @@ export class VoiceClient {
     this.microphone = null
     this.capability = null
     this.controlGate = null
+    this.reconnecting = false
+    this.reconnectRequestPending = false
+    this.pendingRemoteTrack = null
+    this.streamEpoch = 0
     this.playback.clear()
     const room = this.room
     this.room = null
@@ -154,7 +163,12 @@ export class VoiceClient {
         this.capability !== null &&
         participant.identity === `agent-${this.capability.session_id}`
       ) {
-        this.playback.setTrack(track as RemoteAudioTrack)
+        const remoteTrack = track as RemoteAudioTrack
+        if (this.reconnecting) {
+          this.pendingRemoteTrack = remoteTrack
+        } else {
+          this.playback.setTrack(remoteTrack)
+        }
       }
     })
     room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
@@ -177,17 +191,26 @@ export class VoiceClient {
       ) {
         this.playoutGeneration += 1
       }
-      if (event.type === 'turn.interrupted' || event.type === 'session.reconnected') {
-        this.playback.reset()
-      }
-      if (event.type === 'session.reconnected' || event.type === 'session.degraded') {
+      if (event.type === 'turn.interrupted') this.playback.reset()
+      if (event.type === 'session.reconnected') {
+        this.streamEpoch = event.stream_epoch
+        this.completeReconnect()
+      } else if (event.type === 'session.degraded') {
+        this.streamEpoch = event.stream_epoch
         this.clearReconnectAckTimer()
+        this.reconnecting = false
+        this.reconnectRequestPending = false
+        this.pendingRemoteTrack = null
       }
       if (event.type === 'turn.playout-ready') void this.publishPlayoutAck(event)
       this.callbacks.onControl(event)
     })
     room.on(RoomEvent.Reconnecting, () => {
+      if (this.reconnecting) return
       this.clearReconnectAckTimer()
+      this.reconnecting = true
+      this.reconnectRequestPending = false
+      this.pendingRemoteTrack = null
       this.playoutGeneration += 1
       this.controlGate?.beginReconnect()
       this.playback.suspend()
@@ -209,11 +232,18 @@ export class VoiceClient {
   }
 
   private async publishReconnect(): Promise<void> {
-    if (this.room === null || this.capability === null) return
+    if (
+      this.room === null
+      || this.capability === null
+      || !this.reconnecting
+      || this.reconnectRequestPending
+    ) return
+    this.reconnectRequestPending = true
     this.clientSequence += 1
     const payload = new TextEncoder().encode(JSON.stringify({
       schema_version: CLIENT_CONTROL_VERSION,
       session_id: this.capability.session_id,
+      stream_epoch: this.streamEpoch,
       sequence: this.clientSequence,
       type: 'client.reconnected',
     }))
@@ -260,6 +290,19 @@ export class VoiceClient {
       })
     } catch {
       await this.failSession('Не удалось подтвердить воспроизведение ответа')
+    }
+  }
+
+  private completeReconnect(): void {
+    this.clearReconnectAckTimer()
+    this.reconnecting = false
+    this.reconnectRequestPending = false
+    const track = this.pendingRemoteTrack
+    this.pendingRemoteTrack = null
+    if (track === null) {
+      this.playback.reset()
+    } else {
+      this.playback.setTrack(track)
     }
   }
 

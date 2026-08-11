@@ -65,4 +65,21 @@ describe('audio playout boundary', () => {
 
     await expect(confirmation).resolves.toBe(true)
   })
+
+  it('restarts drain confirmation after autoplay recovery reattaches audio', async () => {
+    vi.useFakeTimers()
+    const container = document.createElement('div')
+    const boundary = new AudioPlaybackBoundary(container, vi.fn())
+    boundary.setTrack(new FakeTrack())
+
+    const confirmation = boundary.confirmDrain(250, 1_000)
+    await vi.advanceTimersByTimeAsync(900)
+    boundary.reset()
+    const recoveredElement = container.querySelector('audio') as HTMLAudioElement
+    await vi.advanceTimersByTimeAsync(20)
+    Object.defineProperty(recoveredElement, 'currentTime', { value: 0.3, configurable: true })
+    await vi.advanceTimersByTimeAsync(20)
+
+    await expect(confirmation).resolves.toBe(true)
+  })
 })
