@@ -1,15 +1,12 @@
-"""Single-alias LiteLLM provider adapter with fail-closed privacy and routing guards."""
+"""Single-endpoint, single-alias LiteLLM adapter with fail-closed content guards."""
 
 from __future__ import annotations
 
 import http.client
-import ipaddress
 import json
 import os
 from pathlib import Path
-import socket
 import stat
-import subprocess
 import threading
 import time
 from typing import Callable
@@ -43,28 +40,6 @@ class LiteLLMProvider:
         self.observations: list[dict] = []
 
     @staticmethod
-    def _transport_gate() -> dict[str, str]:
-        try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(HOST, PORT, type=socket.SOCK_STREAM)}
-            network = ipaddress.ip_network("100.64.0.0/10")
-            if not addresses or any(ipaddress.ip_address(address) not in network for address in addresses):
-                raise StageFailure("llm_provider", "endpoint_not_tailscale")
-            address = sorted(addresses)[0]
-            route = subprocess.run(
-                ["ip", "route", "get", address], check=True, capture_output=True, text=True
-            ).stdout
-        except StageFailure:
-            raise
-        except (OSError, socket.gaierror, subprocess.SubprocessError, ValueError) as error:
-            raise StageFailure("llm_provider", "endpoint_transport_unavailable") from error
-        if " dev tailscale0 " not in f" {route.strip()} ":
-            raise StageFailure("llm_provider", "endpoint_route_not_tailscale")
-        return {
-            "address_class": "tailscale-cgnat-ipv4", "route_interface": "tailscale0",
-            "resolved_address": address,
-        }
-
-    @staticmethod
     def _token() -> str:
         try:
             info = TOKEN_PATH.stat()
@@ -80,18 +55,8 @@ class LiteLLMProvider:
         return value
 
     @staticmethod
-    def _wireguard_gate(address: str) -> None:
-        try:
-            subprocess.run(
-                ["tailscale", "ping", "--tsmp", "--c", "1", "--timeout", "5s", address],
-                check=True, capture_output=True, text=True, timeout=7,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise StageFailure("llm_provider", "endpoint_wireguard_unavailable") from error
-
-    @staticmethod
-    def _capability_gate(transport: dict[str, str], token: str) -> None:
-        connection = http.client.HTTPConnection(transport["resolved_address"], PORT, timeout=10)
+    def _capability_gate(token: str) -> None:
+        connection = http.client.HTTPConnection(HOST, PORT, timeout=10)
         try:
             connection.request(
                 "GET", "/v1/models",
@@ -117,19 +82,19 @@ class LiteLLMProvider:
             connection.close()
 
     def readiness(self) -> dict:
-        transport = self._transport_gate()
         token = self._token()
         try:
-            self._wireguard_gate(transport["resolved_address"])
-            self._capability_gate(transport, token)
+            self._capability_gate(token)
         finally:
             del token
         return {
             "ready": True, "provider_mode": self.provider_mode,
             "provider_identity": self.provider_identity, "endpoint": ENDPOINT,
             "selected_alias": ALIAS, "external_transfer": True,
-            "automatic_fallback": False, "wireguard_proven": True,
-            "authenticated_alias_capability": True, **transport,
+            "automatic_fallback": False, "redirects_followed": False,
+            "authenticated_alias_capability": True,
+            "runtime_network_proof_enforced": False,
+            "transport_security": "temporary-operator-accepted-http",
         }
 
     def _payload(self, session_id: str, transcript: str) -> dict:
@@ -148,9 +113,8 @@ class LiteLLMProvider:
         return payload
 
     def _execute(self, payload: dict, on_sentence: Callable[[str], None] | None = None) -> dict:
-        transport = self._transport_gate()
         token = self._token()
-        connection = http.client.HTTPConnection(transport["resolved_address"], PORT, timeout=40)
+        connection = http.client.HTTPConnection(HOST, PORT, timeout=40)
         self._connection = connection
         submitted = time.monotonic()
         accepted = None

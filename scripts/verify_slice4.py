@@ -77,6 +77,10 @@ def main() -> int:
         "endpoint": readiness["endpoint"],
         "external_transfer": True,
         "automatic_fallback": False,
+        "redirects_followed": readiness["redirects_followed"],
+        "authenticated_alias_capability": readiness["authenticated_alias_capability"],
+        "runtime_network_proof_enforced": readiness["runtime_network_proof_enforced"],
+        "transport_security": readiness["transport_security"],
         "public_sample_id": sample["id"],
         "terminal": "turn.completed",
         "safe_observation": observation,
@@ -87,10 +91,11 @@ def main() -> int:
     output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
     print("Slice 4 selected-provider automated acceptance")
     print(f"provider: {provider.provider_identity}")
-    print(f"endpoint: {readiness['endpoint']} (tailscale0)")
+    print(f"endpoint: {readiness['endpoint']} (temporary operator-accepted HTTP)")
     print(f"public_transcript: {transcript}")
     print(f"response: {response}")
     print("automatic_fallback: false")
+    print("runtime_network_proof_enforced: false")
     print(f"cancellation: {cancellation_code}")
     print("content_persisted: false")
     print("terminal: turn.completed")

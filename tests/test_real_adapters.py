@@ -198,42 +198,73 @@ class LiteLLMProviderContractTests(unittest.TestCase):
             provider.respond(session_id="session-a", turn_id="turn-a", transcript="x" * 4097)
         self.assertEqual(raised.exception.code, "transcript_out_of_bounds")
 
-    def test_readiness_proves_wireguard_and_authenticated_alias_capability(self) -> None:
+    def test_readiness_checks_authenticated_alias_without_runtime_network_proof(self) -> None:
         body = json.dumps({"data": [{"id": ALIAS}]}).encode()
         connection = StubHTTPConnection(StubHTTPResponse(body))
-        transport = {
-            "address_class": "tailscale-cgnat-ipv4", "route_interface": "tailscale0",
-            "resolved_address": "100.64.0.1",
-        }
         with (
-            patch.object(LiteLLMProvider, "_transport_gate", return_value=transport),
             patch.object(LiteLLMProvider, "_token", return_value="test-token"),
-            patch("voice_agent_v2.cloud_llm.subprocess.run") as run,
-            patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+            patch(
+                "voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection,
+            ) as http_connection,
         ):
             readiness = LiteLLMProvider().readiness()
-        self.assertTrue(readiness["wireguard_proven"])
         self.assertTrue(readiness["authenticated_alias_capability"])
         self.assertEqual(readiness["selected_alias"], ALIAS)
-        self.assertEqual(run.call_args.args[0][:3], ["tailscale", "ping", "--tsmp"])
+        self.assertEqual(readiness["endpoint"], "http://rpi:4000")
+        self.assertFalse(readiness["redirects_followed"])
+        self.assertFalse(readiness["runtime_network_proof_enforced"])
+        self.assertEqual(readiness["transport_security"], "temporary-operator-accepted-http")
+        self.assertNotIn("wireguard_proven", readiness)
+        self.assertNotIn("route_interface", readiness)
+        self.assertNotIn("address_class", readiness)
+        http_connection.assert_called_once_with("rpi", 4000, timeout=10)
         method, path, request_body, headers = connection.requests[0]
         self.assertEqual((method, path, request_body), ("GET", "/v1/models", None))
         self.assertEqual(headers["Authorization"], "Bearer test-token")
         self.assertTrue(connection.closed)
+
+    def test_readiness_rejects_redirect_without_following_it(self) -> None:
+        connection = StubHTTPConnection(StubHTTPResponse(b"", status=302))
+        with (
+            patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+            patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+        ):
+            with self.assertRaises(StageFailure) as raised:
+                LiteLLMProvider().readiness()
+        self.assertEqual(raised.exception.code, "capability_http_302")
+        self.assertEqual(len(connection.requests), 1)
+        self.assertTrue(connection.closed)
+
+    def test_completion_rejects_redirect_without_fallback(self) -> None:
+        connection = StubHTTPConnection(StubHTTPResponse(b"", status=307))
+        provider = LiteLLMProvider()
+        with (
+            patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+            patch(
+                "voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection,
+            ) as http_connection,
+        ):
+            with self.assertRaises(StageFailure) as raised:
+                provider.respond(
+                    session_id="session-a", turn_id="turn-a", transcript="Публичный запрос",
+                )
+        self.assertEqual(raised.exception.code, "selected_provider_http_307")
+        self.assertEqual(provider.provider_identity, "litellm/deepseek-v4-flash")
+        self.assertFalse(provider.observations[-1]["success"])
+        self.assertEqual(len(connection.requests), 1)
+        http_connection.assert_called_once_with("rpi", 4000, timeout=40)
 
     def test_stream_output_type_and_size_are_enforced_locally(self) -> None:
         cases = (
             ({"choices": [{"delta": {"content": 7}}]}, "selected_provider_protocol_error"),
             ({"choices": [{"delta": {"content": "x" * 8193}}]}, "selected_provider_output_out_of_bounds"),
         )
-        transport = {"resolved_address": "100.64.0.1"}
         for event, expected_code in cases:
             with self.subTest(expected_code=expected_code):
                 stream = b"data: " + json.dumps(event).encode() + b"\ndata: [DONE]\n"
                 connection = StubHTTPConnection(StubHTTPResponse(stream))
                 provider = LiteLLMProvider()
                 with (
-                    patch.object(LiteLLMProvider, "_transport_gate", return_value=transport),
                     patch.object(LiteLLMProvider, "_token", return_value="test-token"),
                     patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
                 ):
@@ -250,7 +281,6 @@ class LiteLLMProviderContractTests(unittest.TestCase):
             {"model": "alternate-provider", "choices": [{"delta": {"content": "Ответ."}}]},
             {"choices": [{"delta": {"content": "Ответ."}}]},
         )
-        transport = {"resolved_address": "100.64.0.1"}
         for event in cases:
             with self.subTest(event=event):
                 stream = b"data: " + json.dumps(event).encode() + b"\ndata: [DONE]\n"
@@ -258,7 +288,6 @@ class LiteLLMProviderContractTests(unittest.TestCase):
                 provider = LiteLLMProvider()
                 handed_off = []
                 with (
-                    patch.object(LiteLLMProvider, "_transport_gate", return_value=transport),
                     patch.object(LiteLLMProvider, "_token", return_value="test-token"),
                     patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
                 ):
