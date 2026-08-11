@@ -245,6 +245,32 @@ class LiteLLMProviderContractTests(unittest.TestCase):
                 self.assertEqual(provider.observations[-1]["error_class"], expected_code)
                 self.assertNotIn("text", provider.observations[-1])
 
+    def test_stream_rejects_missing_or_alternate_provider_identity_before_tts_handoff(self) -> None:
+        cases = (
+            {"model": "alternate-provider", "choices": [{"delta": {"content": "Ответ."}}]},
+            {"choices": [{"delta": {"content": "Ответ."}}]},
+        )
+        transport = {"resolved_address": "100.64.0.1"}
+        for event in cases:
+            with self.subTest(event=event):
+                stream = b"data: " + json.dumps(event).encode() + b"\ndata: [DONE]\n"
+                connection = StubHTTPConnection(StubHTTPResponse(stream))
+                provider = LiteLLMProvider()
+                handed_off = []
+                with (
+                    patch.object(LiteLLMProvider, "_transport_gate", return_value=transport),
+                    patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+                    patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+                ):
+                    with self.assertRaises(StageFailure) as raised:
+                        provider.respond_with_handoff(
+                            session_id="session-a", turn_id="turn-a", transcript="Публичный запрос",
+                            on_sentence=handed_off.append,
+                        )
+                self.assertEqual(raised.exception.code, "selected_provider_identity_mismatch")
+                self.assertEqual(handed_off, [])
+                self.assertEqual(provider.observations[-1]["error_class"], "selected_provider_identity_mismatch")
+
     def test_executor_output_is_bounded_and_protocol_failures_are_explicit(self) -> None:
         for result, expected_code in (
             ({"text": 7}, "selected_provider_protocol_error"),
@@ -494,6 +520,18 @@ class AdapterProcessTests(unittest.TestCase):
                 Path(directory) / "adapter.log", dict(os.environ),
             )
             with self.assertRaises(AdapterProcessError):
+                adapter.start(1)
+            self.assertIsNone(adapter.process)
+            self.assertIsNone(adapter._reader)
+            self.assertIsNone(adapter._log)
+
+    def test_non_object_startup_event_is_an_explicit_protocol_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = AdapterProcess(
+                [sys.executable, "-c", "print('[]', flush=True)"],
+                Path(directory) / "adapter.log", dict(os.environ),
+            )
+            with self.assertRaisesRegex(AdapterProcessError, "non-object protocol output"):
                 adapter.start(1)
             self.assertIsNone(adapter.process)
             self.assertIsNone(adapter._reader)

@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Cumulative Slices 2–5 branch ready for final human acceptance.** The deterministic Slice 1 tracer remains executable. The branch now runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` over Tailscale, and local Qwen3 CustomVoice/`ryan`. Automated public-corpus full turns pass, while every Slice 2 gate failure and operator exception remains documented. Physical microphone and subjective listening are intentionally pending for one final command.
+**Cumulative Slices 2–5 branch ready for final human acceptance.** The deterministic Slice 1 tracer remains executable. The branch now runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` over Tailscale, and local Qwen3 CustomVoice/`ryan`. Automated public-corpus diagnostics exercised complete turns and interruption, but the final contract-format run completed only two of three turns and encountered the known provider failures. Every Slice 2 gate failure and operator exception remains documented. Physical microphone and subjective listening are intentionally pending for one final command.
 
 ## Root verification
 
@@ -49,7 +49,7 @@ Speak one Russian utterance during the capture window. Check the printed transcr
 - The detailed avatar-module and visual-control contract requires a dedicated Grill/design task before MVP eye implementation.
 - Live2D and 3D remain possible later avatar modules; neither is an MVP renderer decision.
 - Optional wake-word activation, including any custom Russian wake model, begins only after the core MVP is reliable.
-- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the current operator-attested alias is synthetic-test-only.
+- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the current operator-attested alias is limited to public diagnostics and the single final human turn.
 - Selective migration from the legacy repository waits for a concrete vertical slice and fresh validation.
 
 ## Non-goals

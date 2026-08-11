@@ -41,6 +41,6 @@
 
 ## Recommendations
 
-- Run `./run-voice-turn --microphone --duration 8 --play` once and record the human result without retaining conversation content.
+- Run the single final human-acceptance command documented in [`README.md`](../../../README.md#final-slice-5-human-acceptance) once and record the human result without retaining conversation content.
 - Keep Slice 6 blocked until that result is accepted.
 - Run no-mistakes on the final committed review fixes; never merge without a later explicit instruction.

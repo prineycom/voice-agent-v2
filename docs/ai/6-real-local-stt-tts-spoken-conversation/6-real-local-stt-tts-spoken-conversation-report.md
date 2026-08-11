@@ -37,13 +37,9 @@
 | `./verify-slice4` | ✅ pass | Real Whisper + selected provider + deterministic audio; real provider cancellation. |
 | `./verify-slice5` | ✅ harness pass with fixed-provider limitations | Final format: two of three completed, one explicit empty-provider failure, cancellation attempt failed at the fixed provider before TTS; public playable artifacts created. |
 
-## Final human command
+## Final human acceptance
 
-```sh
-./run-voice-turn --microphone --duration 8 --play
-```
-
-Pasha should speak one Russian utterance during the capture window, verify the printed transcript/response, listen for Qwen3 `ryan` intelligibility/pronunciation/naturalness, and confirm the terminal is `turn.completed`. This command retains neither microphone PCM nor synthesized PCM by default and writes only content-free evidence under the authorized cache.
+Use only the authoritative command and instructions in [`README.md`](../../../README.md#final-slice-5-human-acceptance). Pasha should verify the printed transcript/response, listen for Qwen3 `ryan` intelligibility/pronunciation/naturalness, and confirm the terminal is `turn.completed`. The command retains neither microphone PCM nor synthesized PCM by default and writes only content-free evidence under the authorized cache.
 
 ## Unresolved uncertainty
 

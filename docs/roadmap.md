@@ -114,7 +114,7 @@ The project has repeatable measurements and a transparent operator-fixed deliver
 ### Dependencies
 
 - Slice 1 contracts and deterministic tracer are green.
-- Local artifact licenses/acquisition paths remain reviewable without exposing credentials. The task-private test credential authenticated over the proven transport. The user selected only `deepseek-v4-flash` and accepts an operator-attested opaque route; completion requests remain blocked until the superseding preregistration is committed. Defaults, other aliases, fallback, private/live content, and production use remain forbidden.
+- Local artifact licenses/acquisition paths remain reviewable without exposing credentials. The task-private test credential authenticated over the proven transport. The user selected only `deepseek-v4-flash` and accepts an operator-attested opaque route; completion requests were blocked until the superseding preregistration was committed. Defaults, other aliases, fallback, and production use remain forbidden; ADR-0005 separately authorizes only the cumulative public diagnostics and one final live human turn.
 
 ### Acceptance criteria
 
@@ -139,7 +139,7 @@ Preserve the completed LFM and local STT/TTS runs. Re-prove the Tailscale route,
 - Machine-readable local benchmark results and a human-readable selection rationale.
 - Precommitted thresholds/rubrics and repeat-run comparison.
 - Selected local STT/TTS artifact manifests and measured residency/admission constraints.
-- A synthetic-test result for the operator-attested `deepseek-v4-flash` alias, or an explicit failed-selection record. Slice 4 remains blocked until a later private/live provider privacy/provenance approval even if the synthetic benchmark passes.
+- A synthetic-test result for the operator-attested `deepseek-v4-flash` alias, or an explicit failed-selection record. The normal Slice 4 gate remains failed; ADR-0005 separately authorizes only cumulative Slices 3–5 and one final live human turn, not production use or Slice 6.
 - Explicit list of hypotheses that component/provider benchmarking has not tested.
 
 ## Slice 3 — Real local STT voice turn
@@ -218,7 +218,7 @@ After a real local transcript, the user receives a relevant response from the on
 - Provider mode/model identity is explicit in safe configuration, readiness, and metadata while credentials and prompt/response content remain absent.
 - In cloud mode only final transcript and permitted context cross the allowlisted TLS endpoint; raw audio, local files, environment values, and secrets do not.
 - Session context never crosses session IDs and is not durably persisted by default.
-- Selected-provider failure yields no fabricated answer, alternate-provider request, or downstream TTS request.
+- Selected-provider failure yields no fabricated answer or alternate-provider request. TTS handoff waits for the exact selected response identity; a later stream failure discards buffered synthesis and emits no public TTS audio.
 - Real STT → selected LLM provider → deterministic TTS completes one correlated turn through the public tracer.
 
 ### Validation method
@@ -272,7 +272,7 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 ### Evidence required before Slice 6
 
-- Final human microphone and Qwen intelligibility/pronunciation/naturalness acceptance from `./run-voice-turn --microphone --duration 8 --play`; pending and never auto-claimed.
+- Final human microphone and Qwen intelligibility/pronunciation/naturalness acceptance using the single command in [`README.md`](../README.md#final-slice-5-human-acceptance); pending and never auto-claimed.
 - Listening/latency/resource report tied to the selected artifact.
 - Sustained-run and cancellation traces.
 - Complete real-inference turn trace and declared audio format.

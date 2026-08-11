@@ -30,7 +30,7 @@ The session controller owns the provider-neutral request/result contract. In clo
 - the approved provider privacy/retention assumptions are recorded before activation;
 - every provider/gateway hop has proven encrypted transport: TLS by default, or plaintext HTTP only inside a freshly verified Tailscale WireGuard path under ADR-0004's fail-closed conditions.
 
-The only authorized cloud investigation path is currently LiteLLM at `http://rpi:4000`. This is not yet a passing cloud provider selection: unauthenticated health succeeded, model listing requires a credential, no model alias or underlying provider/model has been approved, and no completion request has been sent. Authentication must be explicitly authorized without searching ambient credential sources; a new superseding preregistration must be approved and committed before inference.
+The only authorized cloud path is LiteLLM at `http://rpi:4000`. Authenticated discovery and public-synthetic measurements selected only alias `deepseek-v4-flash`, while its underlying route remains operator-attested and opaque and its automated gates remain failed. [ADR-0005](0005-operator-fixed-slices-2-5-model-stack.md) authorizes that failed alias only for cumulative Slices 3–5 and one final human turn; it does not grant production approval or permit another alias or fallback.
 
 STT and TTS remain local in both modes.
 

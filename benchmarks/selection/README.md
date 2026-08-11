@@ -1,10 +1,10 @@
-# Slice 2 failed-selection rationale
+# Slice 2 local-v1 failed-selection rationale
 
-The approved preregistration is commit `f11f6caa42301376b96063cea61a617b94ecaad1`. All content-bearing raw evidence remains under `/home/priney/.cache/voice-agent-v2/slice-2/`; tracked results contain aggregates and hashes only.
+This file owns the fail-closed outcome under local preregistration v1, commit `f11f6caa42301376b96063cea61a617b94ecaad1`; it is not the current cumulative-delivery selection. The later operator-fixed stack is owned by `../results/fixed-stack-delivery.v1.json` and [ADR-0005](../../docs/adr/0005-operator-fixed-slices-2-5-model-stack.md). All content-bearing raw evidence remains under `/home/priney/.cache/voice-agent-v2/slice-2/`; tracked results contain aggregates and hashes only.
 
-## Outcome
+## Local v1 outcome
 
-**No LLM and no complete stack are selected. Slice 4 remains blocked.** The explicit single-LLM rule permits only official `LiquidAI/LFM2.5-2.6B` native BF16 on vLLM. It failed hard component gates, so no alternate local model or cloud provider was contacted, acquired, run, or substituted. Dependent overlap and winning-configuration repeat were not run.
+**Under local preregistration v1, no LLM and no complete stack were selected, so Slice 4 was blocked.** The explicit single-LLM rule permitted only official `LiquidAI/LFM2.5-2.6B` native BF16 on vLLM. It failed hard component gates, so no alternate local model or cloud provider was contacted, acquired, run, or substituted under that plan. Dependent overlap and winning-configuration repeat were not run.
 
 ## Hard failures
 

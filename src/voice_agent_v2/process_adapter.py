@@ -81,6 +81,8 @@ class AdapterProcess:
             raise AdapterProcessError("adapter closed unexpectedly")
         if isinstance(value, BaseException):
             raise AdapterProcessError("adapter emitted invalid protocol output") from value
+        if not isinstance(value, dict):
+            raise AdapterProcessError("adapter emitted non-object protocol output")
         return value
 
     def request(self, value: dict, timeout_seconds: float) -> dict:

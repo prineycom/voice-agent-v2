@@ -81,4 +81,4 @@ Planning is read-only and safe before approval:
   tts-piper-denis-medium tts-piper-dmitri-medium
 ```
 
-The approved local acquisition/measurement sequence has completed through its fail-closed component gate; selected-stack overlap/repeat correctly did not run. Cloud work remains blocked before inference at credential/model discovery. The root `./verify` remains the final required repository check.
+The local v1 acquisition/measurement sequence stopped at its fail-closed component gate, as preserved in [`selection/README.md`](selection/README.md). Later public-synthetic cloud, Qwen, repeat, and fixed-stack overlap measurements are owned by `results/fixed-stack-delivery.v1.json`; the cumulative delivery exception is owned by [ADR-0005](../docs/adr/0005-operator-fixed-slices-2-5-model-stack.md). Root `./verify` continues to own Slice 1 verification rather than the Slices 2–5 acceptance state.

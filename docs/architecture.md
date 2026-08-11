@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 project architecture
 >
-> **Last updated:** 2026-08-10
+> **Last updated:** 2026-08-11
 
 This document defines the active target architecture. It records user-approved candidate identities and endpoints only at their evidence gate; a gateway investigation is not a passing provider/model selection.
 
@@ -36,7 +36,7 @@ Untested behavior is not implied by a target diagram.
 
 ### 3.1 Active product boundary
 
-The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The authorized cloud investigation adds one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and, only after all remaining gates pass, one explicitly configured managed cloud LLM. The relay is not a second inference/control plane and never acts as fallback.
+The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The authorized cloud path adds one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and one explicitly configured operator-attested cloud route. Normal production activation still requires the remaining provider/privacy gates; ADR-0005 alone authorizes the failed alias for cumulative Slices 3–5 and one final human turn. The relay is not a second inference/control plane and never acts as fallback.
 
 The ordinary browser may run on the canonical PC. A browser on another tailnet device is an optional presentation endpoint: it performs no required inference or orchestration, but it runs the selected avatar module.
 
@@ -159,7 +159,7 @@ Contract versions change for semantic compatibility, not every implementation re
 - Provider mode/identity, correlation, external-transfer fact, latency, usage/cost when available, and error class are observable without logging request/response content.
 - Switching provider is an explicit configuration and readiness transition, not transparent retry behavior.
 
-The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement only, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. Therefore any passing benchmark can establish only synthetic test viability; private/live transcript transfer, Slice 4 activation, and production use remain unapproved until the normal privacy/provider gates are restored.
+The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. ADR-0005 subsequently authorizes the same failed alias only for cumulative Slices 3–5 and one final live microphone/listening turn. That exception does not approve general private transcript transfer, production use, or Slice 6.
 
 ### 5.2 Avatar-boundary constraints
 
@@ -211,7 +211,7 @@ On barge-in, the controller:
 
 ### 6.4 Slices 3–5 pre-LiveKit runtime
 
-The cumulative pre-LiveKit tracer now has three concrete adapters: process-isolated local Whisper large-v3-turbo, a single-alias LiteLLM `deepseek-v4-flash` HTTP adapter, and process-isolated local Qwen3 CustomVoice/`ryan`. The provider adapter admits only a final transcript and a bounded memory-only per-session context, proves its Tailscale route at readiness/request time, filters request fields, ignores hidden reasoning content, and has no fallback. Qwen's native 24 kHz stream is HQ-converted in its process boundary to the preserved TTS v1 16 kHz mono PCM contract and emitted as validated ordered chunks without an output path by default.
+The cumulative pre-LiveKit tracer now has three concrete adapters: process-isolated local Whisper large-v3-turbo, a single-alias LiteLLM `deepseek-v4-flash` HTTP adapter, and process-isolated local Qwen3 CustomVoice/`ryan`. The provider adapter admits only a final transcript and a bounded memory-only per-session context, proves its Tailscale route at readiness/request time, filters request fields, ignores hidden reasoning content, and has no fallback. Readiness also proves WireGuard reachability and authenticated alias capability. Streamed content reaches the TTS handoff only after the response has echoed exactly `deepseek-v4-flash`; a missing or alternate response identity fails the turn. Qwen's native 24 kHz stream is HQ-converted in its process boundary to the preserved TTS v1 16 kHz mono PCM contract and emitted as validated ordered chunks without an output path by default.
 
 The controller hands complete provider sentences to TTS while the provider stream remains open, but buffers audio events until `llm.final` so the public lifecycle ordering remains stable. Cancellation terminates delivery with one correlated terminal event and no later chunks. This tracer proves inference contracts; it does not implement LiveKit publication, browser behavior, or a durable conversation store. Default execution persists neither microphone input, transcript/response, nor synthesized audio.
 
@@ -223,7 +223,7 @@ No failure silently switches LLM provider, moves another inference capability to
 | --- | --- | --- |
 | LiveKit unavailable | Hard for realtime use | Client shows unavailable/reconnecting; no inference turn is admitted. |
 | STT unavailable or fails | Hard for the affected voice turn | No transcript is fabricated; turn fails recoverably and retained raw audio is not created by default. |
-| Selected LLM provider unavailable or fails | Hard for the affected response | No fabricated answer, alternate-provider request, or TTS request; turn fails with provider mode visible to the operator/user state. |
+| Selected LLM provider unavailable or fails | Hard for the affected response | No fabricated answer or alternate-provider request. No TTS handoff occurs before the selected response identity is proven; if a later stream failure follows a validated sentence handoff, buffered synthesized audio is discarded, no public audio chunk is emitted, and the turn fails with provider mode visible to the operator/user state. |
 | Cloud credential, endpoint allowlist, or approved privacy metadata invalid | Hard for cloud-mode readiness | Cloud mode remains unready; secrets are not exposed and local mode is not selected automatically. |
 | TTS unavailable or fails | Hard for supported spoken output; text is salvageable | Valid response text may remain visible, but the spoken turn is marked degraded/failed rather than complete. |
 | Avatar input invalid, missing, late, or stale | Soft | Avatar host rejects it and chooses the designed safe deterministic state; voice continues and validation failure is counted without private content. |

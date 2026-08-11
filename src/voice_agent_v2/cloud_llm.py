@@ -200,6 +200,8 @@ class LiteLLMProvider:
                 if model is not None:
                     if not isinstance(model, str) or len(model) > 512:
                         raise StageFailure("llm_provider", "selected_provider_protocol_error")
+                    if model != ALIAS:
+                        raise StageFailure("llm_provider", "selected_provider_identity_mismatch")
                     response_models.add(model)
                 raw_usage = event.get("usage")
                 if isinstance(raw_usage, dict):
@@ -235,7 +237,7 @@ class LiteLLMProvider:
                         raise StageFailure("llm_provider", "selected_provider_output_out_of_bounds")
                     visible_first = visible_first or now
                     visible.append(content_piece)
-                    if on_sentence is not None:
+                    if on_sentence is not None and response_models == {ALIAS}:
                         current = "".join(visible)
                         punctuation = max((current.rfind(mark) for mark in (".", "!", "?", "。", "！", "？")), default=-1)
                         if punctuation >= handoff_offset:
@@ -255,6 +257,8 @@ class LiteLLMProvider:
             connection.close()
             self._connection = None
             del token
+        if response_models != {ALIAS}:
+            raise StageFailure("llm_provider", "selected_provider_identity_mismatch")
         output = "".join(visible).strip()
         if on_sentence is not None and handoff_offset < len("".join(visible)):
             remaining = "".join(visible)[handoff_offset:].strip()

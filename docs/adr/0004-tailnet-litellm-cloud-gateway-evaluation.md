@@ -1,6 +1,6 @@
 # ADR-0004: Evaluate one tailnet LiteLLM gateway after local LLM failure
 
-- **Status:** Accepted for Slice 2 evaluation; not yet an approved provider selection
+- **Status:** Accepted for Slice 2 evaluation; cumulative delivery governed by ADR-0005
 - **Date:** 2026-08-10
 - **Decision owner:** Voice Agent v2 project architecture
 
@@ -70,4 +70,4 @@ Only public synthetic fixtures may be used in Slice 2. Raw audio, private transc
 
 This decision narrows ADR-0003's explicit cloud option and supersedes ADR-0001 only where it prohibited every required user-managed service outside the canonical host. It does not restore the legacy Pi/Desktop inference topology: the tailnet node is limited to the selected cloud gateway boundary and may not host STT/TTS or become a general control/inference plane.
 
-Transport and unauthenticated discovery evidence is recorded in `benchmarks/evidence/litellm-discovery.v1.json`; raw headers/bodies and network diagnostics remain under `/home/priney/.cache/voice-agent-v2/slice-2/discovery/litellm-rpi-4000/`. No cloud completion result exists yet.
+Transport and authenticated discovery evidence is recorded in `benchmarks/evidence/litellm-discovery.v1.json`; raw headers/bodies and network diagnostics remain under `/home/priney/.cache/voice-agent-v2/slice-2/discovery/litellm-rpi-4000/`. Public-synthetic completion results and their failed gates are owned by `benchmarks/results/fixed-stack-delivery.v1.json`; ADR-0005 governs the later cumulative delivery exception.
