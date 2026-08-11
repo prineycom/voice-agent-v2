@@ -577,7 +577,11 @@ class LocalSTTContractTests(unittest.TestCase):
 
     def test_stt_and_tts_startup_failures_are_stage_specific_and_cleaned_up(self) -> None:
         StartupFailingProcess.instances.clear()
-        with patch("voice_agent_v2.local_stt.AdapterProcess", StartupFailingProcess):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("voice_agent_v2.local_stt.TEMP", Path(directory)),
+            patch("voice_agent_v2.local_stt.AdapterProcess", StartupFailingProcess),
+        ):
             stt = WhisperSTT()
             with self.assertRaises(StageFailure) as stt_failure:
                 stt.transcribe(
