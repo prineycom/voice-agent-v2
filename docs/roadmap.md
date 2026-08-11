@@ -283,7 +283,7 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 ## Slice 6 — Local LiveKit media and interruption
 
-> **Not started:** the Slice 5 human gate is accepted, but this documentation update does not authorize or begin Slice 6.
+> **Authorized 2026-08-11:** Pasha explicitly authorized the failed, operator-opaque LiteLLM `deepseek-v4-flash` route for Slice 6 private live transcript testing. ADR-0006 supersedes ADR-0005's consumed live-traffic scope and requires the endpoint only from untracked server-side `LITELLM_BASE_URL`; current HTTP transport and every prior latency/reliability/privacy limitation remain visible, with no fallback or production approval.
 
 ### User-visible outcome
 

@@ -31,12 +31,13 @@ Untested behavior is not implied by a target diagram.
 | D7 | Decision | The pinned [legacy repository](#34-pinned-legacy-reference) is provenance, not a dependency. A future slice may selectively migrate a proven contract, component, or test only with fresh V2 validation and recorded origin. |
 | D8 | Decision | The detailed avatar-module and visual-control contract is deferred to a separate Grill/design task that must complete before MVP eye implementation. |
 | D9 | Decision | For the cumulative Slice 2–5 delivery branch, Pasha fixes Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and Qwen3-TTS CustomVoice/`ryan` despite recorded gate failures. Pasha attested the final human microphone/listening turn on 2026-08-11; every automated failure and exception remains visible, and no fallback or false pass is allowed. See [ADR-0005](adr/0005-operator-fixed-slices-2-5-model-stack.md). |
+| D10 | Decision | Slice 6 private live transcript traffic may use the same failed, operator-opaque LiteLLM alias under Pasha's explicit exception. Its endpoint is required only from untracked server-side `LITELLM_BASE_URL`, with no code default, alternate name, redirect, alias, or fallback; the current test value is HTTP and remains non-production. See [ADR-0006](adr/0006-slice-6-live-transcript-and-endpoint-configuration.md). |
 
 ## 3. System boundary
 
 ### 3.1 Active product boundary
 
-The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The cumulative cloud path added one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and one explicitly configured operator-attested cloud route. Normal production activation still requires the remaining provider/privacy gates; ADR-0005 authorized the failed alias only for cumulative Slices 3–5 and the final human turn completed on 2026-08-11. The relay is not a second inference/control plane and never acts as fallback.
+The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The cumulative cloud path added one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and one explicitly configured operator-attested cloud route. Normal production activation still requires the remaining provider/privacy gates; ADR-0005 ended with the cumulative Slice 3–5 human turn, while ADR-0006 separately authorizes the same failed route for Slice 6 private live testing. The relay is not a second inference/control plane and never acts as fallback.
 
 The ordinary browser may run on the canonical PC. A browser on another tailnet device is an optional presentation endpoint: it performs no required inference or orchestration, but it runs the selected avatar module.
 
@@ -118,7 +119,7 @@ Media and control remain distinct even when LiveKit transports both.
 2. The browser joins a realtime session and publishes microphone audio to local LiveKit.
 3. The session controller consumes the audio. It owns utterance boundaries and creates one turn correlation ID per accepted utterance.
 4. The controller streams or submits audio to local STT. Partial transcript events may improve feedback; only a final transcript can advance the turn to response generation.
-5. The controller sends the final transcript and permitted conversation context through the LLM provider adapter to the one explicitly configured provider. In local mode the request stays on-host. In cloud mode only approved fields traverse the allowlisted endpoint. TLS remains the target; for the current private test Pasha temporarily accepts exact HTTP endpoint `http://rpi:4000` without runtime DNS/route/TSMP proof, while the gateway's onward provider hop remains operator-opaque.
+5. The controller sends the final transcript and permitted conversation context through the LLM provider adapter to the one explicitly configured provider. In local mode the request stays on-host. In cloud mode only approved fields traverse the endpoint required from server-only `LITELLM_BASE_URL`. TLS remains the target; for the current private test Pasha temporarily accepts exact configured value `http://rpi:4000` without runtime DNS/route/TSMP proof, while the gateway's onward provider hop remains operator-opaque.
 6. The selected LLM provider returns response text. Provider identity and the external-transfer fact, when applicable, remain associated with the turn; provider failure cannot select another provider.
 7. The controller sends validated response text to local TTS and publishes ordered transcript/lifecycle events. LLM generation and TTS may overlap only in a way proven safe by the measured budget.
 8. TTS audio is published through LiveKit. The controller publishes turn/lifecycle state, while the browser derives a bounded speech envelope from actual playout.
@@ -153,13 +154,13 @@ Contract versions change for semantic compatibility, not every implementation re
 
 - Exactly one provider mode is configured for a deployment/session; request failure never changes it.
 - Local mode uses a host-local endpoint and locally managed model artifact.
-- Cloud mode uses one allowlisted endpoint, explicit gateway alias and underlying provider/model identity, and a server-side credential from an explicitly authorized untracked source. The current ADR-0005 exception allows only `http://rpi:4000` with redirects rejected and without runtime network proof; HTTPS is deferred.
+- Cloud mode uses one allowlisted endpoint, explicit gateway alias and underlying provider/model identity, and a server-side credential from an explicitly authorized untracked source. For Slice 6, ADR-0006 requires the endpoint from untracked server-side `LITELLM_BASE_URL` with no default or alternate name; its current accepted value is `http://rpi:4000`, redirects and fallback remain rejected, and HTTPS is deferred.
 - Cloud requests contain only final transcript and explicitly permitted context fields—never raw microphone/TTS audio, arbitrary local files, environment values, or credentials.
 - Before activation, cloud-provider retention/training policy, privacy terms, cost model, and region where relevant are recorded and approved.
 - Provider mode/identity, correlation, external-transfer fact, latency, usage/cost when available, and error class are observable without logging request/response content.
 - Switching provider is an explicit configuration and readiness transition, not transparent retry behavior.
 
-The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. ADR-0005 subsequently authorized the same failed alias only for cumulative Slices 3–5 and the single final live microphone/listening turn attested on 2026-08-11. That consumed exception does not approve general private transcript transfer, production use, or Slice 6.
+The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. ADR-0005 subsequently authorized the same failed alias only for cumulative Slices 3–5 and the single final live microphone/listening turn attested on 2026-08-11. ADR-0006 now separately authorizes private live transcript transfer only for Slice 6 implementation and acceptance; neither exception approves production use or claims that any failed provider gate passed.
 
 ### 5.2 Avatar-boundary constraints
 
@@ -259,7 +260,7 @@ Raw recordings, transcripts, prompts, responses, model artifacts, tokens, and en
 
 ### 9.1 Tracked configuration
 
-Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, artifact manifests, LLM provider mode, allowlisted provider endpoint/model identity, approved privacy-policy metadata, and example variable names. Startup rejects invalid, missing, or incompatible required values.
+Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, artifact manifests, LLM provider mode/model identity, approved privacy-policy metadata, and example variable names. The active LiteLLM endpoint value is required untracked server-side configuration; tracked files may name `LITELLM_BASE_URL` and document the accepted test value but must not supply a runtime default. Startup rejects invalid, missing, or incompatible required values.
 
 ### 9.2 Untracked local state
 
@@ -281,7 +282,7 @@ Local model artifacts require identity, revision/hash, license/provenance, expec
 
 - Expose only the HTTPS application entry point and the minimum LiveKit signaling/media paths needed by a tailnet browser.
 - Bind STT, TTS, any selected local LLM, health details, model lifecycle controls, and controller administration to loopback or an equally host-local transport.
-- Permit provider-adapter traffic only to exact endpoint `http://rpi:4000`. For the current private test Pasha accepts this temporary HTTP transport without runtime Tailscale proof; the adapter still rejects redirects and does not add another endpoint or fallback. HTTPS is deferred.
+- Permit provider-adapter traffic only to the endpoint explicitly supplied in server-side `LITELLM_BASE_URL`. Its current private-test value is `http://rpi:4000`; Pasha accepts this temporary HTTP transport without runtime Tailscale proof, while the adapter rejects missing/invalid configuration, alternate environment names, redirects, additional endpoints, and fallback. HTTPS is deferred and requires only configuration plus readiness.
 - Keep LiveKit signing material in the web gateway; issue narrow room capabilities because LiveKit requires them as protocol credentials, not as a second user-auth subsystem.
 - Do not publish a public fallback route or alternate provider route.
 - Record the actual tailnet ports and transport behavior in the LiveKit slice after loopback and remote-client validation.

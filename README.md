@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Cumulative Slices 2–5 delivery accepted by Pasha on 2026-08-11.** The deterministic Slice 1 tracer remains executable. The branch runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` at the exact temporary endpoint `http://rpi:4000`, and local Qwen3 CustomVoice/`ryan`. After the PipeWire correction, Pasha completed the documented microphone/listening command and attested that the full physical-microphone → Whisper → selected LLM → Qwen playback experience worked. Automated public-corpus diagnostics still include the recorded provider and overlap failures; this human acceptance does not reclassify any failed gate. Slice 6 has not started.
+**Cumulative Slices 2–5 delivery accepted; Slice 6 implementation authorized by Pasha on 2026-08-11.** The deterministic Slice 1 tracer remains executable. The fixed stack is real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash`, and local Qwen3 CustomVoice/`ryan`. Slice 6 requires the provider endpoint only from untracked server-side `LITELLM_BASE_URL`; the current private test value remains the temporary HTTP route recorded in ADR-0006. Automated provider and overlap failures remain failed, and the new authorization is not production security/privacy approval.
 
 ## Root verification
 
@@ -51,7 +51,7 @@ Microphone capture is bounded to 1–30 seconds. The command removes temporary m
 - The detailed avatar-module and visual-control contract requires a dedicated Grill/design task before MVP eye implementation.
 - Live2D and 3D remain possible later avatar modules; neither is an MVP renderer decision.
 - Optional wake-word activation, including any custom Russian wake model, begins only after the core MVP is reliable.
-- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the narrow operator-attested alias exception covered public diagnostics and the now-completed single final human turn, not further live or production use.
+- Production cloud identity/provenance, privacy/cost facts, and approval remain deferred. ADR-0006 separately permits Slice 6 private live testing but not production use; every earlier provider failure and unknown remains explicit.
 - Selective migration from the legacy repository waits for a concrete vertical slice and fresh validation.
 
 ## Non-goals
