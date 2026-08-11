@@ -29,6 +29,7 @@ from .tracer import CancellationToken, TraceResult
 AUDIO_FRAME_MS = 20
 AUDIO_FRAME_BYTES = 16_000 * 2 * AUDIO_FRAME_MS // 1000
 AUDIO_QUEUE_MS = 100
+BROWSER_CONTROL_QUEUE_SIZE = 32
 
 
 class SessionCapacityError(RuntimeError):
@@ -179,6 +180,10 @@ class LiveKitRoomController:
         self._audio_task: asyncio.Task[None] | None = None
         self._browser_join_task: asyncio.Task[None] | None = None
         self._runner_start_task: asyncio.Task[None] | None = None
+        self._control_queue: asyncio.Queue[bytes] = asyncio.Queue(
+            maxsize=BROWSER_CONTROL_QUEUE_SIZE
+        )
+        self._control_task: asyncio.Task[None] | None = None
         self._close_lock = asyncio.Lock()
         self._closed = False
         self._cleanup_complete = False
@@ -272,6 +277,11 @@ class LiveKitRoomController:
         )
 
     def _register_handlers(self) -> None:
+        if self._control_task is None:
+            self._control_task = asyncio.create_task(
+                self._consume_controls(), name=f"browser-control-{self.session_id}"
+            )
+
         @self.room.on("participant_connected")
         def participant_connected(participant) -> None:
             if participant.identity != self.browser_identity:
@@ -304,12 +314,29 @@ class LiveKitRoomController:
                 or packet.topic != CLIENT_CONTROL_TOPIC
             ):
                 return
-            asyncio.create_task(self.session.handle_client_control(packet.data))
+            payload = bytes(packet.data)
+            if not payload or len(payload) > MAX_CONTROL_BYTES:
+                self.session.drop_counts["client_control"] += 1
+                return
+            try:
+                self._control_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                self.session.drop_counts["client_control"] += 1
 
         @self.room.on("participant_disconnected")
         def participant_disconnected(participant) -> None:
             if participant.identity == self.browser_identity:
                 asyncio.create_task(self.close())
+
+    async def _consume_controls(self) -> None:
+        while True:
+            payload = await self._control_queue.get()
+            try:
+                await self.session.handle_client_control(payload)
+            except Exception:
+                pass
+            finally:
+                self._control_queue.task_done()
 
     async def _consume_microphone(self, track) -> None:
         endpoint = EnergyEndpoint()
@@ -368,7 +395,11 @@ class LiveKitRoomController:
                         raise
                     except Exception:
                         pass
-                for task in (self._browser_join_task, self._audio_task):
+                for task in (
+                    self._browser_join_task,
+                    self._audio_task,
+                    self._control_task,
+                ):
                     if task is None or task is asyncio.current_task():
                         continue
                     task.cancel()
@@ -378,9 +409,13 @@ class LiveKitRoomController:
                         pass
                     except Exception as error:
                         errors.append(error)
+                try:
+                    self.audio_source.clear_queue()
+                except Exception as error:
+                    errors.append(error)
                 for cleanup in (
-                    self.session.disconnect,
                     self.room.disconnect,
+                    self.session.disconnect,
                     self.audio_source.aclose,
                 ):
                     try:

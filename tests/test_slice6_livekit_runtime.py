@@ -41,12 +41,23 @@ class FakeSession:
     def __init__(self) -> None:
         self.ready_count = 0
         self.failures = []
+        self.drop_counts = {"client_control": 0}
+        self.controls: list[bytes] = []
+        self.control_started = asyncio.Event()
+        self.control_release = asyncio.Event()
+        self.control_release.set()
 
     async def ready(self) -> None:
         self.ready_count += 1
 
     async def fail(self, stage: str, code: str) -> None:
         self.failures.append((stage, code))
+
+    async def handle_client_control(self, payload: bytes) -> bool:
+        self.controls.append(payload)
+        self.control_started.set()
+        await self.control_release.wait()
+        return True
 
 
 class FakeAudioStream:
@@ -78,6 +89,10 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         controller._browser_ready = False
         controller._browser_join_task = None
         controller._audio_task = None
+        controller._control_queue = asyncio.Queue(
+            maxsize=runtime.BROWSER_CONTROL_QUEUE_SIZE
+        )
+        controller._control_task = None
         controller._closed = False
         return controller
 
@@ -107,6 +122,39 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(controller._browser_join_task.cancelled())
         microphone_released.set()
         await controller._audio_task
+
+    async def test_browser_control_delivery_is_serialized_and_bounded(self) -> None:
+        controller = self.controller()
+        controller.session.control_release.clear()
+        controller._register_handlers()
+        participant = types.SimpleNamespace(identity=controller.browser_identity)
+
+        def packet(payload: bytes):
+            return types.SimpleNamespace(
+                participant=participant,
+                topic=runtime.CLIENT_CONTROL_TOPIC,
+                data=payload,
+            )
+
+        controller.room.handlers["data_received"](packet(b"first"))
+        await asyncio.wait_for(controller.session.control_started.wait(), 1)
+        for index in range(runtime.BROWSER_CONTROL_QUEUE_SIZE + 10):
+            controller.room.handlers["data_received"](
+                packet(f"control-{index}".encode())
+            )
+
+        self.assertEqual(
+            controller._control_queue.qsize(), runtime.BROWSER_CONTROL_QUEUE_SIZE
+        )
+        self.assertEqual(controller.session.drop_counts["client_control"], 10)
+        controller.session.control_release.set()
+        await asyncio.wait_for(controller._control_queue.join(), 1)
+        self.assertEqual(
+            len(controller.session.controls), runtime.BROWSER_CONTROL_QUEUE_SIZE + 1
+        )
+        controller._control_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await controller._control_task
 
     async def test_microphone_eof_and_failure_degrade_the_room(self) -> None:
         for stream, expected in (

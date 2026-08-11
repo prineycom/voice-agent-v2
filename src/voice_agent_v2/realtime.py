@@ -219,6 +219,7 @@ class RealtimeSession:
         self._disconnect_complete = False
         self._lock = asyncio.Lock()
         self._runner_lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
         self._disconnect_lock = asyncio.Lock()
         self.drop_counts = {"stale_event": 0, "client_control": 0}
 
@@ -234,23 +235,24 @@ class RealtimeSession:
         )
 
     async def start_utterance(self) -> str:
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("session is closed")
-            prior_cleanup, drain_error = await self._interrupt_locked("barge_in")
-            if drain_error is not None:
-                await self._degrade_locked("publication", drain_error)
-                raise RuntimeError("audio publication could not be cancelled safely")
-            self._turn_sequence += 1
-            turn_id = f"turn-{self._turn_sequence:08d}"
-            context = TurnContext(
-                turn_id=turn_id,
-                cancellation=CancellationToken(),
-                prior_cleanup=prior_cleanup,
-            )
-            self._active = context
-            await self._emit(turn_id, "turn.listening", {"state": "listening"})
-            return turn_id
+        async with self._reconnect_lock:
+            async with self._lock:
+                if self._closed:
+                    raise RuntimeError("session is closed")
+                prior_cleanup, drain_error = await self._interrupt_locked("barge_in")
+                if drain_error is not None:
+                    await self._degrade_locked("publication", drain_error)
+                    raise RuntimeError("audio publication could not be cancelled safely")
+                self._turn_sequence += 1
+                turn_id = f"turn-{self._turn_sequence:08d}"
+                context = TurnContext(
+                    turn_id=turn_id,
+                    cancellation=CancellationToken(),
+                    prior_cleanup=prior_cleanup,
+                )
+                self._active = context
+                await self._emit(turn_id, "turn.listening", {"state": "listening"})
+                return turn_id
 
     async def finish_utterance(self, pcm: bytes) -> str:
         if not pcm or len(pcm) % 2 or len(pcm) > MAX_UTTERANCE_BYTES:
@@ -401,6 +403,10 @@ class RealtimeSession:
 
     async def _abort_failed_transport(self, context: TurnContext) -> None:
         context.cancellation.cancel()
+        context.terminal = True
+        self._closed = True
+        self._report_failure("transport", "control_publish_failed")
+        await self._clear_audio(context.turn_id)
         try:
             await asyncio.to_thread(self.runner.cancel)
         except Exception:
@@ -412,9 +418,6 @@ class RealtimeSession:
             except Exception:
                 pass
         context.rollback_error = await self._rollback_context(context)
-        context.terminal = True
-        self._closed = True
-        self._report_failure("transport", "control_publish_failed")
 
     async def _run_turn_body(self, context: TurnContext, pcm: bytes) -> None:
         if context.prior_cleanup is not None:
@@ -676,21 +679,22 @@ class RealtimeSession:
                 self._client_sequence = sequence
                 context.playout_ack.set_result(None)
                 return True
-        async with self._lock:
-            if sequence <= self._client_sequence or stream_epoch != self.stream_epoch:
-                self.drop_counts["client_control"] += 1
-                return False
-            self._client_sequence = sequence
-            if self._closed:
-                self.stream_epoch += 1
-                await self._emit(
-                    SESSION_TURN_ID,
-                    "session.degraded",
-                    {"state": "degraded", "stage": "controller", "code": "session_closed"},
-                )
-                self._report_failure("controller", "session_closed")
-                return True
-            cleanup, reset_error = await self._interrupt_locked("client_reconnected")
+        async with self._reconnect_lock:
+            async with self._lock:
+                if sequence <= self._client_sequence or stream_epoch != self.stream_epoch:
+                    self.drop_counts["client_control"] += 1
+                    return False
+                self._client_sequence = sequence
+                if self._closed:
+                    self.stream_epoch += 1
+                    await self._emit(
+                        SESSION_TURN_ID,
+                        "session.degraded",
+                        {"state": "degraded", "stage": "controller", "code": "session_closed"},
+                    )
+                    self._report_failure("controller", "session_closed")
+                    return True
+                cleanup, reset_error = await self._interrupt_locked("client_reconnected")
             try:
                 async with asyncio.timeout(CANCELLATION_CLEANUP_BOUND_MS / 1000):
                     if cleanup is not None:
@@ -705,20 +709,21 @@ class RealtimeSession:
                 reset_error = "reconnect_cleanup_timeout"
             except Exception:
                 reset_error = "reconnect_context_reset_failed"
-            self.stream_epoch += 1
-            if reset_error is None:
-                await self._emit(
-                    SESSION_TURN_ID,
-                    "session.reconnected",
-                    {
-                        "state": "ready",
-                        "stale_media_discarded": True,
-                        "conversation_context_reset": True,
-                    },
-                )
-            else:
-                await self._degrade_locked("controller", reset_error)
-        return True
+            async with self._lock:
+                self.stream_epoch += 1
+                if reset_error is None:
+                    await self._emit(
+                        SESSION_TURN_ID,
+                        "session.reconnected",
+                        {
+                            "state": "ready",
+                            "stale_media_discarded": True,
+                            "conversation_context_reset": True,
+                        },
+                    )
+                else:
+                    await self._degrade_locked("controller", reset_error)
+            return True
 
     async def disconnect(self) -> None:
         async with self._disconnect_lock:

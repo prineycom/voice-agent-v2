@@ -195,6 +195,7 @@ class TransportFailureRunner(FakeRunner):
         self.release = threading.Event()
         self.context = ["prior context"]
         self.rollback_done = threading.Event()
+        self.operations: list[str] = []
 
     def run_turn(self, *, session_id, turn_id, input_pcm, cancellation, event_observer):
         del input_pcm
@@ -212,13 +213,25 @@ class TransportFailureRunner(FakeRunner):
         return TraceResult((event,), b"", b"")
 
     def cancel(self) -> None:
+        self.operations.append("cancel")
         super().cancel()
         self.release.set()
 
     def discard_turn(self, session_id: str, turn_id: str) -> None:
+        self.operations.append("rollback")
         super().discard_turn(session_id, turn_id)
         self.context[:] = ["prior context"]
         self.rollback_done.set()
+
+
+class OrderedAudioSink(MemoryAudioSink):
+    def __init__(self, operations: list[str]) -> None:
+        super().__init__()
+        self.operations = operations
+
+    async def clear(self, turn_id) -> None:
+        self.operations.append("media-clear")
+        await super().clear(turn_id)
 
 
 class BlockingRunner(FakeRunner):
@@ -403,12 +416,13 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_control_transport_failure_stops_worker_and_rolls_back_context(self) -> None:
         events = FailingEventSink("turn.transcribing")
         runner = TransportFailureRunner()
+        audio = OrderedAudioSink(runner.operations)
         failures: list[tuple[str, str]] = []
         session = RealtimeSession(
             session_id="session-test-0001",
             runner=runner,
             event_sink=events,
-            audio_sink=MemoryAudioSink(),
+            audio_sink=audio,
             failure_handler=lambda stage, code: failures.append((stage, code)),
         )
         turn_id = await session.submit_utterance(b"\0\0" * 320)
@@ -418,9 +432,38 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.context, ["prior context"])
         self.assertEqual(runner.discarded_turns, [("session-test-0001", turn_id)])
         self.assertGreaterEqual(runner.cancel_count, 1)
+        self.assertEqual(runner.operations[:3], ["media-clear", "cancel", "rollback"])
+        self.assertEqual(audio.cleared, [turn_id])
         self.assertEqual(failures, [("transport", "control_publish_failed")])
         with self.assertRaisesRegex(RuntimeError, "session is closed"):
             await session.start_utterance()
+
+    async def test_reconnect_during_playout_does_not_deadlock_session_cleanup(self) -> None:
+        events = MemoryEventSink()
+        audio = MemoryAudioSink(block=True)
+        runner = FakeRunner()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=audio,
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(audio.started.wait(), 1)
+        reconnected = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+
+        self.assertTrue(
+            await asyncio.wait_for(session.handle_client_control(reconnected), 2)
+        )
+        self.assertEqual(events.events[-1]["type"], "session.reconnected")
+        self.assertNotIn("session.degraded", [event["type"] for event in events.events])
+        self.assertEqual(runner.reset_sessions, [session.session_id])
 
     async def test_closed_session_reconnect_stays_degraded_without_reset(self) -> None:
         events = MemoryEventSink()
