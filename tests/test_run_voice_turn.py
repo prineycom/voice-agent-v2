@@ -72,6 +72,74 @@ class MicrophoneCaptureContractTests(unittest.TestCase):
                 self.assertNotIn("pw-record", str(raised.exception))
                 self.assertEqual(list((Path(directory) / "runtime" / "turn-temp").iterdir()), [])
 
+    def test_cache_setup_failure_is_normalized_before_model_start(self) -> None:
+        args = argparse.Namespace(microphone=True, input_wav=None, duration=8.0, play=True)
+        stdout = StringIO()
+        stderr = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "not-a-directory"
+            cache.write_bytes(b"")
+            with (
+                patch.object(run_voice_turn, "CACHE", cache),
+                patch.object(run_voice_turn, "arguments", return_value=args),
+                patch.object(run_voice_turn, "WhisperSTT") as stt,
+                patch.object(run_voice_turn, "LiteLLMProvider") as llm,
+                patch.object(run_voice_turn, "Qwen3TTS") as tts,
+                redirect_stdout(stdout), redirect_stderr(stderr),
+            ):
+                result = run_voice_turn.main()
+        self.assertEqual(result, 2)
+        self.assertIn("Terminal: turn.failed", stderr.getvalue())
+        self.assertIn("Failure: microphone_capture/capture_setup_failed", stderr.getvalue())
+        self.assertNotIn("Traceback", stdout.getvalue() + stderr.getvalue())
+        stt.assert_not_called()
+        llm.assert_not_called()
+        tts.assert_not_called()
+
+    def test_cleanup_failure_erases_pcm_and_blocks_model_start(self) -> None:
+        expected_bytes = 16_000 * 2
+        args = argparse.Namespace(microphone=True, input_wav=None, duration=1.0, play=True)
+        captured_path = None
+        original_unlink = Path.unlink
+
+        def record(command, **_kwargs):
+            nonlocal captured_path
+            captured_path = Path(command[-1])
+            captured_path.write_bytes(b"\0" * expected_bytes)
+            return subprocess.CompletedProcess(command, 0)
+
+        def reject_capture_unlink(path, *, missing_ok=False):
+            if path.name.startswith("microphone-"):
+                raise PermissionError("capture cleanup blocked")
+            return original_unlink(path, missing_ok=missing_ok)
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(run_voice_turn, "CACHE", Path(directory)),
+                patch.object(run_voice_turn, "arguments", return_value=args),
+                patch.object(run_voice_turn.subprocess, "run", side_effect=record),
+                patch.object(Path, "unlink", new=reject_capture_unlink),
+                patch.object(run_voice_turn, "WhisperSTT") as stt,
+                patch.object(run_voice_turn, "LiteLLMProvider") as llm,
+                patch.object(run_voice_turn, "Qwen3TTS") as tts,
+                redirect_stdout(stdout), redirect_stderr(stderr),
+            ):
+                result = run_voice_turn.main()
+                evidence_path = next((Path(directory) / "evidence").glob("*.json"))
+                evidence = json.loads(evidence_path.read_text())
+                self.assertIsNotNone(captured_path)
+                self.assertEqual(captured_path.read_bytes(), b"")
+        self.assertEqual(result, 2)
+        self.assertIn("Failure: microphone_capture/capture_cleanup_failed", stderr.getvalue())
+        self.assertIn("Retention: microphone=false", stderr.getvalue())
+        self.assertNotIn("Traceback", stdout.getvalue() + stderr.getvalue())
+        self.assertFalse(evidence["input_retained"])
+        stt.assert_not_called()
+        llm.assert_not_called()
+        tts.assert_not_called()
+
     def test_wrong_sized_success_is_explicit_failure(self) -> None:
         def short_record(command, **_kwargs):
             Path(command[-1]).write_bytes(b"\0\0")

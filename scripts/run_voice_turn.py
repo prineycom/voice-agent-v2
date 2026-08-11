@@ -28,9 +28,10 @@ CAPTURE_TIMEOUT_MARGIN_SECONDS = 5.0
 class MicrophoneCaptureFailure(RuntimeError):
     """Content-free bounded failure before a voice turn is admitted."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, input_retained: bool = False) -> None:
         super().__init__(code)
         self.code = code
+        self.input_retained = input_retained
 
 
 def arguments() -> argparse.Namespace:
@@ -50,13 +51,41 @@ def wav_pcm(path: Path) -> bytes:
         return source.readframes(source.getnframes())
 
 
+def _cleanup_temporary_capture(temporary: Path) -> None:
+    try:
+        temporary.unlink(missing_ok=True)
+        return
+    except OSError as error:
+        cleanup_error = error
+    try:
+        with temporary.open("r+b") as captured:
+            captured.truncate(0)
+    except OSError:
+        pass
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError:
+        try:
+            input_retained = temporary.stat().st_size > 0
+        except OSError:
+            input_retained = True
+    else:
+        input_retained = False
+    raise MicrophoneCaptureFailure(
+        "capture_cleanup_failed", input_retained=input_retained,
+    ) from cleanup_error
+
+
 def microphone_pcm(duration: float) -> bytes:
     if not 1.0 <= duration <= 30.0:
         raise MicrophoneCaptureFailure("duration_out_of_bounds")
     sample_count = int(duration * CAPTURE_RATE_HZ)
     expected_bytes = sample_count * CAPTURE_CHANNELS * CAPTURE_SAMPLE_WIDTH_BYTES
     temporary = CACHE / "runtime" / "turn-temp" / f"microphone-{time.monotonic_ns()}.pcm"
-    temporary.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise MicrophoneCaptureFailure("capture_setup_failed") from error
     command = [
         "pw-record", "--rate", str(CAPTURE_RATE_HZ), "--channels", str(CAPTURE_CHANNELS),
         "--format", "s16", "--raw", "--sample-count", str(sample_count), str(temporary),
@@ -96,17 +125,23 @@ def microphone_pcm(duration: float) -> bytes:
             raise MicrophoneCaptureFailure("capture_output_size_mismatch")
         return pcm
     finally:
-        temporary.unlink(missing_ok=True)
+        _cleanup_temporary_capture(temporary)
 
 
 def _capture_failure(error: MicrophoneCaptureFailure) -> int:
     print("Terminal: turn.failed", file=sys.stderr)
     print(f"Failure: microphone_capture/{error.code}", file=sys.stderr)
-    print("Retention: microphone=false, synthesized_audio=false, conversation_content=false", file=sys.stderr)
+    microphone_retained = str(error.input_retained).lower()
+    print(
+        f"Retention: microphone={microphone_retained}, "
+        "synthesized_audio=false, conversation_content=false",
+        file=sys.stderr,
+    )
     evidence = {
         "schema_version": "voice-agent.slice5-human-command-run.v1",
         "terminal": "turn.failed", "stage": "microphone_capture", "error_class": error.code,
-        "input_retained": False, "output_retained": False, "conversation_content_retained": False,
+        "input_retained": error.input_retained,
+        "output_retained": False, "conversation_content_retained": False,
     }
     try:
         output = CACHE / "evidence" / f"slice5-human-run-{time.monotonic_ns()}.json"
