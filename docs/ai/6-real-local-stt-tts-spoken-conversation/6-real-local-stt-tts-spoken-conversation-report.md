@@ -42,7 +42,7 @@
 
 ## Dated human acceptance
 
-On 2026-08-11, after PR 14 head `f1a3de997296e6dac87203cf5c2e157945a865b8` corrected the PipeWire path, Pasha ran `./run-voice-turn --microphone --duration 8 --play` and attested: `все сработало! Что дальше?` This accepts the complete physical microphone capture, Whisper → `deepseek-v4-flash` → Qwen3 `ryan` turn, audible playback, and overall manual Slice 5 experience. No transcript, response, latency, pronunciation observation, audio-quality adjective, or granular rubric score was supplied or inferred.
+On 2026-08-11, after PR 14 head `f1a3de997296e6dac87203cf5c2e157945a865b8` corrected the PipeWire path, Pasha ran `./run-voice-turn --microphone --duration 8 --play` and attested that the complete test worked. This accepts the complete physical microphone capture, Whisper → `deepseek-v4-flash` → Qwen3 `ryan` turn, audible playback, and overall manual Slice 5 experience. No transcript, response, latency, pronunciation observation, audio-quality adjective, or granular rubric score was supplied or inferred.
 
 ## Unresolved uncertainty
 

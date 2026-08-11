@@ -61,7 +61,7 @@ This correction introduced the exact-size PipeWire status-1 regression handling.
 
 ## Correction 3 — dated human acceptance
 
-On 2026-08-11, after the microphone correction at PR head `f1a3de997296e6dac87203cf5c2e157945a865b8`, Pasha ran `./run-voice-turn --microphone --duration 8 --play` and reported verbatim: `все сработало! Что дальше?`
+On 2026-08-11, after the microphone correction at PR head `f1a3de997296e6dac87203cf5c2e157945a865b8`, Pasha ran `./run-voice-turn --microphone --duration 8 --play` and attested that the complete test worked.
 
 This is recorded only as Pasha's acceptance that physical microphone capture, the full Whisper → `deepseek-v4-flash` → Qwen3 `ryan` turn, audible playback, and the overall manual Slice 5 experience succeeded. No transcript, response, latency, pronunciation detail, audio-quality adjective, or granular score is recorded or inferred. Every automated failure and operator limitation remains unchanged.
 
