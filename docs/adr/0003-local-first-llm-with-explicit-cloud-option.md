@@ -28,9 +28,9 @@ The session controller owns the provider-neutral request/result contract. In clo
 - the provider endpoint, gateway endpoint when used, model alias, and underlying provider/model identity are allowlisted configuration, not LLM-generated or implicit default values;
 - default observations record provider mode/identity, request correlation, latency, token/usage and cost data when available, error class, and that an external transfer occurred, without prompt/response content;
 - the approved provider privacy/retention assumptions are recorded before activation;
-- every provider/gateway hop has proven encrypted transport: TLS by default, or plaintext HTTP only inside a freshly verified Tailscale WireGuard path under ADR-0004's fail-closed conditions.
+- encrypted transport remains the production target; [ADR-0005](0005-operator-fixed-slices-2-5-model-stack.md) records Pasha's narrow acceptance of the exact temporary HTTP gateway without runtime DNS/route/TSMP proof while HTTPS is deferred.
 
-The only authorized cloud path is LiteLLM at `http://rpi:4000`. Authenticated discovery and public-synthetic measurements selected only alias `deepseek-v4-flash`, while its underlying route remains operator-attested and opaque and its automated gates remain failed. [ADR-0005](0005-operator-fixed-slices-2-5-model-stack.md) authorizes that failed alias only for cumulative Slices 3–5 and one final human turn; it does not grant production approval or permit another alias or fallback.
+The only authorized cloud path is LiteLLM at `http://rpi:4000`. Authenticated discovery and public-synthetic measurements selected only alias `deepseek-v4-flash`, while its underlying route remains operator-attested and opaque and its automated gates remain failed. ADR-0005 authorizes that failed alias only for cumulative Slices 3–5 and one final human turn; it does not grant production approval or permit another alias or fallback. Runtime still checks bearer-authenticated alias capability and rejects redirects, but it deliberately performs no Tailscale transport proof.
 
 STT and TTS remain local in both modes.
 

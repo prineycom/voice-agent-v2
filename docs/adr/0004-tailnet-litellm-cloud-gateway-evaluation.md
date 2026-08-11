@@ -16,7 +16,7 @@ A separately authorized, read-only lookup inspected only likely LiteLLM credenti
 
 For this closed-circuit Slice 2 test only, the user explicitly accepted the disclosure risk and placed the credential out-of-band in the approved task-private `litellm.token` file with mode `0600`. The harness did not expose it. An authenticated `GET /v1/models` over the re-proven Tailscale route returned six aliases. The user selected exactly `deepseek-v4-flash`, personally attested that it is the intended DeepSeek route, and directed the project to stop further RPi mapping/provenance/cost/privacy investigation. The active config did not prove the mapping; that fact remains explicit. No prompt was sent before the superseding preregistration.
 
-## Decision
+## Slice 2 measurement decision (historical)
 
 Evaluate exactly the allowlisted LiteLLM gateway endpoint `http://rpi:4000` as the only cloud-gateway candidate. Do not retry LFM, contact another gateway/provider directly, use an implicit LiteLLM default, or configure automatic/per-request fallback.
 
@@ -42,19 +42,23 @@ After authorized authentication, discovery may query only the model-list surface
 
 Only public synthetic fixtures may be used in Slice 2. Raw audio, private transcripts, conversation history, local files, credentials, and environment values are forbidden. STT and TTS remain local and separate; no cloud STT/TTS is authorized.
 
+## Post-review runtime correction
+
+On 2026-08-11 Pasha explicitly removed DNS-class, kernel-route, Tailscale peer, and TSMP/WireGuard proof from Slice 4–5 runtime readiness and request admission. The proof above remains authoritative historical Slice 2 discovery/measurement evidence; it is not a current runtime invariant. For the private test setup Pasha accepts plaintext HTTP only at exact endpoint `http://rpi:4000` while HTTPS is deferred. Runtime keeps the bearer-authenticated content-free alias check, exact `deepseek-v4-flash` selection, redirect rejection, bounded output, cancellation, redaction, explicit failure, and no fallback. No replacement network-verification abstraction or HTTPS work is introduced by this correction.
+
 ## Consequences
 
 ### Positive
 
 - The documented local failure remains visible while the architecture can evaluate the explicit cloud option.
-- Tailscale protects the otherwise plaintext host-to-gateway HTTP payload without opening a LAN/public fallback route.
+- The historical Slice 2 measurement proved that Tailscale carried its plaintext host-to-gateway HTTP payload without a LAN/public fallback route.
 - One alias, one endpoint, and no fallback preserve explainable privacy, cost, latency, and failure behavior.
 - Authentication and content filtering fail closed before external transfer.
 
 ### Costs and risks
 
 - The user-operated LiteLLM gateway becomes an additional availability, configuration, credential, and observability boundary if cloud mode later passes and is selected.
-- Tailscale route proof does not establish the gateway's onward provider encryption, provider/model mapping, retention, training, region, or cost policy.
+- Historical Tailscale route proof did not establish the gateway's onward provider encryption, provider/model mapping, retention, training, region, or cost policy; current runtime no longer performs that proof.
 - LiteLLM aliases can hide provider/model changes unless the mapping is separately recorded and readiness verifies the expected echoed identity.
 - Operator attestation permits the selected alias benchmark but cannot prove the gateway's hidden route, onward endpoint, privacy, region, or cost. Even a passing synthetic benchmark cannot activate private/live or production cloud mode without a later explicit provider/privacy decision.
 
@@ -64,7 +68,7 @@ Only public synthetic fixtures may be used in Slice 2. Raw audio, private transc
 - **Retry or retune LFM:** rejected for this decision; further LFM inference is explicitly stopped.
 - **Call a cloud provider directly:** not authorized; only the exact LiteLLM gateway path may be investigated.
 - **Allow gateway default/fallback routing:** rejected because it hides provider/model, privacy, cost, and failure behavior.
-- **Send prompts over unproven plaintext HTTP:** rejected; transport must fail closed before content transfer.
+- **Send prompts over unproven plaintext HTTP during Slice 2 measurement:** rejected at the time; the later post-review runtime exception above is a separate Pasha-owned decision.
 
 ## Evidence and supersession
 

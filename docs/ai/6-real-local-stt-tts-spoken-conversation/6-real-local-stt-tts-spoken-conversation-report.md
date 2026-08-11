@@ -32,7 +32,7 @@
 
 | Command | Result | Notes |
 | ------- | ------ | ----- |
-| `./verify` | ✅ pass | 41 deterministic/unit/contract tests. |
+| `./verify` | ✅ pass | 54 deterministic/unit/contract tests after the focused runtime-transport correction. |
 | `./verify-slice3` | ✅ pass | Real Whisper public-corpus turn, deterministic downstream. |
 | `./verify-slice4` | ✅ pass | Real Whisper + selected provider + deterministic audio; real provider cancellation. |
 | `./verify-slice5` | ✅ harness pass with fixed-provider limitations | Final format: two of three completed, one explicit empty-provider failure, cancellation attempt failed at the fixed provider before TTS; public playable artifacts created. |

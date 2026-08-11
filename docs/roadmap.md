@@ -88,6 +88,8 @@ Run the root verification command from an empty-cache, network-denied environmen
 ## Slice 2 — Measured host/model and LLM-provider budget
 
 > **Cumulative-delivery override (2026-08-11):** Pasha fixed Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and pinned-legacy Qwen3 CustomVoice/`ryan` for Slices 2–5 despite recorded hard-gate misses. Failed gates remain failed and are never relabelled. The branch proceeds through Slice 5 for one final human microphone/listening test; intermediate microphone acceptance, review, no-mistakes, PR, and merge are deferred.
+>
+> **Post-review runtime transport correction (2026-08-11):** historical Slice 2 Tailscale discovery/measurement evidence remains unchanged, but Slice 4–5 runtime readiness and request admission no longer perform DNS/route/TSMP/WireGuard proof. Pasha accepts exact temporary HTTP endpoint `http://rpi:4000` for the private test setup; bearer-authenticated alias capability, redirect rejection, output bounds, cancellation, redaction, and no fallback remain required. HTTPS is deferred.
 
 ### User-visible outcome
 
@@ -216,7 +218,7 @@ After a real local transcript, the user receives a relevant response from the on
 - The fixed response set meets the preregistered relevance, language, safety, latency, and response-length rubric.
 - First-token, completion, context, resource/network, usage/cost where available, and cancellation observations remain within the selected budget.
 - Provider mode/model identity is explicit in safe configuration, readiness, and metadata while credentials and prompt/response content remain absent.
-- In cloud mode only final transcript and permitted context cross the allowlisted TLS endpoint; raw audio, local files, environment values, and secrets do not.
+- In cloud mode only final transcript and permitted context cross exact temporary endpoint `http://rpi:4000`; raw audio, local files, environment values, and secrets do not. Runtime Tailscale proof is intentionally absent under the post-review exception, while redirects remain rejected.
 - Session context never crosses session IDs and is not durably persisted by default.
 - Selected-provider failure yields no fabricated answer or alternate-provider request. TTS handoff waits for the exact selected response identity; a later stream failure discards buffered synthesis and emits no public TTS audio.
 - Real STT → selected LLM provider → deterministic TTS completes one correlated turn through the public tracer.
