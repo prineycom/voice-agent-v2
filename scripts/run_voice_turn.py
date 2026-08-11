@@ -19,6 +19,19 @@ from voice_agent_v2.local_stt import CACHE, WhisperSTT
 from voice_agent_v2.local_tts import OUTPUT_FORMAT, Qwen3TTS
 from voice_agent_v2.real_turn import RealTurnController
 
+CAPTURE_RATE_HZ = 16_000
+CAPTURE_CHANNELS = 1
+CAPTURE_SAMPLE_WIDTH_BYTES = 2
+CAPTURE_TIMEOUT_MARGIN_SECONDS = 5.0
+
+
+class MicrophoneCaptureFailure(RuntimeError):
+    """Content-free bounded failure before a voice turn is admitted."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one real Whisper → LiteLLM → Qwen3 voice turn")
@@ -39,23 +52,77 @@ def wav_pcm(path: Path) -> bytes:
 
 def microphone_pcm(duration: float) -> bytes:
     if not 1.0 <= duration <= 30.0:
-        raise SystemExit("microphone duration must be between 1 and 30 seconds")
+        raise MicrophoneCaptureFailure("duration_out_of_bounds")
+    sample_count = int(duration * CAPTURE_RATE_HZ)
+    expected_bytes = sample_count * CAPTURE_CHANNELS * CAPTURE_SAMPLE_WIDTH_BYTES
     temporary = CACHE / "runtime" / "turn-temp" / f"microphone-{time.monotonic_ns()}.pcm"
     temporary.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "pw-record", "--rate", str(CAPTURE_RATE_HZ), "--channels", str(CAPTURE_CHANNELS),
+        "--format", "s16", "--raw", "--sample-count", str(sample_count), str(temporary),
+    ]
     print(f"Speak now ({duration:.1f} seconds)...", flush=True)
     try:
-        subprocess.run([
-            "pw-record", "--rate", "16000", "--channels", "1", "--format", "s16",
-            "--raw", "--sample-count", str(int(duration * 16_000)), str(temporary),
-        ], check=True)
-        return temporary.read_bytes()
+        try:
+            completed = subprocess.run(
+                command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=duration + CAPTURE_TIMEOUT_MARGIN_SECONDS,
+            )
+        except FileNotFoundError as error:
+            raise MicrophoneCaptureFailure("recorder_unavailable") from error
+        except subprocess.TimeoutExpired as error:
+            raise MicrophoneCaptureFailure("recorder_timeout") from error
+        except OSError as error:
+            raise MicrophoneCaptureFailure("recorder_start_failed") from error
+        # PipeWire 1.6.8 pw-record (pw-cat) returns 1 after a normal sample-count stop;
+        # accept that status only when the bounded output is present at the exact expected size.
+        if completed.returncode not in {0, 1}:
+            raise MicrophoneCaptureFailure("recorder_nonzero")
+        if not temporary.is_file():
+            code = "recorder_nonzero" if completed.returncode else "capture_output_missing"
+            raise MicrophoneCaptureFailure(code)
+        try:
+            size = temporary.stat().st_size
+        except OSError as error:
+            raise MicrophoneCaptureFailure("capture_output_unreadable") from error
+        if size != expected_bytes:
+            code = "recorder_nonzero" if completed.returncode else "capture_output_size_mismatch"
+            raise MicrophoneCaptureFailure(code)
+        try:
+            pcm = temporary.read_bytes()
+        except OSError as error:
+            raise MicrophoneCaptureFailure("capture_output_unreadable") from error
+        if len(pcm) != expected_bytes:
+            raise MicrophoneCaptureFailure("capture_output_size_mismatch")
+        return pcm
     finally:
         temporary.unlink(missing_ok=True)
 
 
+def _capture_failure(error: MicrophoneCaptureFailure) -> int:
+    print("Terminal: turn.failed", file=sys.stderr)
+    print(f"Failure: microphone_capture/{error.code}", file=sys.stderr)
+    print("Retention: microphone=false, synthesized_audio=false, conversation_content=false", file=sys.stderr)
+    evidence = {
+        "schema_version": "voice-agent.slice5-human-command-run.v1",
+        "terminal": "turn.failed", "stage": "microphone_capture", "error_class": error.code,
+        "input_retained": False, "output_retained": False, "conversation_content_retained": False,
+    }
+    try:
+        output = CACHE / "evidence" / f"slice5-human-run-{time.monotonic_ns()}.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    except OSError:
+        print("Evidence: content_free_evidence_write_failed", file=sys.stderr)
+    return 2
+
+
 def main() -> int:
     args = arguments()
-    pcm = microphone_pcm(args.duration) if args.microphone else wav_pcm(args.input_wav.resolve())
+    try:
+        pcm = microphone_pcm(args.duration) if args.microphone else wav_pcm(args.input_wav.resolve())
+    except MicrophoneCaptureFailure as error:
+        return _capture_failure(error)
     stt = WhisperSTT()
     llm = LiteLLMProvider()
     tts = Qwen3TTS()
