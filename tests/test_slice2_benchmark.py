@@ -169,11 +169,21 @@ class Slice2CommittedEvidenceTests(unittest.TestCase):
                 else [result["preregistration_commit"]]
             )
             for commit in commits:
-                # The cumulative PR was squash-merged, so its original preregistration
-                # commits are intentionally not ancestors of the default-branch commit.
-                # Keep the content-addressed historical references without pretending
-                # the squash rewrote machine-readable evidence or retained ancestry.
-                self.assertRegex(commit, r"^[0-9a-f]{40}$", result_path.name)
+                object_check = subprocess.run(
+                    ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                    cwd=ROOT,
+                    check=False,
+                )
+                self.assertEqual(object_check.returncode, 0, result_path.name)
+                historical = subprocess.run(
+                    ["git", "show", f"{commit}:benchmarks/config/preregistration.v1.json"],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(historical.returncode, 0, result_path.name)
+                self.assertEqual(json.loads(historical.stdout), preregistration, result_path.name)
 
     def test_fixture_revisions_are_content_addressable(self) -> None:
         for name in (

@@ -47,12 +47,14 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
       await client.start()
     } catch (error) {
       await client.stop()
-      clientRef.current = null
-      dispatch({
-        type: 'connection',
-        connection: 'failed',
-        error: error instanceof Error ? error.message : 'Локальный голосовой путь недоступен',
-      })
+      if (clientRef.current === client) {
+        clientRef.current = null
+        dispatch({
+          type: 'connection',
+          connection: 'failed',
+          error: error instanceof Error ? error.message : 'Локальный голосовой путь недоступен',
+        })
+      }
     }
   }, [disconnect])
 

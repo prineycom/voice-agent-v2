@@ -96,6 +96,7 @@ class Slice6Settings:
     litellm_token_file: Path
     web_dist: Path
     room_token_ttl_seconds: int = 300
+    browser_join_timeout_seconds: int = 30
     max_sessions: int = 1
 
     @classmethod

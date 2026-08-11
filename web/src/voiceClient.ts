@@ -35,6 +35,8 @@ export class VoiceClient {
   private controlGate: RealtimeControlGate | null = null
   private clientSequence = 0
   private stopping = false
+  private startAbort: AbortController | null = null
+  private stopPromise: Promise<void> | null = null
 
   constructor(
     audioContainer: HTMLElement,
@@ -44,34 +46,48 @@ export class VoiceClient {
   }
 
   async start(): Promise<void> {
+    if (this.stopping) throw new Error('voice session start was cancelled')
+    const abort = new AbortController()
+    this.startAbort = abort
     this.callbacks.onConnection('connecting')
-    const response = await fetch('/api/session', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { Accept: 'application/json' },
-    })
-    if (!response.ok) throw new Error(`local voice path unavailable (${response.status})`)
-    const capability = parseCapability(await response.json())
-    if (capability === null) throw new Error('invalid room capability response')
-    this.capability = capability
-    this.controlGate = new RealtimeControlGate(capability.session_id, capability.stream_epoch)
-    this.callbacks.onSession(capability)
+    try {
+      const response = await fetch('/api/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+        signal: abort.signal,
+      })
+      this.ensureStarting()
+      if (!response.ok) throw new Error(`local voice path unavailable (${response.status})`)
+      const capability = parseCapability(await response.json())
+      this.ensureStarting()
+      if (capability === null) throw new Error('invalid room capability response')
+      this.capability = capability
+      this.controlGate = new RealtimeControlGate(capability.session_id, capability.stream_epoch)
+      this.callbacks.onSession(capability)
 
-    const room = new Room({ adaptiveStream: false, dynacast: false, disconnectOnPageLeave: true })
-    this.room = room
-    this.registerRoomHandlers(room)
-    await room.connect(capability.livekit_url, capability.token, { autoSubscribe: true })
-    this.microphone = await createLocalAudioTrack({
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    })
-    await room.localParticipant.publishTrack(this.microphone, {
-      source: Track.Source.Microphone,
-      dtx: false,
-      red: true,
-    })
+      const room = new Room({ adaptiveStream: false, dynacast: false, disconnectOnPageLeave: true })
+      this.room = room
+      this.registerRoomHandlers(room)
+      await room.connect(capability.livekit_url, capability.token, { autoSubscribe: true })
+      await this.ensureRoomStarting(room)
+      const microphone = await createLocalAudioTrack({
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      })
+      await this.ensureRoomStarting(room, microphone)
+      this.microphone = microphone
+      await room.localParticipant.publishTrack(microphone, {
+        source: Track.Source.Microphone,
+        dtx: false,
+        red: true,
+      })
+      await this.ensureRoomStarting(room, microphone)
+    } finally {
+      if (this.startAbort === abort) this.startAbort = null
+    }
   }
 
   async resumeAudio(): Promise<void> {
@@ -85,16 +101,43 @@ export class VoiceClient {
   }
 
   async stop(): Promise<void> {
-    if (this.stopping) return
+    if (this.stopPromise !== null) return this.stopPromise
     this.stopping = true
+    this.startAbort?.abort()
+    this.stopPromise = this.releaseResources()
+    return this.stopPromise
+  }
+
+  private async releaseResources(): Promise<void> {
     this.microphone?.stop()
     this.microphone = null
+    this.capability = null
     this.controlGate = null
     this.playback.clear()
     const room = this.room
     this.room = null
-    if (room !== null) await room.disconnect()
-    this.callbacks.onConnection('closed')
+    try {
+      if (room !== null) await room.disconnect()
+    } finally {
+      this.callbacks.onConnection('closed')
+    }
+  }
+
+  private ensureStarting(): void {
+    if (this.stopping) throw new Error('voice session start was cancelled')
+  }
+
+  private async ensureRoomStarting(
+    room: Room,
+    microphone?: LocalAudioTrack,
+  ): Promise<void> {
+    if (!this.stopping) return
+    microphone?.stop()
+    try {
+      await room.disconnect()
+    } finally {
+      throw new Error('voice session start was cancelled')
+    }
   }
 
   private registerRoomHandlers(room: Room): void {

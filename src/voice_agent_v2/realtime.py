@@ -80,9 +80,11 @@ class TurnRunner(Protocol):
 class TurnContext:
     turn_id: str
     cancellation: CancellationToken
-    prior_cleanup: asyncio.Task[None] | None = None
+    prior_cleanup: asyncio.Task[str | None] | None = None
     task: asyncio.Task[None] | None = None
     terminal: bool = False
+    rollback_complete: bool = False
+    rollback_error: str | None = None
 
 
 def _bounded_json_value(value: object, depth: int = 0) -> bool:
@@ -224,7 +226,10 @@ class RealtimeSession:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("session is closed")
-            prior_cleanup = await self._interrupt_locked("barge_in")
+            prior_cleanup, drain_error = await self._interrupt_locked("barge_in")
+            if drain_error is not None:
+                await self._degrade_locked("publication", drain_error)
+                raise RuntimeError("audio publication could not be cancelled safely")
             self._turn_sequence += 1
             turn_id = f"turn-{self._turn_sequence:08d}"
             context = TurnContext(
@@ -254,37 +259,95 @@ class RealtimeSession:
 
     async def discard_utterance(self) -> None:
         async with self._lock:
-            await self._interrupt_locked("utterance_too_short")
+            cleanup, drain_error = await self._interrupt_locked("utterance_too_short")
+            if drain_error is not None:
+                await self._degrade_locked("publication", drain_error)
+            elif cleanup is not None:
+                self._watch_cleanup(cleanup)
 
     async def interrupt(self, reason: str = "barge_in") -> None:
         async with self._lock:
-            await self._interrupt_locked(reason)
+            cleanup, drain_error = await self._interrupt_locked(reason)
+            if drain_error is not None:
+                await self._degrade_locked("publication", drain_error)
+            elif cleanup is not None:
+                self._watch_cleanup(cleanup)
 
-    async def _interrupt_locked(self, reason: str) -> asyncio.Task[None] | None:
-        context = self._active
-        if context is None or context.terminal:
-            return None
-        started = time.monotonic()
-        context.terminal = True
-        context.cancellation.cancel()
+    async def _clear_audio(self, turn_id: str) -> str | None:
         try:
             await asyncio.wait_for(
-                self.audio_sink.clear(context.turn_id),
+                self.audio_sink.clear(turn_id),
                 timeout=BARGE_IN_DRAIN_BOUND_MS / 1000,
             )
         except TimeoutError:
-            pass
+            return "audio_drain_timeout"
+        except Exception:
+            return "audio_drain_failed"
+        return None
 
-        async def cancel_runner() -> None:
+    async def _rollback_context(self, context: TurnContext) -> str | None:
+        if context.rollback_complete:
+            return context.rollback_error
+        discard = getattr(self.runner, "discard_turn", None)
+        try:
+            if discard is not None:
+                await asyncio.to_thread(discard, self.session_id, context.turn_id)
+        except Exception:
+            context.rollback_error = "context_rollback_failed"
+        context.rollback_complete = True
+        return context.rollback_error
+
+    async def _degrade_locked(self, stage: str, code: str) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._emit(
+            SESSION_TURN_ID,
+            "session.degraded",
+            {"state": "degraded", "stage": stage, "code": code},
+        )
+
+    def _watch_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
+        async def finish() -> None:
+            error = await cleanup
+            if error is not None:
+                async with self._lock:
+                    await self._degrade_locked("controller", error)
+
+        asyncio.create_task(finish(), name=f"watch-{cleanup.get_name()}")
+
+    async def _interrupt_locked(
+        self, reason: str
+    ) -> tuple[asyncio.Task[str | None] | None, str | None]:
+        context = self._active
+        if context is None or context.terminal:
+            return None, None
+        started = time.monotonic()
+        context.terminal = True
+        context.cancellation.cancel()
+
+        async def cancel_runner() -> str | None:
+            cancel_error: Exception | None = None
             try:
-                discard = getattr(self.runner, "discard_turn", None)
-                if discard is not None:
-                    await asyncio.to_thread(discard, self.session_id, context.turn_id)
                 await asyncio.to_thread(self.runner.cancel)
-            except Exception:
-                return
+            except Exception as error:
+                cancel_error = error
+            task = context.task
+            if task is not None and task is not asyncio.current_task():
+                try:
+                    await task
+                except Exception as error:
+                    cancel_error = cancel_error or error
+            if not context.rollback_complete:
+                context.rollback_error = await self._rollback_context(context)
+            if cancel_error is not None:
+                return "cancellation_cleanup_failed"
+            return context.rollback_error
 
-        cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
+        try:
+            drain_error = await self._clear_audio(context.turn_id)
+        finally:
+            cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
         drain_ms = min((time.monotonic() - started) * 1000, float(BARGE_IN_DRAIN_BOUND_MS))
         await self._emit(
             context.turn_id,
@@ -297,24 +360,29 @@ class RealtimeSession:
             },
             terminal=True,
         )
-        return cleanup
+        return cleanup, drain_error
 
     async def _run_turn(self, context: TurnContext, pcm: bytes) -> None:
         if context.prior_cleanup is not None:
+            cleanup_error: str | None = None
             try:
-                await asyncio.wait_for(
+                cleanup_error = await asyncio.wait_for(
                     asyncio.shield(context.prior_cleanup),
                     timeout=CANCELLATION_CLEANUP_BOUND_MS / 1000,
                 )
             except TimeoutError:
-                if not context.terminal:
-                    context.terminal = True
-                    await self._emit(
-                        context.turn_id,
-                        "turn.failed",
-                        {"outcome": "failed", "stage": "controller", "code": "cancellation_cleanup_timeout"},
-                        terminal=True,
-                    )
+                cleanup_error = "cancellation_cleanup_timeout"
+            if cleanup_error is not None:
+                async with self._lock:
+                    if not context.terminal:
+                        context.terminal = True
+                        await self._emit(
+                            context.turn_id,
+                            "turn.failed",
+                            {"outcome": "failed", "stage": "controller", "code": cleanup_error},
+                            terminal=True,
+                        )
+                    await self._degrade_locked("controller", cleanup_error)
                 return
         if context.terminal or self._closed:
             return
@@ -354,28 +422,43 @@ class RealtimeSession:
                         {"outcome": "failed", "stage": "controller", "code": "inference_runner_failure"},
                         terminal=True,
                     )
+                context.rollback_error = await self._rollback_context(context)
+                if context.rollback_error is not None:
+                    async with self._lock:
+                        await self._degrade_locked("controller", context.rollback_error)
                 return
 
         while not observed.empty():
             await self._relay_internal(context, observed.get_nowait())
-        if context.terminal or self._closed:
+        if context.terminal:
+            context.rollback_error = await self._rollback_context(context)
+            if context.rollback_error is not None:
+                async with self._lock:
+                    await self._degrade_locked("controller", context.rollback_error)
+            return
+        if self._closed:
             return
         terminal = result.terminal_event
         if terminal["type"] != "turn.completed":
             await self._relay_internal(context, terminal)
+            if context.terminal:
+                context.rollback_error = await self._rollback_context(context)
+                if context.rollback_error is not None:
+                    async with self._lock:
+                        await self._degrade_locked("controller", context.rollback_error)
             return
         if not result.output_pcm:
-            context.terminal = True
-            await self._emit(
-                context.turn_id,
-                "turn.failed",
-                {"outcome": "failed", "stage": "publication", "code": "empty_audio_output"},
-                terminal=True,
-            )
+            await self._fail_publication(context, "empty_audio_output", clear_audio=False)
             return
-        played = await self.audio_sink.play(
-            context.turn_id, result.output_pcm, lambda: context.terminal or context.cancellation.cancelled
-        )
+        try:
+            played = await self.audio_sink.play(
+                context.turn_id,
+                result.output_pcm,
+                lambda: context.terminal or context.cancellation.cancelled,
+            )
+        except Exception:
+            await self._fail_publication(context, "audio_playout_exception", clear_audio=True)
+            return
         # Completion and admission of the next turn share the session lock. This
         # prevents an old completion from appearing after the next listening event.
         async with self._lock:
@@ -410,19 +493,34 @@ class RealtimeSession:
                     terminal=True,
                 )
             else:
-                discard = getattr(self.runner, "discard_turn", None)
-                if discard is not None:
-                    try:
-                        await asyncio.to_thread(discard, self.session_id, context.turn_id)
-                    except Exception:
-                        pass
-                context.terminal = True
-                await self._emit(
-                    context.turn_id,
-                    "turn.failed",
-                    {"outcome": "failed", "stage": "publication", "code": "audio_playout_failed"},
-                    terminal=True,
+                await self._fail_publication_locked(
+                    context, "audio_playout_failed", clear_audio=True
                 )
+
+    async def _fail_publication(
+        self, context: TurnContext, code: str, *, clear_audio: bool
+    ) -> None:
+        async with self._lock:
+            await self._fail_publication_locked(context, code, clear_audio=clear_audio)
+
+    async def _fail_publication_locked(
+        self, context: TurnContext, code: str, *, clear_audio: bool
+    ) -> None:
+        if context.terminal or self._closed or self._active is not context:
+            return
+        drain_error = await self._clear_audio(context.turn_id) if clear_audio else None
+        context.rollback_error = await self._rollback_context(context)
+        context.terminal = True
+        await self._emit(
+            context.turn_id,
+            "turn.failed",
+            {"outcome": "failed", "stage": "publication", "code": code},
+            terminal=True,
+        )
+        if drain_error is not None:
+            await self._degrade_locked("publication", drain_error)
+        elif context.rollback_error is not None:
+            await self._degrade_locked("controller", context.rollback_error)
 
     async def _relay_internal(self, context: TurnContext, event: dict[str, object]) -> None:
         if context.terminal or self._active is not context:
@@ -440,13 +538,6 @@ class RealtimeSession:
         terminal = event_type in TERMINAL_EVENT_TYPES
         if terminal:
             context.terminal = True
-            if event_type == "turn.failed":
-                discard = getattr(self.runner, "discard_turn", None)
-                if discard is not None:
-                    try:
-                        await asyncio.to_thread(discard, self.session_id, context.turn_id)
-                    except Exception:
-                        pass
         await self._emit(context.turn_id, str(event_type), dict(event["payload"]), terminal=terminal)
 
     async def handle_client_control(self, payload: bytes) -> bool:
@@ -475,12 +566,13 @@ class RealtimeSession:
             return False
         self._client_sequence = sequence
         async with self._lock:
-            cleanup = await self._interrupt_locked("client_reconnected")
-            reset_error: str | None = None
+            cleanup, reset_error = await self._interrupt_locked("client_reconnected")
             try:
                 async with asyncio.timeout(CANCELLATION_CLEANUP_BOUND_MS / 1000):
                     if cleanup is not None:
-                        await asyncio.shield(cleanup)
+                        cleanup_error = await asyncio.shield(cleanup)
+                        if cleanup_error is not None:
+                            reset_error = cleanup_error
                     async with self._runner_lock:
                         reset = getattr(self.runner, "reset_session", None)
                         if reset is not None:
@@ -513,7 +605,7 @@ class RealtimeSession:
         async with self._lock:
             if self._closed:
                 return
-            cleanup = await self._interrupt_locked("client_disconnected")
+            cleanup, _drain_error = await self._interrupt_locked("client_disconnected")
             self._closed = True
         if cleanup is not None:
             try:

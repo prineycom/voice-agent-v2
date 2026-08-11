@@ -176,6 +176,7 @@ class LiveKitRoomController:
             audio_sink=LiveKitAudioSink(self.audio_source),
         )
         self._audio_task: asyncio.Task[None] | None = None
+        self._browser_join_task: asyncio.Task[None] | None = None
         self._closed = False
         self._browser_ready = False
 
@@ -193,6 +194,26 @@ class LiveKitRoomController:
             await self.room.local_participant.publish_track(track, options)
         except Exception:
             await self.close(notify=False)
+            raise
+
+    def arm_browser_join_timeout(self) -> None:
+        if self._closed or self._browser_ready or self._browser_join_task is not None:
+            return
+        self._browser_join_task = asyncio.create_task(
+            self._expire_unclaimed_room(), name=f"browser-join-{self.session_id}"
+        )
+
+    async def _expire_unclaimed_room(self) -> None:
+        try:
+            await asyncio.sleep(
+                min(
+                    self.settings.browser_join_timeout_seconds,
+                    self.settings.room_token_ttl_seconds,
+                )
+            )
+            if not self._browser_ready:
+                await self.close()
+        except asyncio.CancelledError:
             raise
 
     def browser_token(self) -> str:
@@ -242,6 +263,8 @@ class LiveKitRoomController:
         def participant_connected(participant) -> None:
             if participant.identity == self.browser_identity and not self._browser_ready:
                 self._browser_ready = True
+                if self._browser_join_task is not None:
+                    self._browser_join_task.cancel()
                 asyncio.create_task(self.session.ready())
 
         @self.room.on("track_subscribed")
@@ -310,13 +333,25 @@ class LiveKitRoomController:
         if self._closed:
             return
         self._closed = True
+        if (
+            self._browser_join_task is not None
+            and self._browser_join_task is not asyncio.current_task()
+        ):
+            self._browser_join_task.cancel()
+            try:
+                await self._browser_join_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._audio_task is not None and self._audio_task is not asyncio.current_task():
             self._audio_task.cancel()
             try:
                 await self._audio_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
-        await self.session.disconnect()
+        try:
+            await self.session.disconnect()
+        except Exception:
+            pass
         try:
             await self.room.disconnect()
         except Exception:
@@ -325,7 +360,10 @@ class LiveKitRoomController:
             await self.audio_source.aclose()
         except Exception:
             pass
-        await asyncio.to_thread(self.runner.close, self.session_id)
+        try:
+            await asyncio.to_thread(self.runner.close, self.session_id)
+        except Exception:
+            pass
         if notify:
             await self.on_closed(self.session_id)
 
@@ -357,9 +395,11 @@ class SessionRegistry:
             self._controllers[session_id] = controller
         try:
             await controller.start()
-        except Exception:
+            controller.arm_browser_join_timeout()
+        except BaseException:
             async with self._lock:
                 self._controllers.pop(session_id, None)
+            await controller.close(notify=False)
             raise
         return {
             "session_id": session_id,
