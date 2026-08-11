@@ -48,11 +48,9 @@
 
 ### Correction
 
-- Run bounded `pw-record` with an explicit timeout and without `check=True`.
-- Accept PipeWire status 1 only when the output exists at the exact requested PCM byte count; every incomplete/nonstandard case fails explicitly.
-- Normalize unavailable/startup/timeout/nonzero/missing/unreadable/size errors to content-free `microphone_capture/<code>`, print `Terminal: turn.failed`, write content-free evidence when possible, start no inference, and delete temporary PCM in all cases.
+This correction introduced the exact-size PipeWire status-1 regression handling. The current capture, cleanup, retention-reporting, and STT-admission contract is owned by [`docs/architecture.md`](../../architecture.md#7-failure-semantics); the operator command and pending human acceptance are owned by [`README.md`](../../../README.md#final-slice-5-human-acceptance).
 
-### Validation
+### Validation at the correction checkpoint
 
 | Command | Result | Notes |
 | ------- | ------ | ----- |

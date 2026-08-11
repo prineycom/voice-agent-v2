@@ -263,7 +263,7 @@ A user can speak through a host-local path and hear a locally synthesized spoken
 
 - Fixed listening material meets the preregistered Russian intelligibility/naturalness and first-audio/real-time-factor thresholds.
 - A live microphone turn produces an audible answer with exactly one correlated completion.
-- Recorder startup/nonzero/timeout/missing-or-invalid-output failures stop before STT with content-free bounded failure output, no traceback, and no retained temporary PCM.
+- Microphone capture stays within 1–30 seconds and accepts PipeWire status 1 only for exact-size bounded PCM; recorder availability/setup/startup/nonzero/timeout/output and cleanup failures stop before STT with content-free failure output, no traceback, and explicit input-retention status.
 - Required selected-provider→TTS overlap remains within the measured GPU/RAM reserve in local mode or the measured network/TTS reserve in cloud mode; sustained turns do not show unbounded memory growth.
 - Cancellation stops synthesis and output within the declared bound and emits no stale chunks.
 - TTS failure preserves valid text but cannot mark the spoken turn successfully completed.

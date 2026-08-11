@@ -12,8 +12,8 @@
 | `src/voice_agent_v2/local_tts.py` | Added selected Qwen3 CustomVoice/`ryan` adapter, explicit native-24 kHz → contract-16 kHz HQ conversion, PCM validation, readiness, streaming, cancellation, safe observations, and no default output file. | Real TTS contract, format, cancellation, non-retention. |
 | `src/voice_agent_v2/real_turn.py` | Added cumulative real-turn controller with provider-to-TTS sentence handoff, ordered public lifecycle, text-preserving TTS failure, terminal semantics, and cancellation. | First complete real-inference conversation before LiveKit. |
 | `scripts/verify_slice5.py`, `verify-slice5` | Runs three sustained public real turns plus a full-stack cancellation and writes explicit public playable WAV diagnostics outside Git. | Automated sustained/cancellation/resource evidence. |
-| `scripts/run_voice_turn.py`, `run-voice-turn` | Provides the single final PipeWire microphone/listening command with default non-retention, PipeWire 1.6.8 bounded-capture exit handling, timeout, and content-free capture-failure normalization. | Deferred physical microphone and listening acceptance. |
-| `tests/test_real_adapters.py`, `tests/test_run_voice_turn.py` | Covers ordered PCM chunks/totals, format/text bounds, no output path, lifecycle ordering, text-preserving TTS failure, no post-terminal chunks, recorder regression/failure classes, cleanup, and no traceback. | Producer/consumer/failure/privacy contracts. |
+| `scripts/run_voice_turn.py`, `run-voice-turn` | Provides the single final PipeWire microphone/listening command governed by the operator guidance in [`README.md`](../../../README.md#final-slice-5-human-acceptance) and failure policy in [`docs/architecture.md`](../../architecture.md#7-failure-semantics). | Deferred physical microphone and listening acceptance. |
+| `tests/test_real_adapters.py`, `tests/test_run_voice_turn.py` | Covers ordered PCM chunks/totals, format/text bounds, no output path, lifecycle ordering, text-preserving TTS failure, no post-terminal chunks, recorder/STT cleanup and retention reporting, and no traceback. | Producer/consumer/failure/privacy contracts. |
 
 ## Acceptance coverage
 
@@ -25,11 +25,11 @@
 | Ordered chunks/format/terminal | ✅ | Qwen's native 24 kHz output is converted to the preserved v1 `pcm_s16le/16000Hz/mono` contract; one `turn.completed` per sustained turn. |
 | Cancellation/stale output | ⚠️ | The first public diagnostic produced `turn.interrupted` with no post-terminal event. The final-format run hit a selected-provider failure before the TTS cancellation seam; unit and Slice 2 real-TTS coverage still prove bounded process stop and no post-terminal chunks. |
 | TTS failure preserves text | ✅ | Unit test retains `llm.final`, emits no TTS chunk, and terminates `turn.failed` at TTS. |
-| Microphone capture failure contract | ✅ | Canonical PipeWire 1.6.8 reproduced exact-size PCM with status 1; CLI now accepts only that complete bounded case and normalizes startup/nonzero/timeout/missing/size failures to content-free `turn.failed` without starting inference. |
-| Default non-retention | ✅ | Microphone capture uses a delete-in-finally cache-local PCM; Qwen streaming command has no output path; final output is memory/playback only. Explicit public automated WAVs are bounded diagnostics. |
+| Microphone capture failure contract | ✅ | Canonical PipeWire 1.6.8 reproduced exact-size PCM with status 1; executable regression coverage enforces the authoritative failure policy in [`docs/architecture.md`](../../architecture.md#7-failure-semantics). |
+| Default non-retention | ✅ | Default microphone and STT cleanup is mandatory and reports any unconfirmed retention; Qwen streaming has no output path and final output is memory/playback only. Explicit public automated WAVs are bounded diagnostics. |
 | Live microphone/listening acceptance | ⏳ | One documented command is ready for Pasha to rerun; physical speech and subjective listening are not claimed by the agent. |
 
-## Validation
+## Validation at the documented checkpoints
 
 | Command | Result | Notes |
 | ------- | ------ | ----- |
