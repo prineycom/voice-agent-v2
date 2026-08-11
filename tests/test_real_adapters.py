@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from voice_agent_v2.cloud_llm import ALIAS, LiteLLMProvider
 from voice_agent_v2.contracts import AudioFormat, StageFailure
-from voice_agent_v2.local_stt import WhisperSTT
+from voice_agent_v2.local_stt import TemporaryAudioFailure, WhisperSTT
 from voice_agent_v2.local_tts import OUTPUT_FORMAT, Qwen3TTS
 from voice_agent_v2.process_adapter import AdapterProcess, AdapterProcessError
 from voice_agent_v2.real_turn import RealTurnController
@@ -405,6 +405,19 @@ class RealTurnControllerTests(unittest.TestCase):
         self.assertIn("llm.final", [event["type"] for event in result.events])
         self.assertNotIn("tts.audio", [event["type"] for event in result.events])
 
+    def test_stt_cleanup_retention_status_reaches_terminal_failure(self) -> None:
+        class CleanupFailingSTT(FakeSTT):
+            def transcribe(self, **_kwargs) -> str:
+                raise TemporaryAudioFailure(input_retained=True)
+
+        result = RealTurnController(CleanupFailingSTT(), FakeLLM(), FakeTTS()).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+        )
+        self.assertEqual(result.terminal_event["type"], "turn.failed")
+        self.assertEqual(result.terminal_event["payload"]["stage"], "stt")
+        self.assertEqual(result.terminal_event["payload"]["code"], "temporary_audio_cleanup_failed")
+        self.assertTrue(result.terminal_event["payload"]["input_retained"])
+
     def test_invalid_correlation_id_is_rejected_before_events(self) -> None:
         controller = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS())
         with self.assertRaises(ValueError):
@@ -511,6 +524,50 @@ class LocalSTTContractTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "selected_stt_unavailable")
             self.assertFalse(list(Path(directory).iterdir()))
+
+    def test_temporary_directory_failure_is_stage_specific_before_inference(self) -> None:
+        stt = WhisperSTT()
+        process = StubProcess()
+        stt._process = process
+        stt.ready_metadata = {"event": "ready"}
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / "not-a-directory"
+            blocked.write_bytes(b"")
+            with patch("voice_agent_v2.local_stt.TEMP", blocked / "turn-temp"):
+                with self.assertRaises(StageFailure) as raised:
+                    stt.transcribe(
+                        session_id="session-test-0001", turn_id="turn-test-0001", pcm=b"\0\0" * 160,
+                        audio_format=AudioFormat(),
+                    )
+        self.assertEqual(raised.exception.code, "temporary_audio_setup_failed")
+        self.assertFalse(hasattr(process, "last_path"))
+
+    def test_temporary_cleanup_failure_scrubs_audio_and_refuses_transcript(self) -> None:
+        stt = WhisperSTT()
+        stt._process = StubProcess()
+        stt.ready_metadata = {"event": "ready"}
+        original_unlink = Path.unlink
+
+        def reject_wav_unlink(path, *, missing_ok=False):
+            if path.suffix == ".wav":
+                raise PermissionError("temporary cleanup blocked")
+            return original_unlink(path, missing_ok=missing_ok)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("voice_agent_v2.local_stt.TEMP", Path(directory)),
+                patch.object(Path, "unlink", new=reject_wav_unlink),
+            ):
+                with self.assertRaises(StageFailure) as raised:
+                    stt.transcribe(
+                        session_id="session-test-0001", turn_id="turn-test-0001", pcm=b"\0\0" * 160,
+                        audio_format=AudioFormat(),
+                    )
+                retained_path = next(Path(directory).glob("*.wav"))
+                self.assertEqual(retained_path.read_bytes(), b"")
+                self.assertFalse(raised.exception.input_retained)
+        self.assertEqual(raised.exception.code, "temporary_audio_cleanup_failed")
+        self.assertFalse(stt.observations)
 
     def test_cancel_stops_selected_process(self) -> None:
         stt = WhisperSTT()

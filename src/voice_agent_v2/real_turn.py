@@ -56,7 +56,13 @@ class RealTurnController:
             ).as_dict())
 
         def fail(error: StageFailure) -> TraceResult:
-            emit("turn.failed", {"outcome": "failed", "stage": error.stage, "code": error.code}, True)
+            payload: dict[str, object] = {
+                "outcome": "failed", "stage": error.stage, "code": error.code,
+            }
+            input_retained = getattr(error, "input_retained", None)
+            if input_retained is not None:
+                payload["input_retained"] = bool(input_retained)
+            emit("turn.failed", payload, True)
             return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
 
         def cancel_adapters(*adapters) -> None:

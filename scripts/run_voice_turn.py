@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from voice_agent_v2.cloud_llm import LiteLLMProvider
+from voice_agent_v2.contracts import StageFailure
 from voice_agent_v2.local_stt import CACHE, WhisperSTT
 from voice_agent_v2.local_tts import OUTPUT_FORMAT, Qwen3TTS
 from voice_agent_v2.real_turn import RealTurnController
@@ -128,10 +129,10 @@ def microphone_pcm(duration: float) -> bytes:
         _cleanup_temporary_capture(temporary)
 
 
-def _capture_failure(error: MicrophoneCaptureFailure) -> int:
+def _failure(stage: str, code: str, *, input_retained: bool = False) -> int:
     print("Terminal: turn.failed", file=sys.stderr)
-    print(f"Failure: microphone_capture/{error.code}", file=sys.stderr)
-    microphone_retained = str(error.input_retained).lower()
+    print(f"Failure: {stage}/{code}", file=sys.stderr)
+    microphone_retained = str(input_retained).lower()
     print(
         f"Retention: microphone={microphone_retained}, "
         "synthesized_audio=false, conversation_content=false",
@@ -139,8 +140,8 @@ def _capture_failure(error: MicrophoneCaptureFailure) -> int:
     )
     evidence = {
         "schema_version": "voice-agent.slice5-human-command-run.v1",
-        "terminal": "turn.failed", "stage": "microphone_capture", "error_class": error.code,
-        "input_retained": error.input_retained,
+        "terminal": "turn.failed", "stage": stage, "error_class": code,
+        "input_retained": input_retained,
         "output_retained": False, "conversation_content_retained": False,
     }
     try:
@@ -150,6 +151,24 @@ def _capture_failure(error: MicrophoneCaptureFailure) -> int:
     except OSError:
         print("Evidence: content_free_evidence_write_failed", file=sys.stderr)
     return 2
+
+
+def _capture_failure(error: MicrophoneCaptureFailure) -> int:
+    return _failure("microphone_capture", error.code, input_retained=error.input_retained)
+
+
+def _stage_failure(error: StageFailure) -> int:
+    return _failure(
+        error.stage, error.code, input_retained=bool(getattr(error, "input_retained", False)),
+    )
+
+
+def _close_adapter(adapter, stage: str, code: str) -> StageFailure | None:
+    try:
+        adapter.close()
+    except (OSError, subprocess.SubprocessError):
+        return StageFailure(stage, code)
+    return None
 
 
 def main() -> int:
@@ -163,6 +182,8 @@ def main() -> int:
     tts = Qwen3TTS()
     session_id = f"session-local-{time.monotonic_ns()}"
     turn_id = f"turn-local-{time.monotonic_ns()}"
+    result = None
+    failure = None
     try:
         llm.readiness()
         stt.start()
@@ -170,9 +191,21 @@ def main() -> int:
         result = RealTurnController(stt, llm, tts).run_turn(
             session_id=session_id, turn_id=turn_id, input_pcm=pcm,
         )
+    except StageFailure as error:
+        failure = error
     finally:
-        stt.close()
-        tts.close()
+        stt_close_failure = _close_adapter(stt, "stt", "selected_stt_unavailable")
+        tts_close_failure = _close_adapter(tts, "tts", "selected_tts_unavailable")
+        failure = failure or stt_close_failure or tts_close_failure
+    if failure is not None:
+        return _stage_failure(failure)
+    assert result is not None
+    if result.terminal_event["type"] == "turn.failed":
+        payload = result.terminal_event["payload"]
+        return _failure(
+            str(payload.get("stage", "unknown")), str(payload.get("code", "unknown")),
+            input_retained=bool(payload.get("input_retained", False)),
+        )
     transcript = next((event["payload"]["transcript"] for event in result.events if event["type"] == "stt.final"), None)
     response = next((event["payload"]["response"] for event in result.events if event["type"] == "llm.final"), None)
     print(f"Transcript: {transcript or '<none>'}")

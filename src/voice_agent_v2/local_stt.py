@@ -17,6 +17,34 @@ LOGS = CACHE / "raw" / "service-logs"
 EXPECTED_FORMAT = AudioFormat()
 
 
+class TemporaryAudioFailure(StageFailure):
+    def __init__(self, *, input_retained: bool) -> None:
+        super().__init__("stt", "temporary_audio_cleanup_failed")
+        self.input_retained = input_retained
+
+
+def _cleanup_temporary_audio(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+        return
+    except OSError:
+        pass
+    try:
+        with path.open("r+b") as retained:
+            retained.truncate(0)
+    except OSError:
+        pass
+    try:
+        path.unlink(missing_ok=True)
+        return
+    except OSError as error:
+        try:
+            input_retained = path.stat().st_size > 0
+        except OSError:
+            input_retained = True
+        raise TemporaryAudioFailure(input_retained=input_retained) from error
+
+
 def _environment() -> dict[str, str]:
     packages = VENV / "lib" / "python3.14" / "site-packages"
     libraries = [packages / "nvidia" / name / "lib" for name in ("cublas", "cudnn", "cuda_nvrtc")]
@@ -66,12 +94,15 @@ class WhisperSTT:
             raise StageFailure("stt", "unsupported_audio_format")
         if not pcm or len(pcm) % 2 or len(pcm) > 30 * 16_000 * 2:
             raise StageFailure("stt", "invalid_audio_payload")
+        try:
+            TEMP.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise StageFailure("stt", "temporary_audio_setup_failed") from error
+        path = TEMP / f"{session_id}-{turn_id}-{time.monotonic_ns()}.wav"
         self.start()
         process = self._process
         if process is None:
             raise StageFailure("stt", "selected_stt_unavailable")
-        TEMP.mkdir(parents=True, exist_ok=True)
-        path = TEMP / f"{session_id}-{turn_id}-{time.monotonic_ns()}.wav"
         started = time.monotonic()
         try:
             with wave.open(str(path), "wb") as output:
@@ -86,7 +117,7 @@ class WhisperSTT:
         except (AdapterProcessError, OSError) as error:
             raise StageFailure("stt", "selected_stt_unavailable") from error
         finally:
-            path.unlink(missing_ok=True)
+            _cleanup_temporary_audio(path)
         transcript = response.get("hypothesis")
         if not isinstance(transcript, str) or not transcript.strip():
             raise StageFailure("stt", "empty_transcript")
@@ -94,7 +125,7 @@ class WhisperSTT:
             "session_id_present": bool(session_id), "turn_id_present": bool(turn_id),
             "input_bytes": len(pcm), "audio_duration_ms": len(pcm) / 2 / 16_000 * 1000,
             "latency_ms": (time.monotonic() - started) * 1000,
-            "temporary_audio_retained": path.exists(), "identity": self.identity,
+            "temporary_audio_retained": False, "identity": self.identity,
         })
         return transcript.strip()
 
