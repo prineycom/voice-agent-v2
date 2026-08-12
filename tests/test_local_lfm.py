@@ -264,6 +264,44 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "selected_provider_identity_mismatch")
         self.assertEqual(handed_off, ["Буферизовать."])
 
+    def test_late_failure_cancels_blocked_handoff_before_bounded_join(self) -> None:
+        callback_seen = threading.Event()
+        callback_release = threading.Event()
+        abort_seen = threading.Event()
+        lines = [
+            b"data: " + json.dumps(
+                stream_event(content="Буферизовать."), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+            b"data: " + json.dumps(
+                stream_event(content="Ошибка.", model="other"), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+        ]
+        response = CallbackGatedResponse(lines, callback_seen)
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        def handoff(_sentence: str) -> None:
+            callback_seen.set()
+            callback_release.wait(2)
+
+        def abort() -> None:
+            abort_seen.set()
+            callback_release.set()
+
+        started = time.monotonic()
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond_with_handoff(
+                session_id="session-a",
+                turn_id="turn-a",
+                transcript="Публичный запрос",
+                on_sentence=handoff,
+                on_handoff_abort=abort,
+            )
+
+        self.assertEqual(raised.exception.code, "selected_provider_identity_mismatch")
+        self.assertTrue(abort_seen.is_set())
+        self.assertLess(time.monotonic() - started, 0.5)
+
     def test_handoff_waits_for_complete_identity_validation(self) -> None:
         response = StubResponse([
             stream_event(content="Не выдавать заранее."),

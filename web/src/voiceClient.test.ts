@@ -234,7 +234,7 @@ describe('VoiceClient startup cancellation', () => {
     expect(room.localParticipant.publishTrack).not.toHaveBeenCalled()
   })
 
-  it('waits for a fresh per-turn track and its correlated render boundary', async () => {
+  it('waits for a fresh per-turn track and its correlated retirement lifecycle', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
     const client = new VoiceClient(document.createElement('div'), callbacks())
@@ -248,40 +248,12 @@ describe('VoiceClient startup cancellation', () => {
     Object.defineProperties(mediaStreamTrack, {
       id: { configurable: true, value: 'finite-track-turn-1' },
       readyState: { configurable: true, value: 'live' },
-      muted: { configurable: true, value: false },
-      getSettings: { configurable: true, value: () => ({ sampleRate: 48_000 }) },
     })
-    const renderNode = {
-      onaudioprocess: null as ((event: AudioProcessingEvent) => void) | null,
-      disconnect: vi.fn(),
-    } as unknown as ScriptProcessorNode
-    vi.stubGlobal('AudioContext', class {
-      state: AudioContextState = 'running'
-      readonly sampleRate = 48_000
-      resume = vi.fn().mockResolvedValue(undefined)
-      close = vi.fn().mockResolvedValue(undefined)
-      createScriptProcessor = vi.fn().mockReturnValue(renderNode)
-    })
-    let receivedSamples = 0
-    let emittedSamples = 0
     const turnTrack = {
       kind: 'audio',
       attach: vi.fn().mockReturnValue(element),
       detach: vi.fn().mockReturnValue([]),
       mediaStreamTrack,
-      setAudioContext: vi.fn(),
-      setWebAudioPlugins: vi.fn(),
-      getRTCStatsReport: vi.fn().mockImplementation(async () => new Map([[
-        'audio',
-        {
-          type: 'inbound-rtp',
-          kind: 'audio',
-          trackIdentifier: 'finite-track-turn-1',
-          totalSamplesReceived: receivedSamples,
-          jitterBufferEmittedCount: emittedSamples,
-          concealedSamples: 0,
-        },
-      ]]) as unknown as RTCStatsReport),
     }
     const publication = { trackSid: 'publication-turn-1' }
 
@@ -337,36 +309,6 @@ describe('VoiceClient startup cancellation', () => {
       wait_kind: 'playout',
       type: 'client.wait-started',
     })
-    await vi.waitFor(() => expect(
-      turnTrack.getRTCStatsReport.mock.calls.length,
-    ).toBeGreaterThanOrEqual(2))
-    const baselineReads = turnTrack.getRTCStatsReport.mock.calls.length
-    receivedSamples = 960
-    emittedSamples = 1
-    await vi.waitFor(() => expect(
-      turnTrack.getRTCStatsReport.mock.calls.length,
-    ).toBeGreaterThan(baselineReads))
-    const input = new Float32Array(960)
-    const output = new Float32Array(960)
-    renderNode.onaudioprocess?.({
-      inputBuffer: {
-        numberOfChannels: 1,
-        getChannelData: () => input,
-      },
-      outputBuffer: {
-        numberOfChannels: 1,
-        length: 960,
-        getChannelData: () => output,
-      },
-    } as unknown as AudioProcessingEvent)
-    await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3)
-
-    const earlyReads = turnTrack.getRTCStatsReport.mock.calls.length
-    emittedSamples = 960
-    await vi.waitFor(() => expect(
-      turnTrack.getRTCStatsReport.mock.calls.length,
-    ).toBeGreaterThan(earlyReads))
     await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
     expect(JSON.parse(new TextDecoder().decode(
       room.localParticipant.publishData.mock.calls[3][0] as Uint8Array,

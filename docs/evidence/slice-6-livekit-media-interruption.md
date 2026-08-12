@@ -60,7 +60,7 @@ Result: **PASS** after `./setup-slice6`:
 - the then-current Vitest suite passed;
 - Vite production build: pass.
 
-Browser tests cover the typed reducer/parser, exact capability response, lifecycle/epoch/sequence/turn gates, reconnect suppression, stale event rejection, cancellable startup, bounded readiness, agent loss, cleanup failure, fresh-subscription media invalidation, React shell, autoplay failure boundary, and explicit autoplay recovery. The installed runtime check also exercises cancellation during model startup, unclaimed-room expiry, and capacity retention after incomplete cleanup. The app intentionally remains one small bundle; Vite's size advisory is visible but is not hidden as a failure.
+Browser tests cover the typed reducer/parser, exact capability response, lifecycle/epoch/sequence/turn gates, reconnect suppression, stale event rejection, cancellable startup, bounded readiness, agent loss, cleanup failure, exact fresh-publication attachment and retirement acknowledgement, React shell, autoplay failure boundary, and explicit autoplay recovery. These lifecycle tests deliberately do not use RTP/Web Audio counters as evidence of speaker output: they prove only correlation, subscription invalidation, bounded acknowledgement, and cleanup. The installed runtime check also exercises cancellation during model startup, unclaimed-room expiry, capacity retention after incomplete cleanup, and local idempotent publication retirement after confirmed room disconnect. The app intentionally remains one small bundle; Vite's size advisory is visible but is not hidden as a failure.
 
 ## Measured bind and port evidence
 
@@ -100,13 +100,16 @@ This focused measurement proves the provider/service contract, not full-stack co
 - Endpointing uses 20 ms 16 kHz mono frames, 100 ms speech start, 600 ms trailing silence, 200 ms pre-roll, and a 15 s utterance maximum. It is a bounded CPU energy detector, not an unmeasured claim that Silero is unnecessary.
 - Barge-in first terminalizes the old turn, clears the 100 ms LiveKit source queue, invalidates the browser's old audio subscription and admits only a freshly subscribed track, cancels the selected provider and process-isolated STT/TTS, rolls back undelivered LLM context, and serializes replacement work.
 - During transport reconnect, the browser detaches audio and drops all old-epoch data. The server cancels/drains active work, resets all in-memory conversation context, advances the epoch, and only then reports ready. Cleanup/reset timeout produces `session.degraded` and closes turn admission.
-- Provider failure or empty output remains a hard `turn.failed`; no alternate model, endpoint, alias, transport redirect, local provider, or fabricated answer exists.
+- Provider failure or empty output remains a hard `turn.failed`; a late streamed failure first cancels active TTS through a bounded handoff-abort boundary and discards buffered PCM/context effects before any publication, and no alternate model, endpoint, alias, transport redirect, or fabricated answer exists.
+- Normal teardown retires the exact publication while room transport is available. After confirmed room disconnect, cleanup retires it locally and closes the source without another unpublish request; repeated cleanup joins that same operation.
 
 ## Preserved failed evidence and limitations
 
 Nothing in this slice rewrites historical machine-readable benchmark results. The failed `deepseek-v4-flash` latency, reliability, fairness, isolation/empty-response, privacy/provenance and cost gates remain in the existing Slice 2–5 evidence and architecture summaries. ADR-0006 remains the historical temporary authorization; ADR-0008 removes that route from the active app. The earlier LFM BF16/vLLM failure also remains failed; selecting a separately measured Q4_K_M/llama.cpp runtime does not relabel it.
 
 The Slice 5 cloud-provider stack observed a `7,600 MiB` local Whisper/Qwen peak with `4,682 MiB` then free. The focused local-LFM server alone observed about `2,900 MiB` process VRAM. These measurements are not additive proof and do not establish a new combined ceiling; deterministic/runtime/bind smokes did not load llama.cpp, Whisper, Qwen, LiveKit and a real browser together, so they provide **no combined VRAM/RAM/CPU or latency pass**. Final acceptance requires a safe non-OOM reserve on the 12,282 MiB device under real overlap and barge-in.
+
+Automated RTP counters, Web Audio callbacks, media-element state, LiveKit subscription events, and server queue drain are not physical evidence. They do not establish that the microphone captured speech, the speaker was audible, the response tail played, or barge-in stopped sound within 250 ms. Only the remaining Pasha-owned browser/listening procedure can establish those facts.
 
 Other open limits:
 

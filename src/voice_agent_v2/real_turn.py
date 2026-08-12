@@ -190,10 +190,16 @@ class RealTurnController:
 
         def generate_response() -> str:
             if hasattr(self.llm, "respond_with_handoff"):
-                return self.llm.respond_with_handoff(
-                    session_id=session_id, turn_id=turn_id, transcript=transcript,
-                    on_sentence=synthesize_sentence, cancellation=token,
-                )
+                arguments = {
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "transcript": transcript,
+                    "on_sentence": synthesize_sentence,
+                    "cancellation": token,
+                }
+                if getattr(self.llm, "supports_handoff_abort", False):
+                    arguments["on_handoff_abort"] = lambda: cancel_adapters(self.tts)
+                return self.llm.respond_with_handoff(**arguments)
             response = self.llm.respond(
                 session_id=session_id, turn_id=turn_id, transcript=transcript,
                 cancellation=token,

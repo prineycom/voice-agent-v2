@@ -573,7 +573,7 @@ export class VoiceClient {
       if (this.pendingPlayoutBoundary !== boundary || this.stopping) return
     } catch {
       if (this.pendingPlayoutBoundary === boundary) {
-        await this.failSession('Не удалось подтвердить воспроизведение ответа')
+        await this.failSession('Не удалось подтвердить границу аудиопотока')
       }
       return
     }
@@ -598,7 +598,7 @@ export class VoiceClient {
       })
       if (this.pendingPlayoutBoundary !== boundary) return
     } catch {
-      await this.failSession('Не удалось подтвердить воспроизведение ответа')
+      await this.failSession('Не удалось подтвердить границу аудиопотока')
     }
   }
 
@@ -751,7 +751,7 @@ export class VoiceClient {
     this.playoutAckTimer = setTimeout(() => {
       void this.failSession(
         waitKind === 'playout'
-          ? 'Не удалось подтвердить воспроизведение ответа'
+          ? 'Не удалось подтвердить границу аудиопотока'
           : 'Сервер не подтвердил готовность аудиопотока',
       )
     }, clientDeadlineMs)

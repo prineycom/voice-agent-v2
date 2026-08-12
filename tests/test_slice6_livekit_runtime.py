@@ -132,6 +132,9 @@ class RecordingAudioSink:
     def __init__(self, source: RecordingAudioSource) -> None:
         self.source = source
 
+    async def transport_disconnected(self) -> None:
+        self.source.calls.append("audio.transport-disconnected")
+
     async def close(self) -> None:
         await self.source.aclose()
 
@@ -559,6 +562,120 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls.count(("close", "source-1")), 1)
         self.assertEqual(Source.sequence, 2)
 
+    async def test_confirmed_transport_disconnect_retires_locally_once(self) -> None:
+        calls: list[object] = []
+
+        class Source:
+            sequence = 0
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                Source.sequence += 1
+                self.name = f"source-{Source.sequence}"
+                self.closed = False
+
+            def clear_queue(self) -> None:
+                if self.closed:
+                    raise RuntimeError("disposed source was cleared")
+
+            async def aclose(self) -> None:
+                if self.closed:
+                    raise RuntimeError("source was closed twice")
+                self.closed = True
+                calls.append(("close", self.name))
+
+        class Participant:
+            async def publish_track(self, _track, _options):
+                return types.SimpleNamespace(sid="publication-disconnected")
+
+            async def unpublish_track(self, publication_id: str) -> None:
+                calls.append(("unpublish", publication_id))
+
+        runtime.rtc.AudioSource = Source
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()),
+            Source(),
+            lambda source: calls.append(("fresh", source.name)),
+        )
+        await sink.prepare("turn-disconnected")
+
+        await asyncio.gather(
+            sink.transport_disconnected(),
+            sink.transport_disconnected(),
+        )
+
+        self.assertNotIn(("unpublish", "publication-disconnected"), calls)
+        self.assertEqual(calls.count(("close", "source-1")), 1)
+        self.assertEqual(calls.count(("fresh", "source-2")), 1)
+        self.assertIsNone(sink.publication)
+        await sink.close()
+
+    async def test_transport_disconnect_supersedes_hung_unpublish_without_retry(self) -> None:
+        calls: list[object] = []
+        unpublish_started = asyncio.Event()
+
+        class Source:
+            sequence = 0
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                Source.sequence += 1
+                self.name = f"source-{Source.sequence}"
+                self.closed = False
+
+            async def capture_frame(self, _frame) -> None:
+                return None
+
+            async def wait_for_playout(self) -> None:
+                return None
+
+            def clear_queue(self) -> None:
+                if self.closed:
+                    raise RuntimeError("disposed source was cleared")
+
+            async def aclose(self) -> None:
+                if self.closed:
+                    raise RuntimeError("source was closed twice")
+                self.closed = True
+                calls.append(("close", self.name))
+
+        class Participant:
+            async def publish_track(self, _track, _options):
+                return types.SimpleNamespace(sid="publication-hung")
+
+            async def unpublish_track(self, publication_id: str) -> None:
+                calls.append(("unpublish", publication_id))
+                unpublish_started.set()
+                await asyncio.Event().wait()
+
+        runtime.rtc.AudioSource = Source
+        runtime.rtc.AudioFrame = lambda **kwargs: kwargs
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()),
+            Source(),
+            lambda _source: None,
+        )
+        await sink.prepare("turn-hung")
+        boundary = await sink.play("turn-hung", b"\0\0" * 320, lambda: False)
+        assert boundary is not None
+        completion = asyncio.create_task(sink.complete("turn-hung", boundary))
+        await asyncio.wait_for(unpublish_started.wait(), 1)
+
+        await asyncio.wait_for(sink.transport_disconnected(), 1)
+        with self.assertRaises(asyncio.CancelledError):
+            await completion
+
+        self.assertEqual(calls.count(("unpublish", "publication-hung")), 1)
+        self.assertEqual(calls.count(("close", "source-1")), 1)
+        self.assertIsNone(sink.publication)
+        await sink.close()
+
     def test_live_runner_bounds_session_diagnostics_after_every_turn(self) -> None:
         class Adapter:
             def __init__(self) -> None:
@@ -792,7 +909,10 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_preserves_normal_and_failed_transport_ordering(self) -> None:
         for transport_failed, expected_prefix in (
             (False, [("session.disconnect", True), "audio.close", "room.disconnect"]),
-            (True, ["room.disconnect", ("session.disconnect", False), "audio.close"]),
+            (True, [
+                "room.disconnect", "audio.transport-disconnected",
+                ("session.disconnect", False),
+            ]),
         ):
             with self.subTest(transport_failed=transport_failed):
                 calls: list[object] = []

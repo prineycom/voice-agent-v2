@@ -47,6 +47,7 @@ class _PublicationRetirement:
     task: asyncio.Task[None] | None = None
     error: BaseException | None = None
     source_close_started: bool = False
+    local_only: bool = False
     complete: bool = False
 
 
@@ -172,6 +173,7 @@ class LiveKitAudioSink(AudioSink):
         self._retirement: _PublicationRetirement | None = None
         self._closing = False
         self._closed = False
+        self._transport_disconnected = False
         self._close_task: asyncio.Task[None] | None = None
 
     @staticmethod
@@ -201,7 +203,10 @@ class LiveKitAudioSink(AudioSink):
 
     async def _run_retirement(self, state: _PublicationRetirement) -> None:
         try:
-            await self.room.local_participant.unpublish_track(state.publication_id)
+            async with self._rotation_lock:
+                local_only = state.local_only or self._transport_disconnected
+            if not local_only:
+                await self.room.local_participant.unpublish_track(state.publication_id)
             async with self._rotation_lock:
                 if self._retirement is not state:
                     raise RuntimeError("LiveKit publication retirement state changed")
@@ -220,6 +225,21 @@ class LiveKitAudioSink(AudioSink):
                 self._sealed_boundary = None
                 state.complete = True
                 self._retirement = None
+        except asyncio.CancelledError:
+            async with self._rotation_lock:
+                superseded = (
+                    self._retirement is state
+                    and state.local_only
+                    and not state.source_close_started
+                )
+            if superseded:
+                raise
+            async with self._rotation_lock:
+                if self._retirement is state:
+                    state.error = asyncio.CancelledError()
+                    state.complete = True
+                    self._rotation_failed = True
+            raise
         except BaseException as error:
             async with self._rotation_lock:
                 if self._retirement is state:
@@ -251,6 +271,48 @@ class LiveKitAudioSink(AudioSink):
             raise RuntimeError("LiveKit publication retirement was not started")
         await asyncio.wait({task})
         task.result()
+
+    async def transport_disconnected(self) -> None:
+        async with self._rotation_lock:
+            self._transport_disconnected = True
+            if self.publication is None:
+                return
+            state = self._reserve_retirement_locked(
+                self._publication_id(self.publication), self.source
+            )
+            state.local_only = True
+            task = state.task
+            if (
+                task is not None
+                and not task.done()
+                and not state.source_close_started
+            ):
+                task.cancel()
+        if task is not None:
+            try:
+                await asyncio.shield(task)
+            except (asyncio.CancelledError, Exception):
+                pass
+        async with self._rotation_lock:
+            if self._retirement is not state or state.complete and state.error is None:
+                return
+            current_task = state.task
+            if current_task is not None and current_task is not task:
+                task = current_task
+            elif state.source_close_started:
+                task = current_task
+            else:
+                state.error = None
+                state.complete = False
+                self._rotation_failed = False
+                task = asyncio.create_task(
+                    self._run_retirement(state),
+                    name=f"livekit-local-retirement-{state.publication_id}",
+                )
+                task.add_done_callback(self._consume_retirement)
+                state.task = task
+        if task is not None:
+            await asyncio.shield(task)
 
     async def prepare(self, turn_id: str) -> str:
         while True:
@@ -716,6 +778,7 @@ class LiveKitRoomController:
                         raise ExceptionGroup(
                             "room resource cleanup failed", [error]
                         ) from error
+                    await self.audio_sink.transport_disconnected()
                     try:
                         await self.session.disconnect(notify_client=False)
                     except RuntimeError as error:

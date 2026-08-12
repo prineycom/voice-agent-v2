@@ -776,8 +776,11 @@ class RealTurnControllerTests(unittest.TestCase):
 
     def test_late_llm_failure_discards_streamed_tts_buffer(self) -> None:
         class LateFailingLLM(FakeLLM):
-            def respond_with_handoff(self, *, on_sentence, **_kwargs) -> str:
+            supports_handoff_abort = True
+
+            def respond_with_handoff(self, *, on_sentence, on_handoff_abort, **_kwargs) -> str:
                 on_sentence("Буферизованный ответ.")
+                on_handoff_abort()
                 raise StageFailure("llm_provider", "selected_provider_identity_mismatch")
 
         class RecordingTTS(FakeTTS):
@@ -795,6 +798,7 @@ class RealTurnControllerTests(unittest.TestCase):
         )
 
         self.assertEqual(tts.synthesized, 1)
+        self.assertEqual(tts.cancel_count, 1)
         self.assertEqual(result.output_pcm, b"")
         self.assertEqual(result.terminal_event["type"], "turn.failed")
         self.assertNotIn("turn.speaking", [event["type"] for event in result.events])
