@@ -114,7 +114,7 @@ function finiteTrackBoundary() {
         type: 'inbound-rtp',
         kind: 'audio',
         trackIdentifier: 'finite-track',
-        totalSamplesDuration: 0,
+        totalSamplesReceived: 0,
         jitterBufferEmittedCount: 0,
         concealedSamples: 0,
       },
@@ -244,8 +244,10 @@ describe('VoiceClient startup cancellation', () => {
     element.pause = vi.fn()
     element.load = vi.fn()
     const mediaStreamTrack = new EventTarget() as MediaStreamTrack
+    let trackReadyState: MediaStreamTrackState = 'live'
     Object.defineProperties(mediaStreamTrack, {
-      readyState: { configurable: true, value: 'live' },
+      id: { configurable: true, value: 'finite-track-turn-1' },
+      readyState: { configurable: true, get: () => trackReadyState },
       muted: { configurable: true, value: false },
     })
     const renderNode = {
@@ -259,7 +261,7 @@ describe('VoiceClient startup cancellation', () => {
       close = vi.fn().mockResolvedValue(undefined)
       createScriptProcessor = vi.fn().mockReturnValue(renderNode)
     })
-    let receivedDurationSeconds = 0
+    let receivedSamples = 0
     let emittedSamples = 0
     const turnTrack = {
       kind: 'audio',
@@ -273,7 +275,8 @@ describe('VoiceClient startup cancellation', () => {
         {
           type: 'inbound-rtp',
           kind: 'audio',
-          totalSamplesDuration: receivedDurationSeconds,
+          trackIdentifier: 'finite-track-turn-1',
+          totalSamplesReceived: receivedSamples,
           jitterBufferEmittedCount: emittedSamples,
           concealedSamples: 0,
         },
@@ -337,14 +340,14 @@ describe('VoiceClient startup cancellation', () => {
       turnTrack.getRTCStatsReport.mock.calls.length,
     ).toBeGreaterThanOrEqual(2))
     const baselineReads = turnTrack.getRTCStatsReport.mock.calls.length
-    receivedDurationSeconds = 320 / 16_000
+    receivedSamples = 960
     emittedSamples = 1
     await vi.waitFor(() => expect(
       turnTrack.getRTCStatsReport.mock.calls.length,
     ).toBeGreaterThan(baselineReads))
     const input = new Float32Array(960)
     const output = new Float32Array(960)
-    const render = () => renderNode.onaudioprocess?.({
+    renderNode.onaudioprocess?.({
       inputBuffer: {
         numberOfChannels: 1,
         getChannelData: () => input,
@@ -355,9 +358,18 @@ describe('VoiceClient startup cancellation', () => {
         getChannelData: () => output,
       },
     } as unknown as AudioProcessingEvent)
-    render()
     await new Promise((resolve) => setTimeout(resolve, 25))
-    render()
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3)
+
+    const earlyReads = turnTrack.getRTCStatsReport.mock.calls.length
+    emittedSamples = 960
+    await vi.waitFor(() => expect(
+      turnTrack.getRTCStatsReport.mock.calls.length,
+    ).toBeGreaterThan(earlyReads))
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3)
+
+    trackReadyState = 'ended'
+    mediaStreamTrack.dispatchEvent(new Event('ended'))
     await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
     expect(JSON.parse(new TextDecoder().decode(
       room.localParticipant.publishData.mock.calls[3][0] as Uint8Array,

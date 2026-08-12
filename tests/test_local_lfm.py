@@ -214,6 +214,42 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "selected_provider_cancelled")
         self.assertFalse(opened)
 
+    def test_active_request_wait_is_synchronized_with_cancellation(self) -> None:
+        created: list[DeadlineConnection] = []
+
+        def factory(host: str, port: int, *, timeout: float):
+            connection = DeadlineConnection(
+                host, port, timeout=timeout, responses=[], block_headers=True
+            )
+            created.append(connection)
+            return connection
+
+        provider = LocalLFMProvider(
+            connection_factory=factory, request_timeout_seconds=1
+        )
+        cancellation = CancellationToken()
+        failures: list[str] = []
+
+        def respond() -> None:
+            try:
+                provider.respond(
+                    session_id="session-a", turn_id="turn-a", transcript="Запрос",
+                    cancellation=cancellation,
+                )
+            except StageFailure as error:
+                failures.append(error.code)
+
+        worker = threading.Thread(target=respond)
+        worker.start()
+        self.assertTrue(provider.wait_for_active_request(0.5))
+        cancellation.cancel()
+        worker.join(0.5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, ["selected_provider_cancelled"])
+        self.assertTrue(created[0].closed)
+        self.assertFalse(provider.wait_for_active_request(0))
+
     def test_whole_request_deadline_closes_delayed_headers(self) -> None:
         created: list[DeadlineConnection] = []
 

@@ -191,10 +191,7 @@ def main() -> int:
 
         worker = threading.Thread(target=long_request)
         worker.start()
-        deadline = time.monotonic() + 2
-        while cancellation_provider._connection is None and time.monotonic() < deadline:
-            time.sleep(0.005)
-        if cancellation_provider._connection is None:
+        if not cancellation_provider.wait_for_active_request(2):
             raise AssertionError("local LFM cancellation request did not enter transport")
         cancellation.cancel()
         cancellation_provider.cancel()

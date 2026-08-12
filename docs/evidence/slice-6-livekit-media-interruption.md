@@ -121,7 +121,7 @@ Other open limits:
 
 Keep all captures outside Git and do not paste secrets or conversation content into the issue/PR.
 
-1. On the canonical host, fill ignored `.env.slice6`, confirm the provider token file is user-owned mode `0600`, run `./setup-slice6`, then run `./run-slice6`. Observe the printed loopback/tailnet URLs and no startup traceback.
+1. On the canonical host, fill ignored `.env.slice6`, run `./setup-slice6`, then run `./run-slice6`. Observe the printed loopback/tailnet URLs, no credential requirement, and no startup traceback.
 2. In a host browser, open `http://127.0.0.1:8000`, choose **Подключить микрофон**, and allow microphone/audio if prompted. Speak one bounded Russian utterance. Observe ordered listening → transcribing → thinking → speaking → completed state, the matching concise local-LFM response, and an audible `ryan` response. A local model timeout, hidden-only, truncated, empty or resource failure must appear explicitly with no cloud/fallback request.
 3. While a second response is audibly playing, begin a new utterance. Capture control/audio timing. Observe the old turn become `turn.interrupted`, old sound cease within 250 ms of server speech-start detection, a new correlated turn complete, no old words resume, and the dropped-event count not increase for valid traffic.
 4. During another response, interrupt the browser network long enough to show **Переподключение…**, then restore it. Observe no old response play after reconnection, state return to ready only after the epoch reset, and a fresh utterance complete without stale transcript/response/audio.

@@ -73,6 +73,7 @@ class LocalLFMProvider:
         self._request_timeout_seconds = request_timeout_seconds
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._operation_lock = threading.Lock()
+        self._operation_changed = threading.Condition(self._operation_lock)
         self._operation_generation = 0
         self._cancelled_generations: set[int] = set()
         self._connections: dict[int, http.client.HTTPConnection] = {}
@@ -94,9 +95,10 @@ class LocalLFMProvider:
         if self._cancelled(generation):
             raise StageFailure("llm_provider", "selected_provider_cancelled")
         connection = self._connection_factory(self._host, self._port, timeout=timeout)
-        with self._operation_lock:
+        with self._operation_changed:
             self._connections[generation] = connection
             cancelled = generation in self._cancelled_generations
+            self._operation_changed.notify_all()
         if cancelled:
             connection.close()
             with self._operation_lock:
@@ -107,9 +109,10 @@ class LocalLFMProvider:
 
     def _release_connection(self, generation: int, connection: http.client.HTTPConnection) -> None:
         connection.close()
-        with self._operation_lock:
+        with self._operation_changed:
             if self._connections.get(generation) is connection:
                 self._connections.pop(generation, None)
+                self._operation_changed.notify_all()
 
     def _cancel_operation(self, generation: int) -> None:
         with self._operation_lock:
@@ -554,6 +557,18 @@ class LocalLFMProvider:
         with self._operation_lock:
             generation = self._operation_generation
         self._cancel_operation(generation)
+
+    def wait_for_active_request(self, timeout_seconds: float) -> bool:
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must not be negative")
+        deadline = time.monotonic() + timeout_seconds
+        with self._operation_changed:
+            while not self._connections:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._operation_changed.wait(remaining)
+            return True
 
     def snapshot_session(self, session_id: str) -> tuple[dict[str, str], ...]:
         return tuple(dict(message) for message in self._contexts.get(session_id, ()))
