@@ -170,6 +170,30 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(adapter.observations), runtime.MAX_SESSION_OBSERVATIONS)
             self.assertEqual(adapter.observations[0], {"sequence": 7})
 
+    def test_live_runner_cancel_attempts_every_adapter_and_aggregates_failures(self) -> None:
+        calls: list[str] = []
+
+        class Adapter:
+            def __init__(self, name: str, fail: bool = False) -> None:
+                self.name = name
+                self.fail = fail
+
+            def cancel(self) -> None:
+                calls.append(self.name)
+                if self.fail:
+                    raise RuntimeError(f"{self.name} cancellation failed")
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.llm = Adapter("llm", fail=True)
+        runner.tts = Adapter("tts")
+        runner.stt = Adapter("stt", fail=True)
+
+        with self.assertRaises(ExceptionGroup) as raised:
+            runner.cancel()
+
+        self.assertEqual(calls, ["llm", "tts", "stt"])
+        self.assertEqual(len(raised.exception.exceptions), 2)
+
     def controller(self):
         controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
         controller.room = FakeRoom()

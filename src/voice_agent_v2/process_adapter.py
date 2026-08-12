@@ -13,6 +13,10 @@ import time
 from typing import Iterator
 
 
+MAX_PROTOCOL_LINE_BYTES = 1_048_576
+MAX_PROTOCOL_QUEUE_EVENTS = 32
+
+
 class AdapterProcessError(RuntimeError):
     pass
 
@@ -24,14 +28,16 @@ class AdapterProcess:
         self.environment = environment
         self.process: subprocess.Popen[str] | None = None
         self._log = None
-        self._events: queue.Queue[dict | BaseException | None] = queue.Queue()
+        self._events: queue.Queue[dict | BaseException | None] = queue.Queue(
+            maxsize=MAX_PROTOCOL_QUEUE_EVENTS
+        )
         self._reader: threading.Thread | None = None
         self._cancel_requested = threading.Event()
 
     def start(self, timeout_seconds: float) -> dict:
         if self.process is not None:
             raise AdapterProcessError("adapter already started")
-        self._events = queue.Queue()
+        self._events = queue.Queue(maxsize=MAX_PROTOCOL_QUEUE_EVENTS)
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log = self.log_path.open("x", encoding="utf-8")
@@ -45,13 +51,38 @@ class AdapterProcess:
                 raise AdapterProcessError("adapter startup cancelled")
             assert process.stdout is not None
 
+            def publish(value: dict | BaseException | None) -> None:
+                try:
+                    self._events.put_nowait(value)
+                except queue.Full as error:
+                    raise AdapterProcessError("adapter event queue overflow") from error
+
+            def fail_reader(error: BaseException) -> None:
+                try:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=0.25)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                while True:
+                    try:
+                        self._events.get_nowait()
+                    except queue.Empty:
+                        break
+                self._events.put_nowait(error)
+
             def read() -> None:
                 try:
-                    for line in process.stdout:
-                        self._events.put(json.loads(line))
-                    self._events.put(None)
+                    while True:
+                        line = process.stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1)
+                        if line == "":
+                            publish(None)
+                            return
+                        if len(line.encode("utf-8")) > MAX_PROTOCOL_LINE_BYTES:
+                            raise AdapterProcessError("adapter protocol line exceeds size bound")
+                        publish(json.loads(line))
                 except BaseException as error:
-                    self._events.put(error)
+                    fail_reader(error)
 
             self._reader = threading.Thread(target=read, name="voice-agent-adapter-reader", daemon=True)
             self._reader.start()

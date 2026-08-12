@@ -212,6 +212,59 @@ class LocalTTSContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "selected_tts_unavailable")
         self.assertFalse(tts.observations)
 
+    def test_turn_tts_budget_spans_every_sentence_handoff(self) -> None:
+        class SentenceProcess:
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def stream(self, value: dict, _timeout: float):
+                data = b"\0\0"
+                yield {
+                    "event": "chunk",
+                    "request_id": value["request_id"],
+                    "sequence": 1,
+                    "pcm_base64": base64.b64encode(data).decode(),
+                    "bytes": len(data),
+                }
+                yield {
+                    "event": "final",
+                    "request_id": value["request_id"],
+                    "audio_bytes": len(data),
+                    "chunk_count": 1,
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "encoding": "pcm_s16le",
+                }
+
+            def cancel(self) -> float:
+                self.cancelled = True
+                return 0.0
+
+        class ManySentenceLLM(FakeLLM):
+            def respond_with_handoff(self, *, on_sentence, **_kwargs) -> str:
+                for index in range(4):
+                    on_sentence(f"Предложение {index}.")
+                return "Ответ из четырёх предложений."
+
+        process = SentenceProcess()
+        tts = Qwen3TTS()
+        tts._process = process
+        tts.ready_metadata = {"event": "ready"}
+        with patch("voice_agent_v2.local_tts.MAX_TTS_CHUNKS", 2):
+            result = RealTurnController(FakeSTT(), ManySentenceLLM(), tts).run_turn(
+                session_id="session-test-0001",
+                turn_id="turn-test-0001",
+                input_pcm=b"\0\0" * 160,
+            )
+
+        self.assertEqual(result.terminal_event["type"], "turn.failed")
+        self.assertEqual(
+            result.terminal_event["payload"]["code"],
+            "selected_tts_output_out_of_bounds",
+        )
+        self.assertTrue(process.cancelled)
+        self.assertIsNone(tts._process)
+
     def test_tts_chunk_and_audio_duration_bounds_cancel_malformed_adapter(self) -> None:
         class MalformedStreamingProcess:
             def __init__(self, chunks: tuple[bytes, ...]) -> None:
@@ -944,6 +997,43 @@ class AdapterProcessTests(unittest.TestCase):
             self.assertIsNone(adapter.process)
             self.assertIsNone(adapter._reader)
             self.assertIsNone(adapter._log)
+
+    def test_protocol_line_and_event_queue_are_bounded_before_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            line_adapter = AdapterProcess(
+                [sys.executable, "-c", "print('x' * 256, flush=True)"],
+                Path(directory) / "line.log",
+                dict(os.environ),
+            )
+            with (
+                patch("voice_agent_v2.process_adapter.MAX_PROTOCOL_LINE_BYTES", 64),
+                self.assertRaisesRegex(AdapterProcessError, "invalid protocol output") as raised,
+            ):
+                line_adapter.start(1)
+            self.assertIn("line exceeds size bound", str(raised.exception.__cause__))
+
+            queue_adapter = AdapterProcess(
+                [
+                    sys.executable,
+                    "-c",
+                    "import json; print(json.dumps({'event':'ready'}), flush=True); "
+                    "[print(json.dumps({'event':'chunk','sequence':i}), flush=True) for i in range(100)]",
+                ],
+                Path(directory) / "queue.log",
+                dict(os.environ),
+            )
+            with patch("voice_agent_v2.process_adapter.MAX_PROTOCOL_QUEUE_EVENTS", 2):
+                try:
+                    queue_adapter.start(1)
+                except AdapterProcessError as error:
+                    self.assertIn("queue overflow", str(error.__cause__ or error))
+                else:
+                    time.sleep(0.05)
+                    with self.assertRaisesRegex(AdapterProcessError, "invalid protocol output") as raised:
+                        queue_adapter.receive(1)
+                    self.assertIn("queue overflow", str(raised.exception.__cause__))
+                finally:
+                    queue_adapter.close()
 
     def test_non_object_startup_event_is_an_explicit_protocol_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

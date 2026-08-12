@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Callable
 
 from .audio import DEFAULT_AUDIO_FORMAT
@@ -10,6 +11,11 @@ from .contracts import (
     EventEnvelope, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure, valid_correlation_id,
 )
 from .tracer import CancellationToken, TraceResult
+
+
+MAX_TURN_TTS_CHUNKS = 4096
+MAX_TURN_TTS_OUTPUT_BYTES = 16_000 * 2 * 180
+MAX_TURN_TTS_SECONDS = 180.0
 
 
 class _TurnInterrupted(Exception):
@@ -145,18 +151,39 @@ class RealTurnController:
 
         tts_error: StageFailure | None = None
         pending_chunks: list[bytes] = []
+        tts_chunks = 0
+        tts_bytes = 0
+        tts_deadline = time.monotonic() + MAX_TURN_TTS_SECONDS
+        create_turn_budget = getattr(self.tts, "create_turn_budget", None)
+        turn_budget = create_turn_budget() if create_turn_budget is not None else None
 
         def synthesize_sentence(sentence: str) -> None:
-            nonlocal tts_error
+            nonlocal tts_error, tts_chunks, tts_bytes
             if tts_error is not None:
                 return
             try:
-                for chunk in self.tts.stream_synthesize(
-                    session_id=session_id, turn_id=turn_id, text=sentence,
-                    audio_format=self.tts.output_format, cancellation=token,
-                ):
+                if time.monotonic() >= tts_deadline:
+                    raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+                arguments = {
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "text": sentence,
+                    "audio_format": self.tts.output_format,
+                    "cancellation": token,
+                }
+                if turn_budget is not None:
+                    arguments["turn_budget"] = turn_budget
+                for chunk in self.tts.stream_synthesize(**arguments):
                     if token.cancelled:
                         raise _TurnInterrupted
+                    tts_chunks += 1
+                    tts_bytes += len(chunk)
+                    if (
+                        tts_chunks > MAX_TURN_TTS_CHUNKS
+                        or tts_bytes > MAX_TURN_TTS_OUTPUT_BYTES
+                        or time.monotonic() >= tts_deadline
+                    ):
+                        raise StageFailure("tts", "selected_tts_output_out_of_bounds")
                     pending_chunks.append(chunk)
             except StageFailure as error:
                 tts_error = error

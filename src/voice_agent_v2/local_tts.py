@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from pathlib import Path
 import time
 from typing import Iterator
@@ -25,6 +26,30 @@ MAX_TTS_OUTPUT_BYTES = (
     * 2
     * MAX_TTS_AUDIO_SECONDS
 )
+
+
+@dataclass
+class TurnTTSBudget:
+    deadline: float
+    chunks: int = 0
+    output_bytes: int = 0
+
+    @classmethod
+    def create(cls) -> TurnTTSBudget:
+        return cls(deadline=time.monotonic() + TTS_REQUEST_TIMEOUT_SECONDS)
+
+    def remaining_seconds(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+        return remaining
+
+    def consume(self, byte_count: int) -> None:
+        self.chunks += 1
+        self.output_bytes += byte_count
+        if self.chunks > MAX_TTS_CHUNKS or self.output_bytes > MAX_TTS_OUTPUT_BYTES:
+            raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+        self.remaining_seconds()
 
 
 def _environment() -> dict[str, str]:
@@ -71,10 +96,14 @@ class Qwen3TTS:
             raise StageFailure("tts", "selected_tts_unavailable") from error
         return dict(self.ready_metadata)
 
+    def create_turn_budget(self) -> TurnTTSBudget:
+        return TurnTTSBudget.create()
+
     def stream_synthesize(
         self, *, session_id: str, turn_id: str, text: str,
         audio_format: AudioFormat = OUTPUT_FORMAT,
         cancellation: CancellationToken | None = None,
+        turn_budget: TurnTTSBudget | None = None,
     ) -> Iterator[bytes]:
         if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
             raise StageFailure("tts", "invalid_correlation_id")
@@ -90,6 +119,7 @@ class Qwen3TTS:
             raise StageFailure("tts", "selected_tts_unavailable")
         request_id = f"{session_id}-{turn_id}-{time.monotonic_ns()}"
         started = time.monotonic()
+        budget = turn_budget or self.create_turn_budget()
         first = None
         chunks = 0
         total_bytes = 0
@@ -99,10 +129,11 @@ class Qwen3TTS:
                 {
                     "command": "synthesize", "request_id": request_id, "text": text,
                     "emit_pcm": True, "output_sample_rate_hz": OUTPUT_FORMAT.sample_rate_hz,
-                }, TTS_REQUEST_TIMEOUT_SECONDS
+                }, budget.remaining_seconds()
             ):
                 if cancellation is not None and cancellation.cancelled:
                     raise StageFailure("tts", "selected_tts_cancelled")
+                budget.remaining_seconds()
                 if event["event"] == "chunk":
                     data = base64.b64decode(event["pcm_base64"], validate=True)
                     if len(data) != event["bytes"] or len(data) % 2:
@@ -113,6 +144,7 @@ class Qwen3TTS:
                     total_bytes += len(data)
                     if chunks > MAX_TTS_CHUNKS or total_bytes > MAX_TTS_OUTPUT_BYTES:
                         raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+                    budget.consume(len(data))
                     first = first or time.monotonic()
                     yield data
                 elif event["event"] == "final":

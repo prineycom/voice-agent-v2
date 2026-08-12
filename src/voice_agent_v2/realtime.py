@@ -420,6 +420,7 @@ class RealtimeSession:
         async def cancel_runner() -> str | None:
             cancel_error: Exception | None = None
             try:
+                await asyncio.to_thread(context.cancellation.cancel)
                 await asyncio.to_thread(self.runner.cancel)
             except Exception as error:
                 cancel_error = error
@@ -451,18 +452,17 @@ class RealtimeSession:
         context = self._active
         if context is None or context.terminal:
             return None, None
-        started = time.monotonic()
         context.terminal = True
-        await asyncio.to_thread(context.cancellation.cancel)
         if context.playout_ack is not None and not context.playout_ack.done():
             context.playout_ack.set_result(None)
 
+        started = time.monotonic()
         try:
             drain_error = await self._clear_audio(context.turn_id)
         finally:
+            drain_ms = (time.monotonic() - started) * 1000
             cleanup = self._ensure_context_cleanup(context)
         if notify_client:
-            drain_ms = min((time.monotonic() - started) * 1000, float(BARGE_IN_DRAIN_BOUND_MS))
             await self._emit(
                 context.turn_id,
                 "turn.interrupted",
@@ -483,13 +483,12 @@ class RealtimeSession:
             await self._abort_failed_transport(context)
 
     async def _abort_failed_transport(self, context: TurnContext) -> None:
-        await asyncio.to_thread(context.cancellation.cancel)
         context.terminal = True
-        existing_cleanup = context.cancellation_cleanup
-        cleanup = self._ensure_context_cleanup(context, wait_for_turn=False)
         self._closed = True
         self._report_failure("transport", "control_publish_failed")
         await self._clear_audio(context.turn_id)
+        existing_cleanup = context.cancellation_cleanup
+        cleanup = self._ensure_context_cleanup(context, wait_for_turn=False)
         if existing_cleanup is None:
             context.rollback_error = await cleanup
 

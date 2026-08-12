@@ -235,6 +235,24 @@ class OrderedAudioSink(MemoryAudioSink):
         await super().clear(turn_id)
 
 
+class SlowCancellationRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_entered = threading.Event()
+        self.cancel_release = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_entered.set()
+        self.cancel_release.wait(2)
+        super().cancel()
+
+
+class FailingCancellationRunner(FakeRunner):
+    def cancel(self) -> None:
+        super().cancel()
+        raise RuntimeError("injected adapter cancellation failure")
+
+
 class StubbornCleanupRunner(FakeRunner):
     def __init__(self) -> None:
         super().__init__()
@@ -419,6 +437,57 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             for event in events.events[new_start:]
         ))
         self.assertGreaterEqual(runner.cancel_count, 1)
+
+    async def test_barge_in_clears_media_before_slow_adapter_cleanup(self) -> None:
+        events = MemoryEventSink()
+        operations: list[str] = []
+        runner = SlowCancellationRunner()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=OrderedAudioSink(operations),
+        )
+        turn_id = await session.start_utterance()
+
+        started = asyncio.get_running_loop().time()
+        await session.interrupt()
+        elapsed_ms = (asyncio.get_running_loop().time() - started) * 1000
+        await asyncio.to_thread(runner.cancel_entered.wait, 1)
+
+        interrupted = next(
+            event for event in events.events
+            if event["turn_id"] == turn_id and event["type"] == "turn.interrupted"
+        )
+        self.assertEqual(operations, ["media-clear"])
+        self.assertLess(elapsed_ms, BARGE_IN_DRAIN_BOUND_MS)
+        self.assertLess(interrupted["payload"]["drain_ms"], BARGE_IN_DRAIN_BOUND_MS)
+        runner.cancel_release.set()
+        await session.wait_for_cleanup()
+
+    async def test_partial_adapter_cancel_failure_degrades_and_blocks_cleanup(self) -> None:
+        events = MemoryEventSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FailingCancellationRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        await session.start_utterance()
+        await session.interrupt()
+        with self.assertRaisesRegex(RuntimeError, "cancellation_cleanup_failed"):
+            await session.wait_for_cleanup()
+        for _ in range(20):
+            if events.events[-1]["type"] == "session.degraded":
+                break
+            await asyncio.sleep(0)
+
+        self.assertEqual(events.events[-1]["type"], "session.degraded")
+        self.assertEqual(
+            events.events[-1]["payload"]["code"], "cancellation_cleanup_failed"
+        )
+        with self.assertRaisesRegex(RuntimeError, "cancellation_cleanup_failed"):
+            await session.disconnect()
 
     async def test_cancellation_waits_for_provider_before_context_rollback(self) -> None:
         events = MemoryEventSink()

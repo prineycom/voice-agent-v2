@@ -88,22 +88,34 @@ class LiveTurnRunner:
         self._snapshots.pop((session_id, turn_id), None)
 
     def cancel(self) -> None:
+        errors: list[Exception] = []
         for adapter in (self.llm, self.tts, self.stt):
             try:
                 adapter.cancel()
-            except Exception:
-                pass
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("one or more inference adapters failed to cancel", errors)
 
     def reset_session(self, session_id: str) -> None:
         self.llm.reset_session(session_id)
         self._snapshots.clear()
 
     def close(self, session_id: str) -> None:
-        self.cancel()
-        self.llm.reset_session(session_id)
-        self.stt.close()
-        self.tts.close()
+        errors: list[Exception] = []
+        for cleanup in (
+            self.cancel,
+            lambda: self.llm.reset_session(session_id),
+            self.stt.close,
+            self.tts.close,
+        ):
+            try:
+                cleanup()
+            except Exception as error:
+                errors.append(error)
         self._snapshots.clear()
+        if errors:
+            raise ExceptionGroup("one or more inference resources failed to close", errors)
 
 
 class LiveKitEventSink(EventSink):
