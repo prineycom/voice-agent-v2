@@ -71,6 +71,25 @@ class AsyncCloser:
         pass
 
 
+class AudioSinkStub:
+    def __init__(self, source: AsyncCloser) -> None:
+        self.source = source
+        self.closed = False
+        self.transport_is_disconnected = False
+
+    async def transport_disconnected(self) -> None:
+        self.transport_is_disconnected = True
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        await self.source.aclose()
+        self.closed = True
+
+    async def wait_for_cleanup(self) -> None:
+        return None
+
+
 class SessionStub:
     def __init__(self) -> None:
         self.closed = False
@@ -126,6 +145,8 @@ def controller_stub(
     controller._cleanup_complete = False
     controller._close_notified = False
     controller._transport_failed = False
+    controller._room_disconnected = False
+    controller._close_retry_task = None
     controller._close_lock = asyncio.Lock()
     controller._runner_start_task = None
     controller._browser_ready = False
@@ -136,6 +157,7 @@ def controller_stub(
     controller.session = session or SessionStub()
     controller.room = AsyncCloser()
     controller.audio_source = AsyncCloser()
+    controller.audio_sink = AudioSinkStub(controller.audio_source)
     controller.runner = runner or RunnerStub()
     controller.on_closed = lambda _session_id: asyncio.sleep(0)
     return controller
@@ -153,7 +175,12 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
         await asyncio.sleep(0.01)
     if registry.active_count != 0 or not controller._closed:
         raise AssertionError("unclaimed room did not release its registry slot")
-    if not controller.session.closed or not controller.room.closed or not controller.audio_source.closed:
+    if (
+        not controller.session.closed
+        or not controller.room.closed
+        or not controller.audio_source.closed
+        or not controller.audio_sink.closed
+    ):
         raise AssertionError("unclaimed room did not close all owned resources")
 
     startup_runner = BlockingStartupRunner()

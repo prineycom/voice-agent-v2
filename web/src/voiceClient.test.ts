@@ -397,6 +397,75 @@ describe('VoiceClient startup cancellation', () => {
     await client.stop()
   })
 
+  it('records correlated retirement while the drained publish is in flight', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const playoutWait = deferred<void>()
+    const waitForFinitePlayout = vi.spyOn(
+      AudioPlaybackBoundary.prototype,
+      'waitForFinitePlayout',
+    ).mockReturnValue(playoutWait.promise)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    const track = {
+      ...finiteTrackBoundary(),
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(element),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    const publication = { trackSid: 'publication-in-flight-retirement' }
+    const participant = { identity: 'agent-session-test-0001' }
+
+    emitSpeakingBoundary(room, publication.trackSid)
+    room.emit('trackSubscribed', track, publication, participant)
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2))
+    emitControl(room, 'turn.playout-ready', 8, {
+      payload: {
+        state: 'awaiting_client_playout_boundary',
+        ack_timeout_ms: 3_000,
+        ack_deadline_ms: 2_750,
+        media_generation: 2,
+        completed_publication_id: publication.trackSid,
+        final_sample_count: 320,
+        sample_rate_hz: 16_000,
+      },
+    })
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3))
+    await vi.waitFor(() => expect(waitForFinitePlayout).toHaveBeenCalledOnce())
+
+    const drainedPublish = deferred<void>()
+    room.localParticipant.publishData.mockReturnValueOnce(drainedPublish.promise)
+    playoutWait.resolve()
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
+
+    room.emit('trackUnsubscribed', track, publication, participant)
+    emitControl(room, 'turn.playout-retired', 9, {
+      payload: {
+        state: 'awaiting_publication_unsubscribed',
+        media_generation: 2,
+        completed_publication_id: publication.trackSid,
+      },
+    })
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4)
+
+    drainedPublish.resolve()
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(5))
+    const controls = room.localParticipant.publishData.mock.calls.map(([payload]) => (
+      JSON.parse(new TextDecoder().decode(payload as Uint8Array))
+    ))
+    expect(controls.slice(-2).map((control) => control.type)).toEqual([
+      'client.playout-drained', 'client.playout-completed',
+    ])
+    expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.any(String))
+    await client.stop()
+  })
+
   it('keeps replacement audio detached and coalesces reconnects until epoch acknowledgement', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
