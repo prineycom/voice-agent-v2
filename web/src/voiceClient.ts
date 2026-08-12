@@ -270,7 +270,6 @@ export class VoiceClient {
       if (
         boundary !== null
         && boundary.completedPublicationId === publicationId
-        && boundary.stage !== 'waiting-drain'
       ) {
         boundary.retirementObserved = true
         if (boundary.stage === 'waiting-retirement') {
@@ -558,37 +557,64 @@ export class VoiceClient {
 
   private async completePlayoutBoundary(): Promise<void> {
     const boundary = this.pendingPlayoutBoundary
-    if (boundary === null || boundary.stage !== 'waiting-drain' || this.stopping) return
-    if (!boundary.waitStarted) return
-    const completedTrack = this.publicationTracks.get(
-      boundary.completedPublicationId,
-    )
-    if (completedTrack === undefined || completedTrack !== this.activeRemoteTrack) return
-    boundary.stage = 'drain-sent'
+    const room = this.room
+    const capability = this.capability
+    if (
+      boundary === null
+      || room === null
+      || capability === null
+      || boundary.stage !== 'waiting-drain'
+      || !boundary.waitStarted
+      || this.stopping
+    ) return
+    const streamEpoch = this.streamEpoch
+    const turnId = boundary.turnId
+    const mediaGeneration = boundary.mediaGeneration
+    const publicationId = boundary.completedPublicationId
+    const completedTrack = this.publicationTracks.get(publicationId)
+    if (
+      completedTrack === undefined
+      || completedTrack !== this.activeRemoteTrack
+      || completedTrack.mediaStreamTrack?.readyState !== 'live'
+      || boundary.retirementObserved
+      || boundary.streamEpoch !== streamEpoch
+    ) return
     try {
       await this.playback.waitForFinitePlayout(
         boundary.finalSampleCount,
         boundary.sampleRateHz,
       )
-      if (this.pendingPlayoutBoundary !== boundary || this.stopping) return
     } catch {
       if (this.pendingPlayoutBoundary === boundary) {
         await this.failSession('Не удалось подтвердить границу аудиопотока')
       }
       return
     }
-    const room = this.room
-    const capability = this.capability
-    if (room === null || capability === null) return
+    if (
+      this.pendingPlayoutBoundary !== boundary
+      || this.room !== room
+      || this.capability !== capability
+      || this.streamEpoch !== streamEpoch
+      || boundary.streamEpoch !== streamEpoch
+      || boundary.turnId !== turnId
+      || boundary.mediaGeneration !== mediaGeneration
+      || boundary.completedPublicationId !== publicationId
+      || boundary.stage !== 'waiting-drain'
+      || boundary.retirementObserved
+      || this.publicationTracks.get(publicationId) !== completedTrack
+      || this.activeRemoteTrack !== completedTrack
+      || completedTrack.mediaStreamTrack?.readyState !== 'live'
+      || this.stopping
+    ) return
     this.clientSequence += 1
     const payload = new TextEncoder().encode(JSON.stringify({
       schema_version: CLIENT_CONTROL_VERSION,
       session_id: capability.session_id,
-      turn_id: boundary.turnId,
-      stream_epoch: boundary.streamEpoch,
+      turn_id: turnId,
+      stream_epoch: streamEpoch,
       sequence: this.clientSequence,
-      media_generation: boundary.mediaGeneration,
-      completed_publication_id: boundary.completedPublicationId,
+      media_generation: mediaGeneration,
+      completed_publication_id: publicationId,
       type: 'client.playout-drained',
     }))
     try {
@@ -596,9 +622,27 @@ export class VoiceClient {
         reliable: true,
         topic: CLIENT_CONTROL_TOPIC,
       })
-      if (this.pendingPlayoutBoundary !== boundary) return
+      if (
+        this.pendingPlayoutBoundary !== boundary
+        || this.room !== room
+        || this.capability !== capability
+        || this.streamEpoch !== streamEpoch
+        || boundary.streamEpoch !== streamEpoch
+        || boundary.turnId !== turnId
+        || boundary.mediaGeneration !== mediaGeneration
+        || boundary.completedPublicationId !== publicationId
+        || boundary.stage !== 'waiting-drain'
+        || boundary.retirementObserved
+        || this.publicationTracks.get(publicationId) !== completedTrack
+        || this.activeRemoteTrack !== completedTrack
+        || completedTrack.mediaStreamTrack?.readyState !== 'live'
+        || this.stopping
+      ) return
+      boundary.stage = 'drain-sent'
     } catch {
-      await this.failSession('Не удалось подтвердить границу аудиопотока')
+      if (this.pendingPlayoutBoundary === boundary) {
+        await this.failSession('Не удалось подтвердить границу аудиопотока')
+      }
     }
   }
 

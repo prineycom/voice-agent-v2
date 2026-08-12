@@ -63,6 +63,7 @@ vi.mock('livekit-client', () => ({
   createLocalAudioTrack: livekit.createLocalAudioTrack,
 }))
 
+import { AudioPlaybackBoundary } from './playback'
 import { VoiceClient, type VoiceClientCallbacks } from './voiceClient'
 
 function deferred<T>() {
@@ -192,6 +193,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
   livekit.rooms.length = 0
   livekit.createLocalAudioTrack.mockReset()
   livekit.setIncludeAgent(true)
@@ -340,6 +342,58 @@ describe('VoiceClient startup cancellation', () => {
       type: 'client.playout-completed',
     })
     expect(turnTrack.detach).toHaveBeenCalledWith(element)
+    await client.stop()
+  })
+
+  it('does not drain a publication unsubscribed while its boundary wait is pending', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const wait = deferred<void>()
+    const waitForFinitePlayout = vi.spyOn(
+      AudioPlaybackBoundary.prototype,
+      'waitForFinitePlayout',
+    ).mockReturnValue(wait.promise)
+    const client = new VoiceClient(document.createElement('div'), callbacks())
+    await client.start()
+    const room = livekit.rooms[0]
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    const track = {
+      ...finiteTrackBoundary(),
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(element),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    const publication = { trackSid: 'publication-early-retirement' }
+    const participant = { identity: 'agent-session-test-0001' }
+
+    emitSpeakingBoundary(room, publication.trackSid)
+    room.emit('trackSubscribed', track, publication, participant)
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2))
+    emitControl(room, 'turn.playout-ready', 8, {
+      payload: {
+        state: 'awaiting_client_playout_boundary',
+        ack_timeout_ms: 3_000,
+        ack_deadline_ms: 2_750,
+        media_generation: 2,
+        completed_publication_id: publication.trackSid,
+        final_sample_count: 320,
+        sample_rate_hz: 16_000,
+      },
+    })
+    await vi.waitFor(() => expect(waitForFinitePlayout).toHaveBeenCalledOnce())
+
+    room.emit('trackUnsubscribed', track, publication, participant)
+    wait.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const controls = room.localParticipant.publishData.mock.calls.map(([payload]) => (
+      JSON.parse(new TextDecoder().decode(payload as Uint8Array))
+    ))
+    expect(controls.map((control) => control.type)).not.toContain('client.playout-drained')
     await client.stop()
   })
 
