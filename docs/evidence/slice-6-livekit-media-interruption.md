@@ -36,7 +36,7 @@ Result: **PASS** at the recorded checkpoint. Python's audit policy denied IP soc
 - correlated success through audio delivery;
 - disconnect cancellation without completion;
 - duplicate, late, wrong-session, wrong-turn, wrong-version, out-of-order, oversized, and malformed control rejection;
-- barge-in with one old `turn.interrupted`, source clear, serialized cancellation, a replacement completion, and no post-replacement old event;
+- barge-in with one old `turn.interrupted`, source clear, serialized cancellation, correlated fresh-media readiness before replacement inference, a replacement completion, and no post-replacement old event;
 - completion/new-turn admission ordering;
 - reconnect epoch advance, stale-media discard, in-memory context reset, duplicate/malformed client-control rejection, and closed-session degradation;
 - control-publication failure cancellation, worker drain, context rollback, and transport-session closure.

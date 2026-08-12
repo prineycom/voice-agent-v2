@@ -31,6 +31,7 @@ MAX_STREAM_LINE_BYTES = 65_536
 MAX_VISIBLE_CHARS = 8192
 MAX_VISIBLE_BYTES = 32_768
 PROVIDER_STARTUP_TIMEOUT_SECONDS = 10.0
+PROVIDER_REQUEST_TIMEOUT_SECONDS = 40.0
 RESOLVER_SHUTDOWN_TIMEOUT_SECONDS = 0.25
 
 
@@ -96,11 +97,13 @@ class _RegisteredTCPConnection:
         cancelled: Callable[[], bool],
         startup_timeout: float,
         resolver_target: Callable = _resolve_provider_host,
+        operation_deadline: float | None = None,
         **kwargs,
     ) -> None:
         self._cancelled = cancelled
         self._startup_timeout = startup_timeout
         self._resolver_target = resolver_target
+        self._operation_deadline = operation_deadline
         super().__init__(*args, **kwargs)
 
     def _startup_failure(self, deadline: float) -> OSError | None:
@@ -157,6 +160,8 @@ class _RegisteredTCPConnection:
     def _connect_registered_socket(self) -> float:
         sys.audit("http.client.connect", self, self.host, self.port)
         deadline = time.monotonic() + self._startup_timeout
+        if self._operation_deadline is not None:
+            deadline = min(deadline, self._operation_deadline)
         addresses = self._resolve_addresses(deadline)
         last_error: OSError | None = None
         for family, socktype, protocol, _canonical_name, address in addresses:
@@ -195,10 +200,16 @@ class _RegisteredTCPConnection:
         raise OSError("provider endpoint did not resolve")
 
 
+    def _remaining_operation_timeout(self) -> float:
+        if self._operation_deadline is None:
+            return self.timeout
+        return max(0.001, min(self.timeout, self._operation_deadline - time.monotonic()))
+
+
 class _RegisteredHTTPConnection(_RegisteredTCPConnection, http.client.HTTPConnection):
     def connect(self) -> None:
         self._connect_registered_socket()
-        self.sock.settimeout(self.timeout)
+        self.sock.settimeout(self._remaining_operation_timeout())
 
 
 class _RegisteredHTTPSConnection(_RegisteredTCPConnection, http.client.HTTPSConnection):
@@ -216,7 +227,7 @@ class _RegisteredHTTPSConnection(_RegisteredTCPConnection, http.client.HTTPSConn
         failure = self._startup_failure(deadline)
         if failure is not None:
             raise failure
-        self.sock.settimeout(self.timeout)
+        self.sock.settimeout(self._remaining_operation_timeout())
 
 
 class LiteLLMProvider:
@@ -231,14 +242,18 @@ class LiteLLMProvider:
         base_url: str | None = None,
         token_path: Path = TOKEN_PATH,
         transport_start_timeout_seconds: float = PROVIDER_STARTUP_TIMEOUT_SECONDS,
+        request_timeout_seconds: float = PROVIDER_REQUEST_TIMEOUT_SECONDS,
         resolver_target: Callable = _resolve_provider_host,
     ) -> None:
         if transport_start_timeout_seconds <= 0:
             raise ValueError("transport_start_timeout_seconds must be positive")
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
         self._executor = executor
         self._configured_base_url = base_url
         self._token_path = token_path
         self._transport_start_timeout_seconds = transport_start_timeout_seconds
+        self._request_timeout_seconds = request_timeout_seconds
         self._resolver_target = resolver_target
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._operation_lock = threading.Lock()
@@ -273,6 +288,7 @@ class LiteLLMProvider:
         endpoint: ProviderEndpoint,
         timeout: float,
         cancelled: Callable[[], bool] = lambda: False,
+        operation_deadline: float | None = None,
     ):
         connection_type = (
             _RegisteredHTTPSConnection
@@ -286,6 +302,7 @@ class LiteLLMProvider:
             cancelled=cancelled,
             startup_timeout=min(timeout, self._transport_start_timeout_seconds),
             resolver_target=self._resolver_target,
+            operation_deadline=operation_deadline,
         )
 
     def _capability_gate(self, token: str, endpoint: ProviderEndpoint) -> None:
@@ -360,15 +377,29 @@ class LiteLLMProvider:
         with self._operation_lock:
             return self._cancelled_generation == generation
 
+    def _apply_response_deadline(
+        self, response: http.client.HTTPResponse, deadline: float
+    ) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StageFailure("llm_provider", "selected_provider_request_timeout")
+        raw = getattr(getattr(response, "fp", None), "raw", None)
+        sock = getattr(raw, "_sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+
     def _execute(
         self, payload: dict, on_sentence: Callable[[str], None] | None, generation: int
     ) -> dict:
         endpoint = self._endpoint()
         token = self._token()
+        submitted = time.monotonic()
+        request_deadline = submitted + self._request_timeout_seconds
         connection = self._connection_for(
             endpoint,
-            40,
+            self._request_timeout_seconds,
             cancelled=lambda: self._operation_cancelled(generation),
+            operation_deadline=request_deadline,
         )
         with self._operation_lock:
             self._connection = connection
@@ -382,7 +413,6 @@ class LiteLLMProvider:
                     self._connection_generation = 0
             del token
             raise StageFailure("llm_provider", "selected_provider_cancelled")
-        submitted = time.monotonic()
         accepted = None
         visible: list[str] = []
         reasoning_events = 0
@@ -403,13 +433,17 @@ class LiteLLMProvider:
             )
             response = connection.getresponse()
             accepted = time.monotonic()
+            self._apply_response_deadline(response, request_deadline)
             if response.status != 200:
                 response.read(65536)
                 raise StageFailure("llm_provider", f"selected_provider_http_{response.status}")
             while True:
                 if self._operation_cancelled(generation):
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
+                self._apply_response_deadline(response, request_deadline)
                 line = response.fp.readline(MAX_STREAM_LINE_BYTES + 1)
+                if time.monotonic() >= request_deadline:
+                    raise StageFailure("llm_provider", "selected_provider_request_timeout")
                 if not line:
                     break
                 if len(line) > MAX_STREAM_LINE_BYTES:

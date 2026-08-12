@@ -15,6 +15,7 @@ from typing import Iterator
 
 MAX_PROTOCOL_LINE_BYTES = 1_048_576
 MAX_PROTOCOL_QUEUE_EVENTS = 32
+MAX_REQUEST_EVENTS = 256
 
 
 class AdapterProcessError(RuntimeError):
@@ -117,15 +118,30 @@ class AdapterProcess:
         return value
 
     def request(self, value: dict, timeout_seconds: float) -> dict:
+        deadline = time.monotonic() + timeout_seconds
+        event_count = 0
         self.send(value)
-        while True:
-            response = self.receive(timeout_seconds)
-            if response.get("request_id") != value.get("request_id"):
-                raise AdapterProcessError("adapter correlation mismatch")
-            if response.get("event") == "error":
-                raise AdapterProcessError(str(response.get("error_class", "adapter_error")))
-            if response.get("event") == "final":
-                return response
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AdapterProcessError("adapter timed out")
+                response = self.receive(remaining)
+                event_count += 1
+                if event_count > MAX_REQUEST_EVENTS:
+                    raise AdapterProcessError("adapter request event bound exceeded")
+                if response.get("request_id") != value.get("request_id"):
+                    raise AdapterProcessError("adapter correlation mismatch")
+                if response.get("event") == "error":
+                    raise AdapterProcessError(str(response.get("error_class", "adapter_error")))
+                if response.get("event") == "final":
+                    return response
+        except AdapterProcessError:
+            try:
+                self.cancel()
+            except (OSError, subprocess.SubprocessError):
+                pass
+            raise
 
     def stream(self, value: dict, timeout_seconds: float) -> Iterator[dict]:
         deadline = time.monotonic() + timeout_seconds

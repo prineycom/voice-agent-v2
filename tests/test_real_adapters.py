@@ -129,6 +129,16 @@ class StubHTTPResponse:
         return self._body
 
 
+class SlowLineReader:
+    def __init__(self, lines: list[bytes], delay_seconds: float) -> None:
+        self.lines = iter(lines)
+        self.delay_seconds = delay_seconds
+
+    def readline(self, _limit: int = -1) -> bytes:
+        time.sleep(self.delay_seconds)
+        return next(self.lines, b"")
+
+
 class BlockingConnectSocket:
     def __init__(self) -> None:
         self.entered = threading.Event()
@@ -543,6 +553,38 @@ class LiteLLMProviderContractTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, expected_code)
                 self.assertEqual(provider.observations[-1]["error_class"], expected_code)
                 self.assertNotIn("text", provider.observations[-1])
+
+    def test_stream_uses_one_wall_clock_deadline_across_slow_events(self) -> None:
+        first = json.dumps({
+            "model": ALIAS,
+            "choices": [{"delta": {"content": "Ответ."}}],
+        }).encode()
+        response = StubHTTPResponse(b"")
+        response.fp = SlowLineReader(
+            [b"data: " + first + b"\n", b"data: [DONE]\n"],
+            0.06,
+        )
+        connection = StubHTTPConnection(response)
+        provider = LiteLLMProvider(
+            base_url=self.TEST_BASE_URL,
+            request_timeout_seconds=0.1,
+        )
+        started = time.monotonic()
+        with (
+            patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+            patch("voice_agent_v2.cloud_llm._RegisteredHTTPConnection", return_value=connection),
+            self.assertRaises(StageFailure) as raised,
+        ):
+            provider.respond(
+                session_id="session-a",
+                turn_id="turn-a",
+                transcript="Публичный запрос",
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(raised.exception.code, "selected_provider_request_timeout")
+        self.assertLess(elapsed, 0.2)
+        self.assertTrue(connection.closed)
 
     def test_stream_rejects_missing_or_alternate_provider_identity_before_tts_handoff(self) -> None:
         cases = (
@@ -966,6 +1008,56 @@ class LocalSTTContractTests(unittest.TestCase):
 
 
 class AdapterProcessTests(unittest.TestCase):
+    def test_request_timeout_is_one_deadline_and_terminates_slow_child(self) -> None:
+        script = (
+            "import json,sys,time; "
+            "print(json.dumps({'event':'ready'}), flush=True); "
+            "request=json.loads(sys.stdin.readline()); "
+            "[(time.sleep(0.04), print(json.dumps({'request_id':request['request_id'],"
+            "'event':'partial'}), flush=True)) for _ in range(10)]"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = AdapterProcess(
+                [sys.executable, "-c", script],
+                Path(directory) / "adapter.log",
+                dict(os.environ),
+            )
+            adapter.start(1)
+            started = time.monotonic()
+            with self.assertRaisesRegex(AdapterProcessError, "timed out"):
+                adapter.request({"request_id": "request"}, 0.1)
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 0.2)
+            self.assertIsNotNone(adapter.process)
+            self.assertIsNotNone(adapter.process.poll())
+            adapter.close()
+
+    def test_request_event_limit_terminates_flooding_child(self) -> None:
+        script = (
+            "import json,sys,time; "
+            "print(json.dumps({'event':'ready'}), flush=True); "
+            "request=json.loads(sys.stdin.readline()); "
+            "[(time.sleep(0.01), print(json.dumps({'request_id':request['request_id'],"
+            "'event':'partial'}), flush=True)) for _ in range(10)]"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = AdapterProcess(
+                [sys.executable, "-c", script],
+                Path(directory) / "adapter.log",
+                dict(os.environ),
+            )
+            adapter.start(1)
+            with (
+                patch("voice_agent_v2.process_adapter.MAX_REQUEST_EVENTS", 2),
+                self.assertRaisesRegex(AdapterProcessError, "event bound exceeded"),
+            ):
+                adapter.request({"request_id": "request"}, 1)
+
+            self.assertIsNotNone(adapter.process)
+            self.assertIsNotNone(adapter.process.poll())
+            adapter.close()
+
     def test_stream_timeout_is_one_wall_clock_deadline(self) -> None:
         adapter = AdapterProcess([], Path("unused"), {})
         adapter.send = lambda _value: None

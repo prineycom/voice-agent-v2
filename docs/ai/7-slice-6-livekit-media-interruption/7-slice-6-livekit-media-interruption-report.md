@@ -38,7 +38,7 @@
 | Command | Result | Notes |
 | --- | --- | --- |
 | `no-mistakes doctor` | PASS | Shared daemon healthy; no pipeline run started. |
-| `./verify` | PASS | Network-denied deterministic suite; 83 tests pass. |
+| `./verify` | Historical pre-fix checkpoint | The earlier network-denied run recorded 83 passing tests; later lifecycle regressions require fresh pipeline results, so this count is not evidence for the current code. |
 | `./setup-slice6` | PASS | Pinned server/Python/npm tooling acquired outside Git; npm reported zero known vulnerabilities. |
 | `./verify-slice6` | PASS | SDK/JWT, Python suite, TypeScript, Vitest and production build. |
 | Restricted LiveKit `1.13.5` start + `ss` inspection | PASS | Loopback signaling, tailnet UDP/7882, no TCP media. |

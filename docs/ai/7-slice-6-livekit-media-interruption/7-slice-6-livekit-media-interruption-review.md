@@ -30,7 +30,7 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify-slice6` | PASS | 83 network-denied Python tests; installed LiveKit/JWT contract; 8 browser tests; typecheck/build. |
+| `./verify-slice6` | Historical pre-fix checkpoint | The earlier checkpoint recorded 83 network-denied Python tests and 8 browser tests; later lifecycle regressions require fresh pipeline results, so these counts are not evidence for the current code. |
 | Restricted LiveKit start plus `ss` | PASS | Loopback TCP/7880; redacted tailnet UDP/7882; no TCP media. |
 | Gateway status/security/origin smoke | PASS | Loopback only, safe headers/status, provider endpoint absent, missing/cross-site origin denied. |
 | `sh -n ...`, Python compile, `git diff --check` | PASS | Scripts, Python syntax and whitespace pass. |

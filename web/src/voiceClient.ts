@@ -53,6 +53,8 @@ export class VoiceClient {
   private mediaInvalidationGeneration = 0
   private renewalBoundaryGeneration = 0
   private freshSubscriptionRequired = false
+  private pendingMediaGeneration: number | null = null
+  private pendingMediaTurnId: string | null = null
   private readonly invalidatedTracks = new WeakSet<RemoteAudioTrack>()
   private streamEpoch = 0
   private playoutGeneration = 0
@@ -156,6 +158,8 @@ export class VoiceClient {
     this.mediaInvalidationGeneration = 0
     this.renewalBoundaryGeneration = 0
     this.freshSubscriptionRequired = false
+    this.pendingMediaGeneration = null
+    this.pendingMediaTurnId = null
     this.streamEpoch = 0
     const errors: unknown[] = []
     const microphone = this.microphone
@@ -251,6 +255,7 @@ export class VoiceClient {
           this.activeRemoteTrack = remoteTrack
           try {
             this.playback.setTrack(remoteTrack)
+            void this.publishMediaReady()
           } catch {
             void this.failSession('Не удалось безопасно переключить воспроизведение')
           }
@@ -295,10 +300,19 @@ export class VoiceClient {
       }
       let terminalFailure: string | null = null
       if (event.type === 'turn.interrupted' || event.type === 'turn.failed') {
-        try {
-          this.renewPlaybackTrack()
-        } catch {
-          terminalFailure = 'Не удалось остановить устаревшее воспроизведение'
+        const mediaGeneration = event.payload.media_generation
+        if (
+          typeof mediaGeneration !== 'number'
+          || !Number.isSafeInteger(mediaGeneration)
+          || mediaGeneration < 1
+        ) {
+          terminalFailure = 'Некорректная граница обновления аудиопотока'
+        } else {
+          try {
+            this.renewPlaybackTrack(event.turn_id, mediaGeneration)
+          } catch {
+            terminalFailure = 'Не удалось остановить устаревшее воспроизведение'
+          }
         }
       }
       if (event.type === 'session.ready') {
@@ -457,6 +471,7 @@ export class VoiceClient {
     } else {
       this.activeRemoteTrack = track
       this.playback.setTrack(track)
+      void this.publishMediaReady()
     }
   }
 
@@ -477,11 +492,59 @@ export class VoiceClient {
     this.playback.clear()
   }
 
-  private renewPlaybackTrack(): void {
+  private renewPlaybackTrack(turnId?: string, mediaGeneration?: number): void {
     this.invalidatePlaybackTrack()
     this.mediaInvalidationGeneration += 1
     this.freshSubscriptionRequired = true
+    if (turnId !== undefined && mediaGeneration !== undefined) {
+      this.pendingMediaTurnId = turnId
+      this.pendingMediaGeneration = mediaGeneration
+    }
     this.beginPublicationRenewal()
+  }
+
+  private async publishMediaReady(): Promise<void> {
+    const room = this.room
+    const capability = this.capability
+    const mediaGeneration = this.pendingMediaGeneration
+    const turnId = this.pendingMediaTurnId
+    if (
+      room === null
+      || capability === null
+      || mediaGeneration === null
+      || turnId === null
+      || this.freshSubscriptionRequired
+      || this.reconnecting
+      || this.stopping
+    ) return
+    const streamEpoch = this.streamEpoch
+    this.clientSequence += 1
+    const payload = new TextEncoder().encode(JSON.stringify({
+      schema_version: CLIENT_CONTROL_VERSION,
+      session_id: capability.session_id,
+      turn_id: turnId,
+      stream_epoch: streamEpoch,
+      sequence: this.clientSequence,
+      media_generation: mediaGeneration,
+      type: 'client.media-ready',
+    }))
+    try {
+      await room.localParticipant.publishData(payload, {
+        reliable: true,
+        topic: CLIENT_CONTROL_TOPIC,
+      })
+      if (
+        this.pendingMediaGeneration === mediaGeneration
+        && this.pendingMediaTurnId === turnId
+        && this.streamEpoch === streamEpoch
+        && !this.reconnecting
+      ) {
+        this.pendingMediaGeneration = null
+        this.pendingMediaTurnId = null
+      }
+    } catch {
+      await this.failSession('Не удалось подтвердить готовность аудиопотока')
+    }
   }
 
   private beginPublicationRenewal(): void {

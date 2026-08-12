@@ -109,6 +109,11 @@ function emitControl(
     streamEpoch?: number
   } = {},
 ): void {
+  const payload = options.payload ?? {}
+  const correlatedPayload = (
+    (type === 'turn.interrupted' || type === 'turn.failed')
+    && payload.media_generation === undefined
+  ) ? { ...payload, media_generation: sequence } : payload
   room.emit(
     'dataReceived',
     new TextEncoder().encode(JSON.stringify({
@@ -119,7 +124,7 @@ function emitControl(
       sequence,
       type,
       terminal: options.terminal ?? false,
-      payload: options.payload ?? {},
+      payload: correlatedPayload,
     })),
     { identity: 'agent-session-test-0001' },
     undefined,
@@ -363,8 +368,17 @@ describe('VoiceClient startup cancellation', () => {
     }
     room.emit('trackSubscribed', staleTrack, publication, { identity: 'agent-session-test-0001' })
     expect(staleTrack.attach).toHaveBeenCalledOnce()
+    expect(room.localParticipant.publishData).not.toHaveBeenCalled()
     room.emit('trackSubscribed', freshTrack, publication, { identity: 'agent-session-test-0001' })
     expect(freshTrack.attach).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledOnce())
+    const encoded = room.localParticipant.publishData.mock.calls[0][0] as Uint8Array
+    expect(JSON.parse(new TextDecoder().decode(encoded))).toMatchObject({
+      turn_id: 'turn-00000001',
+      stream_epoch: 1,
+      media_generation: 3,
+      type: 'client.media-ready',
+    })
     await client.stop()
   })
 

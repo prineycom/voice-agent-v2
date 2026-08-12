@@ -359,6 +359,17 @@ async def wait_for_turn(session: RealtimeSession) -> None:
     if context is None or context.task is None:
         return
     for _ in range(200):
+        if session._media_ready_generation < session._media_generation:
+            payload = json.dumps({
+                "schema_version": CLIENT_CONTROL_VERSION,
+                "session_id": session.session_id,
+                "turn_id": session._media_generation_turn_id,
+                "stream_epoch": session.stream_epoch,
+                "sequence": session._client_sequence + 1,
+                "media_generation": session._media_generation,
+                "type": "client.media-ready",
+            }).encode()
+            await session.handle_client_control(payload)
         if context.playout_ack is not None and not context.playout_ack.done():
             payload = json.dumps({
                 "schema_version": CLIENT_CONTROL_VERSION,
@@ -437,6 +448,46 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             for event in events.events[new_start:]
         ))
         self.assertGreaterEqual(runner.cancel_count, 1)
+
+    async def test_replacement_waits_for_correlated_fresh_media_subscription(self) -> None:
+        events = MemoryEventSink()
+        audio = MemoryAudioSink(block=True)
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=audio,
+        )
+        old_turn = await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(audio.started.wait(), 1)
+        new_turn = await session.start_utterance()
+        await session.finish_utterance(b"\0\0" * 320)
+        await asyncio.sleep(0.05)
+
+        self.assertFalse(any(
+            event["turn_id"] == new_turn and event["type"] == "turn.transcribing"
+            for event in events.events
+        ))
+        interrupted = next(
+            event for event in events.events
+            if event["turn_id"] == old_turn and event["type"] == "turn.interrupted"
+        )
+        accepted = await session.handle_client_control(json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": old_turn,
+            "stream_epoch": session.stream_epoch,
+            "sequence": 1,
+            "media_generation": interrupted["payload"]["media_generation"],
+            "type": "client.media-ready",
+        }).encode())
+        self.assertTrue(accepted)
+
+        await wait_for_turn(session)
+        self.assertEqual(
+            [event["type"] for event in events.events if event["turn_id"] == new_turn][-1],
+            "turn.completed",
+        )
 
     async def test_barge_in_clears_media_before_slow_adapter_cleanup(self) -> None:
         events = MemoryEventSink()

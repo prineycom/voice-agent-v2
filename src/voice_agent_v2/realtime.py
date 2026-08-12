@@ -50,6 +50,7 @@ TURN_PREDECESSOR = {
 BARGE_IN_DRAIN_BOUND_MS = 250
 CANCELLATION_CLEANUP_BOUND_MS = 1_000
 CLIENT_PLAYOUT_ACK_TIMEOUT_MS = 3_000
+CLIENT_MEDIA_READY_TIMEOUT_MS = 3_000
 MAX_UTTERANCE_BYTES = 30 * 16_000 * 2
 
 
@@ -222,6 +223,11 @@ class RealtimeSession:
         self._disconnect_lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[str | None]] = set()
         self._cleanup_error: str | None = None
+        self._media_generation = 0
+        self._media_ready_generation = 0
+        self._media_generation_turn_id: str | None = None
+        self._media_ready = asyncio.Event()
+        self._media_ready.set()
         self.drop_counts = {"stale_event": 0, "client_control": 0}
 
     @property
@@ -513,6 +519,21 @@ class RealtimeSession:
             return
         if context.terminal or self._closed:
             return
+        media_error = await self._await_media_ready(context)
+        if media_error is not None:
+            async with self._lock:
+                if not context.terminal:
+                    context.terminal = True
+                    await self._emit(
+                        context.turn_id,
+                        "turn.failed",
+                        {"outcome": "failed", "stage": "publication", "code": media_error},
+                        terminal=True,
+                    )
+                await self._degrade_locked("publication", media_error)
+            return
+        if context.terminal or self._closed:
+            return
 
         loop = asyncio.get_running_loop()
         observed: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -699,6 +720,24 @@ class RealtimeSession:
         elif context.rollback_error is not None:
             await self._degrade_locked("controller", context.rollback_error)
 
+    async def _await_media_ready(self, context: TurnContext) -> str | None:
+        deadline = (
+            asyncio.get_running_loop().time()
+            + CLIENT_MEDIA_READY_TIMEOUT_MS / 1000
+        )
+        while self._media_ready_generation < self._media_generation:
+            if context.terminal or self._closed:
+                return None
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return "client_media_ready_timeout"
+            try:
+                await asyncio.wait_for(self._media_ready.wait(), timeout=remaining)
+            except TimeoutError:
+                return "client_media_ready_timeout"
+            self._media_ready.clear()
+        return None
+
     async def _relay_internal(self, context: TurnContext, event: dict[str, object]) -> None:
         if context.terminal or self._active is not context:
             self.drop_counts["stale_event"] += 1
@@ -730,18 +769,28 @@ class RealtimeSession:
             self.drop_counts["client_control"] += 1
             return False
         event_type = event.get("type")
-        expected_keys = (
-            {"schema_version", "session_id", "stream_epoch", "sequence", "type"}
-            if event_type == "client.reconnected"
-            else {"schema_version", "session_id", "turn_id", "stream_epoch", "sequence", "type"}
-        )
+        if event_type == "client.reconnected":
+            expected_keys = {
+                "schema_version", "session_id", "stream_epoch", "sequence", "type"
+            }
+        elif event_type == "client.media-ready":
+            expected_keys = {
+                "schema_version", "session_id", "turn_id", "stream_epoch",
+                "sequence", "media_generation", "type",
+            }
+        else:
+            expected_keys = {
+                "schema_version", "session_id", "turn_id", "stream_epoch", "sequence", "type"
+            }
         sequence = event.get("sequence")
         stream_epoch = event.get("stream_epoch")
         if (
             set(event) != expected_keys
             or event.get("schema_version") != CLIENT_CONTROL_VERSION
             or event.get("session_id") != self.session_id
-            or event_type not in {"client.reconnected", "client.playout-completed"}
+            or event_type not in {
+                "client.reconnected", "client.playout-completed", "client.media-ready"
+            }
             or not isinstance(sequence, int)
             or isinstance(sequence, bool)
             or sequence < 1
@@ -753,23 +802,41 @@ class RealtimeSession:
         ):
             self.drop_counts["client_control"] += 1
             return False
-        if event_type == "client.playout-completed":
+        if event_type in {"client.playout-completed", "client.media-ready"}:
             async with self._lock:
                 context = self._active
+                media_generation = event.get("media_generation")
+                media_ready = (
+                    event_type == "client.media-ready"
+                    and isinstance(media_generation, int)
+                    and not isinstance(media_generation, bool)
+                    and media_generation == self._media_generation
+                    and media_generation > self._media_ready_generation
+                    and event.get("turn_id") == self._media_generation_turn_id
+                )
+                playout_complete = (
+                    event_type == "client.playout-completed"
+                    and context is not None
+                    and not context.terminal
+                    and event.get("turn_id") == context.turn_id
+                    and context.playout_ack is not None
+                    and not context.playout_ack.done()
+                )
                 if (
                     sequence <= self._client_sequence
                     or self._closed
                     or stream_epoch != self.stream_epoch
-                    or context is None
-                    or context.terminal
-                    or event.get("turn_id") != context.turn_id
-                    or context.playout_ack is None
-                    or context.playout_ack.done()
+                    or not (media_ready or playout_complete)
                 ):
                     self.drop_counts["client_control"] += 1
                     return False
                 self._client_sequence = sequence
-                context.playout_ack.set_result(None)
+                if media_ready:
+                    self._media_ready_generation = media_generation
+                    self._media_ready.set()
+                else:
+                    assert context is not None and context.playout_ack is not None
+                    context.playout_ack.set_result(None)
                 return True
         async with self._reconnect_lock:
             async with self._lock:
@@ -857,6 +924,11 @@ class RealtimeSession:
         self._event_sequence += 1
         if self._event_sequence > MAX_EVENT_SEQUENCE:
             raise RuntimeError("session event sequence exhausted")
+        if event_type in {"turn.interrupted", "turn.failed"}:
+            self._media_generation += 1
+            self._media_generation_turn_id = turn_id
+            self._media_ready.clear()
+            payload = {**payload, "media_generation": self._media_generation}
         try:
             await self.event_sink.send({
                 "schema_version": CONTROL_EVENT_VERSION,
