@@ -18,9 +18,10 @@ async def lifespan(app: FastAPI):
     if not settings.web_dist.is_dir() or not (settings.web_dist / "index.html").is_file():
         raise RuntimeError("Slice 6 web build is missing; run ./setup-slice6")
     registry = SessionRegistry(settings)
-    app.state.settings = settings
-    app.state.registry = registry
     try:
+        await registry.start()
+        app.state.settings = settings
+        app.state.registry = registry
         yield
     finally:
         await registry.close()

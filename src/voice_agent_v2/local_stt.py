@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 import time
 import wave
 
 from .contracts import AudioFormat, STT_VERSION, StageFailure, valid_correlation_id
-from .process_adapter import AdapterProcess, AdapterProcessError
+from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
@@ -64,13 +65,47 @@ class WhisperSTT:
 
     def __init__(self) -> None:
         self._process: AdapterProcess | None = None
+        self._request_lock = threading.Lock()
+        self._request_generation = 0
+        self._active_request: int | None = None
+        self._cancelled_requests: set[int] = set()
         self.ready_metadata: dict | None = None
         self.observations: list[dict] = []
+
+    @property
+    def process_id(self) -> int | None:
+        process = self._process
+        child = process.process if process is not None else None
+        return child.pid if child is not None and child.poll() is None else None
+
+    def _begin_request(self, cancellation: CancellationToken | None) -> int:
+        with self._request_lock:
+            self._request_generation += 1
+            generation = self._request_generation
+            self._active_request = generation
+            if cancellation is not None and cancellation.cancelled:
+                self._cancelled_requests.add(generation)
+            return generation
+
+    def _request_cancelled(self, generation: int) -> bool:
+        with self._request_lock:
+            return generation in self._cancelled_requests
+
+    def cancel_request(self, generation: int | None = None) -> None:
+        with self._request_lock:
+            active = self._active_request if generation is None else generation
+            if active is not None:
+                self._cancelled_requests.add(active)
+
+    def _finish_request(self, generation: int) -> None:
+        with self._request_lock:
+            if self._active_request == generation:
+                self._active_request = None
+            self._cancelled_requests.discard(generation)
 
     def start(self, cancellation: CancellationToken | None = None) -> dict:
         if self._process is not None:
             if cancellation is not None and cancellation.cancelled:
-                self.cancel()
                 raise StageFailure("stt", "selected_stt_cancelled")
             return dict(self.ready_metadata or {})
         command = [
@@ -80,6 +115,11 @@ class WhisperSTT:
         log = LOGS / f"whisper-{time.monotonic_ns()}.stderr.log"
         process = AdapterProcess(command, log, _environment())
         self._process = process
+        unregister = (
+            cancellation.register(process.cancel)
+            if cancellation is not None
+            else lambda: None
+        )
         try:
             if cancellation is not None and cancellation.cancelled:
                 process.cancel()
@@ -94,7 +134,30 @@ class WhisperSTT:
                 self._process = None
                 self.ready_metadata = None
             raise StageFailure("stt", "selected_stt_unavailable") from error
+        finally:
+            unregister()
         return dict(self.ready_metadata)
+
+    def warmup(self, cancellation: CancellationToken | None = None) -> dict[str, object]:
+        """Run the public inference path once and discard its content result."""
+        self.start(cancellation)
+        process_id = self.process_id
+        if process_id is None:
+            raise StageFailure("stt", "selected_stt_unavailable")
+        try:
+            self.transcribe(
+                session_id="warmup-session",
+                turn_id="warmup-turn",
+                pcm=b"\0\0" * 16_000,
+                audio_format=EXPECTED_FORMAT,
+                cancellation=cancellation,
+            )
+        except StageFailure as error:
+            if error.code != "empty_transcript":
+                raise
+        if self.process_id != process_id:
+            raise StageFailure("stt", "selected_stt_unavailable")
+        return {"process_id": process_id, "discarded": True}
 
     def transcribe(
         self, *, session_id: str, turn_id: str, pcm: bytes, audio_format: AudioFormat,
@@ -117,6 +180,12 @@ class WhisperSTT:
         process = self._process
         if process is None:
             raise StageFailure("stt", "selected_stt_unavailable")
+        generation = self._begin_request(cancellation)
+        unregister = (
+            cancellation.register(lambda: self.cancel_request(generation))
+            if cancellation is not None
+            else lambda: None
+        )
         started = time.monotonic()
         try:
             with wave.open(str(path), "wb") as output:
@@ -128,11 +197,19 @@ class WhisperSTT:
                 {"operation": "transcribe", "request_id": f"{session_id}-{turn_id}", "audio_path": str(path)},
                 60,
             )
-            if cancellation is not None and cancellation.cancelled:
+            if self._request_cancelled(generation):
                 raise StageFailure("stt", "selected_stt_cancelled")
-        except (AdapterProcessError, OSError) as error:
+        except AdapterRequestError as error:
             raise StageFailure("stt", "selected_stt_unavailable") from error
+        except (AdapterProcessError, OSError) as error:
+            cancelled = self._request_cancelled(generation)
+            if not cancelled:
+                self.cancel()
+            code = "selected_stt_cancelled" if cancelled else "selected_stt_unavailable"
+            raise StageFailure("stt", code) from error
         finally:
+            unregister()
+            self._finish_request(generation)
             _cleanup_temporary_audio(path)
         transcript = response.get("hypothesis")
         if not isinstance(transcript, str) or not transcript.strip():

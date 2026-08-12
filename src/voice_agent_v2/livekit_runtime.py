@@ -7,6 +7,7 @@ from datetime import timedelta
 import json
 from pathlib import Path
 import secrets
+import threading
 import time
 from typing import Awaitable, Callable
 
@@ -53,17 +54,30 @@ class LiveTurnRunner:
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
         self._startup_cancellation = CancellationToken()
+        self._start_lock = threading.Lock()
+        self._started = False
         self.warmup_metadata: dict[str, object] | None = None
 
     def start(self) -> None:
-        self.llm.readiness(self._startup_cancellation)
-        self.stt.start(self._startup_cancellation)
-        self.tts.start(self._startup_cancellation)
-        self.warmup_metadata = self.tts.warmup(self._startup_cancellation)
+        with self._start_lock:
+            if self._started:
+                return
+            lfm_ready = self.llm.readiness(self._startup_cancellation)
+            lfm_warmup = self.llm.warmup(self._startup_cancellation)
+            self.stt.start(self._startup_cancellation)
+            stt_warmup = self.stt.warmup(self._startup_cancellation)
+            self.tts.start(self._startup_cancellation)
+            tts_warmup = self.tts.warmup(self._startup_cancellation)
+            self.warmup_metadata = {
+                "lfm_ready": lfm_ready,
+                "lfm": lfm_warmup,
+                "stt": stt_warmup,
+                "tts": tts_warmup,
+            }
+            self._started = True
 
     def cancel_startup(self) -> None:
         self._startup_cancellation.cancel()
-        self.cancel()
 
     def run_turn(
         self,
@@ -104,34 +118,49 @@ class LiveTurnRunner:
         self._snapshots.pop((session_id, turn_id), None)
 
     def cancel(self) -> None:
+        """Invalidate only active generation/synthesis requests; keep resident models alive."""
         errors: list[Exception] = []
-        for adapter in (self.llm, self.tts, self.stt):
+        for adapter in (self.llm, self.tts):
             try:
-                adapter.cancel()
+                cancel_request = getattr(adapter, "cancel_request", None)
+                if cancel_request is not None:
+                    cancel_request()
             except Exception as error:
                 errors.append(error)
         if errors:
-            raise ExceptionGroup("one or more inference adapters failed to cancel", errors)
+            raise ExceptionGroup("one or more inference requests failed to cancel", errors)
 
     def reset_session(self, session_id: str) -> None:
         self.llm.reset_session(session_id)
         self._snapshots.clear()
 
     def close(self, session_id: str) -> None:
+        """Release session context without stopping backend-owned resident models."""
         errors: list[Exception] = []
-        for cleanup in (
-            self.cancel,
-            lambda: self.llm.reset_session(session_id),
-            self.stt.close,
-            self.tts.close,
-        ):
+        for cleanup in (self.cancel, lambda: self.llm.reset_session(session_id)):
+            try:
+                cleanup()
+            except Exception as error:
+                errors.append(error)
+        for key in tuple(self._snapshots):
+            if key[0] == session_id:
+                self._snapshots.pop(key, None)
+        if errors:
+            raise ExceptionGroup("one or more inference session resources failed to close", errors)
+
+    def shutdown(self) -> None:
+        """Stop resident child processes only with backend shutdown."""
+        errors: list[Exception] = []
+        llm_close = getattr(self.llm, "close", lambda: None)
+        for cleanup in (self.cancel, llm_close, self.stt.close, self.tts.close):
             try:
                 cleanup()
             except Exception as error:
                 errors.append(error)
         self._snapshots.clear()
+        self._started = False
         if errors:
-            raise ExceptionGroup("one or more inference resources failed to close", errors)
+            raise ExceptionGroup("one or more resident inference resources failed to close", errors)
 
 
 class LiveKitEventSink(EventSink):
@@ -329,6 +358,7 @@ class LiveKitRoomController:
         room_name: str,
         browser_identity: str,
         on_closed: Callable[[str], Awaitable[None]],
+        runner: LiveTurnRunner | None = None,
     ) -> None:
         self.settings = settings
         self.session_id = session_id
@@ -336,7 +366,8 @@ class LiveKitRoomController:
         self.browser_identity = browser_identity
         self.on_closed = on_closed
         self.agent_identity = f"agent-{session_id}"
-        self.runner = LiveTurnRunner(settings)
+        self._owns_runner = runner is None
+        self.runner = runner or LiveTurnRunner(settings)
         self.room = rtc.Room()
         self.audio_source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
         self.trace = PrivacySafeTrace(
@@ -377,10 +408,11 @@ class LiveKitRoomController:
 
     async def start(self) -> None:
         try:
-            self._runner_start_task = asyncio.create_task(
-                asyncio.to_thread(self.runner.start), name=f"startup-{self.session_id}"
-            )
-            await asyncio.shield(self._runner_start_task)
+            if not getattr(self.runner, "_started", False):
+                self._runner_start_task = asyncio.create_task(
+                    asyncio.to_thread(self.runner.start), name=f"startup-{self.session_id}"
+                )
+                await asyncio.shield(self._runner_start_task)
             if self._closed:
                 raise RuntimeError("room closed during runner startup")
             self._register_handlers()
@@ -723,6 +755,10 @@ class LiveKitRoomController:
                     await self.audio_sink.close()
                     await self._disconnect_room()
                 await asyncio.to_thread(self.runner.close, self.session_id)
+                if getattr(self, "_owns_runner", False):
+                    shutdown = getattr(self.runner, "shutdown", None)
+                    if shutdown is not None:
+                        await asyncio.to_thread(shutdown)
                 self._cleanup_complete = True
             if notify and not self._close_notified:
                 await self.on_closed(self.session_id)
@@ -732,8 +768,12 @@ class LiveKitRoomController:
 class SessionRegistry:
     def __init__(self, settings: Slice6Settings) -> None:
         self.settings = settings
+        self.runner = LiveTurnRunner(settings)
         self._controllers: dict[str, LiveKitRoomController] = {}
         self._lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        await asyncio.to_thread(self.runner.start)
 
     @property
     def active_count(self) -> int:
@@ -752,6 +792,7 @@ class SessionRegistry:
                 room_name=room_name,
                 browser_identity=browser_identity,
                 on_closed=self.remove,
+                runner=self.runner,
             )
             self._controllers[session_id] = controller
         try:
@@ -787,5 +828,9 @@ class SessionRegistry:
             return_exceptions=True,
         )
         errors = [result for result in results if isinstance(result, Exception)]
+        try:
+            await asyncio.to_thread(self.runner.shutdown)
+        except Exception as error:
+            errors.append(error)
         if errors:
             raise ExceptionGroup("session registry cleanup failed", errors)

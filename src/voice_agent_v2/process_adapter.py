@@ -22,6 +22,10 @@ class AdapterProcessError(RuntimeError):
     pass
 
 
+class AdapterRequestError(AdapterProcessError):
+    """A correlated request failed while the resident adapter stayed healthy."""
+
+
 class AdapterProcess:
     def __init__(self, command: list[str], log_path: Path, environment: dict[str, str]) -> None:
         self.command = command
@@ -133,9 +137,11 @@ class AdapterProcess:
                 if response.get("request_id") != value.get("request_id"):
                     raise AdapterProcessError("adapter correlation mismatch")
                 if response.get("event") == "error":
-                    raise AdapterProcessError(str(response.get("error_class", "adapter_error")))
+                    raise AdapterRequestError(str(response.get("error_class", "adapter_error")))
                 if response.get("event") == "final":
                     return response
+        except AdapterRequestError:
+            raise
         except AdapterProcessError:
             try:
                 self.cancel()
@@ -154,10 +160,16 @@ class AdapterProcess:
             if response.get("request_id") != value.get("request_id"):
                 raise AdapterProcessError("adapter correlation mismatch")
             if response.get("event") == "error":
-                raise AdapterProcessError(str(response.get("error_class", "adapter_error")))
+                raise AdapterRequestError(str(response.get("error_class", "adapter_error")))
             yield response
             if response.get("event") == "final":
                 return
+
+    def interrupt_request(self) -> None:
+        """Notify a cooperative runner without terminating its resident process."""
+        process = self.process
+        if process is not None and process.poll() is None:
+            os.kill(process.pid, signal.SIGUSR1)
 
     def cancel(self, timeout_seconds: float = 0.25) -> float:
         self._cancel_requested.set()

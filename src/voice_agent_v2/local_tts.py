@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .audio import OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SECONDS
 from .contracts import AudioFormat, StageFailure, TTS_VERSION, valid_correlation_id
-from .process_adapter import AdapterProcess, AdapterProcessError
+from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
@@ -66,18 +66,57 @@ class Qwen3TTS:
     def __init__(self) -> None:
         self._process: AdapterProcess | None = None
         self._cancel_lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._request_generation = 0
+        self._active_request: int | None = None
+        self._cancelled_requests: set[int] = set()
         self.ready_metadata: dict | None = None
         self.observations: list[dict] = []
+
+    def _begin_request(self, cancellation: CancellationToken | None) -> int:
+        with self._request_lock:
+            self._request_generation += 1
+            generation = self._request_generation
+            self._active_request = generation
+            if cancellation is not None and cancellation.cancelled:
+                self._cancelled_requests.add(generation)
+            return generation
+
+    def _request_cancelled(self, generation: int) -> bool:
+        with self._request_lock:
+            return generation in self._cancelled_requests
+
+    def cancel_request(self, generation: int | None = None) -> None:
+        """Invalidate only the current synthesis; its stream drains to keep the model resident."""
+        with self._request_lock:
+            active = self._active_request if generation is None else generation
+            newly_cancelled = active is not None and active not in self._cancelled_requests
+            if active is not None:
+                self._cancelled_requests.add(active)
+            process = self._process
+        interrupt_request = getattr(process, "interrupt_request", None)
+        if newly_cancelled and interrupt_request is not None:
+            interrupt_request()
+
+    def _finish_request(self, generation: int) -> None:
+        with self._request_lock:
+            if self._active_request == generation:
+                self._active_request = None
+            self._cancelled_requests.discard(generation)
 
     def start(self, cancellation: CancellationToken | None = None) -> dict:
         if self._process is not None:
             if cancellation is not None and cancellation.cancelled:
-                self.cancel()
                 raise StageFailure("tts", "selected_tts_cancelled")
             return dict(self.ready_metadata or {})
         log = LOGS / f"qwen3-tts-{time.monotonic_ns()}.stderr.log"
         process = AdapterProcess([str(VENV / "bin" / "python"), str(RUNNER)], log, _environment())
         self._process = process
+        unregister = (
+            cancellation.register(process.cancel)
+            if cancellation is not None
+            else lambda: None
+        )
         try:
             if cancellation is not None and cancellation.cancelled:
                 process.cancel()
@@ -92,6 +131,8 @@ class Qwen3TTS:
                 self._process = None
                 self.ready_metadata = None
             raise StageFailure("tts", "selected_tts_unavailable") from error
+        finally:
+            unregister()
         return dict(self.ready_metadata)
 
     @property
@@ -148,12 +189,19 @@ class Qwen3TTS:
         if process is None:
             raise StageFailure("tts", "selected_tts_unavailable")
         request_id = f"{session_id}-{turn_id}-{time.monotonic_ns()}"
+        generation = self._begin_request(cancellation)
+        unregister = (
+            cancellation.register(lambda: self.cancel_request(generation))
+            if cancellation is not None
+            else lambda: None
+        )
         started = time.monotonic()
         budget = turn_budget or self.create_turn_budget()
         first = None
         chunks = 0
         total_bytes = 0
         final_seen = False
+        deferred_failure: StageFailure | None = None
         try:
             for event in process.stream(
                 {
@@ -161,9 +209,8 @@ class Qwen3TTS:
                     "emit_pcm": True, "output_sample_rate_hz": OUTPUT_FORMAT.sample_rate_hz,
                 }, budget.remaining_seconds()
             ):
-                if cancellation is not None and cancellation.cancelled:
-                    raise StageFailure("tts", "selected_tts_cancelled")
-                budget.remaining_seconds()
+                if self._request_cancelled(generation) and deferred_failure is None:
+                    deferred_failure = StageFailure("tts", "selected_tts_cancelled")
                 if event["event"] == "chunk":
                     data = base64.b64decode(event["pcm_base64"], validate=True)
                     if len(data) != event["bytes"] or len(data) % 2:
@@ -173,10 +220,17 @@ class Qwen3TTS:
                         raise AdapterProcessError("out-of-order TTS chunk")
                     total_bytes += len(data)
                     if chunks > MAX_TTS_CHUNKS or total_bytes > MAX_TTS_OUTPUT_BYTES:
-                        raise StageFailure("tts", "selected_tts_output_out_of_bounds")
-                    budget.consume(len(data))
+                        deferred_failure = deferred_failure or StageFailure(
+                            "tts", "selected_tts_output_out_of_bounds"
+                        )
+                    if deferred_failure is None:
+                        try:
+                            budget.consume(len(data))
+                        except StageFailure as error:
+                            deferred_failure = error
                     first = first or time.monotonic()
-                    yield data
+                    if deferred_failure is None:
+                        yield data
                 elif event["event"] == "final":
                     if final_seen:
                         raise AdapterProcessError("duplicate TTS terminal event")
@@ -189,14 +243,22 @@ class Qwen3TTS:
                         raise AdapterProcessError("TTS terminal totals/format mismatch")
                 else:
                     raise AdapterProcessError("unknown TTS event")
-            if not final_seen or chunks == 0 or total_bytes == 0:
+            if not final_seen or (
+                (chunks == 0 or total_bytes == 0) and deferred_failure is None
+            ):
                 raise AdapterProcessError("TTS produced no audio")
+            if deferred_failure is not None:
+                raise deferred_failure
         except StageFailure:
-            self.cancel()
             raise
+        except AdapterRequestError as error:
+            raise StageFailure("tts", "selected_tts_unavailable") from error
         except (AdapterProcessError, OSError, ValueError, KeyError, TypeError) as error:
             self.cancel()
             raise StageFailure("tts", "selected_tts_unavailable") from error
+        finally:
+            unregister()
+            self._finish_request(generation)
         completed = time.monotonic()
         self.observations.append({
             "identity": self.identity, "speaker": "ryan", "language": "Russian",

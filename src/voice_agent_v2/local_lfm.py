@@ -182,6 +182,18 @@ class LocalLFMProvider:
             "context_tokens_per_slot": 32_768,
         }
 
+    def warmup(self, cancellation: CancellationToken | None = None) -> dict[str, object]:
+        """Execute one real local completion and discard its content and context."""
+        session_id = "warmup-session"
+        response = self.respond(
+            session_id=session_id,
+            turn_id="warmup-turn",
+            transcript="Ответь одним коротким словом.",
+            cancellation=cancellation,
+        )
+        self.reset_session(session_id)
+        return {"discarded": True, "visible_chars": len(response)}
+
     def _payload(self, session_id: str, transcript: str) -> dict[str, object]:
         if not transcript.strip() or len(transcript) > 4_096:
             raise StageFailure("llm_provider", "transcript_out_of_bounds")
@@ -705,10 +717,13 @@ class LocalLFMProvider:
             cancellation=cancellation,
         )
 
-    def cancel(self) -> None:
+    def cancel_request(self) -> None:
         with self._operation_lock:
             generation = self._operation_generation
         self._cancel_operation(generation)
+
+    def cancel(self) -> None:
+        self.cancel_request()
 
     def handoff_capacity_state(self) -> str:
         with self._operation_lock:

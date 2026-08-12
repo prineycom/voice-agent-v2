@@ -111,7 +111,9 @@ class RealTurnController:
 
         def cancel_adapters(*adapters) -> None:
             for adapter in adapters:
-                cancel = getattr(adapter, "cancel", None)
+                cancel = getattr(adapter, "cancel_request", None)
+                if cancel is None:
+                    cancel = getattr(adapter, "cancel", None)
                 if cancel is not None:
                     try:
                         cancel()
@@ -213,7 +215,7 @@ class RealTurnController:
                 sentence_chunks = 0
                 for chunk in self.tts.stream_synthesize(**arguments):
                     if token.cancelled:
-                        raise _TurnInterrupted
+                        continue
                     tts_chunks += 1
                     sentence_chunks += 1
                     tts_bytes += len(chunk)
@@ -234,6 +236,8 @@ class RealTurnController:
                     })
                     if cancel_after_output_chunks == tts_chunks:
                         token.cancel()
+                if token.cancelled:
+                    raise _TurnInterrupted
                 trace("tts", "sentence_completed", chunk_count=sentence_chunks)
             except _TurnInterrupted:
                 raise
@@ -259,7 +263,9 @@ class RealTurnController:
                     arguments["on_sentence"] = visible_then_synthesize
                 if getattr(self.llm, "supports_handoff_abort", False):
                     def abort_handoff() -> None:
-                        cancel = getattr(self.tts, "cancel", None)
+                        cancel = getattr(self.tts, "cancel_request", None)
+                        if cancel is None:
+                            cancel = getattr(self.tts, "cancel", None)
                         if cancel is not None:
                             cancel()
 

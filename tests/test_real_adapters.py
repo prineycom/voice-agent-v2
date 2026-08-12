@@ -334,10 +334,10 @@ class LocalTTSContractTests(unittest.TestCase):
             result.terminal_event["payload"]["code"],
             "selected_tts_output_out_of_bounds",
         )
-        self.assertTrue(process.cancelled)
-        self.assertIsNone(tts._process)
+        self.assertFalse(process.cancelled)
+        self.assertIs(tts._process, process)
 
-    def test_tts_chunk_and_audio_duration_bounds_cancel_malformed_adapter(self) -> None:
+    def test_tts_chunk_and_audio_duration_bounds_drain_resident_adapter(self) -> None:
         class MalformedStreamingProcess:
             def __init__(self, chunks: tuple[bytes, ...]) -> None:
                 self.chunks = chunks
@@ -352,6 +352,15 @@ class LocalTTSContractTests(unittest.TestCase):
                         "pcm_base64": base64.b64encode(chunk).decode(),
                         "bytes": len(chunk),
                     }
+                yield {
+                    "event": "final",
+                    "request_id": value["request_id"],
+                    "audio_bytes": sum(map(len, self.chunks)),
+                    "chunk_count": len(self.chunks),
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "encoding": "pcm_s16le",
+                }
 
             def cancel(self) -> float:
                 self.cancelled = True
@@ -378,8 +387,8 @@ class LocalTTSContractTests(unittest.TestCase):
                         audio_format=OUTPUT_FORMAT,
                     ))
                 self.assertEqual(raised.exception.code, "selected_tts_output_out_of_bounds")
-                self.assertTrue(process.cancelled)
-                self.assertIsNone(tts._process)
+                self.assertFalse(process.cancelled)
+                self.assertIs(tts._process, process)
 
 
 class LiteLLMProviderContractTests(unittest.TestCase):
@@ -1088,6 +1097,44 @@ class RealTurnControllerTests(unittest.TestCase):
 
 
 class LocalSTTContractTests(unittest.TestCase):
+    def test_cancelled_transcription_drains_without_stopping_resident_process(self) -> None:
+        token = CancellationToken()
+
+        class ResidentProcess(StubProcess):
+            class Child:
+                pid = 5101
+
+                @staticmethod
+                def poll():
+                    return None
+
+            process = Child()
+
+            def request(self, value: dict, timeout: float) -> dict:
+                response = super().request(value, timeout)
+                token.cancel()
+                return response
+
+        stt = WhisperSTT()
+        process = ResidentProcess()
+        stt._process = process
+        stt.ready_metadata = {"event": "ready"}
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "voice_agent_v2.local_stt.TEMP", Path(directory)
+        ):
+            with self.assertRaises(StageFailure) as raised:
+                stt.transcribe(
+                    session_id="session-test-0001",
+                    turn_id="turn-test-0001",
+                    pcm=b"\0\0" * 160,
+                    audio_format=AudioFormat(),
+                    cancellation=token,
+                )
+
+        self.assertEqual(raised.exception.code, "selected_stt_cancelled")
+        self.assertIs(stt._process, process)
+        self.assertEqual(stt.process_id, 5101)
+
     def test_format_and_correlation_mismatch_fail_before_model_start(self) -> None:
         stt = WhisperSTT()
         with self.assertRaises(StageFailure) as invalid_id:
@@ -1209,6 +1256,36 @@ class LocalSTTContractTests(unittest.TestCase):
 
 
 class AdapterProcessTests(unittest.TestCase):
+    def test_correlated_request_failure_keeps_resident_child_for_next_request(self) -> None:
+        script = (
+            "import json,os,sys; "
+            "print(json.dumps({'event':'ready','pid':os.getpid()}), flush=True); "
+            "first=json.loads(sys.stdin.readline()); "
+            "print(json.dumps({'request_id':first['request_id'],'event':'error',"
+            "'error_class':'request_failed'}), flush=True); "
+            "second=json.loads(sys.stdin.readline()); "
+            "print(json.dumps({'request_id':second['request_id'],'event':'final',"
+            "'pid':os.getpid()}), flush=True); "
+            "sys.stdin.readline()"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = AdapterProcess(
+                [sys.executable, "-c", script],
+                Path(directory) / "adapter.log",
+                dict(os.environ),
+            )
+            ready = adapter.start(1)
+            process_id = adapter.process.pid
+            with self.assertRaisesRegex(AdapterProcessError, "request_failed"):
+                adapter.request({"request_id": "first"}, 1)
+            self.assertIsNone(adapter.process.poll())
+            completed = adapter.request({"request_id": "second"}, 1)
+
+            self.assertEqual(ready["pid"], process_id)
+            self.assertEqual(completed["pid"], process_id)
+            self.assertIsNone(adapter.process.poll())
+            adapter.close()
+
     def test_request_timeout_is_one_deadline_and_terminates_slow_child(self) -> None:
         script = (
             "import json,sys,time; "
