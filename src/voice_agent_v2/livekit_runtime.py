@@ -20,6 +20,7 @@ from .realtime import (
     MAX_CONTROL_BYTES,
     AudioSink,
     EnergyEndpoint,
+    MediaBoundary,
     EventSink,
     RealtimeSession,
 )
@@ -141,18 +142,86 @@ class LiveKitEventSink(EventSink):
 
 
 class LiveKitAudioSink(AudioSink):
-    def __init__(self, source: rtc.AudioSource) -> None:
+    def __init__(
+        self,
+        room: rtc.Room,
+        source: rtc.AudioSource,
+        source_changed: Callable[[rtc.AudioSource], None],
+    ) -> None:
+        self.room = room
         self.source = source
+        self.source_changed = source_changed
+        self.publication = None
         self._active_turn: str | None = None
+        self._rotation_lock = asyncio.Lock()
+        self._rotation_failed = False
 
-    async def play(self, turn_id: str, pcm: bytes, cancelled) -> bool:
+    @staticmethod
+    def _publication_id(publication) -> str:
+        publication_id = getattr(publication, "sid", None)
+        if not isinstance(publication_id, str) or not publication_id:
+            raise RuntimeError("LiveKit audio publication has no stable identity")
+        return publication_id
+
+    async def _publish(self, source: rtc.AudioSource):
+        track = rtc.LocalAudioTrack.create_audio_track("agent-response", source)
+        options = rtc.TrackPublishOptions()
+        options.source = rtc.TrackSource.SOURCE_MICROPHONE
+        options.dtx = False
+        options.red = True
+        return await self.room.local_participant.publish_track(track, options)
+
+    async def start(self) -> None:
+        self.publication = await self._publish(self.source)
+        self._publication_id(self.publication)
+
+    async def _rotate(self, expected_source: rtc.AudioSource) -> MediaBoundary:
+        async with self._rotation_lock:
+            if self._rotation_failed:
+                raise RuntimeError("LiveKit audio publication rotation previously failed")
+            if expected_source is not self.source:
+                publication_id = self._publication_id(self.publication)
+                return MediaBoundary(publication_id, publication_id)
+            old_source = self.source
+            old_publication = self.publication
+            if old_publication is None:
+                raise RuntimeError("LiveKit audio publication is not initialized")
+            old_publication_id = self._publication_id(old_publication)
+            next_source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+            try:
+                next_publication = await self._publish(next_source)
+                next_publication_id = self._publication_id(next_publication)
+            except Exception:
+                await next_source.aclose()
+                raise
+            self.source = next_source
+            self.publication = next_publication
+            self.source_changed(next_source)
+            errors: list[Exception] = []
+            try:
+                await self.room.local_participant.unpublish_track(old_publication_id)
+            except Exception as error:
+                errors.append(error)
+            try:
+                await old_source.aclose()
+            except Exception as error:
+                errors.append(error)
+            if errors:
+                self._rotation_failed = True
+                raise ExceptionGroup("LiveKit audio publication rotation failed", errors)
+            return MediaBoundary(old_publication_id, next_publication_id)
+
+    async def play(
+        self, turn_id: str, pcm: bytes, cancelled
+    ) -> MediaBoundary | None:
         if not pcm or len(pcm) % 2:
-            return False
+            return None
+        source = self.source
         self._active_turn = turn_id
         try:
             for offset in range(0, len(pcm), AUDIO_FRAME_BYTES):
                 if cancelled() or self._active_turn != turn_id:
-                    return False
+                    return None
                 chunk = pcm[offset : offset + AUDIO_FRAME_BYTES]
                 frame = rtc.AudioFrame(
                     data=chunk,
@@ -160,17 +229,25 @@ class LiveKitAudioSink(AudioSink):
                     num_channels=1,
                     samples_per_channel=len(chunk) // 2,
                 )
-                await self.source.capture_frame(frame)
-            await self.source.wait_for_playout()
-            return not cancelled() and self._active_turn == turn_id
+                await source.capture_frame(frame)
+            await source.wait_for_playout()
+            if cancelled() or self._active_turn != turn_id:
+                return None
+            return await self._rotate(source)
         finally:
             if self._active_turn == turn_id:
                 self._active_turn = None
 
-    async def clear(self, turn_id: str) -> None:
-        if self._active_turn in {None, turn_id}:
-            self._active_turn = None
-            self.source.clear_queue()
+    async def clear(self, turn_id: str) -> str:
+        source = self.source
+        if self._active_turn not in {None, turn_id}:
+            return self._publication_id(self.publication)
+        self._active_turn = None
+        source.clear_queue()
+        boundary = await self._rotate(source)
+        if boundary.completed_publication_id == boundary.next_publication_id:
+            return boundary.next_publication_id
+        return boundary.next_publication_id
 
 
 class LiveKitRoomController:
@@ -194,11 +271,16 @@ class LiveKitRoomController:
         self.runner = LiveTurnRunner(settings)
         self.room = rtc.Room()
         self.audio_source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+        self.audio_sink = LiveKitAudioSink(
+            self.room,
+            self.audio_source,
+            lambda source: setattr(self, "audio_source", source),
+        )
         self.session = RealtimeSession(
             session_id=session_id,
             runner=self.runner,
             event_sink=LiveKitEventSink(self.room, browser_identity),
-            audio_sink=LiveKitAudioSink(self.audio_source),
+            audio_sink=self.audio_sink,
             failure_handler=self._session_failed,
         )
         self._audio_task: asyncio.Task[None] | None = None
@@ -228,12 +310,7 @@ class LiveKitRoomController:
             self._register_handlers()
             token = self._agent_token()
             await self.room.connect(self.settings.livekit_internal_url, token)
-            track = rtc.LocalAudioTrack.create_audio_track("agent-response", self.audio_source)
-            options = rtc.TrackPublishOptions()
-            options.source = rtc.TrackSource.SOURCE_MICROPHONE
-            options.dtx = False
-            options.red = True
-            await self.room.local_participant.publish_track(track, options)
+            await self.audio_sink.start()
         except Exception:
             await self.close(notify=False)
             raise

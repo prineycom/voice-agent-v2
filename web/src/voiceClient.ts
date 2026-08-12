@@ -21,7 +21,15 @@ import {
 } from './state'
 
 const RECONNECT_ACK_TIMEOUT_MS = 5_000
-const PLAYOUT_ACK_PUBLISH_MARGIN_MS = 250
+const MAX_TRACK_GENERATIONS = 128
+
+interface PendingPlayoutBoundary {
+  turnId: string
+  streamEpoch: number
+  mediaGeneration: number
+  completedPublicationId: string
+  nextPublicationId: string
+}
 
 export interface VoiceClientCallbacks {
   onSession(capability: SessionCapability): void
@@ -42,6 +50,7 @@ export class VoiceClient {
   private startAbort: AbortController | null = null
   private stopPromise: Promise<void> | null = null
   private reconnectAckTimer: ReturnType<typeof setTimeout> | null = null
+  private playoutAckTimer: ReturnType<typeof setTimeout> | null = null
   private initialReadyTimer: ReturnType<typeof setTimeout> | null = null
   private reconnecting = false
   private reconnectRequestPending = false
@@ -55,8 +64,12 @@ export class VoiceClient {
   private freshSubscriptionRequired = false
   private pendingMediaGeneration: number | null = null
   private pendingMediaTurnId: string | null = null
+  private expectedMediaPublicationId: string | null = null
   private reconnectMediaGeneration: number | null = null
   private readonly invalidatedTracks = new WeakSet<RemoteAudioTrack>()
+  private readonly publicationTracks = new Map<string, RemoteAudioTrack>()
+  private readonly endedPublications = new Set<string>()
+  private pendingPlayoutBoundary: PendingPlayoutBoundary | null = null
   private streamEpoch = 0
   private playoutGeneration = 0
 
@@ -145,6 +158,7 @@ export class VoiceClient {
 
   private async releaseResources(notifyClosed: boolean): Promise<void> {
     this.clearReconnectAckTimer()
+    this.clearPlayoutAckTimer()
     this.clearInitialReadyTimer()
     this.playoutGeneration += 1
     this.capability = null
@@ -161,7 +175,11 @@ export class VoiceClient {
     this.freshSubscriptionRequired = false
     this.pendingMediaGeneration = null
     this.pendingMediaTurnId = null
+    this.expectedMediaPublicationId = null
     this.reconnectMediaGeneration = null
+    this.publicationTracks.clear()
+    this.endedPublications.clear()
+    this.pendingPlayoutBoundary = null
     this.streamEpoch = 0
     const errors: unknown[] = []
     const microphone = this.microphone
@@ -224,7 +242,36 @@ export class VoiceClient {
       ) {
         const remoteTrack = track as RemoteAudioTrack
         const remotePublication = publication as RemoteTrackPublication
+        const publicationId = this.publicationId(remotePublication)
+        if (publicationId !== null) {
+          this.publicationTracks.set(publicationId, remoteTrack)
+          if (this.publicationTracks.size > MAX_TRACK_GENERATIONS) {
+            void this.failSession('Превышена граница обновления аудиопотока')
+            return
+          }
+        }
         this.remotePublication = remotePublication
+        if (
+          this.pendingPlayoutBoundary !== null
+          && publicationId === this.pendingPlayoutBoundary.nextPublicationId
+        ) {
+          void this.completePlayoutBoundary()
+          return
+        }
+        if (
+          this.pendingMediaGeneration !== null
+          && publicationId !== null
+          && publicationId === this.expectedMediaPublicationId
+        ) {
+          this.activateCorrelatedTrack(remoteTrack)
+          void this.publishMediaReady()
+          return
+        }
+        if (
+          (this.pendingPlayoutBoundary !== null || this.expectedMediaPublicationId !== null)
+          && publicationId !== null
+        ) return
+        if (publicationId !== null && this.activeRemoteTrack !== null) return
         if (this.freshSubscriptionRequired) {
           const subscribingPublication = (
             this.renewalPhase === 'subscribing'
@@ -268,7 +315,21 @@ export class VoiceClient {
       if (
         track.kind !== Track.Kind.Audio
         || !this.isExpectedAgent(participant.identity)
-        || publication !== this.renewingPublication
+      ) return
+      const publicationId = this.publicationId(publication as RemoteTrackPublication)
+      if (publicationId !== null) {
+        this.publicationTracks.delete(publicationId)
+        this.endedPublications.add(publicationId)
+        if (this.endedPublications.size > MAX_TRACK_GENERATIONS) {
+          const oldest = this.endedPublications.values().next().value
+          if (typeof oldest === 'string') this.endedPublications.delete(oldest)
+        }
+        if (publicationId === this.pendingPlayoutBoundary?.completedPublicationId) {
+          void this.completePlayoutBoundary()
+        }
+      }
+      if (
+        publication !== this.renewingPublication
         || this.renewalPhase !== 'unsubscribing'
       ) return
       this.renewalPhase = 'subscribing'
@@ -302,16 +363,30 @@ export class VoiceClient {
       }
       let terminalFailure: string | null = null
       if (event.type === 'turn.interrupted' || event.type === 'turn.failed') {
+        this.clearPlayoutAckTimer()
+        this.pendingPlayoutBoundary = null
         const mediaGeneration = event.payload.media_generation
+        const publicationId = event.payload.media_publication_id
         if (
           typeof mediaGeneration !== 'number'
           || !Number.isSafeInteger(mediaGeneration)
           || mediaGeneration < 1
+          || (publicationId !== undefined && (
+            typeof publicationId !== 'string'
+            || publicationId.length < 1
+            || publicationId.length > 128
+          ))
         ) {
           terminalFailure = 'Некорректная граница обновления аудиопотока'
         } else {
           try {
-            this.renewPlaybackTrack(event.turn_id, mediaGeneration)
+            if (typeof publicationId === 'string') {
+              this.selectMediaPublication(
+                event.turn_id, mediaGeneration, publicationId,
+              )
+            } else {
+              this.renewPlaybackTrack(event.turn_id, mediaGeneration)
+            }
           } catch {
             terminalFailure = 'Не удалось остановить устаревшее воспроизведение'
           }
@@ -341,6 +416,8 @@ export class VoiceClient {
       } else if (event.type === 'session.degraded') {
         this.streamEpoch = event.stream_epoch
         this.clearReconnectAckTimer()
+        this.clearPlayoutAckTimer()
+        this.pendingPlayoutBoundary = null
         this.reconnecting = false
         this.reconnectRequestPending = false
         this.pendingRemoteTrack = null
@@ -349,7 +426,13 @@ export class VoiceClient {
         const code = typeof event.payload.code === 'string' ? event.payload.code : 'degraded'
         terminalFailure = `Голосовая сессия остановлена (${stage}/${code})`
       }
-      if (event.type === 'turn.playout-ready') void this.publishPlayoutAck(event)
+      if (event.type === 'turn.playout-ready') {
+        try {
+          this.beginPlayoutBoundary(event)
+        } catch {
+          terminalFailure = 'Некорректная граница воспроизведения'
+        }
+      }
       try {
         this.callbacks.onControl(event)
       } catch {
@@ -360,6 +443,8 @@ export class VoiceClient {
     room.on(RoomEvent.Reconnecting, () => {
       if (this.reconnecting) return
       this.clearReconnectAckTimer()
+      this.clearPlayoutAckTimer()
+      this.pendingPlayoutBoundary = null
       this.reconnecting = true
       this.reconnectRequestPending = false
       this.reconnectMediaGeneration = null
@@ -426,51 +511,85 @@ export class VoiceClient {
     }
   }
 
-  private async publishPlayoutAck(event: ControlEvent): Promise<void> {
-    const drainMs = event.payload.drain_bound_ms
+  private beginPlayoutBoundary(event: ControlEvent): void {
     const ackTimeoutMs = event.payload.ack_timeout_ms
+    const ackDeadlineMs = event.payload.ack_deadline_ms
+    const mediaGeneration = event.payload.media_generation
+    const completedPublicationId = event.payload.completed_publication_id
+    const nextPublicationId = event.payload.media_publication_id
     if (
-      typeof drainMs !== 'number'
-      || !Number.isFinite(drainMs)
-      || drainMs < 0
+      event.payload.state !== 'awaiting_client_playout_boundary'
       || typeof ackTimeoutMs !== 'number'
-      || !Number.isFinite(ackTimeoutMs)
-      || ackTimeoutMs <= PLAYOUT_ACK_PUBLISH_MARGIN_MS
+      || !Number.isSafeInteger(ackTimeoutMs)
+      || typeof ackDeadlineMs !== 'number'
+      || !Number.isSafeInteger(ackDeadlineMs)
+      || ackDeadlineMs < 1
+      || ackDeadlineMs >= ackTimeoutMs
       || ackTimeoutMs > 10_000
-    ) {
-      await this.failSession('Некорректная граница воспроизведения')
-      return
+      || typeof mediaGeneration !== 'number'
+      || !Number.isSafeInteger(mediaGeneration)
+      || mediaGeneration < 1
+      || typeof completedPublicationId !== 'string'
+      || completedPublicationId.length < 1
+      || completedPublicationId.length > 128
+      || typeof nextPublicationId !== 'string'
+      || nextPublicationId.length < 1
+      || nextPublicationId.length > 128
+      || completedPublicationId === nextPublicationId
+    ) throw new Error('invalid playout boundary')
+    this.pendingPlayoutBoundary = {
+      turnId: event.turn_id,
+      streamEpoch: event.stream_epoch,
+      mediaGeneration,
+      completedPublicationId,
+      nextPublicationId,
     }
-    const generation = ++this.playoutGeneration
-    let drained = false
+    this.clearPlayoutAckTimer()
+    this.playoutAckTimer = setTimeout(() => {
+      void this.failSession('Не удалось подтвердить воспроизведение ответа')
+    }, ackDeadlineMs)
+    void this.completePlayoutBoundary()
+  }
+
+  private async completePlayoutBoundary(): Promise<void> {
+    const boundary = this.pendingPlayoutBoundary
+    if (
+      boundary === null
+      || !this.endedPublications.has(boundary.completedPublicationId)
+    ) return
+    const nextTrack = this.publicationTracks.get(boundary.nextPublicationId)
+    if (nextTrack === undefined || this.stopping) return
     try {
-      drained = await this.playback.confirmDrain(
-        drainMs,
-        ackTimeoutMs - PLAYOUT_ACK_PUBLISH_MARGIN_MS,
-      )
+      this.activateCorrelatedTrack(nextTrack)
     } catch {
       await this.failSession('Не удалось подтвердить воспроизведение ответа')
       return
     }
-    if (generation !== this.playoutGeneration || this.stopping) return
-    if (!drained || this.room === null || this.capability === null) {
-      await this.failSession('Не удалось подтвердить воспроизведение ответа')
-      return
-    }
+    const room = this.room
+    const capability = this.capability
+    if (room === null || capability === null) return
     this.clientSequence += 1
     const payload = new TextEncoder().encode(JSON.stringify({
       schema_version: CLIENT_CONTROL_VERSION,
-      session_id: this.capability.session_id,
-      turn_id: event.turn_id,
-      stream_epoch: event.stream_epoch,
+      session_id: capability.session_id,
+      turn_id: boundary.turnId,
+      stream_epoch: boundary.streamEpoch,
       sequence: this.clientSequence,
+      media_generation: boundary.mediaGeneration,
+      completed_publication_id: boundary.completedPublicationId,
+      media_publication_id: boundary.nextPublicationId,
       type: 'client.playout-completed',
     }))
     try {
-      await this.room.localParticipant.publishData(payload, {
+      await room.localParticipant.publishData(payload, {
         reliable: true,
         topic: CLIENT_CONTROL_TOPIC,
       })
+      if (this.pendingPlayoutBoundary === boundary) {
+        this.endedPublications.delete(boundary.completedPublicationId)
+        this.pendingPlayoutBoundary = null
+        this.clearPlayoutAckTimer()
+      }
     } catch {
       await this.failSession('Не удалось подтвердить воспроизведение ответа')
     }
@@ -479,6 +598,8 @@ export class VoiceClient {
   private completeReconnect(event: ControlEvent): void {
     const mediaGeneration = event.payload.media_generation
     const mediaReadyTimeoutMs = event.payload.media_ready_timeout_ms
+    const mediaReadyAckDeadlineMs = event.payload.media_ready_ack_deadline_ms
+    const publicationId = event.payload.media_publication_id
     if (
       event.payload.state !== 'awaiting_media'
       || typeof mediaGeneration !== 'number'
@@ -488,24 +609,22 @@ export class VoiceClient {
       || !Number.isSafeInteger(mediaReadyTimeoutMs)
       || mediaReadyTimeoutMs < 250
       || mediaReadyTimeoutMs > RECONNECT_ACK_TIMEOUT_MS
+      || typeof mediaReadyAckDeadlineMs !== 'number'
+      || !Number.isSafeInteger(mediaReadyAckDeadlineMs)
+      || mediaReadyAckDeadlineMs < 1
+      || mediaReadyAckDeadlineMs >= mediaReadyTimeoutMs
+      || typeof publicationId !== 'string'
+      || publicationId.length < 1
+      || publicationId.length > 128
     ) throw new Error('invalid reconnect media generation')
     this.clearReconnectAckTimer()
     this.reconnectAckTimer = setTimeout(() => {
       void this.failSession('Сервер не подтвердил готовность аудиопотока')
-    }, mediaReadyTimeoutMs)
+    }, mediaReadyAckDeadlineMs)
     this.reconnecting = false
     this.reconnectMediaGeneration = mediaGeneration
-    this.pendingMediaTurnId = 'session'
-    this.pendingMediaGeneration = mediaGeneration
-    const track = this.pendingRemoteTrack
     this.pendingRemoteTrack = null
-    if (track === null || this.invalidatedTracks.has(track)) {
-      this.renewPlaybackTrack('session', mediaGeneration)
-    } else {
-      this.activeRemoteTrack = track
-      this.playback.setTrack(track)
-      void this.publishMediaReady()
-    }
+    this.selectMediaPublication('session', mediaGeneration, publicationId)
   }
 
   private isExpectedAgent(identity: string): boolean {
@@ -515,6 +634,43 @@ export class VoiceClient {
   private hasExpectedAgent(room: Room): boolean {
     if (this.capability === null) return false
     return room.remoteParticipants.has(`agent-${this.capability.session_id}`)
+  }
+
+  private publicationId(publication: RemoteTrackPublication): string | null {
+    const publicationId = publication.trackSid
+    return typeof publicationId === 'string' && publicationId.length > 0
+      ? publicationId
+      : null
+  }
+
+  private activateCorrelatedTrack(track: RemoteAudioTrack): void {
+    if (this.activeRemoteTrack === track) return
+    this.invalidatePlaybackTrack()
+    this.activeRemoteTrack = track
+    this.expectedMediaPublicationId = null
+    this.freshSubscriptionRequired = false
+    this.renewalPhase = 'idle'
+    this.renewingPublication = null
+    this.playback.setTrack(track)
+  }
+
+  private selectMediaPublication(
+    turnId: string,
+    mediaGeneration: number,
+    publicationId: string,
+  ): void {
+    this.invalidatePlaybackTrack()
+    this.pendingMediaTurnId = turnId
+    this.pendingMediaGeneration = mediaGeneration
+    this.expectedMediaPublicationId = publicationId
+    this.freshSubscriptionRequired = false
+    this.renewalPhase = 'idle'
+    this.renewingPublication = null
+    const track = this.publicationTracks.get(publicationId)
+    if (track !== undefined) {
+      this.activateCorrelatedTrack(track)
+      void this.publishMediaReady()
+    }
   }
 
   private invalidatePlaybackTrack(): void {
@@ -574,6 +730,7 @@ export class VoiceClient {
       ) {
         this.pendingMediaGeneration = null
         this.pendingMediaTurnId = null
+        this.expectedMediaPublicationId = null
       }
     } catch {
       await this.failSession('Не удалось подтвердить готовность аудиопотока')
@@ -597,6 +754,12 @@ export class VoiceClient {
     this.initialReadyTimer = setTimeout(() => {
       void this.failSession('Сервер не подтвердил готовность голосовой сессии')
     }, timeoutMs)
+  }
+
+  private clearPlayoutAckTimer(): void {
+    if (this.playoutAckTimer === null) return
+    clearTimeout(this.playoutAckTimer)
+    this.playoutAckTimer = null
   }
 
   private clearInitialReadyTimer(): void {

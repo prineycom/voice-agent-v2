@@ -40,7 +40,7 @@
 | `no-mistakes doctor` | PASS | Shared daemon healthy; no pipeline run started. |
 | `./verify` | Historical pre-fix checkpoint | The earlier network-denied run recorded 83 passing tests; later lifecycle regressions require fresh pipeline results, so this count is not evidence for the current code. |
 | `./setup-slice6` | PASS | Pinned server/Python/npm tooling acquired outside Git; npm reported zero known vulnerabilities. |
-| `./verify-slice6` | PASS | SDK/JWT, Python suite, TypeScript, Vitest and production build. |
+| `./verify-slice6` | Historical pre-fix checkpoint | The earlier SDK/JWT, Python, TypeScript, Vitest, and production-build pass predates later lifecycle changes and is not evidence for the current code. |
 | Restricted LiveKit `1.13.5` start + `ss` inspection | PASS | Loopback signaling, tailnet UDP/7882, no TCP media. |
 | Loopback gateway/status/security/origin smoke | PASS | Exact safe status, security headers, forbidden missing/cross-site origin; no inference/session admitted. |
 | `git diff --check` / Python compile | PASS | No whitespace or syntax errors at checkpoint. |

@@ -155,6 +155,70 @@ class StartupCancellationRunner(RecordingRunner):
 
 
 class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_playout_rotates_to_a_correlated_fresh_publication(self) -> None:
+        calls: list[object] = []
+
+        class Source:
+            sequence = 0
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                Source.sequence += 1
+                self.name = f"source-{Source.sequence}"
+
+            async def capture_frame(self, _frame) -> None:
+                calls.append(("capture", self.name))
+
+            async def wait_for_playout(self) -> None:
+                calls.append(("drained", self.name))
+
+            def clear_queue(self) -> None:
+                calls.append(("clear", self.name))
+
+            async def aclose(self) -> None:
+                calls.append(("close", self.name))
+
+        class Participant:
+            sequence = 0
+
+            async def publish_track(self, _track, _options):
+                Participant.sequence += 1
+                publication = types.SimpleNamespace(
+                    sid=f"publication-{Participant.sequence}"
+                )
+                calls.append(("publish", publication.sid))
+                return publication
+
+            async def unpublish_track(self, publication_id: str) -> None:
+                calls.append(("unpublish", publication_id))
+
+        runtime.rtc.AudioSource = Source
+        runtime.rtc.AudioFrame = lambda **kwargs: kwargs
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        room = types.SimpleNamespace(local_participant=Participant())
+        source = Source()
+        observed_sources = []
+        sink = runtime.LiveKitAudioSink(room, source, observed_sources.append)
+
+        await sink.start()
+        boundary = await sink.play("turn-test", b"\0\0" * 320, lambda: False)
+
+        self.assertEqual(
+            boundary,
+            runtime.MediaBoundary("publication-1", "publication-2"),
+        )
+        self.assertEqual(observed_sources, [sink.source])
+        self.assertLess(
+            calls.index(("publish", "publication-2")),
+            calls.index(("unpublish", "publication-1")),
+        )
+        self.assertLess(
+            calls.index(("unpublish", "publication-1")),
+            calls.index(("close", "source-1")),
+        )
+
     def test_live_runner_bounds_session_diagnostics_after_every_turn(self) -> None:
         class Adapter:
             def __init__(self) -> None:

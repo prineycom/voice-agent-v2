@@ -16,6 +16,7 @@ from voice_agent_v2.realtime import (
     CONTROL_EVENT_VERSION,
     ControlEventGate,
     EnergyEndpoint,
+    MediaBoundary,
     RealtimeSession,
 )
 from voice_agent_v2.slice6_config import (
@@ -71,23 +72,32 @@ class MemoryAudioSink:
         self.released = asyncio.Event()
         self.cleared: list[str] = []
         self.played: list[str] = []
+        self.publication_sequence = 0
+        self.publication_id = "publication-0"
 
-    async def play(self, turn_id, pcm, cancelled) -> bool:
+    def rotate(self) -> MediaBoundary:
+        completed = self.publication_id
+        self.publication_sequence += 1
+        self.publication_id = f"publication-{self.publication_sequence}"
+        return MediaBoundary(completed, self.publication_id)
+
+    async def play(self, turn_id, pcm, cancelled) -> MediaBoundary | None:
         self.played.append(turn_id)
         self.started.set()
         if self.fail_play:
             raise RuntimeError("playout failed")
         if self.block:
             await self.released.wait()
-        return bool(pcm) and not cancelled()
+        return self.rotate() if pcm and not cancelled() else None
 
-    async def clear(self, turn_id) -> None:
+    async def clear(self, turn_id) -> str:
         self.cleared.append(turn_id)
         if self.fail_clear:
             raise RuntimeError("clear failed")
         if self.block_clear:
             await self.released.wait()
         self.released.set()
+        return self.rotate().next_publication_id
 
 
 class FakeRunner:
@@ -230,9 +240,9 @@ class OrderedAudioSink(MemoryAudioSink):
         super().__init__()
         self.operations = operations
 
-    async def clear(self, turn_id) -> None:
+    async def clear(self, turn_id) -> str:
         self.operations.append("media-clear")
-        await super().clear(turn_id)
+        return await super().clear(turn_id)
 
 
 class SlowCancellationRunner(FakeRunner):
@@ -370,13 +380,23 @@ async def wait_for_turn(session: RealtimeSession) -> None:
                 "type": "client.media-ready",
             }).encode()
             await session.handle_client_control(payload)
-        if context.playout_ack is not None and not context.playout_ack.done():
+        if (
+            context.playout_ack is not None
+            and not context.playout_ack.done()
+            and context.playout_boundary is not None
+            and context.playout_media_generation is not None
+        ):
             payload = json.dumps({
                 "schema_version": CLIENT_CONTROL_VERSION,
                 "session_id": session.session_id,
                 "turn_id": context.turn_id,
                 "stream_epoch": session.stream_epoch,
                 "sequence": session._client_sequence + 1,
+                "media_generation": context.playout_media_generation,
+                "completed_publication_id": (
+                    context.playout_boundary.completed_publication_id
+                ),
+                "media_publication_id": context.playout_boundary.next_publication_id,
                 "type": "client.playout-completed",
             }).encode()
             if await session.handle_client_control(payload):
@@ -720,6 +740,46 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.events[-1]["type"], "turn.listening")
         self.assertEqual(events.events[-1]["turn_id"], turn_id)
 
+    async def test_reconnect_can_replace_media_while_speech_waits_for_readiness(self) -> None:
+        events = MemoryEventSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        await session.start_utterance()
+        await session.interrupt()
+        admission = asyncio.create_task(session.start_utterance())
+        await asyncio.sleep(0)
+        self.assertFalse(admission.done())
+
+        reconnected = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+        self.assertTrue(
+            await asyncio.wait_for(session.handle_client_control(reconnected), 1)
+        )
+        acknowledgement = events.events[-1]
+        self.assertEqual(acknowledgement["type"], "session.reconnected")
+        media_ready = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": "session",
+            "stream_epoch": 2,
+            "sequence": 2,
+            "media_generation": acknowledgement["payload"]["media_generation"],
+            "type": "client.media-ready",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(media_ready))
+        turn_id = await asyncio.wait_for(admission, 1)
+        self.assertEqual(events.events[-1]["turn_id"], turn_id)
+        self.assertEqual(events.events[-1]["type"], "turn.listening")
+
     async def test_closed_session_reconnect_stays_degraded_without_reset(self) -> None:
         events = MemoryEventSink()
         runner = FakeRunner()
@@ -760,13 +820,20 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         while session._active is not None and session._active.playout_ack is None:
             await asyncio.sleep(0.01)
         context = session._active
-        assert context is not None
+        assert (
+            context is not None
+            and context.playout_boundary is not None
+            and context.playout_media_generation is not None
+        )
         playout = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": old_turn,
             "stream_epoch": session.stream_epoch,
             "sequence": 1,
+            "media_generation": context.playout_media_generation,
+            "completed_publication_id": context.playout_boundary.completed_publication_id,
+            "media_publication_id": context.playout_boundary.next_publication_id,
             "type": "client.playout-completed",
         }).encode()
         self.assertTrue(await session.handle_client_control(playout))
@@ -804,6 +871,19 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(runner.cleanup_entered.wait, 1)
         await session.finish_utterance(b"\0\0" * 320)
         await session.discard_utterance()
+        interrupted = next(
+            event for event in reversed(events.events)
+            if event["type"] == "turn.interrupted"
+        )
+        self.assertTrue(await session.handle_client_control(json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": interrupted["turn_id"],
+            "stream_epoch": session.stream_epoch,
+            "sequence": 1,
+            "media_generation": interrupted["payload"]["media_generation"],
+            "type": "client.media-ready",
+        }).encode()))
         third_turn = await session.start_utterance()
         await session.finish_utterance(b"\0\0" * 320)
         third_context = session._active
@@ -942,14 +1022,30 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         self.assertEqual(events.events[-1]["type"], "turn.playout-ready")
         self.assertEqual(events.events[-1]["payload"]["ack_timeout_ms"], 3_000)
+        self.assertEqual(events.events[-1]["payload"]["ack_deadline_ms"], 2_750)
+        self.assertEqual(
+            events.events[-1]["payload"]["completed_publication_id"],
+            context.playout_boundary.completed_publication_id,
+        )
+        self.assertEqual(
+            events.events[-1]["payload"]["media_publication_id"],
+            context.playout_boundary.next_publication_id,
+        )
         self.assertFalse(context.task.done())
 
+        assert (
+            context.playout_boundary is not None
+            and context.playout_media_generation is not None
+        )
         wrong = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": "turn-wrong",
             "stream_epoch": session.stream_epoch,
             "sequence": 1,
+            "media_generation": context.playout_media_generation,
+            "completed_publication_id": context.playout_boundary.completed_publication_id,
+            "media_publication_id": context.playout_boundary.next_publication_id,
             "type": "client.playout-completed",
         }).encode()
         self.assertFalse(await session.handle_client_control(wrong))
@@ -960,6 +1056,9 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             "turn_id": turn_id,
             "stream_epoch": session.stream_epoch,
             "sequence": 2,
+            "media_generation": context.playout_media_generation,
+            "completed_publication_id": context.playout_boundary.completed_publication_id,
+            "media_publication_id": context.playout_boundary.next_publication_id,
             "type": "client.playout-completed",
         }).encode()
         self.assertTrue(await session.handle_client_control(valid))

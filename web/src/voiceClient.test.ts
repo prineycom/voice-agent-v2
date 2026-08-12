@@ -176,61 +176,71 @@ describe('VoiceClient startup cancellation', () => {
     expect(room.localParticipant.publishTrack).not.toHaveBeenCalled()
   })
 
-  it('publishes playout acknowledgement after the media clock drain boundary', async () => {
-    vi.useFakeTimers()
+  it('acknowledges only the correlated publication end and fresh track', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
     const client = new VoiceClient(document.createElement('div'), callbacks())
     await client.start()
     const room = livekit.rooms[0]
-    const remoteElement = document.createElement('audio')
-    remoteElement.play = vi.fn().mockResolvedValue(undefined)
-    remoteElement.pause = vi.fn()
-    remoteElement.load = vi.fn()
-    room.emit(
-      'trackSubscribed',
-      {
-        kind: 'audio',
-        attach: vi.fn().mockReturnValue(remoteElement),
-        detach: vi.fn().mockReturnValue([]),
-      },
-      {},
-      { identity: 'agent-session-test-0001' },
-    )
+    const oldElement = document.createElement('audio')
+    oldElement.play = vi.fn().mockResolvedValue(undefined)
+    oldElement.pause = vi.fn()
+    oldElement.load = vi.fn()
+    const oldTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(oldElement),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    const oldPublication = { trackSid: 'publication-old' }
+    room.emit('trackSubscribed', oldTrack, oldPublication, {
+      identity: 'agent-session-test-0001',
+    })
+    const nextElement = document.createElement('audio')
+    nextElement.play = vi.fn().mockResolvedValue(undefined)
+    nextElement.pause = vi.fn()
+    nextElement.load = vi.fn()
+    const nextTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(nextElement),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    const nextPublication = { trackSid: 'publication-next' }
+    room.emit('trackSubscribed', nextTrack, nextPublication, {
+      identity: 'agent-session-test-0001',
+    })
+    expect(nextTrack.attach).not.toHaveBeenCalled()
+
     const types = [
       'session.ready', 'turn.listening', 'turn.transcribing', 'stt.final',
       'turn.thinking', 'llm.final', 'turn.speaking', 'turn.playout-ready',
     ]
     for (const [index, type] of types.entries()) {
-      const sessionEvent = type.startsWith('session.')
-      const payload = type === 'turn.playout-ready'
-        ? { drain_bound_ms: 250, ack_timeout_ms: 3_000 }
-        : {}
-      room.emit(
-        'dataReceived',
-        new TextEncoder().encode(JSON.stringify({
-          schema_version: 'voice-agent.realtime-control.v1',
-          session_id: 'session-test-0001',
-          turn_id: sessionEvent ? 'session' : 'turn-00000001',
-          stream_epoch: 1,
-          sequence: index + 1,
-          type,
-          terminal: false,
-          payload,
-        })),
-        { identity: 'agent-session-test-0001' },
-        undefined,
-        'voice-agent.control.v1',
-      )
+      emitControl(room, type, index + 1, {
+        payload: type === 'turn.playout-ready' ? {
+          state: 'awaiting_client_playout_boundary',
+          ack_timeout_ms: 3_000,
+          ack_deadline_ms: 2_750,
+          media_generation: 1,
+          completed_publication_id: 'publication-old',
+          media_publication_id: 'publication-next',
+        } : {},
+      })
     }
-    Object.defineProperty(remoteElement, 'currentTime', { value: 0.3, configurable: true })
-    await vi.advanceTimersByTimeAsync(20)
+    await Promise.resolve()
+    expect(room.localParticipant.publishData).not.toHaveBeenCalled()
 
-    expect(room.localParticipant.publishData).toHaveBeenCalledOnce()
+    room.emit('trackUnsubscribed', oldTrack, oldPublication, {
+      identity: 'agent-session-test-0001',
+    })
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledOnce())
+    expect(nextTrack.attach).toHaveBeenCalledOnce()
     const encoded = room.localParticipant.publishData.mock.calls[0][0] as Uint8Array
     expect(JSON.parse(new TextDecoder().decode(encoded))).toMatchObject({
       turn_id: 'turn-00000001',
       stream_epoch: 1,
+      media_generation: 1,
+      completed_publication_id: 'publication-old',
+      media_publication_id: 'publication-next',
       type: 'client.playout-completed',
     })
   })
@@ -250,7 +260,7 @@ describe('VoiceClient startup cancellation', () => {
       attach: vi.fn().mockReturnValue(oldElement),
       detach: vi.fn().mockReturnValue([]),
     }
-    room.emit('trackSubscribed', oldTrack, {}, { identity: 'agent-session-test-0001' })
+    room.emit('trackSubscribed', oldTrack, { trackSid: 'publication-old' }, { identity: 'agent-session-test-0001' })
     const replacementElement = document.createElement('audio')
     replacementElement.play = vi.fn().mockResolvedValue(undefined)
     replacementElement.pause = vi.fn()
@@ -264,7 +274,7 @@ describe('VoiceClient startup cancellation', () => {
     room.emit('reconnecting')
     room.emit('reconnected')
     room.emit('reconnected')
-    room.emit('trackSubscribed', replacementTrack, {}, { identity: 'agent-session-test-0001' })
+    room.emit('trackSubscribed', replacementTrack, { trackSid: 'publication-reconnected' }, { identity: 'agent-session-test-0001' })
     await Promise.resolve()
 
     expect(room.localParticipant.publishData).toHaveBeenCalledOnce()
@@ -291,6 +301,8 @@ describe('VoiceClient startup cancellation', () => {
           conversation_context_reset: true,
           media_generation: 1,
           media_ready_timeout_ms: 3_000,
+          media_ready_ack_deadline_ms: 2_750,
+          media_publication_id: 'publication-reconnected',
           interrupted_turn_id: null,
         },
       })),
@@ -313,6 +325,42 @@ describe('VoiceClient startup cancellation', () => {
       payload: { state: 'ready', media_generation: 1 },
     })
     await client.stop()
+  })
+
+  it('uses the server-provided reconnect acknowledgement deadline', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    room.emit('reconnecting')
+    room.emit('reconnected')
+    await Promise.resolve()
+    emitControl(room, 'session.reconnected', 1, {
+      streamEpoch: 2,
+      payload: {
+        state: 'awaiting_media',
+        stale_media_discarded: true,
+        conversation_context_reset: true,
+        media_generation: 1,
+        media_ready_timeout_ms: 3_000,
+        media_ready_ack_deadline_ms: 2_750,
+        media_publication_id: 'publication-missing',
+        interrupted_turn_id: null,
+      },
+    })
+
+    await vi.advanceTimersByTimeAsync(2_749)
+    expect(observed.onConnection).not.toHaveBeenLastCalledWith(
+      'failed', expect.any(String),
+    )
+    await vi.advanceTimersByTimeAsync(2)
+    expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed', 'Сервер не подтвердил готовность аудиопотока',
+    )
   })
 
   it('fails closed when reconnect receives no server epoch acknowledgement', async () => {
