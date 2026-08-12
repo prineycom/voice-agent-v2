@@ -29,6 +29,9 @@ interface PendingPlayoutBoundary {
   mediaGeneration: number
   completedPublicationId: string
   nextPublicationId: string
+  finalSampleCount: number
+  sampleRateHz: number
+  observing: boolean
 }
 
 export interface VoiceClientCallbacks {
@@ -324,9 +327,6 @@ export class VoiceClient {
           const oldest = this.endedPublications.values().next().value
           if (typeof oldest === 'string') this.endedPublications.delete(oldest)
         }
-        if (publicationId === this.pendingPlayoutBoundary?.completedPublicationId) {
-          void this.completePlayoutBoundary()
-        }
       }
       if (
         publication !== this.renewingPublication
@@ -426,7 +426,13 @@ export class VoiceClient {
         const code = typeof event.payload.code === 'string' ? event.payload.code : 'degraded'
         terminalFailure = `Голосовая сессия остановлена (${stage}/${code})`
       }
-      if (event.type === 'turn.playout-ready') {
+      if (event.type === 'turn.speaking') {
+        try {
+          this.beginResponseBoundary(event)
+        } catch {
+          terminalFailure = 'Некорректная граница начала воспроизведения'
+        }
+      } else if (event.type === 'turn.playout-ready') {
         try {
           this.beginPlayoutBoundary(event)
         } catch {
@@ -511,12 +517,46 @@ export class VoiceClient {
     }
   }
 
+  private beginResponseBoundary(event: ControlEvent): void {
+    const mediaGeneration = event.payload.media_generation
+    const publicationId = event.payload.media_publication_id
+    const timeoutMs = event.payload.media_ready_timeout_ms
+    const ackDeadlineMs = event.payload.media_ready_ack_deadline_ms
+    const track = typeof publicationId === 'string'
+      ? this.publicationTracks.get(publicationId)
+      : undefined
+    if (
+      event.payload.state !== 'awaiting_media'
+      || typeof mediaGeneration !== 'number'
+      || !Number.isSafeInteger(mediaGeneration)
+      || mediaGeneration < 1
+      || typeof publicationId !== 'string'
+      || publicationId.length < 1
+      || publicationId.length > 128
+      || typeof timeoutMs !== 'number'
+      || !Number.isSafeInteger(timeoutMs)
+      || typeof ackDeadlineMs !== 'number'
+      || !Number.isSafeInteger(ackDeadlineMs)
+      || ackDeadlineMs < 1
+      || ackDeadlineMs >= timeoutMs
+      || track === undefined
+      || track !== this.activeRemoteTrack
+    ) throw new Error('invalid response media boundary')
+    this.playback.armRenderBoundary()
+    this.pendingMediaTurnId = event.turn_id
+    this.pendingMediaGeneration = mediaGeneration
+    this.expectedMediaPublicationId = publicationId
+    void this.publishMediaReady()
+  }
+
   private beginPlayoutBoundary(event: ControlEvent): void {
     const ackTimeoutMs = event.payload.ack_timeout_ms
     const ackDeadlineMs = event.payload.ack_deadline_ms
     const mediaGeneration = event.payload.media_generation
     const completedPublicationId = event.payload.completed_publication_id
     const nextPublicationId = event.payload.media_publication_id
+    const finalSampleCount = event.payload.final_sample_count
+    const sampleRateHz = event.payload.sample_rate_hz
     if (
       event.payload.state !== 'awaiting_client_playout_boundary'
       || typeof ackTimeoutMs !== 'number'
@@ -536,6 +576,13 @@ export class VoiceClient {
       || nextPublicationId.length < 1
       || nextPublicationId.length > 128
       || completedPublicationId === nextPublicationId
+      || typeof finalSampleCount !== 'number'
+      || !Number.isSafeInteger(finalSampleCount)
+      || finalSampleCount < 1
+      || finalSampleCount > 30 * 16_000
+      || typeof sampleRateHz !== 'number'
+      || !Number.isSafeInteger(sampleRateHz)
+      || sampleRateHz !== 16_000
     ) throw new Error('invalid playout boundary')
     this.pendingPlayoutBoundary = {
       turnId: event.turn_id,
@@ -543,6 +590,9 @@ export class VoiceClient {
       mediaGeneration,
       completedPublicationId,
       nextPublicationId,
+      finalSampleCount,
+      sampleRateHz,
+      observing: false,
     }
     this.clearPlayoutAckTimer()
     this.playoutAckTimer = setTimeout(() => {
@@ -553,16 +603,21 @@ export class VoiceClient {
 
   private async completePlayoutBoundary(): Promise<void> {
     const boundary = this.pendingPlayoutBoundary
-    if (
-      boundary === null
-      || !this.endedPublications.has(boundary.completedPublicationId)
-    ) return
+    if (boundary === null || boundary.observing || this.stopping) return
     const nextTrack = this.publicationTracks.get(boundary.nextPublicationId)
-    if (nextTrack === undefined || this.stopping) return
+    if (nextTrack === undefined) return
+    boundary.observing = true
     try {
+      await this.playback.waitForRenderedSamples(
+        boundary.finalSampleCount,
+        boundary.sampleRateHz,
+      )
+      if (this.pendingPlayoutBoundary !== boundary || this.stopping) return
       this.activateCorrelatedTrack(nextTrack)
     } catch {
-      await this.failSession('Не удалось подтвердить воспроизведение ответа')
+      if (this.pendingPlayoutBoundary === boundary) {
+        await this.failSession('Не удалось подтвердить воспроизведение ответа')
+      }
       return
     }
     const room = this.room
@@ -586,7 +641,6 @@ export class VoiceClient {
         topic: CLIENT_CONTROL_TOPIC,
       })
       if (this.pendingPlayoutBoundary === boundary) {
-        this.endedPublications.delete(boundary.completedPublicationId)
         this.pendingPlayoutBoundary = null
         this.clearPlayoutAckTimer()
       }

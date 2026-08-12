@@ -63,12 +63,20 @@ class EventSink(Protocol):
 class MediaBoundary:
     completed_publication_id: str
     next_publication_id: str
+    final_sample_count: int = 1
+    sample_rate_hz: int = 16_000
 
 
 class AudioSink(Protocol):
+    requires_media_start_ack: bool
+
+    def current_publication_id(self) -> str: ...
+
     async def play(
         self, turn_id: str, pcm: bytes, cancelled: Callable[[], bool]
     ) -> MediaBoundary | None: ...
+
+    async def complete(self, turn_id: str, boundary: MediaBoundary) -> None: ...
 
     async def clear(self, turn_id: str) -> str: ...
 
@@ -635,6 +643,12 @@ class RealtimeSession:
         del result
         del worker
         pcm = b""
+        media_error = await self._await_media_ready(context)
+        if media_error is not None:
+            await self._fail_publication(context, media_error, clear_audio=True)
+            async with self._lock:
+                await self._degrade_locked("publication", media_error)
+            return
         if context.terminal:
             context.rollback_error = await self._rollback_context(context)
             if context.rollback_error is not None:
@@ -674,6 +688,11 @@ class RealtimeSession:
             or boundary.completed_publication_id == boundary.next_publication_id
             or len(boundary.completed_publication_id) > 128
             or len(boundary.next_publication_id) > 128
+            or not isinstance(boundary.final_sample_count, int)
+            or isinstance(boundary.final_sample_count, bool)
+            or boundary.final_sample_count < 1
+            or boundary.final_sample_count > MAX_UTTERANCE_BYTES // 2
+            or boundary.sample_rate_hz != 16_000
         ):
             await self._fail_publication(context, "audio_boundary_invalid", clear_audio=True)
             return
@@ -696,8 +715,11 @@ class RealtimeSession:
                     "media_generation": context.playout_media_generation,
                     "completed_publication_id": boundary.completed_publication_id,
                     "media_publication_id": boundary.next_publication_id,
+                    "final_sample_count": boundary.final_sample_count,
+                    "sample_rate_hz": boundary.sample_rate_hz,
                 },
             )
+            self._arm_media_ready_timeout(context.playout_media_generation)
         try:
             await asyncio.wait_for(
                 asyncio.shield(context.playout_ack),
@@ -711,8 +733,14 @@ class RealtimeSession:
                 await self._degrade_locked("transport", "client_playout_ack_timeout")
             return
 
-        # Completion and admission of the next turn share the session lock. This
-        # prevents an old completion from appearing after the next listening event.
+        try:
+            await self.audio_sink.complete(context.turn_id, boundary)
+        except Exception:
+            await self._fail_publication(
+                context, "audio_boundary_finalize_failed", clear_audio=True
+            )
+            return
+
         async with self._lock:
             if context.terminal or self._closed or self._active is not context:
                 return
@@ -812,7 +840,15 @@ class RealtimeSession:
         timeout = self._media_ready_timeout_task
         if timeout is not None and not timeout.done():
             timeout.cancel()
-        generation = self._media_generation
+        self._media_ready_timeout_task = None
+        return self._media_generation
+
+    def _arm_media_ready_timeout(self, generation: int) -> None:
+        if generation != self._media_generation or self._closed:
+            return
+        timeout = self._media_ready_timeout_task
+        if timeout is not None and not timeout.done():
+            timeout.cancel()
         epoch = self.stream_epoch
 
         async def expire() -> None:
@@ -833,7 +869,6 @@ class RealtimeSession:
         self._media_ready_timeout_task = asyncio.create_task(
             expire(), name=f"media-ready-{self.session_id}-{generation}"
         )
-        return generation
 
     def _confirm_media_ready(self, generation: int) -> None:
         self._media_ready_generation = generation
@@ -859,7 +894,27 @@ class RealtimeSession:
         terminal = event_type in TERMINAL_EVENT_TYPES
         if terminal:
             context.terminal = True
-        await self._emit(context.turn_id, str(event_type), dict(event["payload"]), terminal=terminal)
+        public_payload = dict(event["payload"])
+        media_generation: int | None = None
+        if (
+            event_type == "turn.speaking"
+            and self.audio_sink.requires_media_start_ack
+        ):
+            media_generation = self._invalidate_media(context.turn_id)
+            public_payload.update({
+                "state": "awaiting_media",
+                "media_generation": media_generation,
+                "media_publication_id": self.audio_sink.current_publication_id(),
+                "media_ready_timeout_ms": CLIENT_MEDIA_READY_TIMEOUT_MS,
+                "media_ready_ack_deadline_ms": (
+                    CLIENT_MEDIA_READY_TIMEOUT_MS - CLIENT_MEDIA_READY_ACK_MARGIN_MS
+                ),
+            })
+        await self._emit(
+            context.turn_id, str(event_type), public_payload, terminal=terminal
+        )
+        if media_generation is not None:
+            self._arm_media_ready_timeout(media_generation)
 
     async def handle_client_control(self, payload: bytes) -> bool:
         if not payload or len(payload) > MAX_CONTROL_BYTES:
@@ -1024,6 +1079,7 @@ class RealtimeSession:
                             "interrupted_turn_id": interrupted_turn_id,
                         },
                     )
+                    self._arm_media_ready_timeout(media_generation)
                 else:
                     await self._degrade_locked("controller", reset_error)
             return True
@@ -1075,8 +1131,10 @@ class RealtimeSession:
         self._event_sequence += 1
         if self._event_sequence > MAX_EVENT_SEQUENCE:
             raise RuntimeError("session event sequence exhausted")
+        media_generation: int | None = None
         if event_type in {"turn.interrupted", "turn.failed"}:
-            payload = {**payload, "media_generation": self._invalidate_media(turn_id)}
+            media_generation = self._invalidate_media(turn_id)
+            payload = {**payload, "media_generation": media_generation}
         try:
             await self.event_sink.send({
                 "schema_version": CONTROL_EVENT_VERSION,
@@ -1088,6 +1146,8 @@ class RealtimeSession:
                 "terminal": terminal,
                 "payload": payload,
             })
+            if media_generation is not None:
+                self._arm_media_ready_timeout(media_generation)
         except Exception:
             self._closed = True
             self._report_failure("transport", "control_publish_failed")

@@ -55,7 +55,23 @@ class FailingEventSink(MemoryEventSink):
         await super().send(event)
 
 
+class DelayedEventSink(MemoryEventSink):
+    def __init__(self, delayed_type: str) -> None:
+        super().__init__()
+        self.delayed_type = delayed_type
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send(self, event: dict[str, object]) -> None:
+        if event["type"] == self.delayed_type:
+            self.started.set()
+            await self.release.wait()
+        await super().send(event)
+
+
 class MemoryAudioSink:
+    requires_media_start_ack = False
+
     def __init__(
         self,
         *,
@@ -72,8 +88,12 @@ class MemoryAudioSink:
         self.released = asyncio.Event()
         self.cleared: list[str] = []
         self.played: list[str] = []
+        self.completed: list[str] = []
         self.publication_sequence = 0
         self.publication_id = "publication-0"
+
+    def current_publication_id(self) -> str:
+        return self.publication_id
 
     def rotate(self) -> MediaBoundary:
         completed = self.publication_id
@@ -89,6 +109,9 @@ class MemoryAudioSink:
         if self.block:
             await self.released.wait()
         return self.rotate() if pcm and not cancelled() else None
+
+    async def complete(self, turn_id, _boundary) -> None:
+        self.completed.append(turn_id)
 
     async def clear(self, turn_id) -> str:
         self.cleared.append(turn_id)
@@ -1006,6 +1029,60 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.runner.reset_sessions, ["session-test-0001"])
         self.assertEqual(session.drop_counts["client_control"], 4)
 
+    async def test_audio_publication_waits_for_render_observer_readiness(self) -> None:
+        events = MemoryEventSink()
+        audio = MemoryAudioSink()
+        audio.requires_media_start_ack = True
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=audio,
+        )
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        while not events.events or events.events[-1]["type"] != "turn.speaking":
+            await asyncio.sleep(0.01)
+        self.assertEqual(audio.played, [])
+        speaking = events.events[-1]
+        ready = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": session.stream_epoch,
+            "sequence": 1,
+            "media_generation": speaking["payload"]["media_generation"],
+            "type": "client.media-ready",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(ready))
+        context = session._active
+        assert context is not None and context.task is not None
+        while context.playout_ack is None:
+            await asyncio.sleep(0.01)
+        self.assertEqual(audio.played, [turn_id])
+        await session.interrupt()
+        await asyncio.wait_for(context.task, 2)
+
+    async def test_media_deadline_starts_after_control_publication(self) -> None:
+        events = DelayedEventSink("turn.playout-ready")
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(events.started.wait(), 1)
+
+        self.assertIsNone(session._media_ready_timeout_task)
+        events.release.set()
+        context = session._active
+        assert context is not None and context.task is not None
+        while not events.events or events.events[-1]["type"] != "turn.playout-ready":
+            await asyncio.sleep(0.01)
+        self.assertIsNotNone(session._media_ready_timeout_task)
+        await session.interrupt()
+        await asyncio.wait_for(context.task, 2)
+
     async def test_completion_waits_for_matching_client_playout_ack(self) -> None:
         events = MemoryEventSink()
         runner = FakeRunner()
@@ -1031,6 +1108,8 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             events.events[-1]["payload"]["media_publication_id"],
             context.playout_boundary.next_publication_id,
         )
+        self.assertEqual(events.events[-1]["payload"]["final_sample_count"], 1)
+        self.assertEqual(events.events[-1]["payload"]["sample_rate_hz"], 16_000)
         self.assertFalse(context.task.done())
 
         assert (

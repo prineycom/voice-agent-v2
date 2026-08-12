@@ -142,6 +142,8 @@ class LiveKitEventSink(EventSink):
 
 
 class LiveKitAudioSink(AudioSink):
+    requires_media_start_ack = True
+
     def __init__(
         self,
         room: rtc.Room,
@@ -155,6 +157,7 @@ class LiveKitAudioSink(AudioSink):
         self._active_turn: str | None = None
         self._rotation_lock = asyncio.Lock()
         self._rotation_failed = False
+        self._pending_boundary: tuple[str, MediaBoundary, rtc.AudioSource] | None = None
 
     @staticmethod
     def _publication_id(publication) -> str:
@@ -175,13 +178,35 @@ class LiveKitAudioSink(AudioSink):
         self.publication = await self._publish(self.source)
         self._publication_id(self.publication)
 
-    async def _rotate(self, expected_source: rtc.AudioSource) -> MediaBoundary:
+    async def _retire(self, publication_id: str, source: rtc.AudioSource) -> None:
+        errors: list[Exception] = []
+        try:
+            await self.room.local_participant.unpublish_track(publication_id)
+        except Exception as error:
+            errors.append(error)
+        try:
+            await source.aclose()
+        except Exception as error:
+            errors.append(error)
+        if errors:
+            self._rotation_failed = True
+            raise ExceptionGroup("LiveKit audio publication retirement failed", errors)
+
+    async def _rotate(
+        self,
+        expected_source: rtc.AudioSource,
+        *,
+        turn_id: str,
+        final_sample_count: int,
+        retain_completed: bool,
+    ) -> MediaBoundary:
         async with self._rotation_lock:
             if self._rotation_failed:
                 raise RuntimeError("LiveKit audio publication rotation previously failed")
             if expected_source is not self.source:
-                publication_id = self._publication_id(self.publication)
-                return MediaBoundary(publication_id, publication_id)
+                raise RuntimeError("LiveKit audio source changed before rotation")
+            if retain_completed and self._pending_boundary is not None:
+                raise RuntimeError("previous LiveKit media boundary is still pending")
             old_source = self.source
             old_publication = self.publication
             if old_publication is None:
@@ -197,19 +222,20 @@ class LiveKitAudioSink(AudioSink):
             self.source = next_source
             self.publication = next_publication
             self.source_changed(next_source)
-            errors: list[Exception] = []
-            try:
-                await self.room.local_participant.unpublish_track(old_publication_id)
-            except Exception as error:
-                errors.append(error)
-            try:
-                await old_source.aclose()
-            except Exception as error:
-                errors.append(error)
-            if errors:
-                self._rotation_failed = True
-                raise ExceptionGroup("LiveKit audio publication rotation failed", errors)
-            return MediaBoundary(old_publication_id, next_publication_id)
+            boundary = MediaBoundary(
+                old_publication_id,
+                next_publication_id,
+                final_sample_count,
+                16_000,
+            )
+            if retain_completed:
+                self._pending_boundary = (turn_id, boundary, old_source)
+            else:
+                await self._retire(old_publication_id, old_source)
+            return boundary
+
+    def current_publication_id(self) -> str:
+        return self._publication_id(self.publication)
 
     async def play(
         self, turn_id: str, pcm: bytes, cancelled
@@ -233,10 +259,23 @@ class LiveKitAudioSink(AudioSink):
             await source.wait_for_playout()
             if cancelled() or self._active_turn != turn_id:
                 return None
-            return await self._rotate(source)
+            return await self._rotate(
+                source,
+                turn_id=turn_id,
+                final_sample_count=len(pcm) // 2,
+                retain_completed=True,
+            )
         finally:
             if self._active_turn == turn_id:
                 self._active_turn = None
+
+    async def complete(self, turn_id: str, boundary: MediaBoundary) -> None:
+        async with self._rotation_lock:
+            pending = self._pending_boundary
+            if pending is None or pending[0] != turn_id or pending[1] != boundary:
+                raise RuntimeError("LiveKit media boundary is not pending")
+            await self._retire(boundary.completed_publication_id, pending[2])
+            self._pending_boundary = None
 
     async def clear(self, turn_id: str) -> str:
         source = self.source
@@ -244,9 +283,17 @@ class LiveKitAudioSink(AudioSink):
             return self._publication_id(self.publication)
         self._active_turn = None
         source.clear_queue()
-        boundary = await self._rotate(source)
-        if boundary.completed_publication_id == boundary.next_publication_id:
-            return boundary.next_publication_id
+        boundary = await self._rotate(
+            source,
+            turn_id=turn_id,
+            final_sample_count=0,
+            retain_completed=False,
+        )
+        async with self._rotation_lock:
+            pending = self._pending_boundary
+            if pending is not None:
+                await self._retire(pending[1].completed_publication_id, pending[2])
+                self._pending_boundary = None
         return boundary.next_publication_id
 
 

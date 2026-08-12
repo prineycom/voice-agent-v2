@@ -4,6 +4,7 @@ import { AudioPlaybackBoundary, type AttachableAudioTrack } from './playback'
 class FakeTrack implements AttachableAudioTrack {
   attachCount = 0
   detachCount = 0
+  renderObserver: ((sampleCount: number, sampleRate: number) => void) | null = null
 
   attach(): HTMLMediaElement {
     this.attachCount += 1
@@ -17,6 +18,15 @@ class FakeTrack implements AttachableAudioTrack {
   detach(): HTMLMediaElement[] {
     this.detachCount += 1
     return []
+  }
+
+  observeRenderedSamples(
+    observer: (sampleCount: number, sampleRate: number) => void,
+  ): () => void {
+    this.renderObserver = observer
+    return () => {
+      this.renderObserver = null
+    }
   }
 }
 
@@ -50,4 +60,23 @@ describe('audio playout boundary', () => {
     expect(container.childElementCount).toBe(0)
   })
 
+  it('resolves only after the exact rendered sample boundary', async () => {
+    const boundary = new AudioPlaybackBoundary(
+      document.createElement('div'),
+      vi.fn(),
+    )
+    const track = new FakeTrack()
+    boundary.setTrack(track)
+    const rendered = boundary.waitForRenderedSamples(320, 16_000)
+    let completed = false
+    void rendered.then(() => { completed = true })
+
+    track.renderObserver?.(319, 16_000)
+    await Promise.resolve()
+    expect(completed).toBe(false)
+    track.renderObserver?.(1, 16_000)
+    await rendered
+
+    expect(completed).toBe(true)
+  })
 })

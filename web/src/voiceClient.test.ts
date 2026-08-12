@@ -186,10 +186,15 @@ describe('VoiceClient startup cancellation', () => {
     oldElement.play = vi.fn().mockResolvedValue(undefined)
     oldElement.pause = vi.fn()
     oldElement.load = vi.fn()
+    let renderObserver: ((sampleCount: number, sampleRate: number) => void) | null = null
     const oldTrack = {
       kind: 'audio',
       attach: vi.fn().mockReturnValue(oldElement),
       detach: vi.fn().mockReturnValue([]),
+      observeRenderedSamples: vi.fn((observer: (sampleCount: number, sampleRate: number) => void) => {
+        renderObserver = observer
+        return vi.fn()
+      }),
     }
     const oldPublication = { trackSid: 'publication-old' }
     room.emit('trackSubscribed', oldTrack, oldPublication, {
@@ -216,29 +221,50 @@ describe('VoiceClient startup cancellation', () => {
     ]
     for (const [index, type] of types.entries()) {
       emitControl(room, type, index + 1, {
-        payload: type === 'turn.playout-ready' ? {
+        payload: type === 'turn.speaking' ? {
+          state: 'awaiting_media',
+          media_generation: 1,
+          media_publication_id: 'publication-old',
+          media_ready_timeout_ms: 3_000,
+          media_ready_ack_deadline_ms: 2_750,
+        } : type === 'turn.playout-ready' ? {
           state: 'awaiting_client_playout_boundary',
           ack_timeout_ms: 3_000,
           ack_deadline_ms: 2_750,
-          media_generation: 1,
+          media_generation: 2,
           completed_publication_id: 'publication-old',
           media_publication_id: 'publication-next',
+          final_sample_count: 320,
+          sample_rate_hz: 16_000,
         } : {},
       })
     }
-    await Promise.resolve()
-    expect(room.localParticipant.publishData).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledOnce())
+    expect(JSON.parse(new TextDecoder().decode(
+      room.localParticipant.publishData.mock.calls[0][0] as Uint8Array,
+    ))).toMatchObject({
+      turn_id: 'turn-00000001',
+      media_generation: 1,
+      type: 'client.media-ready',
+    })
 
     room.emit('trackUnsubscribed', oldTrack, oldPublication, {
       identity: 'agent-session-test-0001',
     })
-    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledOnce())
+    await Promise.resolve()
+    expect(room.localParticipant.publishData).toHaveBeenCalledOnce()
+    expect(renderObserver).not.toBeNull()
+    renderObserver!(319, 16_000)
+    await Promise.resolve()
+    expect(room.localParticipant.publishData).toHaveBeenCalledOnce()
+    renderObserver!(1, 16_000)
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2))
     expect(nextTrack.attach).toHaveBeenCalledOnce()
-    const encoded = room.localParticipant.publishData.mock.calls[0][0] as Uint8Array
+    const encoded = room.localParticipant.publishData.mock.calls[1][0] as Uint8Array
     expect(JSON.parse(new TextDecoder().decode(encoded))).toMatchObject({
       turn_id: 'turn-00000001',
       stream_epoch: 1,
-      media_generation: 1,
+      media_generation: 2,
       completed_publication_id: 'publication-old',
       media_publication_id: 'publication-next',
       type: 'client.playout-completed',
