@@ -471,6 +471,7 @@ class LocalLFMProvider:
         turn_id: str,
         transcript: str,
         on_sentence: Callable[[str], None] | None,
+        on_visible_sentence: Callable[[str], None] | None,
         on_handoff_abort: Callable[[], None] | None,
         cancellation: CancellationToken | None,
     ) -> str:
@@ -524,7 +525,11 @@ class LocalLFMProvider:
             handoff_thread.start()
 
         def enqueue_handoff(sentence: str) -> None:
-            if handoff_queue is not None and not handoff_aborted.is_set():
+            if handoff_aborted.is_set():
+                return
+            if on_visible_sentence is not None:
+                on_visible_sentence(sentence)
+            if handoff_queue is not None:
                 handoff_queue.put_nowait(sentence)
 
         handoff_finished = False
@@ -672,9 +677,12 @@ class LocalLFMProvider:
             turn_id=turn_id,
             transcript=transcript,
             on_sentence=None,
+            on_visible_sentence=None,
             on_handoff_abort=None,
             cancellation=cancellation,
         )
+
+    supports_visible_handoff = True
 
     def respond_with_handoff(
         self,
@@ -683,6 +691,7 @@ class LocalLFMProvider:
         turn_id: str,
         transcript: str,
         on_sentence: Callable[[str], None],
+        on_visible_sentence: Callable[[str], None] | None = None,
         on_handoff_abort: Callable[[], None] | None = None,
         cancellation: CancellationToken | None = None,
     ) -> str:
@@ -691,6 +700,7 @@ class LocalLFMProvider:
             turn_id=turn_id,
             transcript=transcript,
             on_sentence=on_sentence,
+            on_visible_sentence=on_visible_sentence,
             on_handoff_abort=on_handoff_abort,
             cancellation=cancellation,
         )

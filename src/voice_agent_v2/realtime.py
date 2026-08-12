@@ -6,9 +6,11 @@ from array import array
 import asyncio
 from collections import deque
 from dataclasses import dataclass
+import inspect
 import json
 import math
 import sys
+import threading
 import time
 from typing import Callable, Protocol
 
@@ -31,6 +33,7 @@ PUBLIC_EVENT_TYPES = frozenset({
     "turn.transcribing",
     "stt.final",
     "turn.thinking",
+    "llm.visible",
     "llm.final",
     "turn.speaking",
     "turn.playout-ready",
@@ -44,8 +47,9 @@ TURN_PREDECESSOR = {
     "turn.transcribing": "turn.listening",
     "stt.final": "turn.transcribing",
     "turn.thinking": "stt.final",
-    "llm.final": "turn.thinking",
-    "turn.speaking": "llm.final",
+    "llm.visible": {"turn.thinking", "llm.visible", "turn.speaking"},
+    "llm.final": {"turn.thinking", "llm.visible", "turn.speaking"},
+    "turn.speaking": {"llm.visible", "llm.final"},
     "turn.playout-ready": "turn.speaking",
     "turn.playout-retired": "turn.playout-ready",
     "turn.completed": "turn.playout-retired",
@@ -82,8 +86,12 @@ class AudioSink(Protocol):
 
     def current_publication_id(self) -> str: ...
 
-    async def play(
+    async def write(
         self, turn_id: str, pcm: bytes, cancelled: Callable[[], bool]
+    ) -> bool: ...
+
+    async def seal(
+        self, turn_id: str, cancelled: Callable[[], bool]
     ) -> MediaBoundary | None: ...
 
     async def complete(self, turn_id: str, boundary: MediaBoundary) -> None: ...
@@ -100,6 +108,7 @@ class TurnRunner(Protocol):
         input_pcm: bytes,
         cancellation: CancellationToken,
         event_observer: Callable[[dict[str, object]], None],
+        trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
     ) -> TraceResult: ...
 
     def cancel(self) -> None: ...
@@ -121,6 +130,8 @@ class TurnContext:
     playout_retired: bool = False
     playout_retirement_token: object | None = None
     playout_retirement: asyncio.Task[None] | None = None
+    audio_chunk_sequence: int = 0
+    audio_bytes_streamed: int = 0
 
 
 def _bounded_json_value(value: object, depth: int = 0) -> bool:
@@ -206,8 +217,14 @@ class ControlEventGate:
             self.last_turn_event = event_type
         elif turn_id != self.current_turn_id or self.current_turn_terminal:
             return self._drop()
-        elif event_type in TURN_PREDECESSOR and TURN_PREDECESSOR[event_type] != self.last_turn_event:
-            return self._drop()
+        elif event_type in TURN_PREDECESSOR:
+            predecessor = TURN_PREDECESSOR[event_type]
+            if (
+                self.last_turn_event not in predecessor
+                if isinstance(predecessor, set)
+                else predecessor != self.last_turn_event
+            ):
+                return self._drop()
         if terminal:
             self.current_turn_terminal = True
         elif not event_type.startswith("session."):
@@ -231,6 +248,7 @@ class RealtimeSession:
         event_sink: EventSink,
         audio_sink: AudioSink,
         failure_handler: Callable[[str, str], None] | None = None,
+        trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
     ) -> None:
         if not valid_correlation_id(session_id):
             raise ValueError("invalid realtime session ID")
@@ -239,6 +257,7 @@ class RealtimeSession:
         self.event_sink = event_sink
         self.audio_sink = audio_sink
         self.failure_handler = failure_handler
+        self.trace_observer = trace_observer
         self.stream_epoch = 1
         self._event_sequence = 0
         self._turn_sequence = 0
@@ -263,6 +282,10 @@ class RealtimeSession:
         self._media_ready_timeout_task: asyncio.Task[None] | None = None
         self._media_wait_started_timeout_task: asyncio.Task[None] | None = None
         self.drop_counts = {"stale_event": 0, "client_control": 0}
+
+    def _trace(self, stage: str, event: str, **fields: object) -> None:
+        if self.trace_observer is not None:
+            self.trace_observer(stage, event, fields)
 
     @property
     def active_turn_id(self) -> str | None:
@@ -726,10 +749,51 @@ class RealtimeSession:
             return
 
         loop = asyncio.get_running_loop()
-        observed: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        observed: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
 
         def observe(event: dict[str, object]) -> None:
-            loop.call_soon_threadsafe(observed.put_nowait, event)
+            loop.call_soon_threadsafe(observed.put_nowait, ("event", event))
+
+        def observe_audio(chunk_index: int, chunk: bytes) -> None:
+            delivered = threading.Event()
+            outcome: list[BaseException] = []
+            loop.call_soon_threadsafe(
+                observed.put_nowait,
+                ("audio", (chunk_index, bytes(chunk), delivered, outcome)),
+            )
+            deadline = time.monotonic() + (CLIENT_WAIT_STARTED_TIMEOUT_MS + CLIENT_MEDIA_READY_TIMEOUT_MS) / 1_000
+            while not delivered.wait(0.02):
+                if context.cancellation.cancelled or context.terminal or self._closed:
+                    raise StageFailure("tts", "selected_tts_cancelled")
+                if time.monotonic() >= deadline:
+                    raise StageFailure("tts", "audio_stream_backpressure_timeout")
+            if outcome:
+                raise outcome[0]
+
+        run_parameters = inspect.signature(type(self.runner).run_turn).parameters
+        accepts_keywords = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in run_parameters.values()
+        )
+        streaming_audio = (
+            hasattr(self.audio_sink, "write")
+            and "audio_observer" in run_parameters
+            and "trace_observer" in run_parameters
+        )
+        runner_arguments: dict[str, object] = {
+            "session_id": self.session_id,
+            "turn_id": context.turn_id,
+            "input_pcm": pcm,
+            "cancellation": context.cancellation,
+            "event_observer": observe,
+        }
+        if "trace_observer" in run_parameters:
+            runner_arguments["trace_observer"] = lambda stage, event, fields: self._trace(
+                stage, event, turn_id=context.turn_id, **fields
+            )
+        if streaming_audio:
+            runner_arguments["audio_observer"] = observe_audio
+            runner_arguments["retain_output"] = False
 
         result: TraceResult | None = None
         runner_failed = False
@@ -737,14 +801,7 @@ class RealtimeSession:
             if context.terminal or self._closed:
                 return
             worker = asyncio.create_task(
-                asyncio.to_thread(
-                    self.runner.run_turn,
-                    session_id=self.session_id,
-                    turn_id=context.turn_id,
-                    input_pcm=pcm,
-                    cancellation=context.cancellation,
-                    event_observer=observe,
-                ),
+                asyncio.to_thread(self.runner.run_turn, **runner_arguments),
                 name=f"inference-{context.turn_id}",
             )
             context.worker = worker
@@ -754,7 +811,20 @@ class RealtimeSession:
                         event = await asyncio.wait_for(observed.get(), timeout=0.01)
                     except TimeoutError:
                         continue
-                    await self._relay_internal(context, event)
+                    kind, value = event
+                    if kind == "event":
+                        assert isinstance(value, dict)
+                        await self._relay_internal(context, value)
+                    else:
+                        chunk_index, chunk, delivered, outcome = value
+                        assert isinstance(chunk_index, int) and isinstance(chunk, bytes)
+                        try:
+                            await self._relay_audio_chunk(context, chunk_index, chunk)
+                        except BaseException as error:
+                            outcome.append(error)
+                            raise
+                        finally:
+                            delivered.set()
                 try:
                     result = await worker
                 except Exception:
@@ -772,10 +842,28 @@ class RealtimeSession:
             return
 
         while not observed.empty():
-            await self._relay_internal(context, observed.get_nowait())
+            kind, value = observed.get_nowait()
+            if kind == "event":
+                assert isinstance(value, dict)
+                await self._relay_internal(context, value)
+            else:
+                chunk_index, chunk, delivered, outcome = value
+                assert isinstance(chunk_index, int) and isinstance(chunk, bytes)
+                try:
+                    await self._relay_audio_chunk(context, chunk_index, chunk)
+                except BaseException as error:
+                    outcome.append(error)
+                    raise
+                finally:
+                    delivered.set()
         terminal = result.terminal_event
         output_pcm = result.output_pcm
-        output_bytes = len(output_pcm)
+        terminal_payload_candidate = terminal.get("payload")
+        output_bytes = (
+            terminal_payload_candidate.get("output_bytes", len(output_pcm))
+            if isinstance(terminal_payload_candidate, dict)
+            else len(output_pcm)
+        )
         del result
         del worker
         pcm = b""
@@ -802,21 +890,26 @@ class RealtimeSession:
             return
         if self._closed:
             return
-        if not output_pcm:
+        if not isinstance(output_bytes, int) or output_bytes < 1:
             await self._fail_publication(context, "empty_audio_output", clear_audio=True)
             return
-        if len(output_pcm) > OUTPUT_MEDIA_MAX_BYTES:
-            output_pcm = b""
+        if output_bytes > OUTPUT_MEDIA_MAX_BYTES:
             await self._fail_publication(
                 context, "audio_output_out_of_bounds", clear_audio=True
             )
             return
         try:
-            boundary = await self.audio_sink.play(
-                context.turn_id,
-                output_pcm,
-                lambda: context.terminal or context.cancellation.cancelled,
-            )
+            if streaming_audio:
+                boundary = await self.audio_sink.seal(
+                    context.turn_id,
+                    lambda: context.terminal or context.cancellation.cancelled,
+                )
+            else:
+                boundary = await self.audio_sink.play(
+                    context.turn_id,
+                    output_pcm,
+                    lambda: context.terminal or context.cancellation.cancelled,
+                )
         except Exception:
             await self._fail_publication(context, "audio_playout_exception", clear_audio=True)
             return
@@ -1101,6 +1194,52 @@ class RealtimeSession:
             prepare_timeout.cancel()
         self._media_wait_started_timeout_task = None
 
+    async def _relay_audio_chunk(
+        self, context: TurnContext, chunk_index: int, chunk: bytes
+    ) -> None:
+        if (
+            context.terminal
+            or self._closed
+            or self._active is not context
+            or context.cancellation.cancelled
+        ):
+            self.drop_counts["stale_event"] += 1
+            return
+        if (
+            chunk_index != context.audio_chunk_sequence
+            or not chunk
+            or len(chunk) % 2
+            or context.audio_bytes_streamed + len(chunk) > OUTPUT_MEDIA_MAX_BYTES
+        ):
+            await self._fail_publication(context, "audio_stream_invalid", clear_audio=True)
+            return
+        media_error = await self._await_media_ready(context)
+        if media_error is not None or context.terminal or self._closed:
+            return
+        try:
+            accepted = await self.audio_sink.write(
+                context.turn_id,
+                chunk,
+                lambda: context.terminal or context.cancellation.cancelled,
+            )
+        except Exception as error:
+            self._trace(
+                "publication", "pcm_write_failed",
+                turn_id=context.turn_id, failure_class=type(error).__name__,
+                failure_code="audio_stream_failed",
+            )
+            accepted = False
+        if not accepted:
+            await self._fail_publication(context, "audio_stream_failed", clear_audio=True)
+            raise StageFailure("tts", "audio_stream_failed")
+        context.audio_chunk_sequence += 1
+        context.audio_bytes_streamed += len(chunk)
+        self._trace(
+            "publication", "pcm_chunk",
+            turn_id=context.turn_id, chunk_index=chunk_index, byte_count=len(chunk),
+            total_bytes=context.audio_bytes_streamed,
+        )
+
     async def _relay_internal(self, context: TurnContext, event: dict[str, object]) -> None:
         if context.terminal or self._active is not context:
             self.drop_counts["stale_event"] += 1
@@ -1109,7 +1248,7 @@ class RealtimeSession:
             self.drop_counts["stale_event"] += 1
             return
         event_type = event.get("type")
-        if event_type in {"turn.listening", "tts.audio", "turn.completed"}:
+        if event_type in {"turn.listening", "turn.completed"}:
             return
         if event_type not in PUBLIC_EVENT_TYPES or not isinstance(event.get("payload"), dict):
             self.drop_counts["stale_event"] += 1
@@ -1119,6 +1258,8 @@ class RealtimeSession:
             return
         public_payload = dict(event["payload"])
         media_generation: int | None = None
+        if event_type == "tts.audio":
+            return
         if (
             event_type == "turn.speaking"
             and self.audio_sink.requires_media_start_ack
@@ -1463,9 +1604,14 @@ class RealtimeSession:
         )
         try:
             await self.event_sink.send(event)
+            self._trace("control", "published", event_type=event_type, sequence=self._event_sequence)
             if media_generation is not None:
                 self._arm_wait_started_timeout(media_generation)
-        except Exception:
+        except Exception as error:
+            self._trace(
+                "control", "publish_failed", event_type=event_type,
+                failure_class=type(error).__name__, failure_code="control_publish_failed",
+            )
             self._closed = True
             self._report_failure("transport", "control_publish_failed")
             raise

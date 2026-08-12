@@ -37,12 +37,25 @@ interface PendingPlayoutBoundary {
   retiredControlObserved: boolean
 }
 
+export interface VoiceDiagnosticRecord {
+  timestamp: string
+  stage: string
+  event: string
+  sessionId: string | null
+  turnId: string | null
+  streamEpoch: number
+  sequence: number | null
+  failureCode?: string
+  failureMessage?: string
+}
+
 export interface VoiceClientCallbacks {
   onSession(capability: SessionCapability): void
   onConnection(connection: ConnectionState, error?: string): void
   onControl(event: ControlEvent): void
   onDrop(): void
   onAudioBlocked(blocked: boolean): void
+  onDiagnostic?(record: VoiceDiagnosticRecord): void
 }
 
 export class VoiceClient {
@@ -72,6 +85,7 @@ export class VoiceClient {
   private mediaReadyPublishingGeneration: number | null = null
   private streamEpoch = 0
   private playoutGeneration = 0
+  private readonly diagnostics: VoiceDiagnosticRecord[] = []
 
   constructor(
     audioContainer: HTMLElement,
@@ -101,6 +115,7 @@ export class VoiceClient {
       this.streamEpoch = capability.stream_epoch
       this.controlGate = new RealtimeControlGate(capability.session_id, capability.stream_epoch)
       this.callbacks.onSession(capability)
+      this.recordDiagnostic('session', 'capability_received')
 
       const room = new Room({ adaptiveStream: false, dynacast: false, disconnectOnPageLeave: true })
       this.room = room
@@ -128,6 +143,17 @@ export class VoiceClient {
     } finally {
       if (this.startAbort === abort) this.startAbort = null
     }
+  }
+
+  downloadDiagnostics(): void {
+    const payload = this.diagnostics.map((record) => JSON.stringify(record)).join('\n') + '\n'
+    const blob = new Blob([payload], { type: 'application/x-ndjson' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `voice-agent-diagnostic-${new Date().toISOString().replaceAll(':', '-')}.jsonl`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   async resumeAudio(): Promise<void> {
@@ -385,6 +411,7 @@ export class VoiceClient {
           terminalFailure = 'Некорректная граница завершения аудиопотока'
         }
       }
+      this.recordDiagnostic('control', 'received', event)
       try {
         this.callbacks.onControl(event)
       } catch {
@@ -454,13 +481,17 @@ export class VoiceClient {
     this.reconnectAckTimer = setTimeout(() => {
       void this.failSession('Сервер не подтвердил восстановление сессии')
     }, RECONNECT_ACK_TIMEOUT_MS)
+    const room = this.room
+    const streamEpoch = this.streamEpoch
     try {
-      await this.room.localParticipant.publishData(payload, {
+      await room.localParticipant.publishData(payload, {
         reliable: true,
         topic: CLIENT_CONTROL_TOPIC,
       })
-    } catch {
-      await this.failSession('Не удалось восстановить сессию')
+    } catch (error) {
+      if (!this.isSuperseded(room, streamEpoch)) {
+        await this.failSession('Не удалось восстановить сессию', 'reconnect_publish_failed', error)
+      }
     }
   }
 
@@ -642,9 +673,9 @@ export class VoiceClient {
         boundary.stage = 'waiting-retirement'
         void this.completeRetiredBoundary(boundary)
       }
-    } catch {
+    } catch (error) {
       if (this.pendingPlayoutBoundary === boundary) {
-        await this.failSession('Не удалось подтвердить границу аудиопотока')
+        await this.failSession('Не удалось подтвердить границу аудиопотока', 'playout_drain_publish_failed', error)
       }
     }
   }
@@ -701,9 +732,9 @@ export class VoiceClient {
         this.invalidatePlaybackTrack()
         this.publicationTracks.delete(boundary.completedPublicationId)
       }
-    } catch {
+    } catch (error) {
       if (this.pendingPlayoutBoundary === boundary) {
-        await this.failSession('Не удалось подтвердить завершение аудиопотока')
+        await this.failSession('Не удалось подтвердить завершение аудиопотока', 'playout_complete_publish_failed', error)
       }
     }
   }
@@ -832,8 +863,10 @@ export class VoiceClient {
       ) {
         this.pendingWaitStartedGeneration = mediaGeneration
       }
-    } catch {
-      await this.failSession('Не удалось запустить подтверждение аудиопотока')
+    } catch (error) {
+      if (!this.isSuperseded(room, streamEpoch)) {
+        await this.failSession('Не удалось запустить подтверждение аудиопотока', 'wait_started_publish_failed', error)
+      }
     }
   }
 
@@ -895,8 +928,10 @@ export class VoiceClient {
           }, RECONNECT_ACK_TIMEOUT_MS)
         }
       }
-    } catch {
-      await this.failSession('Не удалось подтвердить готовность аудиопотока')
+    } catch (error) {
+      if (!this.isSuperseded(room, streamEpoch)) {
+        await this.failSession('Не удалось подтвердить готовность аудиопотока', 'media_ready_publish_failed', error)
+      }
     } finally {
       if (this.mediaReadyPublishingGeneration === mediaGeneration) {
         this.mediaReadyPublishingGeneration = null
@@ -929,8 +964,43 @@ export class VoiceClient {
     this.reconnectAckTimer = null
   }
 
-  private async failSession(message: string): Promise<void> {
+  private isSuperseded(room: Room, streamEpoch: number): boolean {
+    return this.room !== room || this.streamEpoch !== streamEpoch || this.reconnecting || this.stopping
+  }
+
+  private recordDiagnostic(
+    stage: string,
+    event: string,
+    control?: ControlEvent,
+    failureCode?: string,
+    failure?: unknown,
+  ): void {
+    const record: VoiceDiagnosticRecord = {
+      timestamp: new Date().toISOString(),
+      stage,
+      event,
+      sessionId: this.capability?.session_id ?? null,
+      turnId: control?.turn_id ?? null,
+      streamEpoch: control?.stream_epoch ?? this.streamEpoch,
+      sequence: control?.sequence ?? null,
+    }
+    if (failureCode !== undefined) record.failureCode = failureCode
+    if (failure !== undefined) {
+      record.failureMessage = failure instanceof Error
+        ? `${failure.name}: ${failure.message}`.slice(0, 512)
+        : String(failure).slice(0, 512)
+    }
+    this.diagnostics.push(record)
+    if (this.diagnostics.length > 512) this.diagnostics.shift()
+    this.callbacks.onDiagnostic?.(record)
+    try {
+      localStorage.setItem('voice-agent.slice6.diagnostics', JSON.stringify(this.diagnostics))
+    } catch {}
+  }
+
+  private async failSession(message: string, code = 'client_failure', cause?: unknown): Promise<void> {
     if (this.stopping) return
+    this.recordDiagnostic('client', 'failed', undefined, code, cause ?? message)
     this.stopping = true
     this.startAbort?.abort()
     const cleanup = this.beginResourceRelease(false)

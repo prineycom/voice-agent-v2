@@ -40,6 +40,11 @@ from voice_agent_v2.livekit_runtime import (
     SessionRegistry,
 )
 from voice_agent_v2.local_lfm import LLAMA_ENDPOINT, MODEL_ALIAS, PROVIDER_IDENTITY
+from voice_agent_v2.local_vad import (
+    DEFAULT_MODEL_PATH as VAD_MODEL,
+    SILERO_MODEL_SHA256,
+    SILERO_MODEL_SIZE,
+)
 from voice_agent_v2.slice6_config import Slice6Settings
 
 LFM_CACHE = Path("/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4")
@@ -252,6 +257,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_vad_contract() -> bool:
+    if not VAD_MODEL.is_file():
+        return False
+    if VAD_MODEL.stat().st_size != SILERO_MODEL_SIZE:
+        raise AssertionError("pinned Silero VAD artifact size differs")
+    if sha256_file(VAD_MODEL) != SILERO_MODEL_SHA256:
+        raise AssertionError("pinned Silero VAD artifact identity differs")
+    return True
+
+
 def verify_local_lfm_contract(settings: Slice6Settings) -> bool:
     artifact_present = LFM_MODEL.is_file() and LLAMA_SERVER.is_file()
     if artifact_present:
@@ -316,12 +331,14 @@ def main() -> int:
         raise AssertionError(f"room capability is not narrow enough: {grants}")
     if any((grants.room_admin, grants.room_create, grants.room_list, grants.room_record)):
         raise AssertionError("browser capability contains a management grant")
+    vad_present = verify_vad_contract()
     artifact_present = verify_local_lfm_contract(settings)
     asyncio.run(verify_room_lifecycle_bounds(settings))
     print("Slice 6 installed-runtime contract: PASS")
     print("SDK pins: " + ", ".join(f"{name}={value}" for name, value in observed.items()))
     print("capability: one room, microphone publish, agent subscribe/data; no management grants")
     print("room lifecycle: startup cancellation drains; incomplete cleanup retains capacity")
+    print("local VAD: pinned Silero v6 CPU artifact hashes=" + ("verified" if vad_present else "not-present"))
     print(
         "local LFM: manifest/provider wiring verified; exact cache hashes="
         + ("verified" if artifact_present else "not-present (real integration check skipped)")

@@ -821,7 +821,17 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 runtime.rtc.AudioStream = types.SimpleNamespace(
                     from_track=lambda **_kwargs: stream
                 )
-                await controller._consume_microphone(object())
+                class SilentVAD:
+                    def infer(self, _pcm):
+                        return 0.0
+                    def reset(self):
+                        return None
+                original_vad = runtime.SileroOnnxModel
+                runtime.SileroOnnxModel = lambda: SilentVAD()
+                try:
+                    await controller._consume_microphone(object())
+                finally:
+                    runtime.SileroOnnxModel = original_vad
                 self.assertTrue(stream.closed)
                 self.assertEqual(controller.session.failures, [("input", expected)])
 

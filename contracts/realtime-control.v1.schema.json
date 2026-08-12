@@ -28,6 +28,7 @@
         "turn.transcribing",
         "stt.final",
         "turn.thinking",
+        "llm.visible",
         "llm.final",
         "turn.speaking",
         "turn.playout-ready",

@@ -119,7 +119,7 @@ def llama_command() -> list[str]:
         "--metrics",
         "--slots",
         "--no-webui",
-        "--verbosity", "4",
+        "--verbosity", "1",
     ]
 
 

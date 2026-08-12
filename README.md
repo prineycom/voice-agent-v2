@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Combined Slice 6 / Issue #15 implementation checkpoint awaiting physical-browser and full-stack resource acceptance.** The active app uses only the pinned cache-local official LFM2.5 Q4_K_M model on GPU-enabled llama.cpp; LiteLLM/DeepSeek is absent from Slice 6 configuration/readiness/requests and there is no cloud fallback. Network-denied controller tests, installed LiveKit/provider contracts, React state/media tests, focused real two-slot LFM integration, scoped capability, loopback gateway, and restricted LiveKit bind smokes pass. Real loopback/tailnet microphone/listening, actual barge-in timing, sustained coexistence with Whisper/Qwen/LiveKit/browser, and subjective response acceptance remain required and are not claimed. Historical DeepSeek failures and authorizations remain factual in ADR-0005/0006; ADR-0008 supersedes them for the active app.
+**Combined Slice 6 / Issue #15 manual acceptance failed on 2026-08-12; the authorized correction remains awaiting a new physical-browser and full-stack resource acceptance.** The active app uses only the pinned cache-local official LFM2.5 Q4_K_M model on GPU-enabled llama.cpp; LiteLLM/DeepSeek is absent from Slice 6 configuration/readiness/requests and there is no cloud fallback. Network-denied controller tests, installed LiveKit/provider contracts, React state/media tests, focused real two-slot LFM integration, scoped capability, loopback gateway, and restricted LiveKit bind smokes pass. Real loopback/tailnet microphone/listening, actual barge-in timing, sustained coexistence with Whisper/Qwen/LiveKit/browser, and subjective response acceptance remain required and are not claimed. Historical DeepSeek failures and authorizations remain factual in ADR-0005/0006; ADR-0008 supersedes them for the active app.
 
 ## Root verification
 
@@ -39,7 +39,7 @@ Generate a dedicated LiveKit key pair and fill every blank in the ignored `.env.
 "${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
 ```
 
-The active app accepts no `LITELLM_*` configuration. `./setup-slice6` verifies, but never downloads or replaces, the exact cache-local Issue #15 model/runtime. Run the focused real provider check with `./verify-local-lfm`; it proves the hashes, loopback endpoint, exact identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, cancellation and recovery. Then this is the single development start command:
+The active app accepts no `LITELLM_*` configuration. `./setup-slice6` verifies, but never downloads or replaces, the exact cache-local Issue #15 model/runtime. Run the focused real provider check with `./verify-local-lfm`; it proves the hashes, loopback endpoint, exact identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, cancellation and recovery. Run `./verify-real-streaming` to start/reuse the exact loopback LFM plus resident Qwen and prove the first PCM chunk arrives before total sentence/TTS completion; it logs timings/counts only, not content or audibility. Then this is the single development start command:
 
 ```sh
 ./run-slice6
@@ -53,7 +53,7 @@ Run the complete deterministic/installed-runtime/browser check with:
 ./verify-slice6
 ```
 
-The command reports the physical-browser gates as required rather than claiming them. `./verify-local-lfm` is a separate real-model host check and remains outside dependency-free CI. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
+The command also runs a real headless Firefox against official local LiveKit with deterministic fake inference; this proves data-channel/track/publication/error lifecycle only. It reports the physical-browser gates as required rather than claiming them. `./verify-local-lfm` is a separate real-model host check and remains outside dependency-free CI. Privacy-safe server JSONL diagnostics are retained outside Git under `~/.cache/voice-agent-v2/slice-6/diagnostics/`; the browser exposes **Скачать диагностику** for a redacted lifecycle timeline. Neither contains audio or conversation text. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
 
 ## Final Slice 5 human acceptance
 

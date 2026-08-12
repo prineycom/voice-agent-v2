@@ -19,6 +19,7 @@ export type ControlEventType =
   | 'turn.transcribing'
   | 'stt.final'
   | 'turn.thinking'
+  | 'llm.visible'
   | 'llm.final'
   | 'turn.speaking'
   | 'turn.playout-ready'
@@ -30,19 +31,20 @@ export type ControlEventType =
 const EVENT_TYPES = new Set<ControlEventType>([
   'session.ready', 'session.reconnected', 'session.degraded',
   'turn.listening', 'turn.transcribing', 'stt.final', 'turn.thinking',
-  'llm.final', 'turn.speaking', 'turn.playout-ready', 'turn.playout-retired',
+  'llm.visible', 'llm.final', 'turn.speaking', 'turn.playout-ready', 'turn.playout-retired',
   'turn.completed',
   'turn.interrupted', 'turn.failed',
 ])
 const TERMINAL_TYPES = new Set<ControlEventType>([
   'turn.completed', 'turn.interrupted', 'turn.failed',
 ])
-const TURN_PREDECESSOR = new Map<ControlEventType, ControlEventType>([
+const TURN_PREDECESSOR = new Map<ControlEventType, ControlEventType | ControlEventType[]>([
   ['turn.transcribing', 'turn.listening'],
   ['stt.final', 'turn.transcribing'],
   ['turn.thinking', 'stt.final'],
-  ['llm.final', 'turn.thinking'],
-  ['turn.speaking', 'llm.final'],
+  ['llm.visible', ['turn.thinking', 'llm.visible', 'turn.speaking']],
+  ['llm.final', ['turn.thinking', 'llm.visible', 'turn.speaking']],
+  ['turn.speaking', ['llm.visible', 'llm.final']],
   ['turn.playout-ready', 'turn.speaking'],
   ['turn.playout-retired', 'turn.playout-ready'],
   ['turn.completed', 'turn.playout-retired'],
@@ -239,13 +241,14 @@ function drop(state: VoiceState): VoiceState {
 
 function validTurnTransition(previous: ControlEventType | null, next: ControlEventType): boolean {
   if (next === 'turn.interrupted' || next === 'turn.failed') return previous !== null
-  return TURN_PREDECESSOR.get(next) === previous
+  const predecessors = TURN_PREDECESSOR.get(next)
+  return Array.isArray(predecessors) ? predecessors.includes(previous as ControlEventType) : predecessors === previous
 }
 
 function phaseFor(type: ControlEventType): TurnPhase | null {
   if (type === 'turn.listening') return 'listening'
   if (type === 'turn.transcribing' || type === 'stt.final') return 'transcribing'
-  if (type === 'turn.thinking' || type === 'llm.final') return 'thinking'
+  if (type === 'turn.thinking' || type === 'llm.visible' || type === 'llm.final') return 'thinking'
   if (
     type === 'turn.speaking'
     || type === 'turn.playout-ready'
@@ -372,7 +375,8 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   if (phase === null) return drop(state)
   const transcript = event.type === 'stt.final' && typeof event.payload.transcript === 'string'
     ? event.payload.transcript : next.transcript
-  const response = event.type === 'llm.final' && typeof event.payload.response === 'string'
+  const response = (event.type === 'llm.visible' || event.type === 'llm.final')
+    && typeof event.payload.response === 'string'
     ? event.payload.response : next.response
   const error = event.type === 'turn.failed'
     ? `Ошибка: ${String(event.payload.stage ?? 'turn')}/${String(event.payload.code ?? 'unknown')}`

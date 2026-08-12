@@ -814,7 +814,8 @@ class RealTurnControllerTests(unittest.TestCase):
         )
         types = [event["type"] for event in result.events]
         self.assertEqual(result.terminal_event["type"], "turn.completed")
-        self.assertLess(types.index("llm.final"), types.index("tts.audio"))
+        self.assertLess(types.index("llm.visible"), types.index("tts.audio"))
+        self.assertLess(types.index("tts.audio"), types.index("llm.final"))
         self.assertEqual(types.count("tts.audio"), 2)
 
     def test_late_llm_failure_discards_streamed_tts_buffer(self) -> None:
@@ -844,8 +845,11 @@ class RealTurnControllerTests(unittest.TestCase):
         self.assertEqual(tts.cancel_count, 1)
         self.assertEqual(result.output_pcm, b"")
         self.assertEqual(result.terminal_event["type"], "turn.failed")
-        self.assertNotIn("turn.speaking", [event["type"] for event in result.events])
-        self.assertNotIn("tts.audio", [event["type"] for event in result.events])
+        event_types = [event["type"] for event in result.events]
+        self.assertIn("llm.visible", event_types)
+        self.assertIn("turn.speaking", event_types)
+        self.assertIn("tts.audio", event_types)
+        self.assertNotIn("llm.final", event_types)
 
     def test_late_handoff_cleanup_finishes_before_next_turn_generation(self) -> None:
         class LateCleanupLLM(FakeLLM):

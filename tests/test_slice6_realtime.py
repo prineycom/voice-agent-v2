@@ -104,14 +104,22 @@ class MemoryAudioSink:
     def current_publication_id(self) -> str:
         return self.publication_id
 
-    async def play(self, turn_id, pcm, cancelled) -> MediaBoundary | None:
+    async def write(self, turn_id, pcm, cancelled) -> bool:
         self.played.append(turn_id)
         self.started.set()
         if self.fail_play:
             raise RuntimeError("playout failed")
         if self.block:
             await self.released.wait()
-        return MediaBoundary(self.publication_id) if pcm and not cancelled() else None
+        return bool(pcm) and not cancelled()
+
+    async def seal(self, turn_id, cancelled) -> MediaBoundary | None:
+        return MediaBoundary(self.publication_id) if self.played and not cancelled() else None
+
+    async def play(self, turn_id, pcm, cancelled) -> MediaBoundary | None:
+        if not await self.write(turn_id, pcm, cancelled):
+            return None
+        return await self.seal(turn_id, cancelled)
 
     async def complete(self, turn_id, _boundary) -> None:
         self.completed.append(turn_id)
@@ -206,11 +214,19 @@ class SizedOutputRunner(FakeRunner):
 
 
 class SizedBoundaryAudioSink(MemoryAudioSink):
-    async def play(self, turn_id, pcm, cancelled) -> MediaBoundary | None:
+    def __init__(self) -> None:
+        super().__init__()
+        self.byte_count = 0
+
+    async def write(self, turn_id, pcm, cancelled) -> bool:
         self.played.append(turn_id)
+        self.byte_count += len(pcm)
+        return bool(pcm) and not cancelled()
+
+    async def seal(self, turn_id, cancelled) -> MediaBoundary | None:
         return (
-            MediaBoundary(self.publication_id, len(pcm) // 2, 16_000)
-            if pcm and not cancelled()
+            MediaBoundary(self.publication_id, self.byte_count // 2, 16_000)
+            if self.byte_count and not cancelled()
             else None
         )
 

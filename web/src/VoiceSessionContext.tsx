@@ -17,6 +17,7 @@ interface VoiceSessionValue {
   connect(): Promise<void>
   disconnect(): Promise<void>
   resumeAudio(): Promise<void>
+  downloadDiagnostics(): void
 }
 
 const VoiceSessionContext = createContext<VoiceSessionValue | null>(null)
@@ -63,6 +64,10 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     }
   }, [disconnect])
 
+  const downloadDiagnostics = useCallback(() => {
+    clientRef.current?.downloadDiagnostics()
+  }, [])
+
   const resumeAudio = useCallback(async () => {
     try {
       await clientRef.current?.resumeAudio()
@@ -83,7 +88,8 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     connect,
     disconnect,
     resumeAudio,
-  }), [state, connect, disconnect, resumeAudio])
+    downloadDiagnostics,
+  }), [state, connect, disconnect, resumeAudio, downloadDiagnostics])
 
   return <VoiceSessionContext.Provider value={value}>{children}</VoiceSessionContext.Provider>
 }

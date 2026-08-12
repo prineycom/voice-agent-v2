@@ -2,10 +2,10 @@
 
 - **Issue:** [#7](https://github.com/prineycom/voice-agent-v2/issues/7)
 - **Checkpoint date:** 2026-08-12
-- **Status:** Partial — deterministic/runtime/bind and focused local-LFM evidence pass; physical-browser/full-stack acceptance remains open
+- **Status:** Failed manual attempt on 2026-08-12; authorized correction passes deterministic/runtime/Firefox boundaries, and a new physical-browser/full-stack acceptance remains open
 - **Legacy source:** None inspected or used
 
-This report distinguishes executable evidence from the microphone, listening, remote-device, timing, and resource observations that do not yet exist. It does not claim final Slice 6 acceptance.
+This report distinguishes executable evidence from physical observations. Pasha's first Firefox attempt failed: background/silence triggered turns and no useful visible/audible response was accepted. The diagnosis is preserved outside the repository; none of the corrections below relabel that failed test or claim final Slice 6 acceptance.
 
 ## Implemented stack and boundaries
 
@@ -60,7 +60,7 @@ Result: **PASS** after `./setup-slice6`:
 - the then-current Vitest suite passed;
 - Vite production build: pass.
 
-Browser tests cover the typed reducer/parser, exact capability response, lifecycle/epoch/sequence/turn gates, reconnect suppression, stale event rejection, cancellable startup, bounded readiness, agent loss, cleanup failure, exact fresh-publication attachment and retirement acknowledgement, React shell, autoplay failure boundary, and explicit autoplay recovery. These lifecycle tests deliberately do not use RTP/Web Audio counters as evidence of speaker output: they prove only correlation, subscription invalidation, bounded acknowledgement, and cleanup. The installed runtime check also exercises cancellation during model startup, unclaimed-room expiry, capacity retention after incomplete cleanup, and local idempotent publication retirement after confirmed room disconnect. The app intentionally remains one small bundle; Vite's size advisory is visible but is not hidden as a failure.
+Browser tests cover the typed reducer/parser, incremental `llm.visible`, exact capability response, lifecycle/epoch/sequence/turn gates, reconnect suppression, stale event rejection, cancellable startup, bounded readiness, agent loss, cleanup failure, exact fresh-publication attachment and retirement acknowledgement, redacted diagnostics download, React shell, autoplay failure boundary, and explicit autoplay recovery. A separate real headless Firefox test joins an actual pinned LiveKit server with deterministic fake inference and observes official data/track/publication lifecycle. These lifecycle tests deliberately do not use RTP/Web Audio counters as evidence of speaker output: they prove only correlation, subscription invalidation, bounded acknowledgement, and cleanup. The installed runtime check also exercises cancellation during model startup, unclaimed-room expiry, capacity retention after incomplete cleanup, and local idempotent publication retirement after confirmed room disconnect. The app intentionally remains one small bundle; Vite's size advisory is visible but is not hidden as a failure.
 
 ## Measured bind and port evidence
 
@@ -82,7 +82,9 @@ The LiveKit JSON startup observation reported version `1.13.5`, loopback bind, t
 
 The tracked [`config/local-lfm-v1.json`](../../config/local-lfm-v1.json) freezes the official model/runtime identity, loopback endpoint, two-slot/65,536-token shape, full GPU offload, flash attention/Jinja/reasoning parser, bounded Russian voice prompt and sampling/visible-output contract. `./setup-slice6` and `./run-slice6` verify the exact 1,674,454,848-byte model SHA-256 `79fdf003…bfee14` and llama.cpp binary SHA-256 `08625d7c…ac11`; they never acquire an alternate model.
 
-A focused real `./verify-local-lfm` run on 2026-08-12 passed:
+Focused real `./verify-local-lfm` and `./verify-real-streaming` runs on 2026-08-12 passed. The streaming check used the exact LFM endpoint plus resident Qwen and observed first PCM at about 11.07 s before total completion at about 13.16 s (17 chunks, no content logged); this proves real component overlap, not speaker audibility.
+
+The provider check recorded:
 
 - health/model identity and loopback-only `127.0.0.1:18080`;
 - llama.cpp tag `b10357` / commit `689e227db`, exact binary/model hashes;
@@ -97,10 +99,10 @@ This focused measurement proves the provider/service contract, not full-stack co
 
 ## Interruption and reconnect policy
 
-- Endpointing uses 20 ms 16 kHz mono frames, 100 ms speech start, 600 ms trailing silence, 200 ms pre-roll, and a 15 s utterance maximum. It is a bounded CPU energy detector, not an unmeasured claim that Silero is unnecessary.
+- Endpointing uses the checksum-pinned Silero v6 ONNX artifact on CPU: 20 ms input, 32 ms inference windows, 96 ms speech confirmation at probability 0.60, 0.35 continuation hysteresis, 640 ms trailing silence, 256 ms pre-roll, and a 15 s maximum. Silence, stationary background and intermittent high-energy/AGC-like candidates have executable no-admission tests; a public Russian LibriSpeech fixture confirms speech detection when the authorized cache is present. RMS is diagnostics only.
 - Barge-in first terminalizes the old turn, clears the 100 ms LiveKit source queue, invalidates the browser's old audio subscription and admits only a freshly subscribed track, cancels the selected provider and process-isolated STT/TTS, rolls back undelivered LLM context, and serializes replacement work.
 - During transport reconnect, the browser detaches audio and drops all old-epoch data. The server cancels/drains active work, resets all in-memory conversation context, advances the epoch, and only then reports ready. Cleanup/reset timeout produces `session.degraded` and closes turn admission.
-- Provider failure or empty output remains a hard `turn.failed`; a late streamed failure first cancels active TTS through a bounded handoff-abort boundary and discards buffered PCM/context effects before any publication, and no alternate model, endpoint, alias, transport redirect, or fabricated answer exists.
+- Each complete visible LFM sentence is published immediately and handed to Qwen while SSE continues; each Qwen PCM chunk enters the correlated LiveKit source immediately. Hidden reasoning never crosses either boundary. Provider/TTS failure stops future output and is explicit; valid visible text is not hidden by TTS failure. A late failure cannot retract already delivered visible/PCM prefix, while barge-in prevents any later old prefix from escaping. No alternate model, endpoint, alias, redirect or fabricated answer exists.
 - Normal teardown retires the exact publication while room transport is available. After confirmed room disconnect, cleanup retires it locally and closes the source without another unpublish request; repeated cleanup joins that same operation.
 
 ## Preserved failed evidence and limitations
@@ -116,7 +118,7 @@ Other open limits:
 - one room/session at a time;
 - no TURN or ICE/TCP fallback;
 - foreground development orchestration only, with no restart/reboot/systemd claim;
-- simple energy endpoint requires real microphone validation;
+- the corrected Silero thresholds still require real canonical-microphone false-positive/miss validation;
 - no physical loopback audio, remote browser, reconnect, or barge-in capture yet;
 - Tailscale HTTPS application/signaling ports have not yet been accepted from a second client.
 
@@ -124,10 +126,10 @@ Other open limits:
 
 Keep all captures outside Git and do not paste secrets or conversation content into the issue/PR.
 
-1. On the canonical host, fill ignored `.env.slice6`, run `./setup-slice6`, then run `./run-slice6`. Observe the printed loopback/tailnet URLs, no credential requirement, and no startup traceback.
+1. On the canonical host, use the already running corrected stack or fill ignored `.env.slice6`, run `./setup-slice6`, then `./run-slice6`. Observe the printed loopback/tailnet URLs, no credential requirement, no startup traceback, and a new content-free session JSONL under `~/.cache/voice-agent-v2/slice-6/diagnostics/`.
 2. In a host browser, open `http://127.0.0.1:8000`, choose **Подключить микрофон**, and allow microphone/audio if prompted. Speak one bounded Russian utterance. Observe ordered listening → transcribing → thinking → speaking → completed state, the matching concise local-LFM response, and an audible `ryan` response. A local model timeout, hidden-only, truncated, empty or resource failure must appear explicitly with no cloud/fallback request.
 3. While a second response is audibly playing, begin a new utterance. Capture control/audio timing. Observe the old turn become `turn.interrupted`, old sound cease within 250 ms of server speech-start detection, a new correlated turn complete, no old words resume, and the dropped-event count not increase for valid traffic.
 4. During another response, interrupt the browser network long enough to show **Переподключение…**, then restore it. Observe no old response play after reconnection, state return to ready only after the epoch reset, and a fresh utterance complete without stale transcript/response/audio.
 5. Disconnect the host browser so the one-session limit is free. From a second device that is already a tailnet member, open `SLICE6_APP_PUBLIC_URL`, connect, speak, see the correlated transcript/response/state, and hear the agent. Confirm no public/non-tailnet path was added and capture the selected WebRTC path as tailnet UDP `7882` plus WSS signaling on the configured port.
 6. During the loopback and remote cases, capture local-LFM visible TTFT/completion, endpoint-to-first-playout/completion and total-board/process VRAM, RAM and CPU with resident llama.cpp plus real Whisper, Qwen3, LiveKit, gateway and browser. Confirm the 12,282 MiB device keeps a safe reserve under overlap/barge-in and the preregistered latency budget. Report every local-provider timeout/empty/truncated response as failure, never as a passing retry or cloud fallback.
-7. Save one redacted browser capture showing transcript/turn state and successful barge-in, plus a redacted listener/capability review. Only those observations can close the pending roadmap evidence.
+7. Before disconnecting after any error, capture the exact UI alert and press **Скачать диагностику**. Save that redacted JSONL, one browser capture showing transcript/turn state and successful barge-in, and a redacted listener/capability review outside Git. Only those observations can close the pending roadmap evidence.

@@ -60,7 +60,7 @@ function TurnCard() {
 }
 
 function Controls() {
-  const { state, audioContainerRef, connect, disconnect, resumeAudio } = useVoiceSession()
+  const { state, audioContainerRef, connect, disconnect, resumeAudio, downloadDiagnostics } = useVoiceSession()
   const active = ['connecting', 'ready', 'reconnecting'].includes(state.connection)
   return (
     <section className="controls" aria-label="Управление голосовой сессией">
@@ -75,6 +75,9 @@ function Controls() {
           Разрешить звук
         </button>
       )}
+      <button type="button" onClick={downloadDiagnostics}>
+        Скачать диагностику
+      </button>
       <div ref={audioContainerRef} className="audio-mount" aria-hidden="true" />
     </section>
   )

@@ -6,22 +6,24 @@ import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 import json
+from pathlib import Path
 import secrets
 from typing import Awaitable, Callable
 
 from livekit import api, rtc
 
 from .audio import OUTPUT_MEDIA_MAX_BYTES
+from .diagnostics import PrivacySafeTrace, TraceIdentity
 from .local_lfm import LocalLFMProvider
 from .local_stt import WhisperSTT
 from .local_tts import Qwen3TTS
 from .real_turn import RealTurnController
+from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
 from .realtime import (
     CLIENT_CONTROL_TOPIC,
     CONTROL_TOPIC,
     MAX_CONTROL_BYTES,
     AudioSink,
-    EnergyEndpoint,
     MediaBoundary,
     EventSink,
     RealtimeSession,
@@ -34,6 +36,7 @@ AUDIO_FRAME_BYTES = 16_000 * 2 * AUDIO_FRAME_MS // 1000
 AUDIO_QUEUE_MS = 100
 BROWSER_CONTROL_QUEUE_SIZE = 32
 MAX_SESSION_OBSERVATIONS = 128
+TRACE_ROOT = Path.home() / ".cache/voice-agent-v2/slice-6/diagnostics"
 
 
 class SessionCapacityError(RuntimeError):
@@ -80,6 +83,9 @@ class LiveTurnRunner:
         input_pcm: bytes,
         cancellation: CancellationToken,
         event_observer,
+        trace_observer=None,
+        audio_observer=None,
+        retain_output: bool = True,
     ) -> TraceResult:
         self._snapshots[(session_id, turn_id)] = self.llm.snapshot_session(session_id)
         try:
@@ -89,6 +95,9 @@ class LiveTurnRunner:
                 input_pcm=input_pcm,
                 cancellation=cancellation,
                 event_observer=event_observer,
+                trace_observer=trace_observer,
+                audio_observer=audio_observer,
+                retain_output=retain_output,
             )
         finally:
             for adapter in (self.stt, self.llm, self.tts):
@@ -167,6 +176,7 @@ class LiveKitAudioSink(AudioSink):
         self.publication = None
         self._prepared_turn: str | None = None
         self._active_turn: str | None = None
+        self._streamed_samples = 0
         self._sealed_boundary: tuple[str, MediaBoundary] | None = None
         self._rotation_lock = asyncio.Lock()
         self._rotation_failed = False
@@ -222,6 +232,7 @@ class LiveKitAudioSink(AudioSink):
                 self.publication = None
                 self._prepared_turn = None
                 self._active_turn = None
+                self._streamed_samples = 0
                 self._sealed_boundary = None
                 state.complete = True
                 self._retirement = None
@@ -356,48 +367,64 @@ class LiveKitAudioSink(AudioSink):
             raise RuntimeError("LiveKit audio publication is not prepared")
         return self._publication_id(self.publication)
 
-    async def play(
-        self, turn_id: str, pcm: bytes, cancelled
-    ) -> MediaBoundary | None:
+    async def write(self, turn_id: str, pcm: bytes, cancelled) -> bool:
         if not pcm or len(pcm) % 2 or len(pcm) > OUTPUT_MEDIA_MAX_BYTES:
-            return None
+            return False
         source = self.source
         publication = self.publication
         if publication is None or self._prepared_turn != turn_id:
             raise RuntimeError("turn audio publication is not prepared")
+        if self._active_turn not in {None, turn_id} or self._sealed_boundary is not None:
+            raise RuntimeError("another LiveKit audio stream is active")
         self._active_turn = turn_id
-        try:
-            for offset in range(0, len(pcm), AUDIO_FRAME_BYTES):
-                if cancelled() or self._active_turn != turn_id:
-                    return None
-                chunk = pcm[offset : offset + AUDIO_FRAME_BYTES]
-                frame = rtc.AudioFrame(
-                    data=chunk,
-                    sample_rate=16_000,
-                    num_channels=1,
-                    samples_per_channel=len(chunk) // 2,
-                )
-                await source.capture_frame(frame)
-            await source.wait_for_playout()
+        for offset in range(0, len(pcm), AUDIO_FRAME_BYTES):
             if cancelled() or self._active_turn != turn_id:
-                return None
-            boundary = MediaBoundary(
-                self._publication_id(publication),
-                len(pcm) // 2,
-                16_000,
+                return False
+            chunk = pcm[offset : offset + AUDIO_FRAME_BYTES]
+            frame = rtc.AudioFrame(
+                data=chunk,
+                sample_rate=16_000,
+                num_channels=1,
+                samples_per_channel=len(chunk) // 2,
             )
-            async with self._rotation_lock:
-                if (
-                    cancelled()
-                    or self.publication is not publication
-                    or self._prepared_turn != turn_id
-                ):
-                    return None
-                self._sealed_boundary = (turn_id, boundary)
-            return boundary
-        finally:
-            if self._active_turn == turn_id:
-                self._active_turn = None
+            await source.capture_frame(frame)
+            self._streamed_samples += len(chunk) // 2
+        return not cancelled() and self._active_turn == turn_id
+
+    async def seal(self, turn_id: str, cancelled) -> MediaBoundary | None:
+        publication = self.publication
+        source = self.source
+        if (
+            publication is None
+            or self._prepared_turn != turn_id
+            or self._active_turn != turn_id
+            or self._streamed_samples < 1
+            or cancelled()
+        ):
+            return None
+        await source.wait_for_playout()
+        if cancelled() or self._active_turn != turn_id:
+            return None
+        boundary = MediaBoundary(
+            self._publication_id(publication), self._streamed_samples, 16_000
+        )
+        async with self._rotation_lock:
+            if (
+                cancelled()
+                or self.publication is not publication
+                or self._prepared_turn != turn_id
+            ):
+                return None
+            self._sealed_boundary = (turn_id, boundary)
+            self._active_turn = None
+        return boundary
+
+    async def play(
+        self, turn_id: str, pcm: bytes, cancelled
+    ) -> MediaBoundary | None:
+        if not await self.write(turn_id, pcm, cancelled):
+            return None
+        return await self.seal(turn_id, cancelled)
 
     async def complete(self, turn_id: str, boundary: MediaBoundary) -> None:
         async with self._rotation_lock:
@@ -420,6 +447,7 @@ class LiveKitAudioSink(AudioSink):
             if self._active_turn not in {None, turn_id}:
                 return publication_id
             self._active_turn = None
+            self._streamed_samples = 0
             retirement = self._reserve_retirement_locked(publication_id, self.source)
             if not retirement.source_close_started and not retirement.complete:
                 self.source.clear_queue()
@@ -490,6 +518,9 @@ class LiveKitRoomController:
         self.runner = LiveTurnRunner(settings)
         self.room = rtc.Room()
         self.audio_source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+        self.trace = PrivacySafeTrace(
+            TRACE_ROOT / f"{session_id}.jsonl", TraceIdentity(session_id)
+        )
         self.audio_sink = LiveKitAudioSink(
             self.room,
             self.audio_source,
@@ -501,6 +532,11 @@ class LiveKitRoomController:
             event_sink=LiveKitEventSink(self.room, browser_identity),
             audio_sink=self.audio_sink,
             failure_handler=self._session_failed,
+            trace_observer=lambda stage, event, fields: self.trace.emit(
+                stage, event, fields,
+                turn_id=str(fields.get("turn_id", "session")),
+                stream_epoch=self.session.stream_epoch if hasattr(self, "session") else 1,
+            ),
         )
         self._audio_task: asyncio.Task[None] | None = None
         self._browser_join_task: asyncio.Task[None] | None = None
@@ -657,14 +693,41 @@ class LiveKitRoomController:
         while True:
             payload = await self._control_queue.get()
             try:
-                await self.session.handle_client_control(payload)
-            except Exception:
-                pass
+                accepted = await self.session.handle_client_control(payload)
+                trace = getattr(self, "trace", None)
+                if trace is not None:
+                    trace.emit(
+                        "control", "client_control",
+                        {"accepted": accepted, "byte_count": len(payload)},
+                        stream_epoch=getattr(self.session, "stream_epoch", 1),
+                    )
+            except Exception as error:
+                trace = getattr(self, "trace", None)
+                if trace is not None:
+                    trace.emit(
+                        "control", "client_control_failed",
+                        {
+                            "failure_class": type(error).__name__,
+                            "failure_code": "client_control_handler_failed",
+                        },
+                        stream_epoch=getattr(self.session, "stream_epoch", 1),
+                    )
+                await self.session.fail("transport", "client_control_handler_failed")
             finally:
                 self._control_queue.task_done()
 
     async def _consume_microphone(self, track) -> None:
-        endpoint = EnergyEndpoint()
+        trace = getattr(self, "trace", None)
+
+        def observe_vad(fields: dict[str, object]) -> None:
+            if trace is not None:
+                trace.emit(
+                    "vad", str(fields["decision"]),
+                    {key: value for key, value in fields.items() if key != "decision"},
+                    stream_epoch=getattr(self.session, "stream_epoch", 1),
+                )
+
+        endpoint = SileroSpeechEndpoint(SileroOnnxModel(), telemetry=observe_vad)
         stream = rtc.AudioStream.from_track(
             track=track,
             capacity=20,
@@ -675,7 +738,8 @@ class LiveKitRoomController:
         failure_code = "microphone_stream_ended"
         try:
             async for event in stream:
-                for signal, payload in endpoint.feed(bytes(event.frame.data)):
+                for decision in endpoint.feed(bytes(event.frame.data)):
+                    signal, payload = decision.kind, decision.payload
                     if signal == "speech_started":
                         await self.session.start_utterance()
                     elif signal == "speech_discarded":
@@ -684,11 +748,21 @@ class LiveKitRoomController:
                         await self.session.finish_utterance(payload)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
             failure_code = "microphone_stream_failed"
+            if trace is not None:
+                trace.emit(
+                    "input", "microphone_failed",
+                    {
+                        "failure_class": type(error).__name__,
+                        "failure_code": failure_code,
+                    },
+                    stream_epoch=getattr(self.session, "stream_epoch", 1),
+                )
         finally:
             try:
-                for signal, payload in endpoint.flush():
+                for decision in endpoint.flush():
+                    signal, payload = decision.kind, decision.payload
                     if signal == "utterance" and payload is not None:
                         try:
                             await self.session.finish_utterance(payload)

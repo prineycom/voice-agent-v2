@@ -2,7 +2,7 @@
 
 **Source:** https://github.com/prineycom/voice-agent-v2/issues/7 and mandatory same-PR scope update https://github.com/prineycom/voice-agent-v2/issues/15
 **Parent:** —
-**Status:** ⚠️ partial — combined LiveKit/local-LFM implementation and automated/focused provider evidence pass; required physical-browser/full-stack resource acceptance is pending
+**Status:** ❌ physical attempt failed on 2026-08-12; authorized same-PR Silero/streaming/diagnostics/Firefox corrections are implemented, but repeat physical/full-stack acceptance is pending
 
 ## Changed files
 

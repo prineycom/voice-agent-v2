@@ -23,7 +23,7 @@ The gateway and controller may share one Python process, but capability, room/me
 
 Media and control remain separate:
 
-- browser microphone audio is resampled through the official RTC SDK to 16 kHz mono PCM and endpointed by the bounded Slice 6 CPU energy detector;
+- browser microphone audio is resampled through the official RTC SDK to 16 kHz mono PCM and endpointed by the pinned cache-local Silero v6 ONNX CPU speech detector; absolute energy is telemetry only;
 - agent PCM uses one LiveKit audio source with a 100 ms source queue;
 - reliable data topics carry a closed V1 controller-to-browser envelope and one bounded browser reconnect notice;
 - both server tests and browser state/media gates reject wrong version/session/epoch/turn, duplicate, late, out-of-order, oversized, and malformed data before state or media actions.
@@ -45,7 +45,8 @@ No avatar component, state, contract, semantic input, design system, public endp
 
 ### Costs and risks
 
-- The energy endpoint is intentionally simpler than Silero and requires the real microphone/browser gate; it is not a quality claim.
+- Pinned legacy provenance is `prineycom/voice-agent@93c5c397:infra/pi/agent/agent.py`, which loads local Silero once. V2 adapts only that ownership/provenance into its low-level controller; it does not import `livekit-agents` or legacy topology.
+- Silero decisions and levels are content-free diagnostics. Real microphone false-positive/miss quality still requires the physical browser gate.
 - One session and no TURN/TCP media are deliberate measured limits. A different topology requires evidence, not an implicit fallback.
 - Resetting context on reconnect reduces continuity.
 - Real browser audio, the second tailnet client, the 250 ms stop bound, and combined resource reserve are not proven by deterministic tests.
