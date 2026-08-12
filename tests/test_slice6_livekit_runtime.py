@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+import threading
 import types
 import unittest
 
@@ -133,6 +134,24 @@ class RecordingRunner:
 
     def close(self, session_id: str) -> None:
         self.calls.append(("runner.close", session_id))
+
+
+class StartupCancellationRunner(RecordingRunner):
+    def __init__(self, calls: list[object]) -> None:
+        super().__init__(calls)
+        self.entered = asyncio.Event()
+        self.cancelled = threading.Event()
+
+    def start(self) -> None:
+        loop = self.loop
+        loop.call_soon_threadsafe(self.entered.set)
+        while not self.cancelled.wait(0.01):
+            pass
+        self.calls.append("runner.start.cancelled")
+
+    def cancel_startup(self) -> None:
+        self.calls.append("runner.cancel_startup")
+        self.cancelled.set()
 
 
 class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -284,6 +303,47 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await controller._consume_microphone(object())
                 self.assertTrue(stream.closed)
                 self.assertEqual(controller.session.failures, [("input", expected)])
+
+    async def test_close_cancels_and_joins_provider_startup_before_release(self) -> None:
+        calls: list[object] = []
+        controller = runtime.LiveKitRoomController.__new__(
+            runtime.LiveKitRoomController
+        )
+        controller.session_id = "session-test"
+        controller.room = RecordingRoom(calls)
+        controller.session = RecordingSession(controller.room, calls)
+        controller.audio_source = RecordingAudioSource(calls)
+        runner = StartupCancellationRunner(calls)
+        runner.loop = asyncio.get_running_loop()
+        controller.runner = runner
+        controller.on_closed = lambda _session_id: asyncio.sleep(0)
+        controller._closed = False
+        controller._cleanup_complete = False
+        controller._close_notified = False
+        controller._transport_failed = False
+        controller._room_disconnected = False
+        controller._close_lock = asyncio.Lock()
+        controller._close_retry_task = None
+        controller._browser_join_task = None
+        controller._audio_task = None
+        controller._control_task = None
+        controller._runner_start_task = asyncio.create_task(
+            asyncio.to_thread(runner.start)
+        )
+        await asyncio.wait_for(runner.entered.wait(), 1)
+
+        await controller.close()
+
+        self.assertLess(
+            calls.index("runner.cancel_startup"),
+            calls.index("runner.start.cancelled"),
+        )
+        self.assertLess(
+            calls.index("runner.start.cancelled"),
+            calls.index(("runner.close", "session-test")),
+        )
+        self.assertTrue(controller._cleanup_complete)
+        self.assertTrue(controller._close_notified)
 
     async def test_cleanup_timeout_holds_capacity_until_late_confirmed_release(self) -> None:
         calls: list[object] = []

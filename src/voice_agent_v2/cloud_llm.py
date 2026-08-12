@@ -305,15 +305,49 @@ class LiteLLMProvider:
             operation_deadline=operation_deadline,
         )
 
-    def _capability_gate(self, token: str, endpoint: ProviderEndpoint) -> None:
-        connection = self._connection_for(endpoint, 10)
+    def _capability_gate(
+        self, token: str, endpoint: ProviderEndpoint, generation: int
+    ) -> None:
+        timeout = self._transport_start_timeout_seconds
+        deadline = time.monotonic() + timeout
+        connection = self._connection_for(
+            endpoint,
+            timeout,
+            cancelled=lambda: self._operation_cancelled(generation),
+            operation_deadline=deadline,
+        )
+        with self._operation_lock:
+            self._connection = connection
+            self._connection_generation = generation
+            cancelled = self._cancelled_generation == generation
+        if cancelled:
+            connection.close()
+            with self._operation_lock:
+                if self._connection_generation == generation:
+                    self._connection = None
+                    self._connection_generation = 0
+            raise StageFailure("llm_provider", "capability_probe_cancelled")
+        deadline_guard = threading.Timer(
+            max(0.001, deadline - time.monotonic()), connection.close
+        )
+        deadline_guard.daemon = True
+        deadline_guard.start()
         try:
             connection.request(
                 "GET", "/v1/models",
                 headers={"Authorization": "Bearer " + token, "Connection": "close", "Host": endpoint.authority},
             )
+            if self._operation_cancelled(generation):
+                raise StageFailure("llm_provider", "capability_probe_cancelled")
             response = connection.getresponse()
+            if time.monotonic() >= deadline:
+                raise StageFailure("llm_provider", "capability_probe_timeout")
+            self._apply_response_deadline(response, deadline)
             body = response.read(MAX_STREAM_LINE_BYTES + 1)
+            if time.monotonic() >= deadline:
+                raise StageFailure("llm_provider", "capability_probe_timeout")
+            if self._operation_cancelled(generation):
+                raise StageFailure("llm_provider", "capability_probe_cancelled")
             if response.status != 200:
                 raise StageFailure("llm_provider", f"capability_http_{response.status}")
             if len(body) > MAX_STREAM_LINE_BYTES:
@@ -327,15 +361,27 @@ class LiteLLMProvider:
         except StageFailure:
             raise
         except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError) as error:
-            raise StageFailure("llm_provider", "capability_probe_unavailable") from error
+            code = (
+                "capability_probe_cancelled"
+                if self._operation_cancelled(generation)
+                else "capability_probe_unavailable"
+            )
+            raise StageFailure("llm_provider", code) from error
         finally:
+            deadline_guard.cancel()
+            deadline_guard.join()
             connection.close()
+            with self._operation_lock:
+                if self._connection_generation == generation:
+                    self._connection = None
+                    self._connection_generation = 0
 
-    def readiness(self) -> dict:
+    def readiness(self, cancellation: CancellationToken | None = None) -> dict:
         endpoint = self._endpoint()
         token = self._token()
+        generation = self._begin_operation(cancellation)
         try:
-            self._capability_gate(token, endpoint)
+            self._capability_gate(token, endpoint, generation)
         finally:
             del token
         return {

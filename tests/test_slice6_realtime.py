@@ -645,7 +645,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             event_sink=events,
             audio_sink=audio,
         )
-        await session.submit_utterance(b"\0\0" * 320)
+        interrupted_turn = await session.submit_utterance(b"\0\0" * 320)
         await asyncio.wait_for(audio.started.wait(), 1)
         reconnected = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
@@ -658,9 +658,67 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             await asyncio.wait_for(session.handle_client_control(reconnected), 2)
         )
-        self.assertEqual(events.events[-1]["type"], "session.reconnected")
+        acknowledgement = events.events[-1]
+        self.assertEqual(acknowledgement["type"], "session.reconnected")
+        self.assertEqual(acknowledgement["payload"]["state"], "awaiting_media")
+        self.assertEqual(
+            acknowledgement["payload"]["interrupted_turn_id"], interrupted_turn
+        )
+        self.assertFalse(any(
+            event["type"] == "turn.interrupted" and event["stream_epoch"] == 1
+            for event in events.events
+        ))
         self.assertNotIn("session.degraded", [event["type"] for event in events.events])
         self.assertEqual(runner.reset_sessions, [session.session_id])
+
+        media_ready = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": "session",
+            "stream_epoch": 2,
+            "sequence": 2,
+            "media_generation": acknowledgement["payload"]["media_generation"],
+            "type": "client.media-ready",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(media_ready))
+        self.assertEqual(events.events[-1]["type"], "session.ready")
+        self.assertEqual(events.events[-1]["stream_epoch"], 2)
+
+    async def test_reconnect_without_active_turn_blocks_admission_until_media_ready(self) -> None:
+        events = MemoryEventSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        reconnected = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(reconnected))
+        acknowledgement = events.events[-1]
+        admission = asyncio.create_task(session.start_utterance())
+        await asyncio.sleep(0.02)
+        self.assertFalse(admission.done())
+        self.assertFalse(any(event["type"] == "turn.listening" for event in events.events))
+
+        media_ready = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": "session",
+            "stream_epoch": 2,
+            "sequence": 2,
+            "media_generation": acknowledgement["payload"]["media_generation"],
+            "type": "client.media-ready",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(media_ready))
+        turn_id = await asyncio.wait_for(admission, 1)
+        self.assertEqual(events.events[-1]["type"], "turn.listening")
+        self.assertEqual(events.events[-1]["turn_id"], turn_id)
 
     async def test_closed_session_reconnect_stays_degraded_without_reset(self) -> None:
         events = MemoryEventSink()

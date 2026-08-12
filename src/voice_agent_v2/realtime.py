@@ -228,6 +228,7 @@ class RealtimeSession:
         self._media_generation_turn_id: str | None = None
         self._media_ready = asyncio.Event()
         self._media_ready.set()
+        self._media_ready_timeout_task: asyncio.Task[None] | None = None
         self.drop_counts = {"stale_event": 0, "client_control": 0}
 
     @property
@@ -243,9 +244,13 @@ class RealtimeSession:
 
     async def start_utterance(self) -> str:
         async with self._reconnect_lock:
+            media_error = await self._await_media_ready()
             async with self._lock:
                 if self._closed:
                     raise RuntimeError("session is closed")
+                if media_error is not None:
+                    await self._degrade_locked("publication", media_error)
+                    raise RuntimeError(media_error)
                 _cleanup, drain_error = await self._interrupt_locked("barge_in")
                 if drain_error is not None:
                     await self._degrade_locked("publication", drain_error)
@@ -720,13 +725,15 @@ class RealtimeSession:
         elif context.rollback_error is not None:
             await self._degrade_locked("controller", context.rollback_error)
 
-    async def _await_media_ready(self, context: TurnContext) -> str | None:
+    async def _await_media_ready(
+        self, context: TurnContext | None = None
+    ) -> str | None:
         deadline = (
             asyncio.get_running_loop().time()
             + CLIENT_MEDIA_READY_TIMEOUT_MS / 1000
         )
         while self._media_ready_generation < self._media_generation:
-            if context.terminal or self._closed:
+            if self._closed or (context is not None and context.terminal):
                 return None
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -735,8 +742,47 @@ class RealtimeSession:
                 await asyncio.wait_for(self._media_ready.wait(), timeout=remaining)
             except TimeoutError:
                 return "client_media_ready_timeout"
-            self._media_ready.clear()
         return None
+
+    def _invalidate_media(self, turn_id: str) -> int:
+        self._media_generation += 1
+        if self._media_generation > MAX_EVENT_SEQUENCE:
+            raise RuntimeError("session media generation exhausted")
+        self._media_generation_turn_id = turn_id
+        self._media_ready.clear()
+        timeout = self._media_ready_timeout_task
+        if timeout is not None and not timeout.done():
+            timeout.cancel()
+        generation = self._media_generation
+        epoch = self.stream_epoch
+
+        async def expire() -> None:
+            try:
+                await asyncio.sleep(CLIENT_MEDIA_READY_TIMEOUT_MS / 1000)
+                async with self._lock:
+                    if (
+                        not self._closed
+                        and self.stream_epoch == epoch
+                        and self._media_ready_generation < generation
+                    ):
+                        await self._degrade_locked(
+                            "publication", "client_media_ready_timeout"
+                        )
+            except asyncio.CancelledError:
+                raise
+
+        self._media_ready_timeout_task = asyncio.create_task(
+            expire(), name=f"media-ready-{self.session_id}-{generation}"
+        )
+        return generation
+
+    def _confirm_media_ready(self, generation: int) -> None:
+        self._media_ready_generation = generation
+        self._media_ready.set()
+        timeout = self._media_ready_timeout_task
+        if timeout is not None and not timeout.done():
+            timeout.cancel()
+        self._media_ready_timeout_task = None
 
     async def _relay_internal(self, context: TurnContext, event: dict[str, object]) -> None:
         if context.terminal or self._active is not context:
@@ -832,8 +878,17 @@ class RealtimeSession:
                     return False
                 self._client_sequence = sequence
                 if media_ready:
-                    self._media_ready_generation = media_generation
-                    self._media_ready.set()
+                    assert isinstance(media_generation, int)
+                    self._confirm_media_ready(media_generation)
+                    if event.get("turn_id") == SESSION_TURN_ID:
+                        await self._emit(
+                            SESSION_TURN_ID,
+                            "session.ready",
+                            {
+                                "state": "ready",
+                                "media_generation": media_generation,
+                            },
+                        )
                 else:
                     assert context is not None and context.playout_ack is not None
                     context.playout_ack.set_result(None)
@@ -853,7 +908,10 @@ class RealtimeSession:
                     )
                     self._report_failure("controller", "session_closed")
                     return True
-                _cleanup, reset_error = await self._interrupt_locked("client_reconnected")
+                interrupted_turn_id = self.active_turn_id
+                _cleanup, reset_error = await self._interrupt_locked(
+                    "client_reconnected", notify_client=False
+                )
             try:
                 async with asyncio.timeout(CANCELLATION_CLEANUP_BOUND_MS / 1000):
                     cleanup_error = await self._await_cleanup_barrier(
@@ -872,13 +930,17 @@ class RealtimeSession:
             async with self._lock:
                 self.stream_epoch += 1
                 if reset_error is None:
+                    media_generation = self._invalidate_media(SESSION_TURN_ID)
                     await self._emit(
                         SESSION_TURN_ID,
                         "session.reconnected",
                         {
-                            "state": "ready",
+                            "state": "awaiting_media",
                             "stale_media_discarded": True,
                             "conversation_context_reset": True,
+                            "media_generation": media_generation,
+                            "media_ready_timeout_ms": CLIENT_MEDIA_READY_TIMEOUT_MS,
+                            "interrupted_turn_id": interrupted_turn_id,
                         },
                     )
                 else:
@@ -909,6 +971,14 @@ class RealtimeSession:
                     await asyncio.wait_for(asyncio.shield(context.task), timeout=1.25)
                 except TimeoutError as error:
                     raise RuntimeError("turn_cleanup_timeout") from error
+            timeout = self._media_ready_timeout_task
+            if timeout is not None and timeout is not asyncio.current_task():
+                timeout.cancel()
+                try:
+                    await timeout
+                except asyncio.CancelledError:
+                    pass
+                self._media_ready_timeout_task = None
             self._disconnect_complete = True
 
     async def _emit(
@@ -925,10 +995,7 @@ class RealtimeSession:
         if self._event_sequence > MAX_EVENT_SEQUENCE:
             raise RuntimeError("session event sequence exhausted")
         if event_type in {"turn.interrupted", "turn.failed"}:
-            self._media_generation += 1
-            self._media_generation_turn_id = turn_id
-            self._media_ready.clear()
-            payload = {**payload, "media_generation": self._media_generation}
+            payload = {**payload, "media_generation": self._invalidate_media(turn_id)}
         try:
             await self.event_sink.send({
                 "schema_version": CONTROL_EVENT_VERSION,

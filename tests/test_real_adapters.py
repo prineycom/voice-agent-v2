@@ -139,6 +139,22 @@ class SlowLineReader:
         return next(self.lines, b"")
 
 
+class TrickleReadinessResponse:
+    status = 200
+
+    def __init__(self) -> None:
+        self.cancelled = threading.Event()
+        self.fp = BytesIO()
+
+    def read(self, _limit: int | None = None) -> bytes:
+        while not self.cancelled.wait(0.01):
+            pass
+        raise OSError("readiness body transport closed")
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+
 class BlockingConnectSocket:
     def __init__(self) -> None:
         self.entered = threading.Event()
@@ -176,6 +192,9 @@ class StubHTTPConnection:
 
     def close(self) -> None:
         self.closed = True
+        cancel = getattr(self.response, "cancel", None)
+        if cancel is not None:
+            cancel()
 
 
 class LocalTTSContractTests(unittest.TestCase):
@@ -433,6 +452,31 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "capability_http_302")
         self.assertEqual(len(connection.requests), 1)
         self.assertTrue(connection.closed)
+
+    def test_readiness_uses_one_deadline_across_trickled_body(self) -> None:
+        response = TrickleReadinessResponse()
+        connection = StubHTTPConnection(response)
+        provider = LiteLLMProvider(
+            base_url=self.TEST_BASE_URL,
+            transport_start_timeout_seconds=0.08,
+        )
+        started = time.monotonic()
+        with (
+            patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+            patch(
+                "voice_agent_v2.cloud_llm._RegisteredHTTPConnection",
+                return_value=connection,
+            ) as http_connection,
+            self.assertRaises(StageFailure) as raised,
+        ):
+            provider.readiness()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(raised.exception.code, "capability_probe_unavailable")
+        self.assertLess(elapsed, 0.25)
+        self.assertTrue(connection.closed)
+        self.assertIsNotNone(http_connection.call_args.kwargs["operation_deadline"])
+        self.assertTrue(callable(http_connection.call_args.kwargs["cancelled"]))
 
     def test_blocked_connection_start_is_cancelled_by_registered_socket(self) -> None:
         provider = LiteLLMProvider(

@@ -55,6 +55,7 @@ export class VoiceClient {
   private freshSubscriptionRequired = false
   private pendingMediaGeneration: number | null = null
   private pendingMediaTurnId: string | null = null
+  private reconnectMediaGeneration: number | null = null
   private readonly invalidatedTracks = new WeakSet<RemoteAudioTrack>()
   private streamEpoch = 0
   private playoutGeneration = 0
@@ -160,6 +161,7 @@ export class VoiceClient {
     this.freshSubscriptionRequired = false
     this.pendingMediaGeneration = null
     this.pendingMediaTurnId = null
+    this.reconnectMediaGeneration = null
     this.streamEpoch = 0
     const errors: unknown[] = []
     const microphone = this.microphone
@@ -317,10 +319,22 @@ export class VoiceClient {
       }
       if (event.type === 'session.ready') {
         this.clearInitialReadyTimer()
+        if (this.reconnectRequestPending) {
+          if (
+            event.payload.state !== 'ready'
+            || event.payload.media_generation !== this.reconnectMediaGeneration
+          ) {
+            terminalFailure = 'Некорректное подтверждение готовности аудиопотока'
+          } else {
+            this.clearReconnectAckTimer()
+            this.reconnectRequestPending = false
+            this.reconnectMediaGeneration = null
+          }
+        }
       } else if (event.type === 'session.reconnected') {
         this.streamEpoch = event.stream_epoch
         try {
-          this.completeReconnect()
+          this.completeReconnect(event)
         } catch {
           terminalFailure = 'Не удалось безопасно восстановить аудиопоток'
         }
@@ -330,6 +344,7 @@ export class VoiceClient {
         this.reconnecting = false
         this.reconnectRequestPending = false
         this.pendingRemoteTrack = null
+        this.reconnectMediaGeneration = null
         const stage = typeof event.payload.stage === 'string' ? event.payload.stage : 'session'
         const code = typeof event.payload.code === 'string' ? event.payload.code : 'degraded'
         terminalFailure = `Голосовая сессия остановлена (${stage}/${code})`
@@ -347,6 +362,7 @@ export class VoiceClient {
       this.clearReconnectAckTimer()
       this.reconnecting = true
       this.reconnectRequestPending = false
+      this.reconnectMediaGeneration = null
       let mediaInvalidationFailed = false
       try {
         this.invalidatePlaybackTrack()
@@ -460,14 +476,31 @@ export class VoiceClient {
     }
   }
 
-  private completeReconnect(): void {
+  private completeReconnect(event: ControlEvent): void {
+    const mediaGeneration = event.payload.media_generation
+    const mediaReadyTimeoutMs = event.payload.media_ready_timeout_ms
+    if (
+      event.payload.state !== 'awaiting_media'
+      || typeof mediaGeneration !== 'number'
+      || !Number.isSafeInteger(mediaGeneration)
+      || mediaGeneration < 1
+      || typeof mediaReadyTimeoutMs !== 'number'
+      || !Number.isSafeInteger(mediaReadyTimeoutMs)
+      || mediaReadyTimeoutMs < 250
+      || mediaReadyTimeoutMs > RECONNECT_ACK_TIMEOUT_MS
+    ) throw new Error('invalid reconnect media generation')
     this.clearReconnectAckTimer()
+    this.reconnectAckTimer = setTimeout(() => {
+      void this.failSession('Сервер не подтвердил готовность аудиопотока')
+    }, mediaReadyTimeoutMs)
     this.reconnecting = false
-    this.reconnectRequestPending = false
+    this.reconnectMediaGeneration = mediaGeneration
+    this.pendingMediaTurnId = 'session'
+    this.pendingMediaGeneration = mediaGeneration
     const track = this.pendingRemoteTrack
     this.pendingRemoteTrack = null
-    if (track === null) {
-      this.renewPlaybackTrack()
+    if (track === null || this.invalidatedTracks.has(track)) {
+      this.renewPlaybackTrack('session', mediaGeneration)
     } else {
       this.activeRemoteTrack = track
       this.playback.setTrack(track)

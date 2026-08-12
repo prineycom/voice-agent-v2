@@ -49,11 +49,16 @@ class LiveTurnRunner:
         self.tts = Qwen3TTS()
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
+        self._startup_cancellation = CancellationToken()
 
     def start(self) -> None:
-        self.llm.readiness()
-        self.stt.start()
-        self.tts.start()
+        self.llm.readiness(self._startup_cancellation)
+        self.stt.start(self._startup_cancellation)
+        self.tts.start(self._startup_cancellation)
+
+    def cancel_startup(self) -> None:
+        self._startup_cancellation.cancel()
+        self.cancel()
 
     def run_turn(
         self,
@@ -434,6 +439,18 @@ class LiveKitRoomController:
             if not self._cleanup_complete:
                 errors: list[Exception] = []
                 startup = self._runner_start_task
+                if (
+                    startup is not None
+                    and startup is not asyncio.current_task()
+                    and not startup.done()
+                ):
+                    try:
+                        cancel_startup = getattr(self.runner, "cancel_startup", None)
+                        if cancel_startup is None:
+                            cancel_startup = self.runner.cancel
+                        await asyncio.to_thread(cancel_startup)
+                    except Exception as error:
+                        errors.append(error)
                 if startup is not None and startup is not asyncio.current_task():
                     try:
                         await asyncio.shield(startup)

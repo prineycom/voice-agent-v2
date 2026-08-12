@@ -78,6 +78,7 @@ export interface VoiceState {
   error: string | null
   droppedEvents: number
   audioBlocked: boolean
+  pendingMediaGeneration: number | null
 }
 
 export const initialVoiceState: VoiceState = {
@@ -94,6 +95,7 @@ export const initialVoiceState: VoiceState = {
   error: null,
   droppedEvents: 0,
   audioBlocked: false,
+  pendingMediaGeneration: null,
 }
 
 export type VoiceAction =
@@ -270,6 +272,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
         transcript: '',
         response: '',
         error: null,
+        pendingMediaGeneration: null,
       }
     }
     return {
@@ -288,9 +291,17 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   ) {
     if (event.turn_id !== 'session' || event.stream_epoch !== state.streamEpoch + 1) return drop(state)
     const degraded = event.type === 'session.degraded'
+    const awaitingMedia = (
+      event.type === 'session.reconnected'
+      && event.payload.state === 'awaiting_media'
+      && typeof event.payload.media_generation === 'number'
+      && Number.isSafeInteger(event.payload.media_generation)
+      && event.payload.media_generation > 0
+    )
+    if (!degraded && !awaitingMedia) return drop(state)
     return {
       ...state,
-      connection: degraded ? 'failed' : 'ready',
+      connection: degraded ? 'failed' : 'reconnecting',
       streamEpoch: event.stream_epoch,
       lastSequence: event.sequence,
       currentTurnId: null,
@@ -300,6 +311,25 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       transcript: '',
       response: '',
       error: degraded ? 'Не удалось безопасно восстановить сессию' : null,
+      pendingMediaGeneration: degraded
+        ? null
+        : event.payload.media_generation as number,
+    }
+  }
+  if (
+    state.connection === 'reconnecting'
+    && event.type === 'session.ready'
+    && event.turn_id === 'session'
+    && event.stream_epoch === state.streamEpoch
+    && event.payload.state === 'ready'
+    && event.payload.media_generation === state.pendingMediaGeneration
+  ) {
+    return {
+      ...state,
+      connection: 'ready',
+      lastSequence: event.sequence,
+      error: null,
+      pendingMediaGeneration: null,
     }
   }
   if (state.connection === 'reconnecting' || event.stream_epoch !== state.streamEpoch) return drop(state)

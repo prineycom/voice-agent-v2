@@ -286,9 +286,12 @@ describe('VoiceClient startup cancellation', () => {
         type: 'session.reconnected',
         terminal: false,
         payload: {
-          state: 'ready',
+          state: 'awaiting_media',
           stale_media_discarded: true,
           conversation_context_reset: true,
+          media_generation: 1,
+          media_ready_timeout_ms: 3_000,
+          interrupted_turn_id: null,
         },
       })),
       { identity: 'agent-session-test-0001' },
@@ -297,6 +300,18 @@ describe('VoiceClient startup cancellation', () => {
     )
 
     expect(replacementTrack.attach).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2))
+    const mediaReadyPayload = room.localParticipant.publishData.mock.calls[1][0] as Uint8Array
+    expect(JSON.parse(new TextDecoder().decode(mediaReadyPayload))).toMatchObject({
+      turn_id: 'session',
+      stream_epoch: 2,
+      media_generation: 1,
+      type: 'client.media-ready',
+    })
+    emitControl(room, 'session.ready', 2, {
+      streamEpoch: 2,
+      payload: { state: 'ready', media_generation: 1 },
+    })
     await client.stop()
   })
 

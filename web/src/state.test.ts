@@ -143,12 +143,23 @@ describe('control event boundary', () => {
     expect(state.droppedEvents).toBe(1)
     state = voiceReducer(state, {
       type: 'control',
-      event: event(6, 'session.reconnected', 'session', {}, 2),
+      event: event(6, 'session.reconnected', 'session', {
+        state: 'awaiting_media',
+        media_generation: 1,
+        interrupted_turn_id: 'turn-00000001',
+      }, 2),
     })
     expect(state.streamEpoch).toBe(2)
-    expect(state.connection).toBe('ready')
+    expect(state.connection).toBe('reconnecting')
     const oldEpoch = event(7, 'session.ready', 'session', {}, 1)
     state = voiceReducer(state, { type: 'control', event: oldEpoch })
     expect(state.droppedEvents).toBe(2)
+    state = voiceReducer(state, {
+      type: 'control',
+      event: event(8, 'session.ready', 'session', {
+        state: 'ready', media_generation: 1,
+      }, 2),
+    })
+    expect(state.connection).toBe('ready')
   })
 })
