@@ -30,6 +30,7 @@ AUDIO_FRAME_MS = 20
 AUDIO_FRAME_BYTES = 16_000 * 2 * AUDIO_FRAME_MS // 1000
 AUDIO_QUEUE_MS = 100
 BROWSER_CONTROL_QUEUE_SIZE = 32
+MAX_SESSION_OBSERVATIONS = 128
 
 
 class SessionCapacityError(RuntimeError):
@@ -64,13 +65,19 @@ class LiveTurnRunner:
         event_observer,
     ) -> TraceResult:
         self._snapshots[(session_id, turn_id)] = self.llm.snapshot_session(session_id)
-        return self.controller.run_turn(
-            session_id=session_id,
-            turn_id=turn_id,
-            input_pcm=input_pcm,
-            cancellation=cancellation,
-            event_observer=event_observer,
-        )
+        try:
+            return self.controller.run_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_pcm=input_pcm,
+                cancellation=cancellation,
+                event_observer=event_observer,
+            )
+        finally:
+            for adapter in (self.stt, self.llm, self.tts):
+                observations = adapter.observations
+                if len(observations) > MAX_SESSION_OBSERVATIONS:
+                    del observations[:-MAX_SESSION_OBSERVATIONS]
 
     def discard_turn(self, session_id: str, turn_id: str) -> None:
         snapshot = self._snapshots.pop((session_id, turn_id), None)

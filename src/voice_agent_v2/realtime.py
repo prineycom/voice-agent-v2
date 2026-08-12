@@ -221,6 +221,7 @@ class RealtimeSession:
         self._runner_lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
         self._disconnect_lock = asyncio.Lock()
+        self._cleanup_tasks: set[asyncio.Task[str | None]] = set()
         self.drop_counts = {"stale_event": 0, "client_control": 0}
 
     @property
@@ -337,6 +338,10 @@ class RealtimeSession:
         finally:
             self._report_failure(stage, code)
 
+    def _track_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
+        self._cleanup_tasks.add(cleanup)
+        cleanup.add_done_callback(self._cleanup_tasks.discard)
+
     def _watch_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
         async def finish() -> None:
             error = await cleanup
@@ -381,6 +386,7 @@ class RealtimeSession:
         finally:
             cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
             context.cancellation_cleanup = cleanup
+            self._track_cleanup(cleanup)
         if notify_client:
             drain_ms = min((time.monotonic() - started) * 1000, float(BARGE_IN_DRAIN_BOUND_MS))
             await self._emit(
@@ -418,6 +424,9 @@ class RealtimeSession:
                 await worker
             except Exception:
                 pass
+            finally:
+                if context.worker is worker:
+                    context.worker = None
         context.rollback_error = await self._rollback_context(context)
 
     async def _run_turn_body(self, context: TurnContext, pcm: bytes) -> None:
@@ -486,9 +495,18 @@ class RealtimeSession:
                     async with self._lock:
                         await self._degrade_locked("controller", context.rollback_error)
                 return
+            finally:
+                if context.worker is worker:
+                    context.worker = None
 
         while not observed.empty():
             await self._relay_internal(context, observed.get_nowait())
+        terminal = result.terminal_event
+        output_pcm = result.output_pcm
+        output_bytes = len(output_pcm)
+        del result
+        del worker
+        pcm = b""
         if context.terminal:
             context.rollback_error = await self._rollback_context(context)
             if context.rollback_error is not None:
@@ -497,7 +515,6 @@ class RealtimeSession:
             return
         if self._closed:
             return
-        terminal = result.terminal_event
         if terminal["type"] != "turn.completed":
             await self._relay_internal(context, terminal)
             if context.terminal:
@@ -506,18 +523,20 @@ class RealtimeSession:
                     async with self._lock:
                         await self._degrade_locked("controller", context.rollback_error)
             return
-        if not result.output_pcm:
+        if not output_pcm:
             await self._fail_publication(context, "empty_audio_output", clear_audio=False)
             return
         try:
             played = await self.audio_sink.play(
                 context.turn_id,
-                result.output_pcm,
+                output_pcm,
                 lambda: context.terminal or context.cancellation.cancelled,
             )
         except Exception:
             await self._fail_publication(context, "audio_playout_exception", clear_audio=True)
             return
+        finally:
+            output_pcm = b""
         if not played:
             await self._fail_publication(context, "audio_playout_failed", clear_audio=True)
             return
@@ -574,7 +593,7 @@ class RealtimeSession:
                 "turn.completed",
                 {
                     "outcome": "completed",
-                    "output_bytes": len(result.output_pcm),
+                    "output_bytes": output_bytes,
                     "audio_format": {
                         "encoding": "pcm_s16le", "sample_rate_hz": 16_000,
                         "channels": 1, "sample_width_bytes": 2,
@@ -732,16 +751,16 @@ class RealtimeSession:
                 return
             async with self._lock:
                 context = self._active
-                cleanup = context.cancellation_cleanup if context is not None else None
                 drain_error: str | None = None
                 if context is not None and not context.terminal:
-                    cleanup, drain_error = await self._interrupt_locked(
+                    _cleanup, drain_error = await self._interrupt_locked(
                         "client_disconnected", notify_client=notify_client
                     )
                 self._closed = True
+                cleanups = tuple(self._cleanup_tasks)
             if drain_error is not None:
                 raise RuntimeError(drain_error)
-            if cleanup is not None:
+            for cleanup in cleanups:
                 try:
                     cleanup_error = await asyncio.wait_for(
                         asyncio.shield(cleanup),

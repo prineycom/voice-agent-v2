@@ -6,6 +6,7 @@ import json
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from voice_agent_v2.audio import generated_output_pcm
 from voice_agent_v2.contracts import EventEnvelope
@@ -234,6 +235,36 @@ class OrderedAudioSink(MemoryAudioSink):
         await super().clear(turn_id)
 
 
+class StubbornCleanupRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.cleanup_entered = threading.Event()
+        self.cleanup_release = threading.Event()
+        self.worker_release = threading.Event()
+
+    def run_turn(self, *, session_id, turn_id, input_pcm, cancellation, event_observer):
+        del input_pcm
+        self.entered.set()
+        self.worker_release.wait(2)
+        event = EventEnvelope(
+            session_id=session_id,
+            turn_id=turn_id,
+            sequence=1,
+            event_type="turn.interrupted",
+            payload={"outcome": "interrupted"},
+            terminal=True,
+        ).as_dict()
+        event_observer(event)
+        return TraceResult((event,), b"", b"")
+
+    def cancel(self) -> None:
+        self.cancel_count += 1
+        self.cleanup_entered.set()
+        self.cleanup_release.wait(2)
+        self.worker_release.set()
+
+
 class BlockingRunner(FakeRunner):
     def __init__(self) -> None:
         super().__init__()
@@ -307,6 +338,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(event["schema_version"] == CONTROL_EVENT_VERSION for event in events.events))
         self.assertEqual(events.events[-1]["turn_id"], turn_id)
         self.assertTrue(events.events[-1]["terminal"])
+        self.assertIsNone(session._active.worker)
 
     async def test_barge_in_clears_old_playout_and_new_turn_has_no_stale_leakage(self) -> None:
         events = MemoryEventSink()
@@ -533,6 +565,37 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             if event["turn_id"] == new_turn and event["type"] == "turn.listening"
         )
         self.assertLess(old_completed, new_listening)
+
+    async def test_disconnect_does_not_confirm_while_prior_cleanup_is_orphaned(self) -> None:
+        events = MemoryEventSink()
+        runner = StubbornCleanupRunner()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        with patch("voice_agent_v2.realtime.CANCELLATION_CLEANUP_BOUND_MS", 30):
+            await session.submit_utterance(b"\0\0" * 320)
+            await asyncio.to_thread(runner.entered.wait, 1)
+            await session.start_utterance()
+            await asyncio.to_thread(runner.cleanup_entered.wait, 1)
+            await session.finish_utterance(b"\0\0" * 320)
+            context = session._active
+            assert context is not None and context.task is not None
+            await asyncio.wait_for(context.task, 1)
+            self.assertEqual(events.events[-1]["type"], "session.degraded")
+
+            with self.assertRaisesRegex(RuntimeError, "cancellation_cleanup_timeout"):
+                await session.disconnect()
+            self.assertFalse(session._disconnect_complete)
+
+            pending = tuple(session._cleanup_tasks)
+            runner.cleanup_release.set()
+            await asyncio.wait_for(asyncio.gather(*pending), 1)
+            await session.disconnect()
+            self.assertTrue(session._disconnect_complete)
+            self.assertFalse(session._cleanup_tasks)
 
     async def test_disconnect_cancels_blocked_inference_without_completion(self) -> None:
         events = MemoryEventSink()

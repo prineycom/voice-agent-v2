@@ -49,6 +49,9 @@ export class VoiceClient {
   private pendingRemoteTrack: RemoteAudioTrack | null = null
   private remotePublication: RemoteTrackPublication | null = null
   private renewingPublication: RemoteTrackPublication | null = null
+  private renewalPhase: 'idle' | 'unsubscribing' | 'subscribing' = 'idle'
+  private mediaInvalidationGeneration = 0
+  private renewalBoundaryGeneration = 0
   private freshSubscriptionRequired = false
   private readonly invalidatedTracks = new WeakSet<RemoteAudioTrack>()
   private streamEpoch = 0
@@ -140,6 +143,9 @@ export class VoiceClient {
     this.pendingRemoteTrack = null
     this.remotePublication = null
     this.renewingPublication = null
+    this.renewalPhase = 'idle'
+    this.mediaInvalidationGeneration = 0
+    this.renewalBoundaryGeneration = 0
     this.freshSubscriptionRequired = false
     this.streamEpoch = 0
     this.playback.clear()
@@ -176,11 +182,32 @@ export class VoiceClient {
         this.isExpectedAgent(participant.identity)
       ) {
         const remoteTrack = track as RemoteAudioTrack
-        if (this.invalidatedTracks.has(remoteTrack)) return
-        this.remotePublication = publication as RemoteTrackPublication
+        const remotePublication = publication as RemoteTrackPublication
+        this.remotePublication = remotePublication
         if (this.freshSubscriptionRequired) {
-          this.invalidatedTracks.add(remoteTrack)
-          this.beginPublicationRenewal()
+          const subscribingPublication = (
+            this.renewalPhase === 'subscribing'
+            && remotePublication === this.renewingPublication
+          )
+          const currentRenewal = (
+            subscribingPublication
+            && this.renewalBoundaryGeneration === this.mediaInvalidationGeneration
+          )
+          if (currentRenewal && this.invalidatedTracks.has(remoteTrack)) return
+          if (currentRenewal) {
+            this.renewalPhase = 'idle'
+            this.renewingPublication = null
+            this.freshSubscriptionRequired = false
+          } else {
+            this.invalidatedTracks.add(remoteTrack)
+            if (subscribingPublication) {
+              this.renewalPhase = 'idle'
+              this.renewingPublication = null
+            }
+            this.beginPublicationRenewal()
+            return
+          }
+        } else if (this.invalidatedTracks.has(remoteTrack)) {
           return
         }
         if (this.reconnecting) {
@@ -196,9 +223,10 @@ export class VoiceClient {
         track.kind !== Track.Kind.Audio
         || !this.isExpectedAgent(participant.identity)
         || publication !== this.renewingPublication
+        || this.renewalPhase !== 'unsubscribing'
       ) return
-      this.renewingPublication = null
-      this.freshSubscriptionRequired = false
+      this.renewalPhase = 'subscribing'
+      this.renewalBoundaryGeneration = this.mediaInvalidationGeneration
       const remotePublication = publication as RemoteTrackPublication
       remotePublication.setSubscribed(true)
     })
@@ -365,14 +393,16 @@ export class VoiceClient {
 
   private renewPlaybackTrack(): void {
     this.invalidatePlaybackTrack()
+    this.mediaInvalidationGeneration += 1
     this.freshSubscriptionRequired = true
     this.beginPublicationRenewal()
   }
 
   private beginPublicationRenewal(): void {
     const publication = this.remotePublication
-    if (publication === null || this.renewingPublication !== null) return
+    if (publication === null || this.renewalPhase !== 'idle') return
     this.renewingPublication = publication
+    this.renewalPhase = 'unsubscribing'
     publication.setSubscribed(false)
   }
 

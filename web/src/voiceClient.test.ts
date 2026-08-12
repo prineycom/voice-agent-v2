@@ -353,6 +353,72 @@ describe('VoiceClient startup cancellation', () => {
     await client.stop()
   })
 
+  it('repeats media renewal when another turn invalidates a pending subscription', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const client = new VoiceClient(document.createElement('div'), callbacks())
+    await client.start()
+    const room = livekit.rooms[0]
+    const publication = { setSubscribed: vi.fn() }
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    const originalTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(element),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', originalTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+    emitControl(room, 'session.ready', 1)
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.failed', 3, { terminal: true })
+    room.emit('trackUnsubscribed', originalTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+
+    emitControl(room, 'turn.listening', 4, { turnId: 'turn-00000002' })
+    emitControl(room, 'turn.failed', 5, {
+      turnId: 'turn-00000002',
+      terminal: true,
+    })
+    const supersededTrack = {
+      kind: 'audio',
+      attach: vi.fn(),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', supersededTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+
+    expect(supersededTrack.attach).not.toHaveBeenCalled()
+    expect(publication.setSubscribed.mock.calls.map(([subscribed]) => subscribed)).toEqual([
+      false, true, false,
+    ])
+
+    room.emit('trackUnsubscribed', supersededTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+    const currentElement = document.createElement('audio')
+    currentElement.play = vi.fn().mockResolvedValue(undefined)
+    currentElement.pause = vi.fn()
+    currentElement.load = vi.fn()
+    const currentTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(currentElement),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', currentTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+
+    expect(publication.setSubscribed).toHaveBeenLastCalledWith(true)
+    expect(currentTrack.attach).toHaveBeenCalledOnce()
+    await client.stop()
+  })
+
   it('fails closed when the agent participant leaves before readiness', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     const microphone = { stop: vi.fn() }

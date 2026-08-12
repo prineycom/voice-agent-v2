@@ -120,6 +120,40 @@ class RecordingRunner:
 
 
 class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def test_live_runner_bounds_session_diagnostics_after_every_turn(self) -> None:
+        class Adapter:
+            def __init__(self) -> None:
+                self.observations = [
+                    {"sequence": sequence}
+                    for sequence in range(runtime.MAX_SESSION_OBSERVATIONS + 7)
+                ]
+
+            def snapshot_session(self, _session_id: str):
+                return ()
+
+        class Controller:
+            def run_turn(self, **_kwargs):
+                return runtime.TraceResult((), b"", b"")
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.stt = Adapter()
+        runner.llm = Adapter()
+        runner.tts = Adapter()
+        runner.controller = Controller()
+        runner._snapshots = {}
+
+        runner.run_turn(
+            session_id="session-test",
+            turn_id="turn-test",
+            input_pcm=b"\0\0",
+            cancellation=runtime.CancellationToken(),
+            event_observer=lambda _event: None,
+        )
+
+        for adapter in (runner.stt, runner.llm, runner.tts):
+            self.assertEqual(len(adapter.observations), runtime.MAX_SESSION_OBSERVATIONS)
+            self.assertEqual(adapter.observations[0], {"sequence": 7})
+
     def controller(self):
         controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
         controller.room = FakeRoom()
