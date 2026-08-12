@@ -52,6 +52,7 @@ TURN_PREDECESSOR = {
 }
 BARGE_IN_DRAIN_BOUND_MS = 250
 CANCELLATION_CLEANUP_BOUND_MS = 1_000
+AUDIO_RETIREMENT_BOUND_MS = 1_000
 CLIENT_PLAYOUT_ACK_TIMEOUT_MS = 3_000
 CLIENT_MEDIA_READY_TIMEOUT_MS = 3_000
 CLIENT_MEDIA_READY_ACK_MARGIN_MS = 250
@@ -114,6 +115,8 @@ class TurnContext:
     playout_boundary: MediaBoundary | None = None
     playout_media_generation: int | None = None
     playout_retired: bool = False
+    playout_retirement_token: object | None = None
+    playout_retirement: asyncio.Task[None] | None = None
 
 
 def _bounded_json_value(value: object, depth: int = 0) -> bool:
@@ -366,6 +369,83 @@ class RealtimeSession:
             return "audio_drain_failed", None
         return None, publication_id
 
+    def _cancel_playout_retirement(self, context: TurnContext) -> None:
+        context.playout_retirement_token = None
+        retirement = context.playout_retirement
+        context.playout_retirement = None
+        if retirement is not None and retirement is not asyncio.current_task():
+            retirement.cancel()
+
+    @staticmethod
+    def _consume_background_task(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except BaseException:
+            pass
+
+    async def _complete_audio_retirement(
+        self, turn_id: str, boundary: MediaBoundary
+    ) -> None:
+        completion = asyncio.create_task(
+            self.audio_sink.complete(turn_id, boundary),
+            name=f"audio-retirement-boundary-{turn_id}",
+        )
+        completion.add_done_callback(self._consume_background_task)
+        try:
+            done, _pending = await asyncio.wait(
+                {completion}, timeout=AUDIO_RETIREMENT_BOUND_MS / 1000
+            )
+            if not done:
+                raise TimeoutError("audio publication retirement timed out")
+            await completion
+        finally:
+            if not completion.done():
+                completion.cancel()
+
+    async def _retire_playout(
+        self,
+        context: TurnContext,
+        boundary: MediaBoundary,
+        media_generation: int,
+        stream_epoch: int,
+        token: object,
+    ) -> None:
+        error: Exception | None = None
+        try:
+            await self._complete_audio_retirement(context.turn_id, boundary)
+        except asyncio.CancelledError:
+            return
+        except Exception as caught:
+            error = caught
+        async with self._lock:
+            if (
+                self._closed
+                or context.terminal
+                or self._active is not context
+                or context.playout_retirement_token is not token
+                or context.playout_boundary != boundary
+                or context.playout_media_generation != media_generation
+                or self._media_generation != media_generation
+                or self.stream_epoch != stream_epoch
+            ):
+                return
+            context.playout_retirement_token = None
+            context.playout_retirement = None
+            if error is not None:
+                if context.playout_ack is not None and not context.playout_ack.done():
+                    context.playout_ack.set_exception(error)
+                return
+            context.playout_retired = True
+            await self._emit(
+                context.turn_id,
+                "turn.playout-retired",
+                {
+                    "state": "awaiting_publication_unsubscribed",
+                    "media_generation": media_generation,
+                    "completed_publication_id": boundary.completed_publication_id,
+                },
+            )
+
     async def _rollback_context(self, context: TurnContext) -> str | None:
         async with self._runner_lock:
             if context.rollback_complete:
@@ -514,6 +594,7 @@ class RealtimeSession:
         if context is None or context.terminal:
             return None, None, None
         context.terminal = True
+        self._cancel_playout_retirement(context)
         if context.playout_ack is not None and not context.playout_ack.done():
             context.playout_ack.set_result(None)
 
@@ -550,6 +631,7 @@ class RealtimeSession:
 
     async def _abort_failed_transport(self, context: TurnContext) -> None:
         context.terminal = True
+        self._cancel_playout_retirement(context)
         self._closed = True
         self._report_failure("transport", "control_publish_failed")
         await self._clear_audio(context.turn_id)
@@ -794,6 +876,7 @@ class RealtimeSession:
         async with self._lock:
             if context.terminal or self._closed or self._active is not context:
                 return
+            self._cancel_playout_retirement(context)
             drain_error, publication_id = await self._clear_audio(context.turn_id)
             if publication_id is None and context.playout_boundary is not None:
                 publication_id = context.playout_boundary.completed_publication_id
@@ -821,6 +904,7 @@ class RealtimeSession:
     ) -> None:
         if context.terminal or self._closed or self._active is not context:
             return
+        self._cancel_playout_retirement(context)
         drain_error: str | None = None
         publication_id: str | None = None
         if clear_audio:
@@ -1114,6 +1198,7 @@ class RealtimeSession:
                     playout_correlated
                     and event_type == "client.playout-drained"
                     and not context.playout_retired
+                    and context.playout_retirement_token is None
                 )
                 playout_complete = (
                     playout_correlated
@@ -1155,21 +1240,18 @@ class RealtimeSession:
                     assert context is not None and boundary is not None
                     assert context.playout_media_generation is not None
                     self._confirm_media_ready(context.playout_media_generation)
-                    try:
-                        await self.audio_sink.complete(context.turn_id, boundary)
-                    except Exception as error:
-                        context.playout_ack.set_exception(error)
-                    else:
-                        context.playout_retired = True
-                        await self._emit(
-                            context.turn_id,
-                            "turn.playout-retired",
-                            {
-                                "state": "awaiting_exact_track_end",
-                                "media_generation": context.playout_media_generation,
-                                "completed_publication_id": boundary.completed_publication_id,
-                            },
-                        )
+                    retirement_token = object()
+                    context.playout_retirement_token = retirement_token
+                    context.playout_retirement = asyncio.create_task(
+                        self._retire_playout(
+                            context,
+                            boundary,
+                            context.playout_media_generation,
+                            self.stream_epoch,
+                            retirement_token,
+                        ),
+                        name=f"playout-retirement-{context.turn_id}",
+                    )
                 else:
                     assert context is not None and context.playout_ack is not None
                     context.playout_ack.set_result(None)

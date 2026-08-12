@@ -31,8 +31,9 @@ interface PendingPlayoutBoundary {
   completedPublicationId: string
   finalSampleCount: number
   sampleRateHz: number
-  stage: 'waiting-drain' | 'drain-sent' | 'waiting-end'
+  stage: 'waiting-drain' | 'drain-sent' | 'waiting-retirement' | 'completion-sent'
   waitStarted: boolean
+  retirementObserved: boolean
 }
 
 export interface VoiceClientCallbacks {
@@ -261,10 +262,21 @@ export class VoiceClient {
         || !this.isExpectedAgent(participant.identity)
       ) return
       const publicationId = this.publicationId(publication as RemoteTrackPublication)
+      if (publicationId === null) return
+      const registeredTrack = this.publicationTracks.get(publicationId)
+      if (registeredTrack !== track) return
+      this.publicationTracks.delete(publicationId)
+      const boundary = this.pendingPlayoutBoundary
       if (
-        publicationId !== null
-        && this.pendingPlayoutBoundary?.completedPublicationId !== publicationId
-      ) this.publicationTracks.delete(publicationId)
+        boundary !== null
+        && boundary.completedPublicationId === publicationId
+        && boundary.stage !== 'waiting-drain'
+      ) {
+        boundary.retirementObserved = true
+        if (boundary.stage === 'waiting-retirement') {
+          void this.completeRetiredBoundary(boundary)
+        }
+      }
     })
     room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
       if (
@@ -526,6 +538,7 @@ export class VoiceClient {
       sampleRateHz,
       stage: 'waiting-drain',
       waitStarted: false,
+      retirementObserved: false,
     }
     this.clearPlayoutAckTimer()
     void this.beginWait(
@@ -594,20 +607,26 @@ export class VoiceClient {
     if (
       boundary === null
       || boundary.stage !== 'drain-sent'
-      || event.payload.state !== 'awaiting_exact_track_end'
+      || event.payload.state !== 'awaiting_publication_unsubscribed'
       || event.turn_id !== boundary.turnId
       || event.stream_epoch !== boundary.streamEpoch
       || event.payload.media_generation !== boundary.mediaGeneration
       || event.payload.completed_publication_id !== boundary.completedPublicationId
     ) throw new Error('invalid retired playout boundary')
-    boundary.stage = 'waiting-end'
+    boundary.stage = 'waiting-retirement'
     void this.completeRetiredBoundary(boundary)
   }
 
   private async completeRetiredBoundary(boundary: PendingPlayoutBoundary): Promise<void> {
+    if (
+      this.pendingPlayoutBoundary !== boundary
+      || boundary.stage !== 'waiting-retirement'
+      || !boundary.retirementObserved
+      || this.publicationTracks.has(boundary.completedPublicationId)
+      || this.stopping
+    ) return
+    boundary.stage = 'completion-sent'
     try {
-      await this.playback.waitForFiniteTrackEnd()
-      if (this.pendingPlayoutBoundary !== boundary || this.stopping) return
       const room = this.room
       const capability = this.capability
       if (room === null || capability === null) return

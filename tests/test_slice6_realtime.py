@@ -126,6 +126,24 @@ class MemoryAudioSink:
         return self.publication_id
 
 
+class HungRetirementAudioSink(MemoryAudioSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.retirement_started = asyncio.Event()
+        self.retirement_release = asyncio.Event()
+        self.late_retirement_finished = asyncio.Event()
+
+    async def complete(self, turn_id, _boundary) -> None:
+        self.completed.append(turn_id)
+        self.retirement_started.set()
+        while not self.retirement_release.is_set():
+            try:
+                await self.retirement_release.wait()
+            except asyncio.CancelledError:
+                continue
+        self.late_retirement_finished.set()
+
+
 class FakeRunner:
     def __init__(self) -> None:
         self.cancel_count = 0
@@ -469,6 +487,13 @@ async def acknowledge_playout(
         }).encode())
         if not accepted:
             raise AssertionError(f"{event_type} was not accepted")
+        if event_type == "client.playout-drained":
+            for _ in range(200):
+                if context.playout_retired:
+                    break
+                await asyncio.sleep(0.01)
+            if not context.playout_retired:
+                raise AssertionError("playout retirement did not complete")
 
 
 async def wait_for_turn(session: RealtimeSession) -> None:
@@ -1285,6 +1310,50 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             events.events[-1]["payload"]["code"], "audio_output_out_of_bounds"
         )
+
+    async def test_hung_retirement_does_not_block_barge_in_or_commit_late(self) -> None:
+        events = MemoryEventSink()
+        audio = HungRetirementAudioSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=audio,
+        )
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        context = session._active
+        assert context is not None and context.task is not None
+        while context.playout_ack is None:
+            await asyncio.sleep(0.01)
+        assert (
+            context.playout_boundary is not None
+            and context.playout_media_generation is not None
+        )
+        await start_media_wait(
+            session, turn_id, context.playout_media_generation, "playout"
+        )
+        drained = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": session.stream_epoch,
+            "sequence": session._client_sequence + 1,
+            "media_generation": context.playout_media_generation,
+            "completed_publication_id": context.playout_boundary.completed_publication_id,
+            "type": "client.playout-drained",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(drained))
+        await asyncio.wait_for(audio.retirement_started.wait(), 1)
+
+        await asyncio.wait_for(session.interrupt("barge_in"), 0.5)
+        self.assertEqual(events.events[-1]["type"], "turn.interrupted")
+        self.assertNotIn("turn.playout-retired", [event["type"] for event in events.events])
+
+        audio.retirement_release.set()
+        await asyncio.wait_for(audio.late_retirement_finished.wait(), 1)
+        await asyncio.sleep(0)
+        self.assertNotIn("turn.playout-retired", [event["type"] for event in events.events])
+        await asyncio.wait_for(context.task, 1)
 
     async def test_completion_waits_for_matching_client_playout_ack(self) -> None:
         events = MemoryEventSink()

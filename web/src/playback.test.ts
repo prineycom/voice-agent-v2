@@ -5,6 +5,11 @@ class FiniteMediaTrack extends EventTarget {
   readonly id = 'finite-track'
   readyState: MediaStreamTrackState = 'live'
   muted = false
+  sampleRate: number | undefined = 48_000
+
+  getSettings(): MediaTrackSettings {
+    return this.sampleRate === undefined ? {} : { sampleRate: this.sampleRate }
+  }
 }
 
 class FakeTrack implements AttachableAudioTrack {
@@ -48,15 +53,11 @@ class FakeTrack implements AttachableAudioTrack {
     return []
   }
 
-  end(): void {
-    this.finiteTrack.readyState = 'ended'
-    this.finiteTrack.dispatchEvent(new Event('ended'))
-  }
 }
 
 class RenderHarness {
   state: AudioContextState = 'running'
-  readonly sampleRate = 48_000
+  readonly sampleRate: number
   readonly resume = vi.fn(async () => { this.state = 'running' })
   readonly close = vi.fn(async () => { this.state = 'closed' })
   readonly node = {
@@ -65,6 +66,10 @@ class RenderHarness {
   } as unknown as ScriptProcessorNode
 
   createScriptProcessor = vi.fn().mockReturnValue(this.node)
+
+  constructor(sampleRate = 48_000) {
+    this.sampleRate = sampleRate
+  }
 
   render(frames: number): void {
     const input = new Float32Array(frames)
@@ -166,32 +171,42 @@ describe('audio playout boundary', () => {
     track.receivedSamples = 960
     track.emittedSamples = 960
     harness.render(960)
-    track.end()
 
     await expect(playout).resolves.toBeUndefined()
   })
 
-  it('does not confirm retirement before the correlated finite track has ended', async () => {
-    const harness = new RenderHarness()
+  it('uses separate 44.1 kHz render and 48 kHz transport targets', async () => {
+    const harness = new RenderHarness(44_100)
     installContext(harness)
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const track = new FakeTrack()
     boundary.setTrack(track)
     await boundary.prepareFinitePlayout()
-    track.receivedSamples = 960
-    track.emittedSamples = 960
     const playout = boundary.waitForFinitePlayout(320, 16_000)
-    harness.render(960)
-    await playout
-    const ended = boundary.waitForFiniteTrackEnd()
     let completed = false
-    void ended.then(() => { completed = true })
+    void playout.then(() => { completed = true })
 
+    track.receivedSamples = 882
+    track.emittedSamples = 882
+    harness.render(882)
     await new Promise((resolve) => setTimeout(resolve, 25))
     expect(completed).toBe(false)
-    track.end()
-    await ended
+
+    track.receivedSamples = 960
+    track.emittedSamples = 960
+    await playout
     expect(completed).toBe(true)
+  })
+
+  it('fails closed when the official transport sample rate is absent', async () => {
+    const harness = new RenderHarness()
+    installContext(harness)
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+    const track = new FakeTrack()
+    track.finiteTrack.sampleRate = undefined
+    boundary.setTrack(track)
+
+    await expect(boundary.prepareFinitePlayout()).rejects.toThrow('transport clock')
   })
 
   it('does not accept transport progress while the render context is suspended', async () => {
@@ -214,7 +229,6 @@ describe('audio playout boundary', () => {
     expect(completed).toBe(false)
     harness.state = 'running'
     harness.render(960)
-    track.end()
     await playout
   })
 

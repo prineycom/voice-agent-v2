@@ -103,6 +103,7 @@ function finiteTrackBoundary() {
   Object.defineProperties(mediaStreamTrack, {
     id: { configurable: true, value: 'finite-track' },
     readyState: { configurable: true, value: 'live' },
+    getSettings: { configurable: true, value: () => ({ sampleRate: 48_000 }) },
   })
   return {
     mediaStreamTrack,
@@ -244,11 +245,11 @@ describe('VoiceClient startup cancellation', () => {
     element.pause = vi.fn()
     element.load = vi.fn()
     const mediaStreamTrack = new EventTarget() as MediaStreamTrack
-    let trackReadyState: MediaStreamTrackState = 'live'
     Object.defineProperties(mediaStreamTrack, {
       id: { configurable: true, value: 'finite-track-turn-1' },
-      readyState: { configurable: true, get: () => trackReadyState },
+      readyState: { configurable: true, value: 'live' },
       muted: { configurable: true, value: false },
+      getSettings: { configurable: true, value: () => ({ sampleRate: 48_000 }) },
     })
     const renderNode = {
       onaudioprocess: null as ((event: AudioProcessingEvent) => void) | null,
@@ -374,20 +375,19 @@ describe('VoiceClient startup cancellation', () => {
       completed_publication_id: 'publication-turn-1',
       type: 'client.playout-drained',
     })
-    expect(trackReadyState).toBe('live')
+    expect(mediaStreamTrack.readyState).toBe('live')
 
+    room.emit('trackUnsubscribed', turnTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+    expect(mediaStreamTrack.readyState).toBe('live')
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4)
     emitControl(room, 'turn.playout-retired', 9, {
       payload: {
-        state: 'awaiting_exact_track_end',
+        state: 'awaiting_publication_unsubscribed',
         media_generation: 2,
         completed_publication_id: 'publication-turn-1',
       },
-    })
-    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4)
-    trackReadyState = 'ended'
-    mediaStreamTrack.dispatchEvent(new Event('ended'))
-    room.emit('trackUnsubscribed', turnTrack, publication, {
-      identity: 'agent-session-test-0001',
     })
     await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(5))
     expect(JSON.parse(new TextDecoder().decode(

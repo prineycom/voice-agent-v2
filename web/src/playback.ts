@@ -9,7 +9,7 @@ export interface AttachableAudioTrack {
 
 interface PlayoutWaiter {
   targetRenderFrames: number
-  targetDeliverySampleCount: number
+  targetTransportSampleCount: number
   resolve: () => void
   reject: (error: Error) => void
 }
@@ -30,19 +30,17 @@ export class AudioPlaybackBoundary {
   private renderFrames = 0
   private renderBaseline: number | null = null
   private renderSampleRate: number | null = null
+  private transportSampleRate: number | null = null
   private renderArmed = false
   private renderStarted = false
   private boundaryGeneration = 0
   private boundaryTrack: MediaStreamTrack | null = null
-  private boundaryTrackEnded = false
-  private boundaryTrackEndedListener: (() => void) | null = null
   private deliveryBaseline: DeliveryStats | null = null
   private deliveryPoll: ReturnType<typeof setTimeout> | null = null
   private deliveryReadActive = false
   private elementBlocked = false
   private contextBlocked = false
   private playoutWaiters = new Set<PlayoutWaiter>()
-  private trackEndWaiters = new Set<PlayoutWaiter>()
 
   constructor(
     private readonly container: HTMLElement,
@@ -72,6 +70,10 @@ export class AudioPlaybackBoundary {
       || mediaTrack.readyState !== 'live'
       || mediaTrack.id.length < 1
     ) throw new Error('finite Web Audio render boundary is unavailable')
+    const transportSampleRate = this.readTransportSampleRate(mediaTrack)
+    if (transportSampleRate === null) {
+      throw new Error('finite audio transport clock is unavailable')
+    }
     const deliveryBaseline = await this.readDeliveryStats(mediaTrack)
     if (
       deliveryBaseline === null
@@ -83,25 +85,11 @@ export class AudioPlaybackBoundary {
       || this.element === null
     ) throw new Error('finite audio delivery boundary is unavailable')
     this.boundaryGeneration += 1
-    const boundaryGeneration = this.boundaryGeneration
     this.renderBaseline = this.renderFrames
     this.renderSampleRate = context.sampleRate
+    this.transportSampleRate = transportSampleRate
     this.deliveryBaseline = deliveryBaseline
     this.boundaryTrack = mediaTrack
-    this.boundaryTrackEnded = false
-    this.boundaryTrackEndedListener = () => {
-      if (
-        boundaryGeneration === this.boundaryGeneration
-        && this.boundaryTrack === mediaTrack
-        && mediaTrack.readyState === 'ended'
-      ) {
-        this.boundaryTrackEnded = true
-        for (const waiter of this.trackEndWaiters) waiter.resolve()
-        this.trackEndWaiters.clear()
-        this.scheduleDeliveryValidation(0)
-      }
-    }
-    mediaTrack.addEventListener('ended', this.boundaryTrackEndedListener)
     if (mediaTrack.readyState !== 'live') {
       this.invalidateRenderBoundary()
       throw new Error('finite audio delivery boundary is unavailable')
@@ -115,6 +103,7 @@ export class AudioPlaybackBoundary {
     const context = this.audioContext
     const baseline = this.renderBaseline
     const renderSampleRate = this.renderSampleRate
+    const transportSampleRate = this.transportSampleRate
     if (
       !Number.isSafeInteger(sampleCount)
       || sampleCount < 1
@@ -124,47 +113,28 @@ export class AudioPlaybackBoundary {
       || context.state !== 'running'
       || baseline === null
       || renderSampleRate === null
+      || transportSampleRate === null
       || this.renderNode === null
       || this.element === null
       || !this.renderArmed
       || this.deliveryBaseline === null
       || this.boundaryTrack === null
+      || this.readTransportSampleRate(this.boundaryTrack) !== transportSampleRate
     ) return Promise.reject(new Error('finite Web Audio render boundary is unavailable'))
-    const normalizedSampleCount = Math.ceil(
+    const targetRenderFrames = baseline + Math.ceil(
       sampleCount * renderSampleRate / sampleRate,
     )
-    const targetRenderFrames = baseline + normalizedSampleCount
+    const targetTransportSampleCount = Math.ceil(
+      sampleCount * transportSampleRate / sampleRate,
+    )
     return new Promise<void>((resolve, reject) => {
       this.playoutWaiters.add({
         targetRenderFrames,
-        targetDeliverySampleCount: normalizedSampleCount,
+        targetTransportSampleCount,
         resolve,
         reject,
       })
       if (this.renderFrames >= targetRenderFrames) this.scheduleDeliveryValidation(0)
-    })
-  }
-
-  waitForFiniteTrackEnd(): Promise<void> {
-    const mediaTrack = this.boundaryTrack
-    if (
-      !this.renderArmed
-      || mediaTrack === null
-      || mediaTrack !== this.track?.mediaStreamTrack
-    ) return Promise.reject(new Error('finite audio track boundary is unavailable'))
-    if (this.boundaryTrackEnded && mediaTrack.readyState === 'ended') {
-      return Promise.resolve()
-    }
-    if (mediaTrack.readyState !== 'live') {
-      return Promise.reject(new Error('finite audio track boundary was lost'))
-    }
-    return new Promise<void>((resolve, reject) => {
-      this.trackEndWaiters.add({
-        targetRenderFrames: 0,
-        targetDeliverySampleCount: 0,
-        resolve,
-        reject,
-      })
     })
   }
 
@@ -328,6 +298,16 @@ export class AudioPlaybackBoundary {
     this.renderNode = node
   }
 
+  private readTransportSampleRate(mediaTrack: MediaStreamTrack): number | null {
+    const sampleRate = mediaTrack.getSettings().sampleRate
+    return (
+      typeof sampleRate === 'number'
+      && Number.isSafeInteger(sampleRate)
+      && sampleRate >= 8_000
+      && sampleRate <= 384_000
+    ) ? sampleRate : null
+  }
+
   private async readDeliveryStats(mediaTrack: MediaStreamTrack): Promise<DeliveryStats | null> {
     const track = this.track
     if (
@@ -398,6 +378,8 @@ export class AudioPlaybackBoundary {
           || mediaTrack === null
           || mediaTrack !== this.track?.mediaStreamTrack
           || this.audioContext?.state !== 'running'
+          || this.transportSampleRate === null
+          || this.readTransportSampleRate(mediaTrack) !== this.transportSampleRate
         ) {
           this.rejectPlayoutWaiters('finite audio delivery boundary was lost')
         } else if (
@@ -416,9 +398,9 @@ export class AudioPlaybackBoundary {
             if (
               this.renderFrames < waiter.targetRenderFrames
               || latest.receivedSamples - baseline.receivedSamples
-                < waiter.targetDeliverySampleCount
+                < waiter.targetTransportSampleCount
               || latest.emittedSamples - baseline.emittedSamples
-                < waiter.targetDeliverySampleCount
+                < waiter.targetTransportSampleCount
             ) continue
             this.playoutWaiters.delete(waiter)
             waiter.resolve()
@@ -440,8 +422,6 @@ export class AudioPlaybackBoundary {
   private rejectPlayoutWaiters(message: string): void {
     for (const waiter of this.playoutWaiters) waiter.reject(new Error(message))
     this.playoutWaiters.clear()
-    for (const waiter of this.trackEndWaiters) waiter.reject(new Error(message))
-    this.trackEndWaiters.clear()
     if (this.deliveryPoll !== null) {
       clearTimeout(this.deliveryPoll)
       this.deliveryPoll = null
@@ -450,16 +430,12 @@ export class AudioPlaybackBoundary {
 
   private invalidateRenderBoundary(): void {
     this.boundaryGeneration += 1
-    if (this.boundaryTrack !== null && this.boundaryTrackEndedListener !== null) {
-      this.boundaryTrack.removeEventListener('ended', this.boundaryTrackEndedListener)
-    }
     this.boundaryTrack = null
-    this.boundaryTrackEnded = false
-    this.boundaryTrackEndedListener = null
     this.renderArmed = false
     this.renderStarted = false
     this.renderBaseline = null
     this.renderSampleRate = null
+    this.transportSampleRate = null
     this.deliveryBaseline = null
     this.rejectPlayoutWaiters('audio playout boundary was invalidated')
   }
