@@ -241,6 +241,49 @@ class LocalTTSContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "selected_tts_unavailable")
         self.assertFalse(tts.observations)
 
+    def test_concurrent_tts_cancellation_joins_single_process_cleanup(self) -> None:
+        class CleanupProcess:
+            def __init__(self) -> None:
+                self.process = object()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+                self.cancel_count = 0
+                self.close_count = 0
+
+            def cancel(self) -> float:
+                self.cancel_count += 1
+                self.entered.set()
+                self.release.wait(1)
+                return 7.0
+
+            def close(self) -> None:
+                self.close_count += 1
+                self.process = None
+
+        tts = Qwen3TTS()
+        process = CleanupProcess()
+        tts._process = process
+        results: list[float] = []
+        first = threading.Thread(target=lambda: results.append(tts.cancel()))
+        second = threading.Thread(target=lambda: results.append(tts.cancel()))
+
+        first.start()
+        self.assertTrue(process.entered.wait(0.5))
+        second.start()
+        time.sleep(0.02)
+        self.assertEqual(process.cancel_count, 1)
+        self.assertTrue(second.is_alive())
+        process.release.set()
+        first.join(0.5)
+        second.join(0.5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(process.cancel_count, 1)
+        self.assertEqual(process.close_count, 1)
+        self.assertCountEqual(results, [0.0, 7.0])
+        self.assertIsNone(tts._process)
+
     def test_turn_tts_budget_spans_every_sentence_handoff(self) -> None:
         class SentenceProcess:
             def __init__(self) -> None:
@@ -803,6 +846,69 @@ class RealTurnControllerTests(unittest.TestCase):
         self.assertEqual(result.terminal_event["type"], "turn.failed")
         self.assertNotIn("turn.speaking", [event["type"] for event in result.events])
         self.assertNotIn("tts.audio", [event["type"] for event in result.events])
+
+    def test_late_handoff_cleanup_finishes_before_next_turn_generation(self) -> None:
+        class LateCleanupLLM(FakeLLM):
+            supports_handoff_abort = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def respond_with_handoff(
+                self, *, on_sentence, on_handoff_abort, **_kwargs
+            ) -> str:
+                self.calls += 1
+                on_sentence("Буферизованный ответ.")
+                if self.calls == 1:
+                    on_handoff_abort()
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_identity_mismatch"
+                    )
+                return "Буферизованный ответ."
+
+        class CleanupBlockingTTS(FakeTTS):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_entered = threading.Event()
+                self.cleanup_release = threading.Event()
+
+            def cancel(self) -> float:
+                if self.cancel_count == 0:
+                    self.cleanup_entered.set()
+                    self.cleanup_release.wait(1)
+                return super().cancel()
+
+        llm = LateCleanupLLM()
+        tts = CleanupBlockingTTS()
+        controller = RealTurnController(FakeSTT(), llm, tts)
+        results = {}
+        first = threading.Thread(target=lambda: results.__setitem__("first", controller.run_turn(
+            session_id="session-test-0001",
+            turn_id="turn-test-0001",
+            input_pcm=b"\0\0" * 160,
+        )))
+        second = threading.Thread(target=lambda: results.__setitem__("second", controller.run_turn(
+            session_id="session-test-0001",
+            turn_id="turn-test-0002",
+            input_pcm=b"\0\0" * 160,
+        )))
+
+        first.start()
+        self.assertTrue(tts.cleanup_entered.wait(0.5))
+        second.start()
+        time.sleep(0.03)
+        self.assertEqual(llm.calls, 1)
+        self.assertTrue(second.is_alive())
+        tts.cleanup_release.set()
+        first.join(0.5)
+        second.join(0.5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(results["first"].terminal_event["type"], "turn.failed")
+        self.assertEqual(results["first"].output_pcm, b"")
+        self.assertEqual(results["second"].terminal_event["type"], "turn.completed")
 
     def test_tts_failure_preserves_llm_text_event_but_fails_spoken_turn(self) -> None:
         result = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS(fail=True)).run_turn(

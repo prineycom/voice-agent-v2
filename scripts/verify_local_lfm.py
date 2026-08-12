@@ -42,8 +42,10 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def request_json(path: str) -> object:
-    connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+def request_json(path: str, *, timeout_seconds: float = 5.0) -> object:
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", PORT, timeout=timeout_seconds
+    )
     try:
         connection.request("GET", path, headers={"Connection": "close"})
         response = connection.getresponse()
@@ -53,6 +55,74 @@ def request_json(path: str) -> object:
         return json.loads(body)
     finally:
         connection.close()
+
+
+def slot_runtime_state() -> dict[int, bool]:
+    document = request_json("/slots", timeout_seconds=1.0)
+    if not isinstance(document, list) or len(document) != 2:
+        raise RuntimeError("local LFM /slots did not expose exactly two slots")
+    states: dict[int, bool] = {}
+    for raw_slot in document:
+        if not isinstance(raw_slot, dict):
+            raise RuntimeError("local LFM /slots returned a malformed slot")
+        slot_id = raw_slot.get("id")
+        processing = raw_slot.get("is_processing")
+        if (
+            not isinstance(slot_id, int)
+            or isinstance(slot_id, bool)
+            or not isinstance(processing, bool)
+            or raw_slot.get("n_ctx") != 32_768
+            or slot_id in states
+        ):
+            raise RuntimeError("local LFM /slots runtime contract mismatch")
+        states[slot_id] = processing
+    return states
+
+
+def wait_for_busy_slots(count: int, timeout_seconds: float) -> frozenset[int]:
+    deadline = time.monotonic() + timeout_seconds
+    last_busy: frozenset[int] = frozenset()
+    while time.monotonic() < deadline:
+        states = slot_runtime_state()
+        last_busy = frozenset(
+            slot_id for slot_id, processing in states.items() if processing
+        )
+        if len(last_busy) >= count:
+            return last_busy
+        time.sleep(0.02)
+    raise RuntimeError(
+        f"local LFM slot occupancy timeout: expected_busy={count} "
+        f"observed_busy={len(last_busy)}"
+    )
+
+
+def wait_for_slot_idle(slot_id: int, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        states = slot_runtime_state()
+        if slot_id not in states:
+            raise RuntimeError("local LFM target slot disappeared")
+        if not states[slot_id]:
+            return
+        time.sleep(0.02)
+    raise RuntimeError(f"local LFM slot {slot_id} did not return idle")
+
+
+def wait_for_all_slots_idle(timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not any(slot_runtime_state().values()):
+            return
+        time.sleep(0.02)
+    raise RuntimeError("local LFM slots did not all return idle")
+
+
+def join_workers(workers: list[threading.Thread], timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    for worker in workers:
+        worker.join(max(0.0, deadline - time.monotonic()))
+    if any(worker.is_alive() for worker in workers):
+        raise RuntimeError("local LFM workers exceeded their shared deadline")
 
 
 def start_server() -> tuple[subprocess.Popen, object]:
@@ -137,11 +207,9 @@ def main() -> int:
     process, output = start_server()
     keep = False
     try:
-        slots = request_json("/slots")
-        if not isinstance(slots, list) or len(slots) != 2 or any(
-            not isinstance(slot, dict) or slot.get("n_ctx") != 32_768 for slot in slots
-        ):
-            raise AssertionError(f"local LFM slots are not 2 x 32768: {slots!r}")
+        initial_slots = slot_runtime_state()
+        if any(initial_slots.values()):
+            raise AssertionError("local LFM started with an unexpectedly busy slot")
         provider = LocalLFMProvider()
         readiness = provider.readiness()
         if readiness["provider_identity"] != PROVIDER_IDENTITY:
@@ -166,16 +234,25 @@ def main() -> int:
                 errors.append(error)
 
         threads = [
-            threading.Thread(target=run, args=("parallel-a", "Почему летом день длиннее? Ответь просто.")),
-            threading.Thread(target=run, args=("parallel-b", "Зачем растениям нужен свет? Ответь просто.")),
+            threading.Thread(
+                target=run,
+                args=("parallel-a", "Объясни простыми словами, почему летом день длиннее, тремя законченными предложениями."),
+            ),
+            threading.Thread(
+                target=run,
+                args=("parallel-b", "Объясни простыми словами, зачем растениям нужен свет, тремя законченными предложениями."),
+            ),
         ]
         started = time.monotonic()
         for thread in threads:
             thread.start()
-        for thread in threads:
-            thread.join(30)
-        if errors or any(thread.is_alive() for thread in threads):
-            raise AssertionError(f"two-slot requests failed: {errors!r}")
+        occupied_parallel_slots = wait_for_busy_slots(2, 5)
+        join_workers(threads, 25)
+        if errors:
+            codes = [getattr(error, "code", type(error).__name__) for error in errors]
+            raise AssertionError(f"two-slot requests failed: {codes!r}")
+        if len(occupied_parallel_slots) != 2:
+            raise AssertionError("two distinct server slots were not busy concurrently")
         parallel_seconds = time.monotonic() - started
         parallel_observations = provider.observations[-2:]
         if len(responses) != 2 or len(parallel_observations) != 2:
@@ -270,28 +347,66 @@ def main() -> int:
             except Exception as error:
                 cancelled.append(getattr(error, "code", type(error).__name__))
 
+        wait_for_all_slots_idle(5)
         worker = threading.Thread(target=long_request)
         worker.start()
-        if not cancellation_provider.wait_for_active_request(2):
-            raise AssertionError("local LFM cancellation request did not enter transport")
+        cancellation_busy_slots = wait_for_busy_slots(1, 5)
+        if len(cancellation_busy_slots) != 1:
+            raise AssertionError("cancellation request did not occupy exactly one server slot")
+        cancelled_slot = next(iter(cancellation_busy_slots))
         cancellation.cancel()
         cancellation_provider.cancel()
-        worker.join(2)
-        if worker.is_alive() or cancelled != ["selected_provider_cancelled"]:
+        join_workers([worker], 3)
+        if cancelled != ["selected_provider_cancelled"]:
             raise AssertionError(f"local LFM cancellation failed: {cancelled!r}")
-        recovery, recovery_observation = one_response(
-            provider,
-            "session-recovery", "turn-recovery", "Назови столицу Сербии одним предложением."
-        )
-        if not recovery:
-            raise AssertionError("local LFM slot did not recover after cancellation")
+        wait_for_slot_idle(cancelled_slot, 5)
+
+        recovery_responses: dict[str, str] = {}
+        recovery_errors: list[BaseException] = []
+
+        def run_recovery(name: str, prompt: str) -> None:
+            try:
+                recovery_responses[name] = provider.respond(
+                    session_id=f"session-recovery-{name}",
+                    turn_id=f"turn-recovery-{name}",
+                    transcript=prompt,
+                )
+            except BaseException as error:
+                recovery_errors.append(error)
+
+        recovery_workers = [
+            threading.Thread(
+                target=run_recovery,
+                args=("a", "Назови столицу Сербии и поясни ответ двумя короткими предложениями."),
+            ),
+            threading.Thread(
+                target=run_recovery,
+                args=("b", "Назови столицу Хорватии и поясни ответ двумя короткими предложениями."),
+            ),
+        ]
+        for recovery_worker in recovery_workers:
+            recovery_worker.start()
+        recovered_busy_slots = wait_for_busy_slots(2, 5)
+        join_workers(recovery_workers, 25)
+        if recovery_errors:
+            codes = [
+                getattr(error, "code", type(error).__name__)
+                for error in recovery_errors
+            ]
+            raise AssertionError(f"full slot recovery requests failed: {codes!r}")
+        if len(recovered_busy_slots) != 2 or len(recovery_responses) != 2:
+            raise AssertionError("full two-slot capacity did not recover after cancellation")
+        recovery_observations = provider.observations[-2:]
 
         print("Issue #15 local LFM integration: PASS")
         print(f"identity: {PROVIDER_IDENTITY}")
         print("runtime: llama.cpp b10357/689e227db; binary/model hashes verified")
         print("network: endpoint=127.0.0.1:18080 only; credentials=false fallback=false")
         print("slots: count=2 n_ctx_slot=32768 full_gpu_offload=required flash_attention=true")
-        print(f"parallel_requests: completed=2 elapsed_seconds={parallel_seconds:.3f}")
+        print(
+            f"parallel_requests: completed=2 concurrently_busy_slots="
+            f"{len(occupied_parallel_slots)} elapsed_seconds={parallel_seconds:.3f}"
+        )
         for index, observation in enumerate(parallel_observations, start=1):
             print(
                 f"parallel-{index}: visible_ttft_ms={observation['visible_first_content_ms']:.3f} "
@@ -304,9 +419,14 @@ def main() -> int:
             f"first_callback_ms={(handoff_times[0] - handoff_started) * 1000:.3f} "
             f"return_ms={(handoff_returned - handoff_started) * 1000:.3f}"
         )
+        recovery_completion_ms = max(
+            float(observation["completion_ms"])
+            for observation in recovery_observations
+        )
         print(
-            f"cancellation: terminal={cancelled[0]} recovery_visible_chars={len(recovery)} "
-            f"recovery_completion_ms={recovery_observation['completion_ms']:.3f}"
+            f"cancellation: terminal={cancelled[0]} exact_slot_released=true "
+            f"recovered_concurrently_busy_slots={len(recovered_busy_slots)} "
+            f"recovery_completion_ms={recovery_completion_ms:.3f}"
         )
         if args.keep_running:
             keep = True

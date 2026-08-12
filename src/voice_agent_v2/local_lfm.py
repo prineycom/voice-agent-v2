@@ -33,7 +33,7 @@ REQUEST_TIMEOUT_SECONDS = 20.0
 READINESS_TIMEOUT_SECONDS = 3.0
 MAX_TOKENS = 768
 REASONING_BUDGET = 384
-HANDOFF_ABORT_JOIN_SECONDS = 0.25
+HANDOFF_CLEANUP_TIMEOUT_SECONDS = 6.0
 ALLOWED_PAYLOAD_FIELDS = frozenset({
     "model", "messages", "stream", "stream_options", "temperature", "top_p",
     "top_k", "repeat_penalty", "max_tokens", "reasoning_format", "reasoning_budget",
@@ -77,9 +77,12 @@ class LocalLFMProvider:
         *,
         connection_factory: Callable[..., http.client.HTTPConnection] = http.client.HTTPConnection,
         request_timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
+        handoff_cleanup_timeout_seconds: float = HANDOFF_CLEANUP_TIMEOUT_SECONDS,
     ) -> None:
         if request_timeout_seconds <= 0:
             raise ValueError("request_timeout_seconds must be positive")
+        if handoff_cleanup_timeout_seconds <= 0:
+            raise ValueError("handoff_cleanup_timeout_seconds must be positive")
         parsed = urlsplit(LLAMA_ENDPOINT)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.port != 18080:
             raise AssertionError("local LFM endpoint invariant changed")
@@ -87,6 +90,7 @@ class LocalLFMProvider:
         self._port = parsed.port
         self._connection_factory = connection_factory
         self._request_timeout_seconds = request_timeout_seconds
+        self._handoff_cleanup_timeout_seconds = handoff_cleanup_timeout_seconds
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._context_lock = threading.Lock()
         self._operation_lock = threading.Lock()
@@ -94,10 +98,16 @@ class LocalLFMProvider:
         self._operation_generation = 0
         self._cancelled_generations: set[int] = set()
         self._connections: dict[int, http.client.HTTPConnection] = {}
+        self._handoff_cleanup_generations: set[int] = set()
+        self._handoff_capacity_error: str | None = None
         self.observations: list[dict[str, object]] = []
 
     def _begin_operation(self, cancellation: CancellationToken | None) -> int:
         with self._operation_lock:
+            if self._handoff_capacity_error is not None:
+                raise StageFailure("llm_provider", self._handoff_capacity_error)
+            if self._handoff_cleanup_generations:
+                raise StageFailure("llm_provider", "local_lfm_handoff_cleanup_pending")
             self._operation_generation += 1
             generation = self._operation_generation
             if cancellation is not None and cancellation.cancelled:
@@ -537,24 +547,37 @@ class LocalLFMProvider:
             if handoff_finished:
                 return
             handoff_finished = True
+            with self._operation_lock:
+                self._handoff_cleanup_generations.add(generation)
             handoff_aborted.set()
-            cancellation_thread: threading.Thread | None = None
-            if on_handoff_abort is not None:
-                cancellation_thread = threading.Thread(
-                    target=on_handoff_abort,
-                    name=f"local-lfm-handoff-abort-{generation}",
-                    daemon=True,
-                )
-                cancellation_thread.start()
             if handoff_queue is not None:
                 try:
                     handoff_queue.put_nowait(None)
                 except queue.Full:
                     pass
-            join_deadline = time.monotonic() + HANDOFF_ABORT_JOIN_SECONDS
-            for worker in (cancellation_thread, handoff_thread):
-                if worker is not None:
-                    worker.join(max(0.0, join_deadline - time.monotonic()))
+
+            cleanup_errors: list[BaseException] = []
+
+            def cleanup() -> None:
+                try:
+                    if on_handoff_abort is not None:
+                        on_handoff_abort()
+                    if handoff_thread is not None:
+                        handoff_thread.join()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+
+            cleanup_thread = threading.Thread(
+                target=cleanup,
+                name=f"local-lfm-handoff-cleanup-{generation}",
+                daemon=True,
+            )
+            cleanup_thread.start()
+            cleanup_thread.join(self._handoff_cleanup_timeout_seconds)
+            with self._operation_lock:
+                if cleanup_thread.is_alive() or cleanup_errors:
+                    self._handoff_capacity_error = "local_lfm_handoff_cleanup_failed"
+                self._handoff_cleanup_generations.discard(generation)
 
         try:
             try:
@@ -667,6 +690,14 @@ class LocalLFMProvider:
         with self._operation_lock:
             generation = self._operation_generation
         self._cancel_operation(generation)
+
+    def handoff_capacity_state(self) -> str:
+        with self._operation_lock:
+            if self._handoff_capacity_error is not None:
+                return "unavailable"
+            if self._handoff_cleanup_generations:
+                return "cleaning"
+            return "available"
 
     def wait_for_active_request(self, timeout_seconds: float) -> bool:
         if timeout_seconds < 0:

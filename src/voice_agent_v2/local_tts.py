@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 import time
 from typing import Iterator
 
@@ -64,6 +65,7 @@ class Qwen3TTS:
 
     def __init__(self) -> None:
         self._process: AdapterProcess | None = None
+        self._cancel_lock = threading.Lock()
         self.ready_metadata: dict | None = None
         self.observations: list[dict] = []
 
@@ -178,18 +180,17 @@ class Qwen3TTS:
         return tuple(self.stream_synthesize(session_id=session_id, turn_id=turn_id, text=text, audio_format=audio_format))
 
     def cancel(self) -> float:
-        process = self._process
-        if process is None:
-            return 0.0
-        latency = process.cancel()
-        if getattr(process, "process", None) is not None:
-            process.close()
-        self._process = None
-        self.ready_metadata = None
-        return latency
+        with self._cancel_lock:
+            process = self._process
+            if process is None:
+                return 0.0
+            latency = process.cancel()
+            if getattr(process, "process", None) is not None:
+                process.close()
+            if self._process is process:
+                self._process = None
+                self.ready_metadata = None
+            return latency
 
     def close(self) -> None:
-        if self._process is not None:
-            self._process.close()
-            self._process = None
-            self.ready_metadata = None
+        self.cancel()

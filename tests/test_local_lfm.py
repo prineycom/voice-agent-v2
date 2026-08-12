@@ -302,6 +302,120 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertTrue(abort_seen.is_set())
         self.assertLess(time.monotonic() - started, 0.5)
 
+    def test_handoff_cleanup_blocks_overlapping_generation_until_confirmed(self) -> None:
+        callback_seen = threading.Event()
+        cleanup_entered = threading.Event()
+        cleanup_release = threading.Event()
+        lines = [
+            b"data: " + json.dumps(
+                stream_event(content="Буферизовать."), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+            b"data: " + json.dumps(
+                stream_event(content="Ошибка.", model="other"), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+        ]
+        responses = [
+            CallbackGatedResponse(lines, callback_seen),
+            StubResponse([
+                stream_event(content="Восстановлено."),
+                stream_event(finish="stop"),
+            ]),
+        ]
+        factory, _created = self.factory(responses)
+        provider = LocalLFMProvider(
+            connection_factory=factory, handoff_cleanup_timeout_seconds=0.5
+        )
+        failures: list[str] = []
+
+        def handoff(_sentence: str) -> None:
+            callback_seen.set()
+            cleanup_release.wait(1)
+
+        def abort() -> None:
+            cleanup_entered.set()
+            cleanup_release.wait(1)
+
+        def first_response() -> None:
+            try:
+                provider.respond_with_handoff(
+                    session_id="session-a",
+                    turn_id="turn-a",
+                    transcript="Публичный запрос",
+                    on_sentence=handoff,
+                    on_handoff_abort=abort,
+                )
+            except StageFailure as error:
+                failures.append(error.code)
+
+        worker = threading.Thread(target=first_response)
+        worker.start()
+        self.assertTrue(cleanup_entered.wait(0.5))
+        self.assertEqual(provider.handoff_capacity_state(), "cleaning")
+        with self.assertRaises(StageFailure) as pending:
+            provider.respond(
+                session_id="session-b", turn_id="turn-b", transcript="Запрос"
+            )
+        self.assertEqual(pending.exception.code, "local_lfm_handoff_cleanup_pending")
+
+        cleanup_release.set()
+        worker.join(0.5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, ["selected_provider_identity_mismatch"])
+        self.assertEqual(provider.handoff_capacity_state(), "available")
+        self.assertEqual(
+            provider.respond(
+                session_id="session-b", turn_id="turn-b", transcript="Запрос"
+            ),
+            "Восстановлено.",
+        )
+
+    def test_handoff_cleanup_timeout_closes_provider_capacity(self) -> None:
+        callback_seen = threading.Event()
+        cleanup_release = threading.Event()
+        lines = [
+            b"data: " + json.dumps(
+                stream_event(content="Буферизовать."), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+            b"data: " + json.dumps(
+                stream_event(content="Ошибка.", model="other"), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+        ]
+        response = CallbackGatedResponse(lines, callback_seen)
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(
+            connection_factory=factory, handoff_cleanup_timeout_seconds=0.05
+        )
+
+        def handoff(_sentence: str) -> None:
+            callback_seen.set()
+            cleanup_release.wait(1)
+
+        try:
+            with self.assertRaises(StageFailure) as late_failure:
+                provider.respond_with_handoff(
+                    session_id="session-a",
+                    turn_id="turn-a",
+                    transcript="Публичный запрос",
+                    on_sentence=handoff,
+                    on_handoff_abort=lambda: cleanup_release.wait(1),
+                )
+            self.assertEqual(
+                late_failure.exception.code,
+                "selected_provider_identity_mismatch",
+            )
+            self.assertEqual(provider.handoff_capacity_state(), "unavailable")
+            with self.assertRaises(StageFailure) as unavailable:
+                provider.respond(
+                    session_id="session-b", turn_id="turn-b", transcript="Запрос"
+                )
+            self.assertEqual(
+                unavailable.exception.code, "local_lfm_handoff_cleanup_failed"
+            )
+        finally:
+            cleanup_release.set()
+        time.sleep(0.02)
+        self.assertEqual(provider.handoff_capacity_state(), "unavailable")
+
     def test_handoff_waits_for_complete_identity_validation(self) -> None:
         response = StubResponse([
             stream_event(content="Не выдавать заранее."),

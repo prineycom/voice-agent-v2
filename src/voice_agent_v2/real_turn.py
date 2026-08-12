@@ -198,7 +198,12 @@ class RealTurnController:
                     "cancellation": token,
                 }
                 if getattr(self.llm, "supports_handoff_abort", False):
-                    arguments["on_handoff_abort"] = lambda: cancel_adapters(self.tts)
+                    def abort_handoff() -> None:
+                        cancel = getattr(self.tts, "cancel", None)
+                        if cancel is not None:
+                            cancel()
+
+                    arguments["on_handoff_abort"] = abort_handoff
                 return self.llm.respond_with_handoff(**arguments)
             response = self.llm.respond(
                 session_id=session_id, turn_id=turn_id, transcript=transcript,
