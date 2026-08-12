@@ -205,11 +205,11 @@ class LiveKitAudioSink(AudioSink):
     async def _retire(self, publication_id: str, source: rtc.AudioSource) -> None:
         errors: list[Exception] = []
         try:
-            await self.room.local_participant.unpublish_track(publication_id)
+            await source.aclose()
         except Exception as error:
             errors.append(error)
         try:
-            await source.aclose()
+            await self.room.local_participant.unpublish_track(publication_id)
         except Exception as error:
             errors.append(error)
         if errors:
@@ -258,6 +258,7 @@ class LiveKitAudioSink(AudioSink):
                     or self._prepared_turn != turn_id
                 ):
                     return None
+                await self._retire(boundary.completed_publication_id, source)
                 self._sealed_boundary = (turn_id, boundary)
             return boundary
         finally:
@@ -272,7 +273,6 @@ class LiveKitAudioSink(AudioSink):
                 or self._prepared_turn != turn_id
             ):
                 raise RuntimeError("LiveKit media boundary is not pending")
-            await self._retire(boundary.completed_publication_id, self.source)
             self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
             self.source_changed(self.source)
             self.publication = None
@@ -287,8 +287,9 @@ class LiveKitAudioSink(AudioSink):
             if self._active_turn not in {None, turn_id}:
                 return publication_id
             self._active_turn = None
-            self.source.clear_queue()
-            await self._retire(publication_id, self.source)
+            if self._sealed_boundary is None:
+                self.source.clear_queue()
+                await self._retire(publication_id, self.source)
             self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
             self.source_changed(self.source)
             self.publication = None

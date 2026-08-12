@@ -214,15 +214,19 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(observed_sources), 1)
         self.assertIs(observed_sources[-1], sink.source)
-        self.assertNotIn(("unpublish", "publication-1"), calls)
+        self.assertIn(("unpublish", "publication-1"), calls)
+        self.assertLess(
+            calls.index(("drained", "source-2")),
+            calls.index(("close", "source-2")),
+        )
+        self.assertLess(
+            calls.index(("close", "source-2")),
+            calls.index(("unpublish", "publication-1")),
+        )
 
         await sink.complete("turn-test", boundary)
 
-        self.assertIn(("unpublish", "publication-1"), calls)
-        self.assertLess(
-            calls.index(("unpublish", "publication-1")),
-            calls.index(("close", "source-2")),
-        )
+        self.assertEqual(calls.count(("unpublish", "publication-1")), 1)
         await sink.prepare("turn-next")
         self.assertIn(("publish", "publication-2"), calls)
         await sink.clear("turn-next")

@@ -74,9 +74,8 @@ class LocalLFMProvider:
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._operation_lock = threading.Lock()
         self._operation_generation = 0
-        self._cancelled_generation = 0
-        self._connection_generation = 0
-        self._connection: http.client.HTTPConnection | None = None
+        self._cancelled_generations: set[int] = set()
+        self._connections: dict[int, http.client.HTTPConnection] = {}
         self.observations: list[dict[str, object]] = []
 
     def _begin_operation(self, cancellation: CancellationToken | None) -> int:
@@ -84,32 +83,40 @@ class LocalLFMProvider:
             self._operation_generation += 1
             generation = self._operation_generation
             if cancellation is not None and cancellation.cancelled:
-                self._cancelled_generation = generation
+                self._cancelled_generations.add(generation)
             return generation
 
     def _cancelled(self, generation: int) -> bool:
         with self._operation_lock:
-            return self._cancelled_generation == generation
+            return generation in self._cancelled_generations
 
     def _register_connection(self, generation: int, timeout: float) -> http.client.HTTPConnection:
         if self._cancelled(generation):
             raise StageFailure("llm_provider", "selected_provider_cancelled")
         connection = self._connection_factory(self._host, self._port, timeout=timeout)
         with self._operation_lock:
-            self._connection = connection
-            self._connection_generation = generation
-            cancelled = self._cancelled_generation == generation
+            self._connections[generation] = connection
+            cancelled = generation in self._cancelled_generations
         if cancelled:
             connection.close()
+            with self._operation_lock:
+                if self._connections.get(generation) is connection:
+                    self._connections.pop(generation, None)
             raise StageFailure("llm_provider", "selected_provider_cancelled")
         return connection
 
     def _release_connection(self, generation: int, connection: http.client.HTTPConnection) -> None:
         connection.close()
         with self._operation_lock:
-            if self._connection_generation == generation and self._connection is connection:
-                self._connection = None
-                self._connection_generation = 0
+            if self._connections.get(generation) is connection:
+                self._connections.pop(generation, None)
+
+    def _cancel_operation(self, generation: int) -> None:
+        with self._operation_lock:
+            self._cancelled_generations.add(generation)
+            connection = self._connections.get(generation)
+        if connection is not None:
+            connection.close()
 
     def readiness(self, cancellation: CancellationToken | None = None) -> dict[str, object]:
         generation = self._begin_operation(cancellation)
@@ -173,64 +180,143 @@ class LocalLFMProvider:
             raise StageFailure("llm_provider", "forbidden_request_field")
         return payload
 
+    def _raise_if_operation_stopped(
+        self,
+        generation: int,
+        deadline: float,
+        deadline_expired: threading.Event,
+    ) -> None:
+        if self._cancelled(generation):
+            raise StageFailure("llm_provider", "selected_provider_cancelled")
+        if deadline_expired.is_set() or time.monotonic() >= deadline:
+            raise StageFailure("llm_provider", "local_lfm_request_timeout")
+
+    def _apply_deadline(
+        self,
+        connection: http.client.HTTPConnection,
+        response: object | None,
+        generation: int,
+        deadline: float,
+        deadline_expired: threading.Event,
+    ) -> None:
+        self._raise_if_operation_stopped(generation, deadline, deadline_expired)
+        remaining = deadline - time.monotonic()
+        connection.timeout = remaining
+        sockets = [getattr(connection, "sock", None)]
+        raw = getattr(getattr(response, "fp", None), "raw", None)
+        sockets.append(getattr(raw, "_sock", None))
+        for sock in sockets:
+            if sock is not None:
+                sock.settimeout(remaining)
+
     def _execute(
         self,
         payload: dict[str, object],
         on_sentence: Callable[[str], None] | None,
         generation: int,
+        started: float,
+        deadline: float,
     ) -> dict[str, object]:
-        started = time.monotonic()
-        deadline = started + self._request_timeout_seconds
-        connection = self._register_connection(generation, self._request_timeout_seconds)
+        connection = self._register_connection(
+            generation, max(0.001, deadline - time.monotonic())
+        )
+        deadline_expired = threading.Event()
+
+        def expire() -> None:
+            deadline_expired.set()
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+        deadline_guard = threading.Timer(
+            max(0.001, deadline - time.monotonic()), expire
+        )
+        deadline_guard.daemon = True
         visible: list[str] = []
         visible_chars = visible_bytes = reasoning_chars = stream_events = 0
         visible_first: float | None = None
         finish_reason: str | None = None
         response_models: set[str] = set()
         usage: dict[str, int] = {}
+        result: dict[str, object]
+        deadline_guard.start()
         try:
+            self._apply_deadline(
+                connection, None, generation, deadline, deadline_expired
+            )
+            request_body = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            self._apply_deadline(
+                connection, None, generation, deadline, deadline_expired
+            )
             connection.request(
                 "POST",
                 "/v1/chat/completions",
-                body=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                body=request_body,
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "text/event-stream",
                     "Connection": "close",
                 },
             )
+            self._apply_deadline(
+                connection, None, generation, deadline, deadline_expired
+            )
             response = connection.getresponse()
+            self._apply_deadline(
+                connection, response, generation, deadline, deadline_expired
+            )
             if response.status != 200:
-                response.read(MAX_STREAM_LINE_BYTES)
-                raise StageFailure("llm_provider", f"local_lfm_http_{response.status}")
+                response.read(MAX_STREAM_LINE_BYTES + 1)
+                self._raise_if_operation_stopped(
+                    generation, deadline, deadline_expired
+                )
+                raise StageFailure(
+                    "llm_provider", f"local_lfm_http_{response.status}"
+                )
             while True:
-                if self._cancelled(generation):
-                    raise StageFailure("llm_provider", "selected_provider_cancelled")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise StageFailure("llm_provider", "local_lfm_request_timeout")
-                if connection.sock is not None:
-                    connection.sock.settimeout(remaining)
+                self._apply_deadline(
+                    connection, response, generation, deadline, deadline_expired
+                )
                 line = response.fp.readline(MAX_STREAM_LINE_BYTES + 1)
+                self._raise_if_operation_stopped(
+                    generation, deadline, deadline_expired
+                )
                 if not line:
                     break
                 if len(line) > MAX_STREAM_LINE_BYTES:
-                    raise StageFailure("llm_provider", "selected_provider_output_out_of_bounds")
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_output_out_of_bounds"
+                    )
                 text = line.decode("utf-8").strip()
+                self._raise_if_operation_stopped(
+                    generation, deadline, deadline_expired
+                )
                 if not text.startswith("data: "):
                     continue
                 if text == "data: [DONE]":
                     break
                 stream_events += 1
                 if stream_events > MAX_STREAM_EVENTS:
-                    raise StageFailure("llm_provider", "selected_provider_output_out_of_bounds")
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_output_out_of_bounds"
+                    )
                 event = json.loads(text[6:])
+                self._raise_if_operation_stopped(
+                    generation, deadline, deadline_expired
+                )
                 if not isinstance(event, dict):
-                    raise StageFailure("llm_provider", "selected_provider_protocol_error")
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_protocol_error"
+                    )
                 model = event.get("model")
                 if model is not None:
                     if model != MODEL_ALIAS:
-                        raise StageFailure("llm_provider", "selected_provider_identity_mismatch")
+                        raise StageFailure(
+                            "llm_provider", "selected_provider_identity_mismatch"
+                        )
                     response_models.add(model)
                 raw_usage = event.get("usage")
                 if isinstance(raw_usage, dict):
@@ -242,54 +328,99 @@ class LocalLFMProvider:
                 if choices in (None, []):
                     continue
                 if not isinstance(choices, list) or not isinstance(choices[0], dict):
-                    raise StageFailure("llm_provider", "selected_provider_protocol_error")
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_protocol_error"
+                    )
                 choice = choices[0]
                 delta = choice.get("delta") or {}
                 if not isinstance(delta, dict):
-                    raise StageFailure("llm_provider", "selected_provider_protocol_error")
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_protocol_error"
+                    )
                 reasoning = delta.get("reasoning_content") or ""
                 content = delta.get("content") or ""
                 if not isinstance(reasoning, str) or not isinstance(content, str):
-                    raise StageFailure("llm_provider", "selected_provider_protocol_error")
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_protocol_error"
+                    )
                 reasoning_chars += len(reasoning)
                 if reasoning_chars > MAX_REASONING_CHARS:
-                    raise StageFailure("llm_provider", "selected_provider_output_out_of_bounds")
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_output_out_of_bounds"
+                    )
                 if content:
                     visible_first = visible_first or time.monotonic()
                     visible_chars += len(content)
                     visible_bytes += len(content.encode("utf-8"))
                     if visible_chars > MAX_VISIBLE_CHARS or visible_bytes > MAX_VISIBLE_BYTES:
-                        raise StageFailure("llm_provider", "selected_provider_output_out_of_bounds")
+                        raise StageFailure(
+                            "llm_provider", "selected_provider_output_out_of_bounds"
+                        )
                     visible.append(content)
                 raw_finish = choice.get("finish_reason")
                 if raw_finish is not None:
                     if raw_finish not in {"stop", "eos_token"}:
-                        raise StageFailure("llm_provider", "local_lfm_incomplete_response")
+                        raise StageFailure(
+                            "llm_provider", "local_lfm_incomplete_response"
+                        )
                     finish_reason = raw_finish
+                self._raise_if_operation_stopped(
+                    generation, deadline, deadline_expired
+                )
+            output = "".join(visible).strip()
+            if response_models != {MODEL_ALIAS}:
+                raise StageFailure(
+                    "llm_provider", "selected_provider_identity_mismatch"
+                )
+            if finish_reason not in {"stop", "eos_token"}:
+                raise StageFailure("llm_provider", "local_lfm_incomplete_response")
+            if not output:
+                raise StageFailure(
+                    "llm_provider", "empty_selected_provider_response"
+                )
+            self._raise_if_operation_stopped(
+                generation, deadline, deadline_expired
+            )
+            if on_sentence is not None:
+                on_sentence(output)
+            self._raise_if_operation_stopped(
+                generation, deadline, deadline_expired
+            )
+            completed = time.monotonic()
+            result = {
+                "text": output,
+                "visible_first_content_ms": (
+                    (visible_first or completed) - started
+                ) * 1_000,
+                "completion_ms": (completed - started) * 1_000,
+                "reasoning_chars": reasoning_chars,
+                "usage": usage,
+            }
         except StageFailure:
+            self._raise_if_operation_stopped(
+                generation, deadline, deadline_expired
+            )
             raise
-        except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError) as error:
-            code = "selected_provider_cancelled" if self._cancelled(generation) else "local_lfm_transport_error"
+        except (
+            OSError,
+            TimeoutError,
+            http.client.HTTPException,
+            UnicodeError,
+            json.JSONDecodeError,
+        ) as error:
+            if self._cancelled(generation):
+                code = "selected_provider_cancelled"
+            elif deadline_expired.is_set() or time.monotonic() >= deadline:
+                code = "local_lfm_request_timeout"
+            else:
+                code = "local_lfm_transport_error"
             raise StageFailure("llm_provider", code) from error
         finally:
-            completed = time.monotonic()
+            deadline_guard.cancel()
+            deadline_guard.join()
             self._release_connection(generation, connection)
-        output = "".join(visible).strip()
-        if response_models != {MODEL_ALIAS}:
-            raise StageFailure("llm_provider", "selected_provider_identity_mismatch")
-        if finish_reason not in {"stop", "eos_token"}:
-            raise StageFailure("llm_provider", "local_lfm_incomplete_response")
-        if not output:
-            raise StageFailure("llm_provider", "empty_selected_provider_response")
-        if on_sentence is not None:
-            on_sentence(output)
-        return {
-            "text": output,
-            "visible_first_content_ms": ((visible_first or completed) - started) * 1_000,
-            "completion_ms": (completed - started) * 1_000,
-            "reasoning_chars": reasoning_chars,
-            "usage": usage,
-        }
+        self._raise_if_operation_stopped(generation, deadline, deadline_expired)
+        return result
 
     def _respond(
         self,
@@ -304,40 +435,87 @@ class LocalLFMProvider:
             raise StageFailure("llm_provider", "invalid_correlation_id")
         generation = self._begin_operation(cancellation)
         started = time.monotonic()
+        deadline = started + self._request_timeout_seconds
+        unregister = (
+            cancellation.register(lambda: self._cancel_operation(generation))
+            if cancellation is not None
+            else lambda: None
+        )
         try:
-            result = self._execute(self._payload(session_id, transcript), on_sentence, generation)
-            text = result["text"]
-            if not isinstance(text, str):
-                raise StageFailure("llm_provider", "selected_provider_protocol_error")
-        except StageFailure as error:
+            try:
+                payload = self._payload(session_id, transcript)
+                if self._cancelled(generation):
+                    raise StageFailure("llm_provider", "selected_provider_cancelled")
+                if time.monotonic() >= deadline:
+                    raise StageFailure("llm_provider", "local_lfm_request_timeout")
+                result = self._execute(
+                    payload, on_sentence, generation, started, deadline
+                )
+                text = result["text"]
+                if not isinstance(text, str):
+                    raise StageFailure(
+                        "llm_provider", "selected_provider_protocol_error"
+                    )
+                context = list(self._contexts.get(session_id, ()))
+                context.extend([
+                    {"role": "user", "content": transcript.strip()},
+                    {"role": "assistant", "content": text},
+                ])
+                if self._cancelled(generation):
+                    raise StageFailure("llm_provider", "selected_provider_cancelled")
+                if time.monotonic() >= deadline:
+                    raise StageFailure("llm_provider", "local_lfm_request_timeout")
+            except StageFailure as error:
+                self.observations.append({
+                    "provider_mode": self.provider_mode,
+                    "provider_identity": self.provider_identity,
+                    "external_transfer": False,
+                    "success": False,
+                    "error_class": error.code,
+                    "completion_ms": (time.monotonic() - started) * 1_000,
+                })
+                raise
+            except (
+                OSError,
+                TimeoutError,
+                http.client.HTTPException,
+                UnicodeError,
+                json.JSONDecodeError,
+            ) as cause:
+                if self._cancelled(generation):
+                    code = "selected_provider_cancelled"
+                elif time.monotonic() >= deadline:
+                    code = "local_lfm_request_timeout"
+                else:
+                    code = "local_lfm_transport_error"
+                error = StageFailure("llm_provider", code)
+                self.observations.append({
+                    "provider_mode": self.provider_mode,
+                    "provider_identity": self.provider_identity,
+                    "external_transfer": False,
+                    "success": False,
+                    "error_class": error.code,
+                    "completion_ms": (time.monotonic() - started) * 1_000,
+                })
+                raise error from cause
+            self._contexts[session_id] = context[-MAX_CONTEXT_MESSAGES:]
             self.observations.append({
                 "provider_mode": self.provider_mode,
                 "provider_identity": self.provider_identity,
                 "external_transfer": False,
-                "success": False,
-                "error_class": error.code,
-                "completion_ms": (time.monotonic() - started) * 1_000,
+                "success": True,
+                "error_class": None,
+                "visible_first_content_ms": result.get("visible_first_content_ms"),
+                "completion_ms": result.get("completion_ms"),
+                "reasoning_chars": result.get("reasoning_chars"),
+                "visible_chars": len(text),
+                "usage": result.get("usage", {}),
             })
-            raise
-        context = self._contexts.setdefault(session_id, [])
-        context.extend([
-            {"role": "user", "content": transcript.strip()},
-            {"role": "assistant", "content": text},
-        ])
-        self._contexts[session_id] = context[-MAX_CONTEXT_MESSAGES:]
-        self.observations.append({
-            "provider_mode": self.provider_mode,
-            "provider_identity": self.provider_identity,
-            "external_transfer": False,
-            "success": True,
-            "error_class": None,
-            "visible_first_content_ms": result.get("visible_first_content_ms"),
-            "completion_ms": result.get("completion_ms"),
-            "reasoning_chars": result.get("reasoning_chars"),
-            "visible_chars": len(text),
-            "usage": result.get("usage", {}),
-        })
-        return text
+            return text
+        finally:
+            unregister()
+            with self._operation_lock:
+                self._cancelled_generations.discard(generation)
 
     def respond(
         self,
@@ -374,14 +552,8 @@ class LocalLFMProvider:
 
     def cancel(self) -> None:
         with self._operation_lock:
-            self._cancelled_generation = self._operation_generation
-            connection = (
-                self._connection
-                if self._connection_generation == self._operation_generation
-                else None
-            )
-        if connection is not None:
-            connection.close()
+            generation = self._operation_generation
+        self._cancel_operation(generation)
 
     def snapshot_session(self, session_id: str) -> tuple[dict[str, str], ...]:
         return tuple(dict(message) for message in self._contexts.get(session_id, ()))

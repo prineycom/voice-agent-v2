@@ -13,7 +13,7 @@ class FakeTrack implements AttachableAudioTrack {
   readonly finiteTrack = new FiniteMediaTrack()
   readonly mediaStreamTrack = this.finiteTrack as unknown as MediaStreamTrack
   readonly elements: HTMLMediaElement[] = []
-  receivedDurationSeconds = 0
+  receivedSamples = 0
   emittedSamples = 0
   concealedSamples = 0
   setAudioContext = vi.fn()
@@ -26,7 +26,7 @@ class FakeTrack implements AttachableAudioTrack {
         type: 'inbound-rtp',
         kind: 'audio',
         trackIdentifier: this.finiteTrack.id,
-        totalSamplesDuration: this.receivedDurationSeconds,
+        totalSamplesReceived: this.receivedSamples,
         jitterBufferEmittedCount: this.emittedSamples,
         concealedSamples: this.concealedSamples,
       },
@@ -46,6 +46,11 @@ class FakeTrack implements AttachableAudioTrack {
   detach(): HTMLMediaElement[] {
     this.detachCount += 1
     return []
+  }
+
+  end(): void {
+    this.finiteTrack.readyState = 'ended'
+    this.finiteTrack.dispatchEvent(new Event('ended'))
   }
 }
 
@@ -122,14 +127,14 @@ describe('audio playout boundary', () => {
     expect(container.childElementCount).toBe(0)
   })
 
-  it('normalizes the correlated Web Audio render boundary to its context rate', async () => {
+  it('requires complete normalized counters, render frames, and the exact track end', async () => {
     const harness = new RenderHarness()
     installContext(harness)
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const track = new FakeTrack()
     boundary.setTrack(track)
     await boundary.prepareFinitePlayout()
-    track.receivedDurationSeconds = 320 / 16_000
+    track.receivedSamples = 960
     track.emittedSamples = 1
     const playout = boundary.waitForFinitePlayout(320, 16_000)
     await new Promise((resolve) => setTimeout(resolve, 25))
@@ -140,6 +145,33 @@ describe('audio playout boundary', () => {
     await Promise.resolve()
     expect(completed).toBe(false)
     harness.render(1)
+    track.end()
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(completed).toBe(false)
+
+    track.emittedSamples = 960
+    await playout
+    expect(completed).toBe(true)
+  })
+
+  it('does not complete before the correlated finite track has ended', async () => {
+    const harness = new RenderHarness()
+    installContext(harness)
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+    const track = new FakeTrack()
+    boundary.setTrack(track)
+    await boundary.prepareFinitePlayout()
+    track.receivedSamples = 960
+    track.emittedSamples = 960
+    const playout = boundary.waitForFinitePlayout(320, 16_000)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    let completed = false
+    void playout.then(() => { completed = true })
+
+    harness.render(960)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(completed).toBe(false)
+    track.end()
     await playout
     expect(completed).toBe(true)
   })
@@ -151,8 +183,8 @@ describe('audio playout boundary', () => {
     const track = new FakeTrack()
     boundary.setTrack(track)
     await boundary.prepareFinitePlayout()
-    track.receivedDurationSeconds = 320 / 16_000
-    track.emittedSamples = 1
+    track.receivedSamples = 960
+    track.emittedSamples = 960
     const playout = boundary.waitForFinitePlayout(320, 16_000)
     await new Promise((resolve) => setTimeout(resolve, 25))
     let completed = false
@@ -164,6 +196,7 @@ describe('audio playout boundary', () => {
     expect(completed).toBe(false)
     harness.state = 'running'
     harness.render(960)
+    track.end()
     await playout
   })
 
@@ -176,8 +209,8 @@ describe('audio playout boundary', () => {
     await boundary.prepareFinitePlayout()
     const playout = boundary.waitForFinitePlayout(320, 16_000)
     const rejected = expect(playout).rejects.toThrow('concealment')
-    track.receivedDurationSeconds = 320 / 16_000
-    track.emittedSamples = 1
+    track.receivedSamples = 960
+    track.emittedSamples = 960
     track.concealedSamples = 1
     await new Promise((resolve) => setTimeout(resolve, 25))
 

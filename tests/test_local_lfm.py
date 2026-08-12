@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 import json
 import threading
+import time
 import unittest
 
 from voice_agent_v2.contracts import StageFailure
@@ -47,6 +48,36 @@ class StubConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+class DeadlineConnection(StubConnection):
+    def __init__(self, *args, block_headers: bool = False, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.block_headers = block_headers
+        self.closed_event = threading.Event()
+        for response in self.responses:
+            if isinstance(response, BlockingReadResponse):
+                response.closed_event = self.closed_event
+
+    def getresponse(self) -> StubResponse:
+        if self.block_headers:
+            self.closed_event.wait(1)
+            raise OSError("connection closed while awaiting headers")
+        return super().getresponse()
+
+    def close(self) -> None:
+        super().close()
+        self.closed_event.set()
+
+
+class BlockingReadResponse(StubResponse):
+    closed_event: threading.Event | None = None
+
+    def read(self, limit: int | None = None) -> bytes:
+        if self.closed_event is None:
+            raise AssertionError("response is not bound to its connection")
+        self.closed_event.wait(1)
+        raise OSError("connection closed while reading error body")
 
 
 def stream_event(*, reasoning: str = "", content: str = "", finish=None, model=MODEL_ALIAS):
@@ -182,6 +213,53 @@ class LocalLFMProviderTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "selected_provider_cancelled")
         self.assertFalse(opened)
+
+    def test_whole_request_deadline_closes_delayed_headers(self) -> None:
+        created: list[DeadlineConnection] = []
+
+        def factory(host: str, port: int, *, timeout: float):
+            connection = DeadlineConnection(
+                host, port, timeout=timeout, responses=[], block_headers=True
+            )
+            created.append(connection)
+            return connection
+
+        provider = LocalLFMProvider(
+            connection_factory=factory, request_timeout_seconds=0.05
+        )
+        started = time.monotonic()
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond(
+                session_id="session-a", turn_id="turn-a", transcript="Запрос"
+            )
+
+        self.assertEqual(raised.exception.code, "local_lfm_request_timeout")
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(created[0].closed)
+
+    def test_whole_request_deadline_closes_delayed_error_body(self) -> None:
+        response = BlockingReadResponse([], status=503)
+        created: list[DeadlineConnection] = []
+
+        def factory(host: str, port: int, *, timeout: float):
+            connection = DeadlineConnection(
+                host, port, timeout=timeout, responses=[response]
+            )
+            created.append(connection)
+            return connection
+
+        provider = LocalLFMProvider(
+            connection_factory=factory, request_timeout_seconds=0.05
+        )
+        started = time.monotonic()
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond(
+                session_id="session-a", turn_id="turn-a", transcript="Запрос"
+            )
+
+        self.assertEqual(raised.exception.code, "local_lfm_request_timeout")
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(created[0].closed)
 
 
 if __name__ == "__main__":
