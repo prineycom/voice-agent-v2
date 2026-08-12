@@ -554,6 +554,27 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("turn.completed", [event["type"] for event in events.events])
         self.assertGreaterEqual(runner.cancel_count, 1)
 
+    async def test_disconnect_without_client_notification_still_cancels_inference(self) -> None:
+        events = MemoryEventSink()
+        runner = BlockingRunner()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.to_thread(runner.entered.wait, 1)
+
+        await session.disconnect(notify_client=False)
+
+        self.assertFalse(any(
+            event["turn_id"] == turn_id and event["terminal"]
+            for event in events.events
+        ))
+        self.assertNotIn("turn.completed", [event["type"] for event in events.events])
+        self.assertGreaterEqual(runner.cancel_count, 1)
+
     async def test_duplicate_late_and_malformed_client_controls_are_rejected(self) -> None:
         events = MemoryEventSink()
         session = RealtimeSession(

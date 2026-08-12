@@ -191,7 +191,10 @@ export class VoiceClient {
       ) {
         this.playoutGeneration += 1
       }
-      if (event.type === 'turn.interrupted') this.playback.reset()
+      if (event.type === 'turn.interrupted' || event.type === 'turn.failed') {
+        this.playback.reset()
+      }
+      let terminalFailure: string | null = null
       if (event.type === 'session.reconnected') {
         this.streamEpoch = event.stream_epoch
         this.completeReconnect()
@@ -201,9 +204,13 @@ export class VoiceClient {
         this.reconnecting = false
         this.reconnectRequestPending = false
         this.pendingRemoteTrack = null
+        const stage = typeof event.payload.stage === 'string' ? event.payload.stage : 'session'
+        const code = typeof event.payload.code === 'string' ? event.payload.code : 'degraded'
+        terminalFailure = `Голосовая сессия остановлена (${stage}/${code})`
       }
       if (event.type === 'turn.playout-ready') void this.publishPlayoutAck(event)
       this.callbacks.onControl(event)
+      if (terminalFailure !== null) void this.failSession(terminalFailure)
     })
     room.on(RoomEvent.Reconnecting, () => {
       if (this.reconnecting) return

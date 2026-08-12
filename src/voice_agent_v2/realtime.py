@@ -347,7 +347,7 @@ class RealtimeSession:
         asyncio.create_task(finish(), name=f"watch-{cleanup.get_name()}")
 
     async def _interrupt_locked(
-        self, reason: str
+        self, reason: str, *, notify_client: bool = True
     ) -> tuple[asyncio.Task[str | None] | None, str | None]:
         context = self._active
         if context is None or context.terminal:
@@ -381,18 +381,19 @@ class RealtimeSession:
         finally:
             cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
             context.cancellation_cleanup = cleanup
-        drain_ms = min((time.monotonic() - started) * 1000, float(BARGE_IN_DRAIN_BOUND_MS))
-        await self._emit(
-            context.turn_id,
-            "turn.interrupted",
-            {
-                "outcome": "interrupted",
-                "reason": reason,
-                "drain_ms": round(drain_ms, 3),
-                "drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS,
-            },
-            terminal=True,
-        )
+        if notify_client:
+            drain_ms = min((time.monotonic() - started) * 1000, float(BARGE_IN_DRAIN_BOUND_MS))
+            await self._emit(
+                context.turn_id,
+                "turn.interrupted",
+                {
+                    "outcome": "interrupted",
+                    "reason": reason,
+                    "drain_ms": round(drain_ms, 3),
+                    "drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS,
+                },
+                terminal=True,
+            )
         return cleanup, drain_error
 
     async def _run_turn(self, context: TurnContext, pcm: bytes) -> None:
@@ -725,7 +726,7 @@ class RealtimeSession:
                     await self._degrade_locked("controller", reset_error)
             return True
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, notify_client: bool = True) -> None:
         async with self._disconnect_lock:
             if self._disconnect_complete:
                 return
@@ -734,7 +735,9 @@ class RealtimeSession:
                 cleanup = context.cancellation_cleanup if context is not None else None
                 drain_error: str | None = None
                 if context is not None and not context.terminal:
-                    cleanup, drain_error = await self._interrupt_locked("client_disconnected")
+                    cleanup, drain_error = await self._interrupt_locked(
+                        "client_disconnected", notify_client=notify_client
+                    )
                 self._closed = True
             if drain_error is not None:
                 raise RuntimeError(drain_error)

@@ -84,6 +84,35 @@ function callbacks(): VoiceClientCallbacks {
   }
 }
 
+function emitControl(
+  room: { emit(event: string, ...args: any[]): void },
+  type: string,
+  sequence: number,
+  options: {
+    turnId?: string
+    terminal?: boolean
+    payload?: Record<string, unknown>
+    streamEpoch?: number
+  } = {},
+): void {
+  room.emit(
+    'dataReceived',
+    new TextEncoder().encode(JSON.stringify({
+      schema_version: 'voice-agent.realtime-control.v1',
+      session_id: 'session-test-0001',
+      turn_id: options.turnId ?? (type.startsWith('session.') ? 'session' : 'turn-00000001'),
+      stream_epoch: options.streamEpoch ?? 1,
+      sequence,
+      type,
+      terminal: options.terminal ?? false,
+      payload: options.payload ?? {},
+    })),
+    { identity: 'agent-session-test-0001' },
+    undefined,
+    'voice-agent.control.v1',
+  )
+}
+
 afterEach(() => {
   vi.useRealTimers()
   livekit.rooms.length = 0
@@ -270,6 +299,76 @@ describe('VoiceClient startup cancellation', () => {
     expect(observed.onConnection).toHaveBeenLastCalledWith(
       'failed',
       'Сервер не подтвердил восстановление сессии',
+    )
+  })
+
+  it('recreates the playback boundary when a partially published turn fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const client = new VoiceClient(document.createElement('div'), callbacks())
+    await client.start()
+    const room = livekit.rooms[0]
+    const firstElement = document.createElement('audio')
+    firstElement.play = vi.fn().mockResolvedValue(undefined)
+    firstElement.pause = vi.fn()
+    firstElement.load = vi.fn()
+    const secondElement = document.createElement('audio')
+    secondElement.play = vi.fn().mockResolvedValue(undefined)
+    secondElement.pause = vi.fn()
+    secondElement.load = vi.fn()
+    const remoteTrack = {
+      kind: 'audio',
+      attach: vi.fn()
+        .mockReturnValueOnce(firstElement)
+        .mockReturnValueOnce(secondElement),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', remoteTrack, {}, { identity: 'agent-session-test-0001' })
+    emitControl(room, 'session.ready', 1)
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.failed', 3, {
+      terminal: true,
+      payload: { stage: 'publication', code: 'audio_playout_exception' },
+    })
+
+    expect(remoteTrack.detach).toHaveBeenCalledWith(firstElement)
+    expect(remoteTrack.attach).toHaveBeenCalledTimes(2)
+    expect(secondElement.play).toHaveBeenCalledOnce()
+    await client.stop()
+  })
+
+  it('releases microphone, playback, and room after terminal degradation', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    const microphone = { stop: vi.fn() }
+    livekit.createLocalAudioTrack.mockResolvedValue(microphone)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    const remoteTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(element),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', remoteTrack, {}, { identity: 'agent-session-test-0001' })
+    emitControl(room, 'session.ready', 1)
+    emitControl(room, 'session.degraded', 2, {
+      payload: { stage: 'input', code: 'microphone_stream_ended' },
+    })
+
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed',
+      'Голосовая сессия остановлена (input/microphone_stream_ended)',
+    ))
+    expect(room.disconnect).toHaveBeenCalledOnce()
+    expect(microphone.stop).toHaveBeenCalledOnce()
+    expect(remoteTrack.detach).toHaveBeenCalledWith(element)
+    expect(observed.onControl).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'session.degraded' }),
     )
   })
 })

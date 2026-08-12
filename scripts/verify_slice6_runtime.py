@@ -56,6 +56,9 @@ class AsyncCloser:
     async def aclose(self) -> None:
         self.closed = True
 
+    def clear_queue(self) -> None:
+        pass
+
 
 class SessionStub:
     def __init__(self) -> None:
@@ -91,24 +94,40 @@ class FailingSession(SessionStub):
         raise RuntimeError("injected session cleanup failure")
 
 
-async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
-    bounded = replace(settings, browser_join_timeout_seconds=0.01)
-    registry = SessionRegistry(bounded)
+def controller_stub(
+    settings: Slice6Settings,
+    session_id: str,
+    *,
+    session: SessionStub | None = None,
+    runner: RunnerStub | None = None,
+) -> LiveKitRoomController:
     controller = object.__new__(LiveKitRoomController)
-    controller.settings = bounded
-    controller.session_id = "session-unclaimed"
+    controller.settings = settings
+    controller.session_id = session_id
+    controller.browser_identity = f"browser-{session_id}"
     controller._closed = False
     controller._cleanup_complete = False
     controller._close_notified = False
+    controller._transport_failed = False
     controller._close_lock = asyncio.Lock()
     controller._runner_start_task = None
     controller._browser_ready = False
     controller._browser_join_task = None
     controller._audio_task = None
-    controller.session = SessionStub()
+    controller._control_task = None
+    controller._control_queue = asyncio.Queue()
+    controller.session = session or SessionStub()
     controller.room = AsyncCloser()
     controller.audio_source = AsyncCloser()
-    controller.runner = RunnerStub()
+    controller.runner = runner or RunnerStub()
+    controller.on_closed = lambda _session_id: asyncio.sleep(0)
+    return controller
+
+
+async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
+    bounded = replace(settings, browser_join_timeout_seconds=0.01)
+    registry = SessionRegistry(bounded)
+    controller = controller_stub(bounded, "session-unclaimed")
     controller.on_closed = registry.remove
     registry._controllers[controller.session_id] = controller
     controller.arm_browser_join_timeout()
@@ -121,22 +140,9 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
         raise AssertionError("unclaimed room did not close all owned resources")
 
     startup_runner = BlockingStartupRunner()
-    startup_controller = object.__new__(LiveKitRoomController)
-    startup_controller.settings = settings
-    startup_controller.session_id = "session-startup"
-    startup_controller.runner = startup_runner
-    startup_controller.session = SessionStub()
-    startup_controller.room = AsyncCloser()
-    startup_controller.audio_source = AsyncCloser()
-    startup_controller.on_closed = lambda _session_id: asyncio.sleep(0)
-    startup_controller._closed = False
-    startup_controller._cleanup_complete = False
-    startup_controller._close_notified = False
-    startup_controller._close_lock = asyncio.Lock()
-    startup_controller._runner_start_task = None
-    startup_controller._browser_ready = False
-    startup_controller._browser_join_task = None
-    startup_controller._audio_task = None
+    startup_controller = controller_stub(
+        settings, "session-startup", runner=startup_runner
+    )
 
     def refuse_join_timer() -> None:
         raise AssertionError("cancelled request must not arm a join timer")
@@ -169,21 +175,12 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     ):
         raise AssertionError("cancelled registry request leaked startup resources")
 
-    failed_controller = object.__new__(LiveKitRoomController)
-    failed_controller.settings = settings
-    failed_controller.session_id = "session-cleanup-failure"
-    failed_controller.runner = RunnerStub()
-    failed_controller.session = FailingSession()
-    failed_controller.room = AsyncCloser()
-    failed_controller.audio_source = AsyncCloser()
-    failed_controller._closed = False
-    failed_controller._cleanup_complete = False
-    failed_controller._close_notified = False
-    failed_controller._close_lock = asyncio.Lock()
-    failed_controller._runner_start_task = None
+    failed_controller = controller_stub(
+        settings,
+        "session-cleanup-failure",
+        session=FailingSession(),
+    )
     failed_controller._browser_ready = True
-    failed_controller._browser_join_task = None
-    failed_controller._audio_task = None
     failed_registry = SessionRegistry(settings)
     failed_controller.on_closed = failed_registry.remove
     failed_registry._controllers[failed_controller.session_id] = failed_controller

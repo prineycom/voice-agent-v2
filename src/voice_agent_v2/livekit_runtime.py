@@ -188,6 +188,7 @@ class LiveKitRoomController:
         self._closed = False
         self._cleanup_complete = False
         self._close_notified = False
+        self._transport_failed = False
         self._browser_ready = False
 
     async def start(self) -> None:
@@ -211,7 +212,9 @@ class LiveKitRoomController:
             await self.close(notify=False)
             raise
 
-    def _session_failed(self, _stage: str, _code: str) -> None:
+    def _session_failed(self, stage: str, _code: str) -> None:
+        if stage == "transport":
+            self._transport_failed = True
         asyncio.create_task(self.close(), name=f"failed-session-{self.session_id}")
 
     def arm_browser_join_timeout(self) -> None:
@@ -413,15 +416,28 @@ class LiveKitRoomController:
                     self.audio_source.clear_queue()
                 except Exception as error:
                     errors.append(error)
-                for cleanup in (
-                    self.room.disconnect,
-                    self.session.disconnect,
-                    self.audio_source.aclose,
-                ):
+                if self._transport_failed:
                     try:
-                        await cleanup()
+                        await self.room.disconnect()
                     except Exception as error:
                         errors.append(error)
+                    try:
+                        await self.session.disconnect(notify_client=False)
+                    except Exception as error:
+                        errors.append(error)
+                else:
+                    try:
+                        await self.session.disconnect()
+                    except Exception as error:
+                        errors.append(error)
+                    try:
+                        await self.room.disconnect()
+                    except Exception as error:
+                        errors.append(error)
+                try:
+                    await self.audio_source.aclose()
+                except Exception as error:
+                    errors.append(error)
                 try:
                     await asyncio.to_thread(self.runner.close, self.session_id)
                 except Exception as error:

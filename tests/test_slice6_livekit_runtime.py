@@ -79,6 +79,46 @@ class FakeAudioStream:
         self.closed = True
 
 
+class RecordingRoom:
+    def __init__(self, calls: list[object]) -> None:
+        self.calls = calls
+        self.disconnected = False
+
+    async def disconnect(self) -> None:
+        self.calls.append("room.disconnect")
+        self.disconnected = True
+
+
+class RecordingSession:
+    def __init__(self, room: RecordingRoom, calls: list[object]) -> None:
+        self.room = room
+        self.calls = calls
+
+    async def disconnect(self, *, notify_client: bool = True) -> None:
+        self.calls.append(("session.disconnect", notify_client))
+        if notify_client and self.room.disconnected:
+            raise RuntimeError("control transport already disconnected")
+
+
+class RecordingAudioSource:
+    def __init__(self, calls: list[object]) -> None:
+        self.calls = calls
+
+    def clear_queue(self) -> None:
+        self.calls.append("audio.clear")
+
+    async def aclose(self) -> None:
+        self.calls.append("audio.close")
+
+
+class RecordingRunner:
+    def __init__(self, calls: list[object]) -> None:
+        self.calls = calls
+
+    def close(self, session_id: str) -> None:
+        self.calls.append(("runner.close", session_id))
+
+
 class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def controller(self):
         controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
@@ -170,6 +210,39 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await controller._consume_microphone(object())
                 self.assertTrue(stream.closed)
                 self.assertEqual(controller.session.failures, [("input", expected)])
+
+    async def test_close_preserves_normal_and_failed_transport_ordering(self) -> None:
+        for transport_failed, expected_prefix in (
+            (False, [("session.disconnect", True), "room.disconnect"]),
+            (True, ["room.disconnect", ("session.disconnect", False)]),
+        ):
+            with self.subTest(transport_failed=transport_failed):
+                calls: list[object] = []
+                controller = runtime.LiveKitRoomController.__new__(
+                    runtime.LiveKitRoomController
+                )
+                controller.session_id = "session-test"
+                controller.room = RecordingRoom(calls)
+                controller.session = RecordingSession(controller.room, calls)
+                controller.audio_source = RecordingAudioSource(calls)
+                controller.runner = RecordingRunner(calls)
+                controller.on_closed = lambda _session_id: asyncio.sleep(0)
+                controller._closed = False
+                controller._cleanup_complete = False
+                controller._close_notified = False
+                controller._transport_failed = transport_failed
+                controller._close_lock = asyncio.Lock()
+                controller._runner_start_task = None
+                controller._browser_join_task = None
+                controller._audio_task = None
+                controller._control_task = None
+
+                await controller.close()
+
+                resource_calls = [call for call in calls if call != "audio.clear"]
+                self.assertEqual(resource_calls[:2], expected_prefix)
+                self.assertTrue(controller._cleanup_complete)
+                self.assertTrue(controller._close_notified)
 
 
 if __name__ == "__main__":
