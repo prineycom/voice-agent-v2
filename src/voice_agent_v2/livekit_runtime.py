@@ -523,6 +523,10 @@ class SessionRegistry:
             "livekit_url": self.settings.livekit_public_url,
             "token": controller.browser_token(),
             "expires_in_seconds": self.settings.room_token_ttl_seconds,
+            "admission_timeout_ms": min(
+                self.settings.browser_join_timeout_seconds,
+                self.settings.room_token_ttl_seconds,
+            ) * 1_000,
             "control_version": "voice-agent.realtime-control.v1",
         }
 

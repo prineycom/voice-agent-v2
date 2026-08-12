@@ -116,6 +116,29 @@ class StubHTTPResponse:
         return self._body
 
 
+class BlockingConnectSocket:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.closed = threading.Event()
+
+    def settimeout(self, _timeout: float) -> None:
+        return None
+
+    def bind(self, _source) -> None:
+        return None
+
+    def connect(self, _address) -> None:
+        self.entered.set()
+        self.closed.wait(2)
+        raise OSError("connect cancelled")
+
+    def setsockopt(self, *_args) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed.set()
+
+
 class StubHTTPConnection:
     def __init__(self, response: StubHTTPResponse) -> None:
         self.response = response
@@ -256,7 +279,7 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         with (
             patch.object(LiteLLMProvider, "_token", return_value="test-token"),
             patch(
-                "voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection,
+                "voice_agent_v2.cloud_llm._RegisteredHTTPConnection", return_value=connection,
             ) as http_connection,
         ):
             readiness = LiteLLMProvider(base_url=self.TEST_BASE_URL).readiness()
@@ -269,7 +292,11 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         self.assertNotIn("wireguard_proven", readiness)
         self.assertNotIn("route_interface", readiness)
         self.assertNotIn("address_class", readiness)
-        http_connection.assert_called_once_with("rpi", 4000, timeout=10)
+        http_connection.assert_called_once()
+        args, kwargs = http_connection.call_args
+        self.assertEqual(args, ("rpi", 4000))
+        self.assertEqual(kwargs["timeout"], 10)
+        self.assertTrue(callable(kwargs["cancelled"]))
         method, path, request_body, headers = connection.requests[0]
         self.assertEqual((method, path, request_body), ("GET", "/v1/models", None))
         self.assertEqual(headers["Authorization"], "Bearer test-token")
@@ -279,7 +306,7 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         connection = StubHTTPConnection(StubHTTPResponse(b"", status=302))
         with (
             patch.object(LiteLLMProvider, "_token", return_value="test-token"),
-            patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+            patch("voice_agent_v2.cloud_llm._RegisteredHTTPConnection", return_value=connection),
         ):
             with self.assertRaises(StageFailure) as raised:
                 LiteLLMProvider(base_url=self.TEST_BASE_URL).readiness()
@@ -287,13 +314,46 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         self.assertEqual(len(connection.requests), 1)
         self.assertTrue(connection.closed)
 
+    def test_blocked_connection_start_is_cancelled_by_registered_socket(self) -> None:
+        provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)
+        connection_socket = BlockingConnectSocket()
+        failures = []
+
+        def respond() -> None:
+            try:
+                provider.respond(
+                    session_id="session-a",
+                    turn_id="turn-a",
+                    transcript="Публичный запрос",
+                )
+            except StageFailure as error:
+                failures.append(error)
+
+        with (
+            patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+            patch(
+                "voice_agent_v2.cloud_llm.socket.getaddrinfo",
+                return_value=[(2, 1, 6, "", ("127.0.0.1", 4000))],
+            ),
+            patch("voice_agent_v2.cloud_llm.socket.socket", return_value=connection_socket),
+        ):
+            worker = threading.Thread(target=respond)
+            worker.start()
+            self.assertTrue(connection_socket.entered.wait(1))
+            provider.cancel()
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(connection_socket.closed.is_set())
+        self.assertEqual(failures[0].code, "selected_provider_cancelled")
+
     def test_completion_rejects_redirect_without_fallback(self) -> None:
         connection = StubHTTPConnection(StubHTTPResponse(b"", status=307))
         provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)
         with (
             patch.object(LiteLLMProvider, "_token", return_value="test-token"),
             patch(
-                "voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection,
+                "voice_agent_v2.cloud_llm._RegisteredHTTPConnection", return_value=connection,
             ) as http_connection,
         ):
             with self.assertRaises(StageFailure) as raised:
@@ -304,7 +364,11 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         self.assertEqual(provider.provider_identity, "litellm/deepseek-v4-flash")
         self.assertFalse(provider.observations[-1]["success"])
         self.assertEqual(len(connection.requests), 1)
-        http_connection.assert_called_once_with("rpi", 4000, timeout=40)
+        http_connection.assert_called_once()
+        args, kwargs = http_connection.call_args
+        self.assertEqual(args, ("rpi", 4000))
+        self.assertEqual(kwargs["timeout"], 40)
+        self.assertTrue(callable(kwargs["cancelled"]))
 
     def test_stream_output_type_and_size_are_enforced_locally(self) -> None:
         cases = (
@@ -318,7 +382,7 @@ class LiteLLMProviderContractTests(unittest.TestCase):
                 provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)
                 with (
                     patch.object(LiteLLMProvider, "_token", return_value="test-token"),
-                    patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+                    patch("voice_agent_v2.cloud_llm._RegisteredHTTPConnection", return_value=connection),
                 ):
                     with self.assertRaises(StageFailure) as raised:
                         provider.respond(
@@ -341,7 +405,7 @@ class LiteLLMProviderContractTests(unittest.TestCase):
                 handed_off = []
                 with (
                     patch.object(LiteLLMProvider, "_token", return_value="test-token"),
-                    patch("voice_agent_v2.cloud_llm.http.client.HTTPConnection", return_value=connection),
+                    patch("voice_agent_v2.cloud_llm._RegisteredHTTPConnection", return_value=connection),
                 ):
                     with self.assertRaises(StageFailure) as raised:
                         provider.respond_with_handoff(
@@ -401,6 +465,29 @@ class BlockingLLM(FakeLLM):
     def cancel(self) -> None:
         self.cancel_count += 1
         self.release.set()
+
+
+class GenerationBlockingLLM(FakeLLM):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_entered = threading.Event()
+        self.first_released = threading.Event()
+        self.cancel_entered = threading.Event()
+        self.allow_cancel = threading.Event()
+
+    def respond_with_handoff(self, *, on_sentence, **_kwargs) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            self.first_entered.set()
+            self.first_released.wait(2)
+            raise StageFailure("llm_provider", "selected_provider_cancelled")
+        on_sentence("Следующий ответ.")
+        return "Следующий ответ."
+
+    def cancel(self) -> None:
+        self.cancel_entered.set()
+        self.allow_cancel.wait(2)
+        self.first_released.set()
 
 
 class FakeTTS:
@@ -540,6 +627,40 @@ class RealTurnControllerTests(unittest.TestCase):
         self.assertEqual(sum(event["terminal"] for event in result.events), 1)
         self.assertGreaterEqual(llm.cancel_count, 1)
         self.assertGreaterEqual(tts.cancel_count, 1)
+
+    def test_late_cancellation_finishes_before_the_next_turn_generation(self) -> None:
+        llm = GenerationBlockingLLM()
+        controller = RealTurnController(FakeSTT(), llm, FakeTTS())
+        token = CancellationToken()
+        results = []
+
+        first = threading.Thread(target=lambda: results.append(controller.run_turn(
+            session_id="session-test-0001",
+            turn_id="turn-test-0001",
+            input_pcm=b"\0\0" * 160,
+            cancellation=token,
+        )))
+        second = threading.Thread(target=lambda: results.append(controller.run_turn(
+            session_id="session-test-0001",
+            turn_id="turn-test-0002",
+            input_pcm=b"\0\0" * 160,
+        )))
+        first.start()
+        self.assertTrue(llm.first_entered.wait(1))
+        token.cancel()
+        self.assertTrue(llm.cancel_entered.wait(1))
+        second.start()
+        threading.Event().wait(0.05)
+        self.assertEqual(llm.calls, 1)
+        llm.allow_cancel.set()
+        first.join(1)
+        second.join(1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(results[0].terminal_event["type"], "turn.interrupted")
+        self.assertEqual(results[1].terminal_event["type"], "turn.completed")
 
     def test_mid_synthesis_cancellation_normalizes_adapter_failure_to_interruption(self) -> None:
         tts = BlockingTTS()

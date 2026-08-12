@@ -46,7 +46,9 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     try {
       await client.start()
     } catch (error) {
-      await client.stop()
+      try {
+        await client.stop()
+      } catch {}
       if (clientRef.current === client) {
         clientRef.current = null
         dispatch({

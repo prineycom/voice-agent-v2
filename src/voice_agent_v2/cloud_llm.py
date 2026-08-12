@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import http.client
 import json
 import os
 from pathlib import Path
+import socket
 import stat
+import sys
 import threading
 import time
 from typing import Callable
@@ -71,6 +74,65 @@ def parse_provider_endpoint(value: str | None) -> ProviderEndpoint:
     )
 
 
+class _RegisteredTCPConnection:
+    def __init__(self, *args, cancelled: Callable[[], bool], **kwargs) -> None:
+        self._cancelled = cancelled
+        super().__init__(*args, **kwargs)
+
+    def _connect_registered_socket(self) -> None:
+        sys.audit("http.client.connect", self, self.host, self.port)
+        addresses = socket.getaddrinfo(
+            self.host, self.port, 0, socket.SOCK_STREAM
+        )
+        last_error: OSError | None = None
+        for family, socktype, protocol, _canonical_name, address in addresses:
+            if self._cancelled():
+                raise OSError(errno.ECANCELED, "provider connection cancelled")
+            candidate = socket.socket(family, socktype, protocol)
+            self.sock = candidate
+            try:
+                candidate.settimeout(self.timeout)
+                if self.source_address:
+                    candidate.bind(self.source_address)
+                if self._cancelled():
+                    raise OSError(errno.ECANCELED, "provider connection cancelled")
+                candidate.connect(address)
+                if self._cancelled():
+                    raise OSError(errno.ECANCELED, "provider connection cancelled")
+                try:
+                    candidate.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError as error:
+                    if error.errno != errno.ENOPROTOOPT:
+                        raise
+                return
+            except OSError as error:
+                last_error = error
+                candidate.close()
+                if self.sock is candidate:
+                    self.sock = None
+                if self._cancelled():
+                    raise OSError(errno.ECANCELED, "provider connection cancelled") from error
+        if last_error is not None:
+            raise last_error
+        raise OSError("provider endpoint did not resolve")
+
+
+class _RegisteredHTTPConnection(_RegisteredTCPConnection, http.client.HTTPConnection):
+    def connect(self) -> None:
+        self._connect_registered_socket()
+
+
+class _RegisteredHTTPSConnection(_RegisteredTCPConnection, http.client.HTTPSConnection):
+    def connect(self) -> None:
+        self._connect_registered_socket()
+        server_hostname = self._tunnel_host or self.host
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=server_hostname
+        )
+
+
 class LiteLLMProvider:
     version = LLM_VERSION
     provider_mode = "cloud"
@@ -115,11 +177,22 @@ class LiteLLMProvider:
         return value
 
     @staticmethod
-    def _connection_for(endpoint: ProviderEndpoint, timeout: float):
+    def _connection_for(
+        endpoint: ProviderEndpoint,
+        timeout: float,
+        cancelled: Callable[[], bool] = lambda: False,
+    ):
         connection_type = (
-            http.client.HTTPSConnection if endpoint.scheme == "https" else http.client.HTTPConnection
+            _RegisteredHTTPSConnection
+            if endpoint.scheme == "https"
+            else _RegisteredHTTPConnection
         )
-        return connection_type(endpoint.host, endpoint.port, timeout=timeout)
+        return connection_type(
+            endpoint.host,
+            endpoint.port,
+            timeout=timeout,
+            cancelled=cancelled,
+        )
 
     def _capability_gate(self, token: str, endpoint: ProviderEndpoint) -> None:
         connection = self._connection_for(endpoint, 10)
@@ -198,7 +271,11 @@ class LiteLLMProvider:
     ) -> dict:
         endpoint = self._endpoint()
         token = self._token()
-        connection = self._connection_for(endpoint, 40)
+        connection = self._connection_for(
+            endpoint,
+            40,
+            cancelled=lambda: self._operation_cancelled(generation),
+        )
         with self._operation_lock:
             self._connection = connection
             self._connection_generation = generation

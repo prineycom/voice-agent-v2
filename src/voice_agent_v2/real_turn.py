@@ -21,6 +21,7 @@ class RealTurnController:
         self.stt = stt
         self.llm = llm
         self.tts = tts
+        self._turn_lock = threading.Lock()
         self._validate_contract_versions()
 
     def _validate_contract_versions(self) -> None:
@@ -39,6 +40,24 @@ class RealTurnController:
         cancel_after_output_chunks: int | None = None,
         diagnostic_clock: Callable[[], str] | None = None,
         event_observer: Callable[[dict[str, object]], None] | None = None,
+    ) -> TraceResult:
+        with self._turn_lock:
+            return self._run_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_pcm=input_pcm,
+                cancellation=cancellation,
+                cancel_after_output_chunks=cancel_after_output_chunks,
+                diagnostic_clock=diagnostic_clock,
+                event_observer=event_observer,
+            )
+
+    def _run_turn(
+        self, *, session_id: str, turn_id: str, input_pcm: bytes,
+        cancellation: CancellationToken | None,
+        cancel_after_output_chunks: int | None,
+        diagnostic_clock: Callable[[], str] | None,
+        event_observer: Callable[[dict[str, object]], None] | None,
     ) -> TraceResult:
         self._validate_contract_versions()
         if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
@@ -69,6 +88,9 @@ class RealTurnController:
             emit("turn.failed", payload, True)
             return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
 
+        cancellation_workers: set[threading.Thread] = set()
+        cancellation_workers_lock = threading.Lock()
+
         def cancel_adapters(*adapters) -> None:
             for adapter in adapters:
                 cancel = getattr(adapter, "cancel", None)
@@ -78,6 +100,30 @@ class RealTurnController:
                     except Exception:
                         pass
 
+        def request_adapter_cancellation(adapters: tuple[object, ...]) -> None:
+            def cancel_registered_generation() -> None:
+                cancel_adapters(*adapters)
+
+            worker = threading.Thread(
+                target=cancel_registered_generation,
+                name="voice-turn-cancellation",
+                daemon=True,
+            )
+            with cancellation_workers_lock:
+                cancellation_workers.add(worker)
+            worker.start()
+
+        def await_adapter_cancellation() -> None:
+            while True:
+                with cancellation_workers_lock:
+                    workers = tuple(cancellation_workers)
+                if not workers:
+                    return
+                for worker in workers:
+                    worker.join()
+                    with cancellation_workers_lock:
+                        cancellation_workers.discard(worker)
+
         def interrupted() -> TraceResult:
             emit("turn.interrupted", {
                 "outcome": "interrupted", "audio_chunks_emitted": len(output_chunks),
@@ -85,15 +131,9 @@ class RealTurnController:
             return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
 
         def run_stage(operation, *adapters):
-            def request_cancellation() -> None:
-                threading.Thread(
-                    target=cancel_adapters,
-                    args=adapters,
-                    name="voice-turn-cancellation",
-                    daemon=True,
-                ).start()
-
-            unregister = token.register(request_cancellation)
+            unregister = token.register(
+                lambda: request_adapter_cancellation(tuple(adapters))
+            )
             try:
                 if token.cancelled:
                     raise _TurnInterrupted
@@ -104,6 +144,7 @@ class RealTurnController:
                 raise
             finally:
                 unregister()
+                await_adapter_cancellation()
             if token.cancelled:
                 cancel_adapters(*adapters)
                 raise _TurnInterrupted

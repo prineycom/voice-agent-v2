@@ -60,6 +60,7 @@ export interface SessionCapability {
   livekit_url: string
   token: string
   expires_in_seconds: number
+  admission_timeout_ms: number
   control_version: typeof CONTROL_VERSION
 }
 
@@ -210,7 +211,7 @@ export class RealtimeControlGate {
 export function parseCapability(value: unknown): SessionCapability | null {
   if (!ownObject(value)) return null
   const keys = Object.keys(value).sort()
-  const expected = ['control_version', 'expires_in_seconds', 'livekit_url', 'session_id', 'stream_epoch', 'token']
+  const expected = ['admission_timeout_ms', 'control_version', 'expires_in_seconds', 'livekit_url', 'session_id', 'stream_epoch', 'token']
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
   if (
     typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id) ||
@@ -218,6 +219,8 @@ export function parseCapability(value: unknown): SessionCapability | null {
     typeof value.livekit_url !== 'string' || !value.livekit_url.startsWith('wss://') || value.livekit_url.length > 2048 ||
     typeof value.token !== 'string' || value.token.length < 16 || value.token.length > 8192 ||
     !Number.isSafeInteger(value.expires_in_seconds) || (value.expires_in_seconds as number) < 1 || (value.expires_in_seconds as number) > 600 ||
+    !Number.isSafeInteger(value.admission_timeout_ms) || (value.admission_timeout_ms as number) < 1_000 || (value.admission_timeout_ms as number) > 60_000 ||
+    (value.admission_timeout_ms as number) > (value.expires_in_seconds as number) * 1_000 ||
     value.control_version !== CONTROL_VERSION
   ) return null
   return value as unknown as SessionCapability

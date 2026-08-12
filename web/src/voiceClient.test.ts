@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const livekit = vi.hoisted(() => {
   const rooms: FakeRoom[] = []
   const createLocalAudioTrack = vi.fn()
+  let includeAgent = true
 
   class FakeRoom {
     connect = vi.fn().mockResolvedValue(undefined)
@@ -12,6 +13,11 @@ const livekit = vi.hoisted(() => {
       publishTrack: vi.fn().mockResolvedValue(undefined),
       publishData: vi.fn().mockResolvedValue(undefined),
     }
+    remoteParticipants = new Map(
+      includeAgent
+        ? [['agent-session-test-0001', { identity: 'agent-session-test-0001' }]]
+        : [],
+    )
     private handlers = new Map<string, Array<(...args: any[]) => void>>()
 
     constructor() {
@@ -30,7 +36,12 @@ const livekit = vi.hoisted(() => {
     }
   }
 
-  return { FakeRoom, createLocalAudioTrack, rooms }
+  return {
+    FakeRoom,
+    createLocalAudioTrack,
+    rooms,
+    setIncludeAgent(value: boolean) { includeAgent = value },
+  }
 })
 
 vi.mock('livekit-client', () => ({
@@ -71,6 +82,7 @@ function capabilityResponse(): Response {
       livekit_url: 'wss://voice.test.ts.net:7443',
       token: 'room-token-long-enough',
       expires_in_seconds: 30,
+      admission_timeout_ms: 30_000,
       control_version: 'voice-agent.realtime-control.v1',
     }),
   } as unknown as Response
@@ -119,6 +131,7 @@ afterEach(() => {
   vi.useRealTimers()
   livekit.rooms.length = 0
   livekit.createLocalAudioTrack.mockReset()
+  livekit.setIncludeAgent(true)
   vi.unstubAllGlobals()
 })
 
@@ -421,6 +434,20 @@ describe('VoiceClient startup cancellation', () => {
     await client.stop()
   })
 
+  it('rejects a room whose agent timed out before the browser joined', async () => {
+    livekit.setIncludeAgent(false)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const client = new VoiceClient(document.createElement('div'), callbacks())
+
+    await expect(client.start()).rejects.toThrow('agent is unavailable')
+    await client.stop()
+
+    const room = livekit.rooms[0]
+    expect(room.disconnect).toHaveBeenCalledOnce()
+    expect(livekit.createLocalAudioTrack).not.toHaveBeenCalled()
+  })
+
   it('fails closed when the agent participant leaves before readiness', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     const microphone = { stop: vi.fn() }
@@ -478,6 +505,38 @@ describe('VoiceClient startup cancellation', () => {
     ))
     await expect(client.stop()).resolves.toBeUndefined()
     expect(microphone.stop).toHaveBeenCalledOnce()
+  })
+
+  it('attempts every resource cleanup before reporting combined failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    const microphone = { stop: vi.fn(() => { throw new Error('stop failed') }) }
+    livekit.createLocalAudioTrack.mockResolvedValue(microphone)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    room.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    const remoteTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(element),
+      detach: vi.fn(() => { throw new Error('detach failed') }),
+    }
+    room.emit('trackSubscribed', remoteTrack, {}, { identity: 'agent-session-test-0001' })
+
+    room.emit('participantDisconnected', { identity: 'agent-session-test-0001' })
+
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed',
+      'Агент голосовой сессии отключился (не удалось полностью освободить транспорт)',
+    ))
+    expect(microphone.stop).toHaveBeenCalledOnce()
+    expect(remoteTrack.detach).toHaveBeenCalled()
+    expect(room.disconnect).toHaveBeenCalledOnce()
+    await expect(client.stop()).resolves.toBeUndefined()
   })
 
   it('releases microphone, playback, and room after terminal degradation', async () => {

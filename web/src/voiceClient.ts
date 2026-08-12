@@ -89,9 +89,12 @@ export class VoiceClient {
       const room = new Room({ adaptiveStream: false, dynacast: false, disconnectOnPageLeave: true })
       this.room = room
       this.registerRoomHandlers(room)
-      this.armInitialReadyTimeout(capability.expires_in_seconds * 1_000)
+      this.armInitialReadyTimeout(capability.admission_timeout_ms)
       await room.connect(capability.livekit_url, capability.token, { autoSubscribe: true })
       await this.ensureRoomStarting(room)
+      if (!this.hasExpectedAgent(room)) {
+        throw new Error('voice session agent is unavailable')
+      }
       const microphone = await createLocalAudioTrack({
         channelCount: 1,
         echoCancellation: true,
@@ -133,8 +136,10 @@ export class VoiceClient {
     this.clearReconnectAckTimer()
     this.clearInitialReadyTimer()
     this.playoutGeneration += 1
-    this.microphone?.stop()
+    const microphone = this.microphone
+    const room = this.room
     this.microphone = null
+    this.room = null
     this.capability = null
     this.controlGate = null
     this.reconnecting = false
@@ -148,11 +153,26 @@ export class VoiceClient {
     this.renewalBoundaryGeneration = 0
     this.freshSubscriptionRequired = false
     this.streamEpoch = 0
-    this.playback.clear()
-    const room = this.room
-    this.room = null
+    const errors: unknown[] = []
     try {
-      if (room !== null) await room.disconnect()
+      try {
+        microphone?.stop()
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        this.playback.clear()
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        if (room !== null) await room.disconnect()
+      } catch (error) {
+        errors.push(error)
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, 'voice session resource cleanup failed')
+      }
     } finally {
       if (notifyClosed) this.callbacks.onConnection('closed')
     }
@@ -167,12 +187,13 @@ export class VoiceClient {
     microphone?: LocalAudioTrack,
   ): Promise<void> {
     if (!this.stopping) return
-    microphone?.stop()
+    try {
+      microphone?.stop()
+    } catch {}
     try {
       await room.disconnect()
-    } finally {
-      throw new Error('voice session start was cancelled')
-    }
+    } catch {}
+    throw new Error('voice session start was cancelled')
   }
 
   private registerRoomHandlers(room: Room): void {
@@ -393,6 +414,11 @@ export class VoiceClient {
 
   private isExpectedAgent(identity: string): boolean {
     return this.capability !== null && identity === `agent-${this.capability.session_id}`
+  }
+
+  private hasExpectedAgent(room: Room): boolean {
+    if (this.capability === null) return false
+    return room.remoteParticipants.has(`agent-${this.capability.session_id}`)
   }
 
   private invalidatePlaybackTrack(): void {

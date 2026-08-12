@@ -16,6 +16,7 @@ const capability: SessionCapability = {
   livekit_url: 'wss://voice.test.ts.net:7443',
   token: 'x'.repeat(32),
   expires_in_seconds: 300,
+  admission_timeout_ms: 30_000,
   control_version: CONTROL_VERSION,
 }
 
