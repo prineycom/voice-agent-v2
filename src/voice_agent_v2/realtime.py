@@ -12,6 +12,7 @@ import sys
 import time
 from typing import Callable, Protocol
 
+from .audio import OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SAMPLES
 from .contracts import StageFailure, valid_correlation_id
 from .tracer import CancellationToken, TraceResult
 
@@ -675,6 +676,12 @@ class RealtimeSession:
         if not output_pcm:
             await self._fail_publication(context, "empty_audio_output", clear_audio=False)
             return
+        if len(output_pcm) > OUTPUT_MEDIA_MAX_BYTES:
+            output_pcm = b""
+            await self._fail_publication(
+                context, "audio_output_out_of_bounds", clear_audio=False
+            )
+            return
         try:
             boundary = await self.audio_sink.play(
                 context.turn_id,
@@ -695,7 +702,7 @@ class RealtimeSession:
             or not isinstance(boundary.final_sample_count, int)
             or isinstance(boundary.final_sample_count, bool)
             or boundary.final_sample_count < 1
-            or boundary.final_sample_count > MAX_UTTERANCE_BYTES // 2
+            or boundary.final_sample_count > OUTPUT_MEDIA_MAX_SAMPLES
             or boundary.sample_rate_hz != 16_000
         ):
             await self._fail_publication(context, "audio_boundary_invalid", clear_audio=True)

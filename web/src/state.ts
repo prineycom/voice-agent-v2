@@ -2,6 +2,8 @@ export const CONTROL_VERSION = 'voice-agent.realtime-control.v1'
 export const CLIENT_CONTROL_VERSION = 'voice-agent.client-control.v1'
 export const CONTROL_TOPIC = 'voice-agent.control.v1'
 export const CLIENT_CONTROL_TOPIC = 'voice-agent.client-control.v1'
+export const OUTPUT_MEDIA_MAX_SECONDS = 180
+export const OUTPUT_MEDIA_MAX_SAMPLES = 16_000 * OUTPUT_MEDIA_MAX_SECONDS
 
 const MAX_CONTROL_BYTES = 65_536
 const MAX_SEQUENCE = 1_000_000_000

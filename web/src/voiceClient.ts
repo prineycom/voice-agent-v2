@@ -12,6 +12,7 @@ import {
   CLIENT_CONTROL_TOPIC,
   CLIENT_CONTROL_VERSION,
   CONTROL_TOPIC,
+  OUTPUT_MEDIA_MAX_SAMPLES,
   RealtimeControlGate,
   parseCapability,
   parseControlEvent,
@@ -263,12 +264,6 @@ export class VoiceClient {
       ) return
       const publicationId = this.publicationId(publication as RemoteTrackPublication)
       if (publicationId !== null) {
-        this.publicationTracks.delete(publicationId)
-        if (
-          this.pendingPlayoutBoundary?.completedPublicationId === publicationId
-        ) {
-          void this.failSession('Аудиопоток завершился до подтверждения воспроизведения')
-        }
         this.endedPublications.add(publicationId)
         if (this.endedPublications.size > MAX_TRACK_GENERATIONS) {
           const oldest = this.endedPublications.values().next().value
@@ -513,7 +508,7 @@ export class VoiceClient {
       || typeof finalSampleCount !== 'number'
       || !Number.isSafeInteger(finalSampleCount)
       || finalSampleCount < 1
-      || finalSampleCount > 30 * 16_000
+      || finalSampleCount > OUTPUT_MEDIA_MAX_SAMPLES
       || typeof sampleRateHz !== 'number'
       || !Number.isSafeInteger(sampleRateHz)
       || sampleRateHz !== 16_000
@@ -554,7 +549,7 @@ export class VoiceClient {
     if (completedTrack === undefined || completedTrack !== this.activeRemoteTrack) return
     boundary.observing = true
     try {
-      await this.playback.waitForRenderedSamples(
+      await this.playback.waitForFinitePlayout(
         boundary.finalSampleCount,
         boundary.sampleRateHz,
       )
@@ -588,6 +583,8 @@ export class VoiceClient {
         this.pendingPlayoutBoundary = null
         this.clearPlayoutAckTimer()
         this.invalidatePlaybackTrack()
+        this.publicationTracks.delete(boundary.completedPublicationId)
+        this.endedPublications.delete(boundary.completedPublicationId)
       }
     } catch {
       await this.failSession('Не удалось подтвердить воспроизведение ответа')
@@ -756,6 +753,9 @@ export class VoiceClient {
       type: 'client.media-ready',
     }))
     try {
+      if (this.expectedMediaPublicationId !== null) {
+        await this.playback.prepareFinitePlayout()
+      }
       await room.localParticipant.publishData(payload, {
         reliable: true,
         topic: CLIENT_CONTROL_TOPIC,

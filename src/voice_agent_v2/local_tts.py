@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 from typing import Iterator
 
+from .audio import OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SECONDS
 from .contracts import AudioFormat, StageFailure, TTS_VERSION, valid_correlation_id
 from .process_adapter import AdapterProcess, AdapterProcessError
 from .tracer import CancellationToken
@@ -17,15 +18,10 @@ VENV = CACHE / "runtime" / "qwen-tts-venv"
 RUNNER = Path(__file__).resolve().parents[2] / "benchmarks" / "slice2" / "runners" / "qwen3_tts_runner.py"
 LOGS = CACHE / "raw" / "service-logs"
 OUTPUT_FORMAT = AudioFormat()
-TTS_REQUEST_TIMEOUT_SECONDS = 180.0
+TTS_REQUEST_TIMEOUT_SECONDS = float(OUTPUT_MEDIA_MAX_SECONDS)
 MAX_TTS_CHUNKS = 4096
-MAX_TTS_AUDIO_SECONDS = 180
-MAX_TTS_OUTPUT_BYTES = (
-    OUTPUT_FORMAT.sample_rate_hz
-    * OUTPUT_FORMAT.channels
-    * 2
-    * MAX_TTS_AUDIO_SECONDS
-)
+MAX_TTS_AUDIO_SECONDS = OUTPUT_MEDIA_MAX_SECONDS
+MAX_TTS_OUTPUT_BYTES = OUTPUT_MEDIA_MAX_BYTES
 
 
 @dataclass

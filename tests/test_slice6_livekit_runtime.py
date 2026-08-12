@@ -212,8 +212,9 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
             boundary,
             runtime.MediaBoundary("publication-1", 320, 16_000),
         )
-        self.assertEqual(observed_sources, [sink.source])
-        self.assertNotIn(("unpublish", "publication-1"), calls)
+        self.assertEqual(len(observed_sources), 2)
+        self.assertIs(observed_sources[-1], sink.source)
+        self.assertIn(("unpublish", "publication-1"), calls)
 
         await sink.complete("turn-test", boundary)
 

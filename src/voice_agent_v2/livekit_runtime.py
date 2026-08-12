@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 
 from livekit import api, rtc
 
+from .audio import OUTPUT_MEDIA_MAX_BYTES
 from .cloud_llm import LiteLLMProvider
 from .local_stt import WhisperSTT
 from .local_tts import Qwen3TTS
@@ -156,6 +157,7 @@ class LiveKitAudioSink(AudioSink):
         self.publication = None
         self._prepared_turn: str | None = None
         self._active_turn: str | None = None
+        self._sealed_boundary: tuple[str, MediaBoundary] | None = None
         self._rotation_lock = asyncio.Lock()
         self._rotation_failed = False
 
@@ -181,6 +183,8 @@ class LiveKitAudioSink(AudioSink):
         async with self._rotation_lock:
             if self._rotation_failed:
                 raise RuntimeError("LiveKit audio publication rotation previously failed")
+            if self._sealed_boundary is not None:
+                raise RuntimeError("previous LiveKit audio boundary is not finalized")
             if self.publication is not None:
                 if self._prepared_turn == turn_id:
                     return self._publication_id(self.publication)
@@ -222,7 +226,7 @@ class LiveKitAudioSink(AudioSink):
     async def play(
         self, turn_id: str, pcm: bytes, cancelled
     ) -> MediaBoundary | None:
-        if not pcm or len(pcm) % 2:
+        if not pcm or len(pcm) % 2 or len(pcm) > OUTPUT_MEDIA_MAX_BYTES:
             return None
         source = self.source
         publication = self.publication
@@ -244,34 +248,43 @@ class LiveKitAudioSink(AudioSink):
             await source.wait_for_playout()
             if cancelled() or self._active_turn != turn_id:
                 return None
-            return MediaBoundary(
+            boundary = MediaBoundary(
                 self._publication_id(publication),
                 len(pcm) // 2,
                 16_000,
             )
+            async with self._rotation_lock:
+                if (
+                    cancelled()
+                    or self.publication is not publication
+                    or self._prepared_turn != turn_id
+                ):
+                    return None
+                await self._retire(boundary.completed_publication_id, source)
+                self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+                self.source_changed(self.source)
+                self.publication = None
+                self._prepared_turn = None
+                self._sealed_boundary = (turn_id, boundary)
+            return boundary
         finally:
             if self._active_turn == turn_id:
                 self._active_turn = None
 
     async def complete(self, turn_id: str, boundary: MediaBoundary) -> None:
         async with self._rotation_lock:
-            if (
-                self.publication is None
-                or self._prepared_turn != turn_id
-                or self._publication_id(self.publication)
-                != boundary.completed_publication_id
-            ):
+            if self._sealed_boundary != (turn_id, boundary):
                 raise RuntimeError("LiveKit media boundary is not pending")
-            await self._retire(boundary.completed_publication_id, self.source)
-            self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
-            self.source_changed(self.source)
-            self.publication = None
-            self._prepared_turn = None
+            self._sealed_boundary = None
 
     async def clear(self, turn_id: str) -> str | None:
         async with self._rotation_lock:
             if self.publication is None:
-                return None
+                sealed = self._sealed_boundary
+                if sealed is None or sealed[0] != turn_id:
+                    return None
+                self._sealed_boundary = None
+                return sealed[1].completed_publication_id
             publication_id = self._publication_id(self.publication)
             if self._active_turn not in {None, turn_id}:
                 return publication_id

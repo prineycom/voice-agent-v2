@@ -98,6 +98,27 @@ function callbacks(): VoiceClientCallbacks {
   }
 }
 
+function finiteTrackBoundary() {
+  const mediaStreamTrack = new EventTarget() as MediaStreamTrack
+  Object.defineProperties(mediaStreamTrack, {
+    id: { configurable: true, value: 'finite-track' },
+    readyState: { configurable: true, value: 'live' },
+  })
+  return {
+    mediaStreamTrack,
+    getRTCStatsReport: vi.fn().mockResolvedValue(new Map([[
+      'audio',
+      {
+        type: 'inbound-rtp',
+        kind: 'audio',
+        trackIdentifier: 'finite-track',
+        totalSamplesReceived: 0,
+        jitterBufferEmittedCount: 0,
+      },
+    ]]) as unknown as RTCStatsReport),
+  }
+}
+
 function emitControl(
   room: { emit(event: string, ...args: any[]): void },
   type: string,
@@ -206,17 +227,27 @@ describe('VoiceClient startup cancellation', () => {
     element.play = vi.fn().mockResolvedValue(undefined)
     element.pause = vi.fn()
     element.load = vi.fn()
-    let renderObserver = (
-      _sampleCount: number, _sampleRate: number, _signal?: boolean,
-    ): void => { throw new Error('render observer was not installed') }
+    let trackState: MediaStreamTrackState = 'live'
+    const mediaStreamTrack = new EventTarget() as MediaStreamTrack
+    Object.defineProperty(mediaStreamTrack, 'readyState', {
+      configurable: true,
+      get: () => trackState,
+    })
+    let receivedSamples = 0
+    let emittedSamples = 0
     const turnTrack = {
       kind: 'audio',
       attach: vi.fn().mockReturnValue(element),
       detach: vi.fn().mockReturnValue([]),
-      observeRenderedSamples: vi.fn((observer: (samples: number, rate: number, signal?: boolean) => void) => {
-        renderObserver = observer
-        return vi.fn()
-      }),
+      mediaStreamTrack,
+      getRTCStatsReport: vi.fn().mockImplementation(async () => new Map([[
+        'audio',
+        {
+          type: 'inbound-rtp', kind: 'audio',
+          totalSamplesReceived: receivedSamples,
+          jitterBufferEmittedCount: emittedSamples,
+        },
+      ]]) as unknown as RTCStatsReport),
     }
     const publication = { trackSid: 'publication-turn-1' }
 
@@ -260,7 +291,7 @@ describe('VoiceClient startup cancellation', () => {
         ack_deadline_ms: 2_750,
         media_generation: 2,
         completed_publication_id: 'publication-turn-1',
-        final_sample_count: 320,
+        final_sample_count: 31 * 16_000,
         sample_rate_hz: 16_000,
       },
     })
@@ -272,11 +303,16 @@ describe('VoiceClient startup cancellation', () => {
       wait_kind: 'playout',
       type: 'client.wait-started',
     })
-    renderObserver(10_000, 16_000, false)
-    renderObserver(319, 16_000, true)
+    receivedSamples = 31 * 16_000
+    emittedSamples = 31 * 16_000 - 1
     await Promise.resolve()
     expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3)
-    renderObserver(1, 16_000, true)
+    emittedSamples += 1
+    trackState = 'ended'
+    mediaStreamTrack.dispatchEvent(new Event('ended'))
+    room.emit('trackUnsubscribed', turnTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
     await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
     expect(JSON.parse(new TextDecoder().decode(
       room.localParticipant.publishData.mock.calls[3][0] as Uint8Array,
@@ -309,6 +345,7 @@ describe('VoiceClient startup cancellation', () => {
     replacementElement.pause = vi.fn()
     replacementElement.load = vi.fn()
     const replacementTrack = {
+      ...finiteTrackBoundary(),
       kind: 'audio',
       attach: vi.fn().mockReturnValue(replacementElement),
       detach: vi.fn().mockReturnValue([]),
@@ -449,10 +486,10 @@ describe('VoiceClient startup cancellation', () => {
     element.pause = vi.fn()
     element.load = vi.fn()
     const staleTrack = {
+      ...finiteTrackBoundary(),
       kind: 'audio',
       attach: vi.fn().mockReturnValue(element),
       detach: vi.fn().mockReturnValue([]),
-      observeRenderedSamples: vi.fn().mockReturnValue(vi.fn()),
     }
     for (const [index, type] of [
       'session.ready', 'turn.listening', 'turn.transcribing', 'stt.final',
@@ -506,6 +543,7 @@ describe('VoiceClient startup cancellation', () => {
     element.pause = vi.fn()
     element.load = vi.fn()
     const track = {
+      ...finiteTrackBoundary(),
       kind: 'audio',
       attach: vi.fn().mockReturnValue(element),
       detach: vi.fn()
@@ -671,6 +709,7 @@ describe('VoiceClient startup cancellation', () => {
     element.pause = vi.fn()
     element.load = vi.fn()
     const remoteTrack = {
+      ...finiteTrackBoundary(),
       kind: 'audio',
       attach: vi.fn().mockReturnValue(element),
       detach: vi.fn()
@@ -738,6 +777,7 @@ describe('VoiceClient startup cancellation', () => {
     element.pause = vi.fn()
     element.load = vi.fn()
     const remoteTrack = {
+      ...finiteTrackBoundary(),
       kind: 'audio',
       attach: vi.fn().mockReturnValue(element),
       detach: vi.fn().mockReturnValue([]),

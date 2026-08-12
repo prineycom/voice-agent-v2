@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Callable
 
-from .audio import DEFAULT_AUDIO_FORMAT
+from .audio import DEFAULT_AUDIO_FORMAT, OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SECONDS
 from .contracts import (
     EventEnvelope, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure, valid_correlation_id,
 )
@@ -14,8 +14,8 @@ from .tracer import CancellationToken, TraceResult
 
 
 MAX_TURN_TTS_CHUNKS = 4096
-MAX_TURN_TTS_OUTPUT_BYTES = 16_000 * 2 * 180
-MAX_TURN_TTS_SECONDS = 180.0
+MAX_TURN_TTS_OUTPUT_BYTES = OUTPUT_MEDIA_MAX_BYTES
+MAX_TURN_TTS_SECONDS = float(OUTPUT_MEDIA_MAX_SECONDS)
 
 
 class _TurnInterrupted(Exception):

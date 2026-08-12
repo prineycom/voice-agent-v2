@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from voice_agent_v2.audio import generated_output_pcm
+from voice_agent_v2.audio import (
+    OUTPUT_MEDIA_MAX_BYTES,
+    OUTPUT_MEDIA_MAX_SAMPLES,
+    generated_output_pcm,
+)
 from voice_agent_v2.contracts import EventEnvelope
 from voice_agent_v2.realtime import (
     BARGE_IN_DRAIN_BOUND_MS,
@@ -171,6 +175,26 @@ class FakeRunner:
 
     def reset_session(self, session_id: str) -> None:
         self.reset_sessions.append(session_id)
+
+
+class SizedOutputRunner(FakeRunner):
+    def __init__(self, output_bytes: int) -> None:
+        super().__init__()
+        self.output_bytes = output_bytes
+
+    def run_turn(self, **kwargs) -> TraceResult:
+        result = super().run_turn(**kwargs)
+        return TraceResult(result.events, result.input_pcm, b"\0" * self.output_bytes)
+
+
+class SizedBoundaryAudioSink(MemoryAudioSink):
+    async def play(self, turn_id, pcm, cancelled) -> MediaBoundary | None:
+        self.played.append(turn_id)
+        return (
+            MediaBoundary(self.publication_id, len(pcm) // 2, 16_000)
+            if pcm and not cancelled()
+            else None
+        )
 
 
 class DeliveryBlockingRunner(FakeRunner):
@@ -1156,6 +1180,68 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(session._media_ready_timeout_task)
         await session.interrupt()
         await asyncio.wait_for(context.task, 2)
+
+    async def test_output_media_bound_accepts_31_seconds_and_exact_maximum(self) -> None:
+        for sample_count in (31 * 16_000, OUTPUT_MEDIA_MAX_SAMPLES):
+            with self.subTest(sample_count=sample_count):
+                events = MemoryEventSink()
+                audio = SizedBoundaryAudioSink()
+                session = RealtimeSession(
+                    session_id="session-test-0001",
+                    runner=SizedOutputRunner(sample_count * 2),
+                    event_sink=events,
+                    audio_sink=audio,
+                )
+                turn_id = await session.submit_utterance(b"\0\0" * 320)
+                context = session._active
+                assert context is not None and context.task is not None
+                while context.playout_ack is None:
+                    await asyncio.sleep(0.01)
+                assert context.playout_boundary is not None
+                assert context.playout_media_generation is not None
+                self.assertEqual(
+                    context.playout_boundary.final_sample_count, sample_count
+                )
+                await start_media_wait(
+                    session, turn_id, context.playout_media_generation, "playout"
+                )
+                acknowledgement = json.dumps({
+                    "schema_version": CLIENT_CONTROL_VERSION,
+                    "session_id": session.session_id,
+                    "turn_id": turn_id,
+                    "stream_epoch": session.stream_epoch,
+                    "sequence": session._client_sequence + 1,
+                    "media_generation": context.playout_media_generation,
+                    "completed_publication_id": (
+                        context.playout_boundary.completed_publication_id
+                    ),
+                    "type": "client.playout-completed",
+                }).encode()
+                self.assertTrue(
+                    await session.handle_client_control(acknowledgement)
+                )
+                await asyncio.wait_for(context.task, 2)
+                self.assertEqual(events.events[-1]["type"], "turn.completed")
+
+    async def test_output_media_over_limit_fails_before_publication(self) -> None:
+        events = MemoryEventSink()
+        audio = SizedBoundaryAudioSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=SizedOutputRunner(OUTPUT_MEDIA_MAX_BYTES + 2),
+            event_sink=events,
+            audio_sink=audio,
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+        context = session._active
+        assert context is not None and context.task is not None
+        await asyncio.wait_for(context.task, 2)
+
+        self.assertEqual(audio.played, [])
+        self.assertEqual(events.events[-1]["type"], "turn.failed")
+        self.assertEqual(
+            events.events[-1]["payload"]["code"], "audio_output_out_of_bounds"
+        )
 
     async def test_completion_waits_for_matching_client_playout_ack(self) -> None:
         events = MemoryEventSink()

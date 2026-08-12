@@ -1,10 +1,24 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AudioPlaybackBoundary, type AttachableAudioTrack } from './playback'
+
+class FiniteMediaTrack extends EventTarget {
+  readonly id = 'finite-track'
+  readyState: MediaStreamTrackState = 'live'
+
+  end(): void {
+    this.readyState = 'ended'
+    this.dispatchEvent(new Event('ended'))
+  }
+}
 
 class FakeTrack implements AttachableAudioTrack {
   attachCount = 0
   detachCount = 0
-  renderObserver: ((sampleCount: number, sampleRate: number, containsSignal?: boolean) => void) | null = null
+  receivedSamples = 0
+  emittedSamples = 0
+  readonly finiteTrack = new FiniteMediaTrack()
+  readonly mediaStreamTrack = this.finiteTrack as unknown as MediaStreamTrack
+  readonly elements: HTMLMediaElement[] = []
 
   attach(): HTMLMediaElement {
     this.attachCount += 1
@@ -12,6 +26,7 @@ class FakeTrack implements AttachableAudioTrack {
     element.play = vi.fn().mockResolvedValue(undefined)
     element.pause = vi.fn()
     element.load = vi.fn()
+    this.elements.push(element)
     return element
   }
 
@@ -20,20 +35,22 @@ class FakeTrack implements AttachableAudioTrack {
     return []
   }
 
-  observeRenderedSamples(
-    observer: (sampleCount: number, sampleRate: number, containsSignal?: boolean) => void,
-  ): () => void {
-    this.renderObserver = observer
-    return () => {
-      this.renderObserver = null
-    }
+  async getRTCStatsReport(): Promise<RTCStatsReport> {
+    return new Map([[
+      'audio',
+      {
+        type: 'inbound-rtp',
+        kind: 'audio',
+        trackIdentifier: this.finiteTrack.id,
+        totalSamplesReceived: this.receivedSamples,
+        jitterBufferEmittedCount: this.emittedSamples,
+      },
+    ]]) as unknown as RTCStatsReport
   }
 }
 
-afterEach(() => vi.useRealTimers())
-
 describe('audio playout boundary', () => {
-  it('reattaches the live track for explicit autoplay recovery', async () => {
+  it('reattaches the finite track for explicit autoplay recovery', async () => {
     const container = document.createElement('div')
     const blocked: boolean[] = []
     const boundary = new AudioPlaybackBoundary(container, (value) => blocked.push(value))
@@ -60,25 +77,71 @@ describe('audio playout boundary', () => {
     expect(container.childElementCount).toBe(0)
   })
 
-  it('ignores pre-RTP render silence and resolves at the correlated sample boundary', async () => {
-    const boundary = new AudioPlaybackBoundary(
-      document.createElement('div'),
-      vi.fn(),
-    )
+  it('counts leading silence from the correlated inbound playout counters', async () => {
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const track = new FakeTrack()
     boundary.setTrack(track)
-    const rendered = boundary.waitForRenderedSamples(320, 16_000)
+    await boundary.prepareFinitePlayout()
+    const playout = boundary.waitForFinitePlayout(320, 16_000)
     let completed = false
-    void rendered.then(() => { completed = true })
+    void playout.then(() => { completed = true })
 
-    track.renderObserver?.(10_000, 16_000, false)
-    track.renderObserver?.(319, 16_000, true)
-    await Promise.resolve()
+    track.receivedSamples = 320
+    track.emittedSamples = 320
+    await new Promise((resolve) => setTimeout(resolve, 25))
     expect(completed).toBe(false)
-    track.renderObserver?.(1, 16_000, true)
-    await rendered
 
+    track.finiteTrack.end()
+    await playout
     expect(completed).toBe(true)
+  })
+
+  it('waits for buffered late tail after track end and rejects partial delivery', async () => {
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+    const track = new FakeTrack()
+    boundary.setTrack(track)
+    await boundary.prepareFinitePlayout()
+    const lateTail = boundary.waitForFinitePlayout(320, 16_000)
+    let completed = false
+    void lateTail.then(() => { completed = true })
+
+    track.receivedSamples = 160
+    track.emittedSamples = 160
+    track.finiteTrack.end()
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(completed).toBe(false)
+    track.receivedSamples = 320
+    track.emittedSamples = 320
+    await lateTail
+
+    const partialTrack = new FakeTrack()
+    boundary.setTrack(partialTrack)
+    await boundary.prepareFinitePlayout()
+    const partial = boundary.waitForFinitePlayout(320, 16_000)
+    partialTrack.receivedSamples = 160
+    partialTrack.emittedSamples = 320
+    partialTrack.finiteTrack.end()
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    boundary.clear()
+    await expect(partial).rejects.toThrow('invalidated')
+  })
+
+  it('does not accept concealed gap samples as delivered response PCM', async () => {
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+    const track = new FakeTrack()
+    boundary.setTrack(track)
+    await boundary.prepareFinitePlayout()
+    const playout = boundary.waitForFinitePlayout(320, 16_000)
+    let completed = false
+    void playout.then(() => { completed = true })
+
+    track.receivedSamples = 300
+    track.emittedSamples = 320
+    track.finiteTrack.end()
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(completed).toBe(false)
+    track.receivedSamples = 320
+    await playout
   })
 
   it('surfaces and resumes the same Web Audio context used for rendering', async () => {
@@ -109,7 +172,6 @@ describe('audio playout boundary', () => {
       setAudioContext(context: AudioContext | undefined): void
       setWebAudioPlugins(nodes: AudioNode[]): void
     }
-    track.observeRenderedSamples = undefined as never
     track.setAudioContext = vi.fn()
     track.setWebAudioPlugins = vi.fn()
 
