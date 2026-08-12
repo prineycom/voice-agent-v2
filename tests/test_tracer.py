@@ -143,6 +143,29 @@ class ContractFixtureTests(unittest.TestCase):
                 for event in run_scenario(scenario).events:
                     validate(event, schema)
 
+    def test_one_of_rejects_zero_or_multiple_matching_branches(self) -> None:
+        client_control_schema = json.loads(
+            (ROOT / "contracts" / "client-control.v1.schema.json").read_text()
+        )
+        with self.assertRaisesRegex(
+            SchemaViolation,
+            r"^\$: oneOf expected exactly one matching branch, matched 0",
+        ):
+            validate({}, client_control_schema)
+
+        ambiguous_schema = {
+            "oneOf": [
+                {"type": "object", "additionalProperties": False},
+                {"type": "object", "additionalProperties": False},
+            ]
+        }
+        with self.assertRaisesRegex(
+            SchemaViolation,
+            r"^\$: oneOf expected exactly one matching branch, matched 2 "
+            r"\(matching branches \[0, 1\]\)$",
+        ):
+            validate({}, ambiguous_schema)
+
     def test_identifier_constraints_enforce_whole_value_and_length(self) -> None:
         contracts = {
             "event-envelope": json.loads(

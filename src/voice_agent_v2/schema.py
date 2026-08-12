@@ -11,6 +11,26 @@ class SchemaViolation(AssertionError):
 
 
 def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
+    if "oneOf" in schema:
+        matches: list[int] = []
+        failures: list[str] = []
+        for index, branch in enumerate(schema["oneOf"]):
+            try:
+                validate(instance, branch, path)
+            except SchemaViolation as exc:
+                failures.append(f"branch {index}: {exc}")
+            else:
+                matches.append(index)
+        if len(matches) != 1:
+            detail = (
+                f"matching branches {matches}"
+                if matches
+                else "; ".join(failures)
+            )
+            raise SchemaViolation(
+                f"{path}: oneOf expected exactly one matching branch, matched {len(matches)} ({detail})"
+            )
+
     expected_type = schema.get("type")
     if expected_type is not None:
         predicates = {
