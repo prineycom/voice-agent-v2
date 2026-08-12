@@ -26,6 +26,7 @@ from voice_agent_v2.tracer import TraceResult
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "voice-agent-v2" / "slice-6"
+EVIDENCE_ROOT = Path(os.environ.get("NO_MISTAKES_EVIDENCE_DIR", str(CACHE)))
 LIVEKIT = CACHE / "tooling/livekit-server-v1.13.5"
 FIREFOX = shutil.which("firefox")
 
@@ -201,6 +202,7 @@ async def main() -> int:
     server: ThreadingHTTPServer | None = None
     server_thread: threading.Thread | None = None
     microphone_subscribed = asyncio.Event()
+    browser_controls: list[dict[str, object]] = []
     try:
         await wait_port(livekit_port, livekit)
         agent_token = (
@@ -244,6 +246,8 @@ async def main() -> int:
             audio_sink=audio_sink,
             failure_handler=lambda stage, code: failures.append((stage, code)),
         )
+        await audio_sink.start()
+        persistent_publication_id = audio_sink.current_publication_id()
 
         @room.on("track_subscribed")
         def track_subscribed(track, publication, participant) -> None:
@@ -262,6 +266,7 @@ async def main() -> int:
                 and packet.topic == CLIENT_CONTROL_TOPIC
                 and 0 < len(packet.data) <= MAX_CONTROL_BYTES
             ):
+                browser_controls.append(json.loads(bytes(packet.data)))
                 asyncio.create_task(session.handle_client_control(bytes(packet.data)))
 
         capability = {
@@ -294,6 +299,7 @@ async def main() -> int:
         geckodriver = Path.home() / ".cache/selenium/geckodriver/linux64/0.37.1/geckodriver"
         service = Service(executable_path=str(geckodriver)) if geckodriver.is_file() else Service()
         driver = webdriver.Firefox(options=options, service=service)
+        await asyncio.to_thread(driver.set_window_size, 1440, 1000)
         await asyncio.to_thread(driver.get, f"http://127.0.0.1:{web_port}/")
         connect = driver.find_element("xpath", "//button[contains(., 'Подключить микрофон')]")
         await asyncio.to_thread(connect.click)
@@ -307,7 +313,7 @@ async def main() -> int:
         if session._closed:
             browser_state = await asyncio.to_thread(
                 driver.execute_script,
-                "return {body:document.body.innerText,diagnostics:localStorage.getItem('voice-agent.slice6.diagnostics')}",
+                "return {body:document.body.innerText,localKeys:Object.keys(localStorage),sessionKeys:Object.keys(sessionStorage)}",
             )
             raise AssertionError(
                 "first full-stack turn closed the session: "
@@ -320,12 +326,33 @@ async def main() -> int:
         await asyncio.wait_for(second_context.task, 15)
 
         await wait_for(
-            lambda: "Ошибка: llm_provider/deterministic_provider_failure" in driver.find_element("tag name", "body").text,
-            "React app did not expose the normalized deterministic provider failure",
+            lambda: (
+                "Видимый префикс перед ошибкой." in driver.find_element("tag name", "body").text
+                and "Ошибка" in driver.find_element("tag name", "body").text
+            ),
+            "React app did not retain and label the deterministic failed answer",
         )
         body = await asyncio.to_thread(lambda: driver.find_element("tag name", "body").text)
-        if "Видимый префикс перед ошибкой." not in body:
-            raise AssertionError("React app lost the already delivered visible prefix")
+        storage_state = await asyncio.to_thread(
+            driver.execute_script,
+            "return {localKeys:Object.keys(localStorage),sessionKeys:Object.keys(sessionStorage)}",
+        )
+        if storage_state != {"localKeys": [], "sessionKeys": []}:
+            raise AssertionError(f"browser persisted session data: {storage_state}")
+        for visible_text in (
+            "Детерминированный видимый ответ.",
+            "Видимый префикс перед ошибкой.",
+            "Завершено",
+            "Ошибка",
+            "Endpoint → текст",
+            "Endpoint → server PCM",
+        ):
+            if visible_text not in body:
+                raise AssertionError(f"React history omitted {visible_text!r}")
+        if audio_sink.current_publication_id() != persistent_publication_id:
+            raise AssertionError("LiveKit publication rotated between turns")
+        if browser_controls:
+            raise AssertionError(f"browser sent unexpected media correctness controls: {browser_controls}")
         download = driver.find_element("xpath", "//button[contains(., 'Скачать диагностику')]")
         await asyncio.to_thread(download.click)
         await wait_for(
@@ -333,7 +360,15 @@ async def main() -> int:
             "Firefox did not download the diagnostic timeline",
         )
         diagnostic_path = next(download_root.glob("voice-agent-diagnostic-*.jsonl"))
-        records = [json.loads(line) for line in diagnostic_path.read_text().splitlines()]
+        diagnostic_output = diagnostic_path.read_text()
+        records = [json.loads(line) for line in diagnostic_output.splitlines()]
+        for private_content in (
+            "Детерминированная речь.",
+            "Детерминированный видимый ответ.",
+            "Видимый префикс перед ошибкой.",
+        ):
+            if private_content in diagnostic_output:
+                raise AssertionError("downloaded diagnostics retained conversation content")
         expected_failure = {
             "stage": "llm_provider",
             "event": "turn.failed",
@@ -343,6 +378,13 @@ async def main() -> int:
         }
         if not any(all(record.get(key) == value for key, value in expected_failure.items()) for record in records):
             raise AssertionError("downloaded Firefox diagnostics lost the correlated server cause")
+        if not any(
+            record.get("serverControlType") == "turn.failed"
+            and record.get("failureStage") == "llm_provider"
+            and record.get("failureCode") == "deterministic_provider_failure"
+            for record in records
+        ):
+            raise AssertionError("downloaded Firefox diagnostics lost normalized server failure fields")
         event_types = [event["type"] for event in event_sink.events]
         if "turn.completed" not in event_types or "turn.failed" not in event_types:
             raise AssertionError(f"full-stack deterministic lifecycle is incomplete: {event_types}")
@@ -351,7 +393,23 @@ async def main() -> int:
             for event in event_sink.events
         ):
             raise AssertionError("streamed publication did not reach its correlated completion")
+        EVIDENCE_ROOT.mkdir(parents=True, exist_ok=True)
+        screenshot_path = EVIDENCE_ROOT / "checkpoint-ab-firefox.png"
+        result_path = EVIDENCE_ROOT / "checkpoint-ab-firefox.json"
+        await asyncio.to_thread(driver.execute_script, "window.scrollTo(0, 0)")
+        await asyncio.to_thread(driver.save_screenshot, str(screenshot_path))
+        result_path.write_text(json.dumps({
+            "browser_surface": body,
+            "server_event_types": event_types,
+            "persistent_publication_id": persistent_publication_id,
+            "browser_media_controls": browser_controls,
+            "browser_storage": storage_state,
+            "downloaded_diagnostic": str(diagnostic_path),
+            "audibility_claimed": False,
+        }, ensure_ascii=False, indent=2) + "\n")
         print("Firefox/React/official LiveKit deterministic full-stack regression: PASS")
+        print(f"Screenshot: {screenshot_path}")
+        print(f"Result: {result_path}")
         print("Evidence: fake inference data, publication lifecycle, and downloadable normalized error; audibility not claimed")
     finally:
         if driver is not None:

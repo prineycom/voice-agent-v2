@@ -101,6 +101,13 @@ class TurnContext:
     first_pcm_ms: float | None = None
 
 
+@dataclass(frozen=True)
+class PcmPumpItem:
+    request: TurnContext
+    chunk_index: int
+    pcm: bytes
+
+
 def _bounded_json_value(value: object, depth: int = 0) -> bool:
     if depth > 5:
         return False
@@ -579,7 +586,7 @@ class RealtimeSession:
 
         loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
-        pcm_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(
+        pcm_queue: asyncio.Queue[PcmPumpItem | None] = asyncio.Queue(
             maxsize=PCM_PUMP_MAX_BLOCKS
         )
         pump_errors: list[BaseException] = []
@@ -596,7 +603,7 @@ class RealtimeSession:
                         return
 
         async def enqueue_pcm(chunk_index: int, chunk: bytes) -> None:
-            await pcm_queue.put((chunk_index, chunk))
+            await pcm_queue.put(PcmPumpItem(context, chunk_index, chunk))
             context.pcm_queue_high_water = max(
                 context.pcm_queue_high_water, pcm_queue.qsize()
             )
@@ -639,8 +646,7 @@ class RealtimeSession:
                 try:
                     if item is None:
                         return
-                    chunk_index, chunk = item
-                    await self._relay_audio_chunk(context, chunk_index, chunk)
+                    await self._relay_queued_pcm(item)
                 except BaseException as error:
                     pump_errors.append(error)
                     context.cancellation.cancel()
@@ -862,6 +868,18 @@ class RealtimeSession:
                 await self._degrade_locked("publication", drain_error)
             elif context.rollback_error is not None:
                 await self._degrade_locked("controller", context.rollback_error)
+
+    async def _relay_queued_pcm(self, item: PcmPumpItem) -> None:
+        context = item.request
+        if (
+            self._active is not context
+            or context.terminal
+            or context.cancellation.cancelled
+            or self._closed
+        ):
+            self.drop_counts["stale_event"] += 1
+            return
+        await self._relay_audio_chunk(context, item.chunk_index, item.pcm)
 
     async def _relay_audio_chunk(
         self, context: TurnContext, chunk_index: int, chunk: bytes

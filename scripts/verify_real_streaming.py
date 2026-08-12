@@ -65,7 +65,16 @@ def main() -> int:
     started = time.monotonic()
     try:
         provider.readiness(token)
-        tts.start(token)
+        warmup = tts.warmup(token)
+        warmed_process_id = tts.process_id
+        if (
+            warmup.get("discarded") is not True
+            or not isinstance(warmup.get("chunk_count"), int)
+            or warmup["chunk_count"] < 1
+            or warmup.get("process_id") != warmed_process_id
+        ):
+            raise AssertionError("real Qwen warm-up was not discarded by the public synthesis path")
+        started = time.monotonic()
         budget = tts.create_turn_budget()
 
         def synthesize(sentence: str) -> None:
@@ -89,7 +98,13 @@ def main() -> int:
         completed = time.monotonic()
         if not pcm_first.is_set() or not callbacks or callbacks[0][0] >= completed:
             raise AssertionError("first Qwen PCM did not precede total LFM/TTS completion")
+        if tts.process_id != warmed_process_id:
+            raise AssertionError("real Qwen synthesis did not reuse the warmed resident process")
         print("Focused real LFM -> resident Qwen PCM streaming: PASS")
+        print(
+            f"warmup_chunks={warmup['chunk_count']} warmup_discarded=true "
+            "process_identity_stable=true"
+        )
         print(f"first_pcm_ms={(callbacks[0][0] - started) * 1000:.3f}")
         print(f"total_completion_ms={(completed - started) * 1000:.3f}")
         print(f"pcm_chunks={len(callbacks)} content_logged=false")

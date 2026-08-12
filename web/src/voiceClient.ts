@@ -415,9 +415,6 @@ export class VoiceClient {
     this.diagnostics.push(record)
     if (this.diagnostics.length > 512) this.diagnostics.shift()
     this.callbacks.onDiagnostic?.(record)
-    try {
-      localStorage.setItem('voice-agent.slice6.diagnostics', JSON.stringify(this.diagnostics))
-    } catch {}
   }
 
   private async failSession(message: string, code = 'client_failure', cause?: unknown): Promise<void> {

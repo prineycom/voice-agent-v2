@@ -111,6 +111,8 @@ function emitControl(
 }
 
 beforeEach(() => {
+  localStorage.clear()
+  sessionStorage.clear()
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
   livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
   vi.spyOn(AudioPlaybackBoundary.prototype, 'setTrack').mockImplementation(() => undefined)
@@ -153,6 +155,30 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     expect(room.localParticipant.publishData).not.toHaveBeenCalled()
     expect(observed.onControl).toHaveBeenCalledTimes(7)
     expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
+  })
+
+  it('keeps diagnostics and conversation content in memory only', async () => {
+    const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'stt.final', 3, { transcript: 'Секретный вопрос.' })
+    emitControl(room, 'turn.thinking', 4)
+    emitControl(room, 'llm.visible', 5, { response: 'Приватный ответ.' })
+    emitControl(room, 'turn.completed', 6, { outcome: 'completed' }, true)
+
+    expect(storageWrite).not.toHaveBeenCalled()
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    const diagnosticOutput = JSON.stringify(
+      vi.mocked(observed.onDiagnostic!).mock.calls.map(([record]) => record),
+    )
+    expect(diagnosticOutput).not.toContain('Секретный вопрос.')
+    expect(diagnosticOutput).not.toContain('Приватный ответ.')
   })
 
   it('keeps a visible prefix and session alive when TTS fails', async () => {

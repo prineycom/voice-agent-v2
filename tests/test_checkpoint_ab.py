@@ -8,8 +8,9 @@ import threading
 import types
 import unittest
 
-from voice_agent_v2.contracts import EventEnvelope
+from voice_agent_v2.contracts import EventEnvelope, valid_correlation_id
 from voice_agent_v2.local_tts import Qwen3TTS
+import voice_agent_v2.realtime as realtime_module
 from voice_agent_v2.realtime import RealtimeSession
 from voice_agent_v2.tracer import TraceResult
 
@@ -239,6 +240,33 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(operations.index("pcm-submitted"), operations.index("synthesis-final"))
         self.assertLessEqual(events.events[-1]["payload"]["server_pcm_queue_max_blocks"], 2)
 
+    async def test_stale_request_tagged_pcm_is_dropped_before_sink_write(self) -> None:
+        events = MemoryEvents()
+        audio = MemoryAudio()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=audio,
+        )
+        stale = realtime_module.TurnContext(
+            turn_id="turn-stale",
+            cancellation=realtime_module.CancellationToken(),
+            endpoint_monotonic=0,
+        )
+        current = realtime_module.TurnContext(
+            turn_id="turn-current",
+            cancellation=realtime_module.CancellationToken(),
+            endpoint_monotonic=0,
+        )
+        session._active = current
+
+        await session._relay_queued_pcm(realtime_module.PcmPumpItem(stale, 0, b"\0\0" * 320))
+
+        self.assertEqual(audio.chunks, [])
+        self.assertEqual(current.audio_chunk_sequence, 0)
+        self.assertEqual(session.drop_counts["stale_event"], 1)
+
     async def test_tts_failure_retains_visible_prefix_without_degrading_session(self) -> None:
         events = MemoryEvents()
         audio = MemoryAudio()
@@ -333,7 +361,11 @@ class CheckpointBWarmupTests(unittest.TestCase):
                 return {"speaker": "ryan"}
 
             def stream_synthesize(self, **arguments):
-                self.requests.append((arguments["session_id"], arguments["turn_id"]))
+                session_id = arguments["session_id"]
+                turn_id = arguments["turn_id"]
+                if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
+                    raise AssertionError("warm-up bypassed the public correlation contract")
+                self.requests.append((session_id, turn_id))
                 yield b"\0\0" * 320
                 yield b"\1\0" * 320
 
