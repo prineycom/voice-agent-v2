@@ -260,11 +260,6 @@ class LiveKitAudioSink(AudioSink):
                     or self._prepared_turn != turn_id
                 ):
                     return None
-                await self._retire(boundary.completed_publication_id, source)
-                self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
-                self.source_changed(self.source)
-                self.publication = None
-                self._prepared_turn = None
                 self._sealed_boundary = (turn_id, boundary)
             return boundary
         finally:
@@ -273,18 +268,23 @@ class LiveKitAudioSink(AudioSink):
 
     async def complete(self, turn_id: str, boundary: MediaBoundary) -> None:
         async with self._rotation_lock:
-            if self._sealed_boundary != (turn_id, boundary):
+            if (
+                self._sealed_boundary != (turn_id, boundary)
+                or self.publication is None
+                or self._prepared_turn != turn_id
+            ):
                 raise RuntimeError("LiveKit media boundary is not pending")
+            await self._retire(boundary.completed_publication_id, self.source)
+            self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+            self.source_changed(self.source)
+            self.publication = None
+            self._prepared_turn = None
             self._sealed_boundary = None
 
     async def clear(self, turn_id: str) -> str | None:
         async with self._rotation_lock:
             if self.publication is None:
-                sealed = self._sealed_boundary
-                if sealed is None or sealed[0] != turn_id:
-                    return None
-                self._sealed_boundary = None
-                return sealed[1].completed_publication_id
+                return None
             publication_id = self._publication_id(self.publication)
             if self._active_turn not in {None, turn_id}:
                 return publication_id
@@ -295,6 +295,7 @@ class LiveKitAudioSink(AudioSink):
             self.source_changed(self.source)
             self.publication = None
             self._prepared_turn = None
+            self._sealed_boundary = None
             return publication_id
 
 

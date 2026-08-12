@@ -187,7 +187,7 @@ export class VoiceClient {
       }
     }
     try {
-      this.playback.clear()
+      await this.playback.dispose()
     } catch (error) {
       errors.push(error)
     }

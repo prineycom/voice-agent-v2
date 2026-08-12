@@ -1,24 +1,37 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AudioPlaybackBoundary, type AttachableAudioTrack } from './playback'
 
 class FiniteMediaTrack extends EventTarget {
   readonly id = 'finite-track'
   readyState: MediaStreamTrackState = 'live'
-
-  end(): void {
-    this.readyState = 'ended'
-    this.dispatchEvent(new Event('ended'))
-  }
+  muted = false
 }
 
 class FakeTrack implements AttachableAudioTrack {
   attachCount = 0
   detachCount = 0
-  receivedSamples = 0
-  emittedSamples = 0
   readonly finiteTrack = new FiniteMediaTrack()
   readonly mediaStreamTrack = this.finiteTrack as unknown as MediaStreamTrack
   readonly elements: HTMLMediaElement[] = []
+  receivedDurationSeconds = 0
+  emittedSamples = 0
+  concealedSamples = 0
+  setAudioContext = vi.fn()
+  setWebAudioPlugins = vi.fn()
+
+  async getRTCStatsReport(): Promise<RTCStatsReport> {
+    return new Map([[
+      'audio',
+      {
+        type: 'inbound-rtp',
+        kind: 'audio',
+        trackIdentifier: this.finiteTrack.id,
+        totalSamplesDuration: this.receivedDurationSeconds,
+        jitterBufferEmittedCount: this.emittedSamples,
+        concealedSamples: this.concealedSamples,
+      },
+    ]]) as unknown as RTCStatsReport
+  }
 
   attach(): HTMLMediaElement {
     this.attachCount += 1
@@ -34,19 +47,53 @@ class FakeTrack implements AttachableAudioTrack {
     this.detachCount += 1
     return []
   }
+}
 
-  async getRTCStatsReport(): Promise<RTCStatsReport> {
-    return new Map([[
-      'audio',
-      {
-        type: 'inbound-rtp',
-        kind: 'audio',
-        trackIdentifier: this.finiteTrack.id,
-        totalSamplesReceived: this.receivedSamples,
-        jitterBufferEmittedCount: this.emittedSamples,
+class RenderHarness {
+  state: AudioContextState = 'running'
+  readonly sampleRate = 48_000
+  readonly resume = vi.fn(async () => { this.state = 'running' })
+  readonly close = vi.fn(async () => { this.state = 'closed' })
+  readonly node = {
+    onaudioprocess: null as ((event: AudioProcessingEvent) => void) | null,
+    disconnect: vi.fn(),
+  } as unknown as ScriptProcessorNode
+
+  createScriptProcessor = vi.fn().mockReturnValue(this.node)
+
+  render(frames: number): void {
+    const input = new Float32Array(frames)
+    const output = new Float32Array(frames)
+    this.node.onaudioprocess?.({
+      inputBuffer: {
+        numberOfChannels: 1,
+        getChannelData: () => input,
       },
-    ]]) as unknown as RTCStatsReport
+      outputBuffer: {
+        numberOfChannels: 1,
+        length: frames,
+        getChannelData: () => output,
+      },
+    } as unknown as AudioProcessingEvent)
   }
+}
+
+const originalAudioContext = window.AudioContext
+
+afterEach(() => {
+  Object.defineProperty(window, 'AudioContext', {
+    configurable: true,
+    value: originalAudioContext,
+  })
+})
+
+function installContext(harness: RenderHarness): void {
+  Object.defineProperty(window, 'AudioContext', {
+    configurable: true,
+    value: class {
+      constructor() { return harness }
+    },
+  })
 }
 
 describe('audio playout boundary', () => {
@@ -67,9 +114,7 @@ describe('audio playout boundary', () => {
 
     expect(track.attachCount).toBe(2)
     expect(track.detachCount).toBe(1)
-    expect(container.childElementCount).toBe(1)
     expect(container.firstElementChild).not.toBe(first)
-    expect(container.querySelector('audio')?.dataset.voiceAgentAudio).toBe('agent-response')
     expect(blocked.at(-1)).toBe(false)
 
     boundary.clear()
@@ -77,120 +122,107 @@ describe('audio playout boundary', () => {
     expect(container.childElementCount).toBe(0)
   })
 
-  it('counts leading silence from the correlated inbound playout counters', async () => {
+  it('normalizes the correlated Web Audio render boundary to its context rate', async () => {
+    const harness = new RenderHarness()
+    installContext(harness)
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const track = new FakeTrack()
     boundary.setTrack(track)
     await boundary.prepareFinitePlayout()
+    track.receivedDurationSeconds = 320 / 16_000
+    track.emittedSamples = 1
     const playout = boundary.waitForFinitePlayout(320, 16_000)
+    await new Promise((resolve) => setTimeout(resolve, 25))
     let completed = false
     void playout.then(() => { completed = true })
 
-    track.receivedSamples = 320
-    track.emittedSamples = 320
-    await new Promise((resolve) => setTimeout(resolve, 25))
+    harness.render(959)
+    await Promise.resolve()
     expect(completed).toBe(false)
-
-    track.finiteTrack.end()
+    harness.render(1)
     await playout
     expect(completed).toBe(true)
   })
 
-  it('waits for buffered late tail after track end and rejects partial delivery', async () => {
+  it('does not accept transport progress while the render context is suspended', async () => {
+    const harness = new RenderHarness()
+    installContext(harness)
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const track = new FakeTrack()
     boundary.setTrack(track)
     await boundary.prepareFinitePlayout()
-    const lateTail = boundary.waitForFinitePlayout(320, 16_000)
+    track.receivedDurationSeconds = 320 / 16_000
+    track.emittedSamples = 1
+    const playout = boundary.waitForFinitePlayout(320, 16_000)
+    await new Promise((resolve) => setTimeout(resolve, 25))
     let completed = false
-    void lateTail.then(() => { completed = true })
+    void playout.then(() => { completed = true })
 
-    track.receivedSamples = 160
-    track.emittedSamples = 160
-    track.finiteTrack.end()
-    await new Promise((resolve) => setTimeout(resolve, 25))
+    harness.state = 'suspended'
+    harness.render(960)
+    await Promise.resolve()
     expect(completed).toBe(false)
-    track.receivedSamples = 320
-    track.emittedSamples = 320
-    await lateTail
-
-    const partialTrack = new FakeTrack()
-    boundary.setTrack(partialTrack)
-    await boundary.prepareFinitePlayout()
-    const partial = boundary.waitForFinitePlayout(320, 16_000)
-    partialTrack.receivedSamples = 160
-    partialTrack.emittedSamples = 320
-    partialTrack.finiteTrack.end()
-    await new Promise((resolve) => setTimeout(resolve, 25))
-    boundary.clear()
-    await expect(partial).rejects.toThrow('invalidated')
+    harness.state = 'running'
+    harness.render(960)
+    await playout
   })
 
-  it('does not accept concealed gap samples as delivered response PCM', async () => {
+  it('fails closed when the delivered timeline contains concealed audio', async () => {
+    const harness = new RenderHarness()
+    installContext(harness)
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const track = new FakeTrack()
     boundary.setTrack(track)
     await boundary.prepareFinitePlayout()
     const playout = boundary.waitForFinitePlayout(320, 16_000)
-    let completed = false
-    void playout.then(() => { completed = true })
-
-    track.receivedSamples = 300
-    track.emittedSamples = 320
-    track.finiteTrack.end()
+    const rejected = expect(playout).rejects.toThrow('concealment')
+    track.receivedDurationSeconds = 320 / 16_000
+    track.emittedSamples = 1
+    track.concealedSamples = 1
     await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(completed).toBe(false)
-    track.receivedSamples = 320
-    await playout
+
+    harness.render(960)
+
+    await rejected
   })
 
-  it('surfaces and resumes the same Web Audio context used for rendering', async () => {
-    const original = window.AudioContext
-    let state: AudioContextState = 'suspended'
-    const resume = vi.fn()
-      .mockRejectedValueOnce(new Error('autoplay blocked'))
-      .mockImplementationOnce(async () => { state = 'running' })
-    const node = {
-      onaudioprocess: null,
-      disconnect: vi.fn(),
-    } as unknown as ScriptProcessorNode
-    class FakeAudioContext {
-      get state(): AudioContextState { return state }
-      resume = resume
-      createScriptProcessor = vi.fn().mockReturnValue(node)
-    }
+  it('closes every context across repeated session disposal', async () => {
+    const contexts: RenderHarness[] = []
     Object.defineProperty(window, 'AudioContext', {
       configurable: true,
-      value: FakeAudioContext,
+      value: class {
+        constructor() {
+          const context = new RenderHarness()
+          contexts.push(context)
+          return context
+        }
+      },
     })
-    const blocked: boolean[] = []
-    const boundary = new AudioPlaybackBoundary(
-      document.createElement('div'),
-      (value) => blocked.push(value),
-    )
-    const track = new FakeTrack() as FakeTrack & {
-      setAudioContext(context: AudioContext | undefined): void
-      setWebAudioPlugins(nodes: AudioNode[]): void
+
+    for (let index = 0; index < 2; index += 1) {
+      const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+      boundary.setTrack(new FakeTrack())
+      await boundary.dispose()
     }
-    track.setAudioContext = vi.fn()
-    track.setWebAudioPlugins = vi.fn()
 
-    try {
-      boundary.setTrack(track)
-      await Promise.resolve()
-      expect(blocked.at(-1)).toBe(true)
+    expect(contexts).toHaveLength(2)
+    expect(contexts.every((context) => context.close.mock.calls.length === 1)).toBe(true)
+  })
 
-      await boundary.resume()
+  it('closes the session context only on disposal and retries a failed close', async () => {
+    const harness = new RenderHarness()
+    harness.close
+      .mockRejectedValueOnce(new Error('close failed'))
+      .mockImplementationOnce(async () => { harness.state = 'closed' })
+    installContext(harness)
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+    boundary.setTrack(new FakeTrack())
 
-      expect(resume).toHaveBeenCalledTimes(2)
-      expect(blocked.at(-1)).toBe(false)
-      expect(track.setAudioContext).toHaveBeenCalledOnce()
-    } finally {
-      boundary.clear()
-      Object.defineProperty(window, 'AudioContext', {
-        configurable: true,
-        value: original,
-      })
-    }
+    boundary.clear()
+    expect(harness.close).not.toHaveBeenCalled()
+    await expect(boundary.dispose()).rejects.toThrow('disposal failed')
+    expect(harness.close).toHaveBeenCalledTimes(1)
+    await expect(boundary.dispose()).resolves.toBeUndefined()
+    expect(harness.close).toHaveBeenCalledTimes(2)
   })
 })

@@ -212,18 +212,21 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
             boundary,
             runtime.MediaBoundary("publication-1", 320, 16_000),
         )
-        self.assertEqual(len(observed_sources), 2)
+        self.assertEqual(len(observed_sources), 1)
         self.assertIs(observed_sources[-1], sink.source)
-        self.assertIn(("unpublish", "publication-1"), calls)
+        self.assertNotIn(("unpublish", "publication-1"), calls)
 
         await sink.complete("turn-test", boundary)
 
+        self.assertIn(("unpublish", "publication-1"), calls)
         self.assertLess(
             calls.index(("unpublish", "publication-1")),
             calls.index(("close", "source-2")),
         )
         await sink.prepare("turn-next")
         self.assertIn(("publish", "publication-2"), calls)
+        await sink.clear("turn-next")
+        self.assertIn(("unpublish", "publication-2"), calls)
 
     def test_live_runner_bounds_session_diagnostics_after_every_turn(self) -> None:
         class Adapter:
