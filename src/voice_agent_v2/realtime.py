@@ -53,6 +53,7 @@ TURN_PREDECESSOR = {
 BARGE_IN_DRAIN_BOUND_MS = 250
 CANCELLATION_CLEANUP_BOUND_MS = 1_000
 AUDIO_RETIREMENT_BOUND_MS = 1_000
+CONTROL_PUBLISH_BOUND_MS = 1_000
 CLIENT_PLAYOUT_ACK_TIMEOUT_MS = 3_000
 CLIENT_MEDIA_READY_TIMEOUT_MS = 3_000
 CLIENT_MEDIA_READY_ACK_MARGIN_MS = 250
@@ -402,6 +403,23 @@ class RealtimeSession:
             if not completion.done():
                 completion.cancel()
 
+    async def _send_bounded_event(self, event: dict[str, object]) -> None:
+        delivery = asyncio.create_task(
+            self.event_sink.send(event),
+            name=f"control-publish-{event['type']}-{event['turn_id']}",
+        )
+        delivery.add_done_callback(self._consume_background_task)
+        try:
+            done, _pending = await asyncio.wait(
+                {delivery}, timeout=CONTROL_PUBLISH_BOUND_MS / 1000
+            )
+            if not done:
+                raise TimeoutError("control publication timed out")
+            await delivery
+        finally:
+            if not delivery.done():
+                delivery.cancel()
+
     async def _retire_playout(
         self,
         context: TurnContext,
@@ -417,6 +435,36 @@ class RealtimeSession:
             return
         except Exception as caught:
             error = caught
+        reserved_event: dict[str, object] | None = None
+        async with self._lock:
+            if (
+                self._closed
+                or context.terminal
+                or self._active is not context
+                or context.playout_retirement_token is not token
+                or context.playout_boundary != boundary
+                or context.playout_media_generation != media_generation
+                or self._media_generation != media_generation
+                or self.stream_epoch != stream_epoch
+            ):
+                return
+            if error is None:
+                reserved_event = self._reserve_public_event(
+                    context.turn_id,
+                    "turn.playout-retired",
+                    {
+                        "state": "awaiting_publication_unsubscribed",
+                        "media_generation": media_generation,
+                        "completed_publication_id": boundary.completed_publication_id,
+                    },
+                )
+        if reserved_event is not None:
+            try:
+                await self._send_bounded_event(reserved_event)
+            except asyncio.CancelledError:
+                return
+            except Exception as caught:
+                error = caught
         async with self._lock:
             if (
                 self._closed
@@ -432,19 +480,13 @@ class RealtimeSession:
             context.playout_retirement_token = None
             context.playout_retirement = None
             if error is not None:
+                if reserved_event is not None:
+                    self._closed = True
+                    self._report_failure("transport", "control_publish_failed")
                 if context.playout_ack is not None and not context.playout_ack.done():
                     context.playout_ack.set_exception(error)
                 return
             context.playout_retired = True
-            await self._emit(
-                context.turn_id,
-                "turn.playout-retired",
-                {
-                    "state": "awaiting_publication_unsubscribed",
-                    "media_generation": media_generation,
-                    "completed_publication_id": boundary.completed_publication_id,
-                },
-            )
 
     async def _rollback_context(self, context: TurnContext) -> str | None:
         async with self._runner_lock:
@@ -1361,6 +1403,30 @@ class RealtimeSession:
                     setattr(self, attribute, None)
             self._disconnect_complete = True
 
+    def _reserve_public_event(
+        self,
+        turn_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        *,
+        terminal: bool = False,
+    ) -> dict[str, object]:
+        if event_type not in PUBLIC_EVENT_TYPES or terminal != (event_type in TERMINAL_EVENT_TYPES):
+            raise ValueError("invalid public control event")
+        self._event_sequence += 1
+        if self._event_sequence > MAX_EVENT_SEQUENCE:
+            raise RuntimeError("session event sequence exhausted")
+        return {
+            "schema_version": CONTROL_EVENT_VERSION,
+            "session_id": self.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": self.stream_epoch,
+            "sequence": self._event_sequence,
+            "type": event_type,
+            "terminal": terminal,
+            "payload": payload,
+        }
+
     async def _emit(
         self,
         turn_id: str,
@@ -1369,26 +1435,15 @@ class RealtimeSession:
         *,
         terminal: bool = False,
     ) -> None:
-        if event_type not in PUBLIC_EVENT_TYPES or terminal != (event_type in TERMINAL_EVENT_TYPES):
-            raise ValueError("invalid public control event")
-        self._event_sequence += 1
-        if self._event_sequence > MAX_EVENT_SEQUENCE:
-            raise RuntimeError("session event sequence exhausted")
         media_generation: int | None = None
         if event_type in {"turn.interrupted", "turn.failed"}:
             media_generation = self._invalidate_media(turn_id)
             payload = {**payload, "media_generation": media_generation}
+        event = self._reserve_public_event(
+            turn_id, event_type, payload, terminal=terminal
+        )
         try:
-            await self.event_sink.send({
-                "schema_version": CONTROL_EVENT_VERSION,
-                "session_id": self.session_id,
-                "turn_id": turn_id,
-                "stream_epoch": self.stream_epoch,
-                "sequence": self._event_sequence,
-                "type": event_type,
-                "terminal": terminal,
-                "payload": payload,
-            })
+            await self.event_sink.send(event)
             if media_generation is not None:
                 self._arm_wait_started_timeout(media_generation)
         except Exception:

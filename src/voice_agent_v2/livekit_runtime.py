@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
 import json
 import secrets
@@ -37,6 +38,16 @@ MAX_SESSION_OBSERVATIONS = 128
 
 class SessionCapacityError(RuntimeError):
     pass
+
+
+@dataclass
+class _PublicationRetirement:
+    publication_id: str
+    source: rtc.AudioSource
+    task: asyncio.Task[None] | None = None
+    error: BaseException | None = None
+    source_close_started: bool = False
+    complete: bool = False
 
 
 class LiveTurnRunner:
@@ -158,6 +169,7 @@ class LiveKitAudioSink(AudioSink):
         self._sealed_boundary: tuple[str, MediaBoundary] | None = None
         self._rotation_lock = asyncio.Lock()
         self._rotation_failed = False
+        self._retirement: _PublicationRetirement | None = None
 
     @staticmethod
     def _publication_id(publication) -> str:
@@ -177,44 +189,92 @@ class LiveKitAudioSink(AudioSink):
     async def start(self) -> None:
         return None
 
-    async def prepare(self, turn_id: str) -> str:
-        async with self._rotation_lock:
-            if self._rotation_failed:
-                raise RuntimeError("LiveKit audio publication rotation previously failed")
-            if self._sealed_boundary is not None:
-                raise RuntimeError("previous LiveKit audio boundary is not finalized")
-            if self.publication is not None:
-                if self._prepared_turn == turn_id:
-                    return self._publication_id(self.publication)
-                await self._retire(self._publication_id(self.publication), self.source)
-            else:
-                await self.source.aclose()
-            source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
-            try:
-                publication = await self._publish(source)
-                publication_id = self._publication_id(publication)
-            except Exception:
-                await source.aclose()
-                raise
-            self.source = source
-            self.publication = publication
-            self._prepared_turn = turn_id
-            self.source_changed(source)
-            return publication_id
+    @staticmethod
+    def _consume_retirement(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except BaseException:
+            pass
 
-    async def _retire(self, publication_id: str, source: rtc.AudioSource) -> None:
-        errors: list[Exception] = []
+    async def _run_retirement(self, state: _PublicationRetirement) -> None:
         try:
-            await source.aclose()
-        except Exception as error:
-            errors.append(error)
-        try:
-            await self.room.local_participant.unpublish_track(publication_id)
-        except Exception as error:
-            errors.append(error)
-        if errors:
+            await self.room.local_participant.unpublish_track(state.publication_id)
+            state.source_close_started = True
+            await state.source.aclose()
+        except BaseException as error:
+            state.error = error
             self._rotation_failed = True
-            raise ExceptionGroup("LiveKit audio publication retirement failed", errors)
+            raise
+        finally:
+            state.complete = True
+
+    def _reserve_retirement_locked(
+        self, publication_id: str, source: rtc.AudioSource
+    ) -> _PublicationRetirement:
+        state = self._retirement
+        if state is not None:
+            if state.publication_id != publication_id or state.source is not source:
+                raise RuntimeError("another LiveKit publication retirement is active")
+            return state
+        state = _PublicationRetirement(publication_id, source)
+        state.task = asyncio.create_task(
+            self._run_retirement(state),
+            name=f"livekit-publication-retirement-{publication_id}",
+        )
+        state.task.add_done_callback(self._consume_retirement)
+        self._retirement = state
+        return state
+
+    async def _wait_for_retirement(self, state: _PublicationRetirement) -> None:
+        task = state.task
+        if task is None:
+            raise RuntimeError("LiveKit publication retirement was not started")
+        await asyncio.shield(task)
+
+    def _finish_retirement_locked(self, state: _PublicationRetirement) -> None:
+        if self._retirement is not state:
+            return
+        if not state.complete or state.error is not None:
+            raise RuntimeError("LiveKit publication retirement did not complete")
+        self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+        self.source_changed(self.source)
+        self.publication = None
+        self._prepared_turn = None
+        self._sealed_boundary = None
+        self._retirement = None
+
+    async def prepare(self, turn_id: str) -> str:
+        while True:
+            retirement: _PublicationRetirement | None = None
+            async with self._rotation_lock:
+                if self._rotation_failed:
+                    raise RuntimeError("LiveKit audio publication rotation previously failed")
+                if self._sealed_boundary is not None:
+                    raise RuntimeError("previous LiveKit audio boundary is not finalized")
+                if self.publication is not None:
+                    if self._prepared_turn == turn_id:
+                        return self._publication_id(self.publication)
+                    retirement = self._reserve_retirement_locked(
+                        self._publication_id(self.publication), self.source
+                    )
+                else:
+                    await self.source.aclose()
+                    source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+                    try:
+                        publication = await self._publish(source)
+                        publication_id = self._publication_id(publication)
+                    except Exception:
+                        await source.aclose()
+                        raise
+                    self.source = source
+                    self.publication = publication
+                    self._prepared_turn = turn_id
+                    self.source_changed(source)
+                    return publication_id
+            assert retirement is not None
+            await self._wait_for_retirement(retirement)
+            async with self._rotation_lock:
+                self._finish_retirement_locked(retirement)
 
     def current_publication_id(self) -> str:
         if self.publication is None:
@@ -272,12 +332,12 @@ class LiveKitAudioSink(AudioSink):
                 or self._prepared_turn != turn_id
             ):
                 raise RuntimeError("LiveKit media boundary is not pending")
-            await self._retire(boundary.completed_publication_id, self.source)
-            self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
-            self.source_changed(self.source)
-            self.publication = None
-            self._prepared_turn = None
-            self._sealed_boundary = None
+            retirement = self._reserve_retirement_locked(
+                boundary.completed_publication_id, self.source
+            )
+        await self._wait_for_retirement(retirement)
+        async with self._rotation_lock:
+            self._finish_retirement_locked(retirement)
 
     async def clear(self, turn_id: str) -> str | None:
         async with self._rotation_lock:
@@ -287,14 +347,13 @@ class LiveKitAudioSink(AudioSink):
             if self._active_turn not in {None, turn_id}:
                 return publication_id
             self._active_turn = None
-            self.source.clear_queue()
-            await self._retire(publication_id, self.source)
-            self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
-            self.source_changed(self.source)
-            self.publication = None
-            self._prepared_turn = None
-            self._sealed_boundary = None
-            return publication_id
+            retirement = self._reserve_retirement_locked(publication_id, self.source)
+            if not retirement.source_close_started and not retirement.complete:
+                self.source.clear_queue()
+        await self._wait_for_retirement(retirement)
+        async with self._rotation_lock:
+            self._finish_retirement_locked(retirement)
+        return publication_id
 
 
 class LiveKitRoomController:

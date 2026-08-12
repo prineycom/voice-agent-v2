@@ -1355,6 +1355,50 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("turn.playout-retired", [event["type"] for event in events.events])
         await asyncio.wait_for(context.task, 1)
 
+    async def test_hung_retired_control_does_not_block_barge_in(self) -> None:
+        events = DelayedEventSink("turn.playout-retired")
+        audio = MemoryAudioSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=audio,
+        )
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        context = session._active
+        assert context is not None and context.task is not None
+        while context.playout_ack is None:
+            await asyncio.sleep(0.01)
+        assert (
+            context.playout_boundary is not None
+            and context.playout_media_generation is not None
+        )
+        await start_media_wait(
+            session, turn_id, context.playout_media_generation, "playout"
+        )
+        drained = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": session.stream_epoch,
+            "sequence": session._client_sequence + 1,
+            "media_generation": context.playout_media_generation,
+            "completed_publication_id": context.playout_boundary.completed_publication_id,
+            "type": "client.playout-drained",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(drained))
+        await asyncio.wait_for(events.started.wait(), 1)
+
+        await asyncio.wait_for(session.interrupt("barge_in"), 0.5)
+        self.assertEqual(events.events[-1]["type"], "turn.interrupted")
+        self.assertFalse(context.playout_retired)
+        events.release.set()
+        await asyncio.sleep(0)
+        self.assertNotIn(
+            "turn.playout-retired", [event["type"] for event in events.events]
+        )
+        await asyncio.wait_for(context.task, 1)
+
     async def test_completion_waits_for_matching_client_playout_ack(self) -> None:
         events = MemoryEventSink()
         runner = FakeRunner()
