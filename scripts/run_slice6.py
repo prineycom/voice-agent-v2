@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 from pathlib import Path
@@ -123,17 +124,41 @@ def llama_command() -> list[str]:
     ]
 
 
+def local_lfm_health_ready(port: int, timeout: float) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/health", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(4_097)
+        if response.status != 200 or len(body) > 4_096:
+            return False
+        document = json.loads(body)
+        return isinstance(document, dict) and document.get("status") == "ok"
+    except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError):
+        return False
+    finally:
+        connection.close()
+
+
 def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: float = 30) -> None:
     deadline = time.monotonic() + timeout
+    require_lfm_health = port == LLAMA_PORT and name == "local LFM"
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"{name} exited before readiness")
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+        remaining = deadline - time.monotonic()
+        if require_lfm_health:
+            if local_lfm_health_ready(port, min(0.2, remaining)):
                 return
-        except OSError:
-            time.sleep(0.1)
-    raise RuntimeError(f"{name} did not listen within {timeout:.0f}s")
+        else:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=min(0.2, remaining)):
+                    return
+            except OSError:
+                pass
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    readiness = "become healthy" if require_lfm_health else "listen"
+    raise RuntimeError(f"{name} did not {readiness} within {timeout:.0f}s")
 
 
 def stop(process: subprocess.Popen) -> None:
