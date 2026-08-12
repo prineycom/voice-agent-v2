@@ -127,7 +127,7 @@ describe('audio playout boundary', () => {
     expect(container.childElementCount).toBe(0)
   })
 
-  it('requires complete normalized counters, render frames, and the exact track end', async () => {
+  it('requires complete normalized counters and render frames before retirement', async () => {
     const harness = new RenderHarness()
     installContext(harness)
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
@@ -145,13 +145,13 @@ describe('audio playout boundary', () => {
     await Promise.resolve()
     expect(completed).toBe(false)
     harness.render(1)
-    track.end()
     await new Promise((resolve) => setTimeout(resolve, 25))
     expect(completed).toBe(false)
 
     track.emittedSamples = 960
     await playout
     expect(completed).toBe(true)
+    expect(track.finiteTrack.readyState).toBe('live')
   })
 
   it('counts a short render before the first delivery-stats poll', async () => {
@@ -171,7 +171,7 @@ describe('audio playout boundary', () => {
     await expect(playout).resolves.toBeUndefined()
   })
 
-  it('does not complete before the correlated finite track has ended', async () => {
+  it('does not confirm retirement before the correlated finite track has ended', async () => {
     const harness = new RenderHarness()
     installContext(harness)
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
@@ -181,15 +181,16 @@ describe('audio playout boundary', () => {
     track.receivedSamples = 960
     track.emittedSamples = 960
     const playout = boundary.waitForFinitePlayout(320, 16_000)
-    await new Promise((resolve) => setTimeout(resolve, 25))
-    let completed = false
-    void playout.then(() => { completed = true })
-
     harness.render(960)
+    await playout
+    const ended = boundary.waitForFiniteTrackEnd()
+    let completed = false
+    void ended.then(() => { completed = true })
+
     await new Promise((resolve) => setTimeout(resolve, 25))
     expect(completed).toBe(false)
     track.end()
-    await playout
+    await ended
     expect(completed).toBe(true)
   })
 

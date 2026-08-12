@@ -41,7 +41,7 @@
         "sequence": {"type": "integer", "minimum": 1, "maximum": 1000000000},
         "media_generation": {"type": "integer", "minimum": 1, "maximum": 1000000000},
         "completed_publication_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "type": {"const": "client.playout-completed"}
+        "type": {"enum": ["client.playout-drained", "client.playout-completed"]}
       },
       "additionalProperties": false
     },

@@ -774,6 +774,32 @@ class RealTurnControllerTests(unittest.TestCase):
         self.assertLess(types.index("llm.final"), types.index("tts.audio"))
         self.assertEqual(types.count("tts.audio"), 2)
 
+    def test_late_llm_failure_discards_streamed_tts_buffer(self) -> None:
+        class LateFailingLLM(FakeLLM):
+            def respond_with_handoff(self, *, on_sentence, **_kwargs) -> str:
+                on_sentence("Буферизованный ответ.")
+                raise StageFailure("llm_provider", "selected_provider_identity_mismatch")
+
+        class RecordingTTS(FakeTTS):
+            def __init__(self) -> None:
+                super().__init__()
+                self.synthesized = 0
+
+            def stream_synthesize(self, **kwargs):
+                self.synthesized += 1
+                yield from super().stream_synthesize(**kwargs)
+
+        tts = RecordingTTS()
+        result = RealTurnController(FakeSTT(), LateFailingLLM(), tts).run_turn(
+            session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,
+        )
+
+        self.assertEqual(tts.synthesized, 1)
+        self.assertEqual(result.output_pcm, b"")
+        self.assertEqual(result.terminal_event["type"], "turn.failed")
+        self.assertNotIn("turn.speaking", [event["type"] for event in result.events])
+        self.assertNotIn("tts.audio", [event["type"] for event in result.events])
+
     def test_tts_failure_preserves_llm_text_event_but_fails_spoken_turn(self) -> None:
         result = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS(fail=True)).run_turn(
             session_id="session-test-0001", turn_id="turn-test-0001", input_pcm=b"\0\0" * 160,

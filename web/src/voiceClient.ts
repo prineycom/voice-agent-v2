@@ -31,7 +31,7 @@ interface PendingPlayoutBoundary {
   completedPublicationId: string
   finalSampleCount: number
   sampleRateHz: number
-  observing: boolean
+  stage: 'waiting-drain' | 'drain-sent' | 'waiting-end'
   waitStarted: boolean
 }
 
@@ -65,7 +65,6 @@ export class VoiceClient {
   private expectedMediaPublicationId: string | null = null
   private reconnectMediaGeneration: number | null = null
   private readonly publicationTracks = new Map<string, RemoteAudioTrack>()
-  private readonly endedPublications = new Set<string>()
   private pendingPlayoutBoundary: PendingPlayoutBoundary | null = null
   private pendingWaitStartedGeneration: number | null = null
   private mediaReadyPublishingGeneration: number | null = null
@@ -171,7 +170,6 @@ export class VoiceClient {
     this.expectedMediaPublicationId = null
     this.reconnectMediaGeneration = null
     this.publicationTracks.clear()
-    this.endedPublications.clear()
     this.pendingPlayoutBoundary = null
     this.pendingWaitStartedGeneration = null
     this.mediaReadyPublishingGeneration = null
@@ -263,13 +261,10 @@ export class VoiceClient {
         || !this.isExpectedAgent(participant.identity)
       ) return
       const publicationId = this.publicationId(publication as RemoteTrackPublication)
-      if (publicationId !== null) {
-        this.endedPublications.add(publicationId)
-        if (this.endedPublications.size > MAX_TRACK_GENERATIONS) {
-          const oldest = this.endedPublications.values().next().value
-          if (typeof oldest === 'string') this.endedPublications.delete(oldest)
-        }
-      }
+      if (
+        publicationId !== null
+        && this.pendingPlayoutBoundary?.completedPublicationId !== publicationId
+      ) this.publicationTracks.delete(publicationId)
     })
     room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
       if (
@@ -311,6 +306,9 @@ export class VoiceClient {
         } else {
           try {
             this.invalidatePlaybackTrack()
+            if (publicationId !== undefined) {
+              this.publicationTracks.delete(publicationId)
+            }
             this.pendingMediaTurnId = event.turn_id
             this.pendingMediaGeneration = mediaGeneration
             this.expectedMediaPublicationId = null
@@ -367,6 +365,12 @@ export class VoiceClient {
           this.beginPlayoutBoundary(event)
         } catch {
           terminalFailure = 'Некорректная граница воспроизведения'
+        }
+      } else if (event.type === 'turn.playout-retired') {
+        try {
+          this.beginRetiredBoundary(event)
+        } catch {
+          terminalFailure = 'Некорректная граница завершения аудиопотока'
         }
       }
       try {
@@ -520,7 +524,7 @@ export class VoiceClient {
       completedPublicationId,
       finalSampleCount,
       sampleRateHz,
-      observing: false,
+      stage: 'waiting-drain',
       waitStarted: false,
     }
     this.clearPlayoutAckTimer()
@@ -541,13 +545,13 @@ export class VoiceClient {
 
   private async completePlayoutBoundary(): Promise<void> {
     const boundary = this.pendingPlayoutBoundary
-    if (boundary === null || boundary.observing || this.stopping) return
+    if (boundary === null || boundary.stage !== 'waiting-drain' || this.stopping) return
     if (!boundary.waitStarted) return
     const completedTrack = this.publicationTracks.get(
       boundary.completedPublicationId,
     )
     if (completedTrack === undefined || completedTrack !== this.activeRemoteTrack) return
-    boundary.observing = true
+    boundary.stage = 'drain-sent'
     try {
       await this.playback.waitForFinitePlayout(
         boundary.finalSampleCount,
@@ -572,9 +576,52 @@ export class VoiceClient {
       sequence: this.clientSequence,
       media_generation: boundary.mediaGeneration,
       completed_publication_id: boundary.completedPublicationId,
-      type: 'client.playout-completed',
+      type: 'client.playout-drained',
     }))
     try {
+      await room.localParticipant.publishData(payload, {
+        reliable: true,
+        topic: CLIENT_CONTROL_TOPIC,
+      })
+      if (this.pendingPlayoutBoundary !== boundary) return
+    } catch {
+      await this.failSession('Не удалось подтвердить воспроизведение ответа')
+    }
+  }
+
+  private beginRetiredBoundary(event: ControlEvent): void {
+    const boundary = this.pendingPlayoutBoundary
+    if (
+      boundary === null
+      || boundary.stage !== 'drain-sent'
+      || event.payload.state !== 'awaiting_exact_track_end'
+      || event.turn_id !== boundary.turnId
+      || event.stream_epoch !== boundary.streamEpoch
+      || event.payload.media_generation !== boundary.mediaGeneration
+      || event.payload.completed_publication_id !== boundary.completedPublicationId
+    ) throw new Error('invalid retired playout boundary')
+    boundary.stage = 'waiting-end'
+    void this.completeRetiredBoundary(boundary)
+  }
+
+  private async completeRetiredBoundary(boundary: PendingPlayoutBoundary): Promise<void> {
+    try {
+      await this.playback.waitForFiniteTrackEnd()
+      if (this.pendingPlayoutBoundary !== boundary || this.stopping) return
+      const room = this.room
+      const capability = this.capability
+      if (room === null || capability === null) return
+      this.clientSequence += 1
+      const payload = new TextEncoder().encode(JSON.stringify({
+        schema_version: CLIENT_CONTROL_VERSION,
+        session_id: capability.session_id,
+        turn_id: boundary.turnId,
+        stream_epoch: boundary.streamEpoch,
+        sequence: this.clientSequence,
+        media_generation: boundary.mediaGeneration,
+        completed_publication_id: boundary.completedPublicationId,
+        type: 'client.playout-completed',
+      }))
       await room.localParticipant.publishData(payload, {
         reliable: true,
         topic: CLIENT_CONTROL_TOPIC,
@@ -584,10 +631,11 @@ export class VoiceClient {
         this.clearPlayoutAckTimer()
         this.invalidatePlaybackTrack()
         this.publicationTracks.delete(boundary.completedPublicationId)
-        this.endedPublications.delete(boundary.completedPublicationId)
       }
     } catch {
-      await this.failSession('Не удалось подтвердить воспроизведение ответа')
+      if (this.pendingPlayoutBoundary === boundary) {
+        await this.failSession('Не удалось подтвердить завершение аудиопотока')
+      }
     }
   }
 

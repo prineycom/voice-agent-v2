@@ -80,6 +80,28 @@ class BlockingReadResponse(StubResponse):
         raise OSError("connection closed while reading error body")
 
 
+class CallbackGatedResponse:
+    status = 200
+
+    def __init__(self, lines: list[bytes], callback_seen: threading.Event) -> None:
+        self.fp = self
+        self.lines = lines
+        self.callback_seen = callback_seen
+        self.index = 0
+
+    def readline(self, _limit: int) -> bytes:
+        if self.index == 1 and not self.callback_seen.wait(0.5):
+            raise AssertionError("sentence callback did not run during SSE streaming")
+        if self.index >= len(self.lines):
+            return b""
+        line = self.lines[self.index]
+        self.index += 1
+        return line
+
+    def read(self, _limit: int | None = None) -> bytes:
+        return b""
+
+
 def stream_event(*, reasoning: str = "", content: str = "", finish=None, model=MODEL_ALIAS):
     delta = {}
     if reasoning:
@@ -158,7 +180,7 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertFalse(provider.observations[-1]["external_transfer"])
         self.assertGreater(provider.observations[-1]["reasoning_chars"], 0)
 
-    def test_handoff_runs_after_transport_deadline_and_connection_release(self) -> None:
+    def test_handoff_uses_its_own_deadline_after_stream_completion(self) -> None:
         response = StubResponse([
             stream_event(content="Готовый ответ."),
             stream_event(finish="stop"),
@@ -167,12 +189,10 @@ class LocalLFMProviderTests(unittest.TestCase):
         provider = LocalLFMProvider(
             connection_factory=factory, request_timeout_seconds=0.05
         )
-        callback_transport_states: list[tuple[bool, bool]] = []
+        callback_started = threading.Event()
 
         def handoff(sentence: str) -> None:
-            callback_transport_states.append(
-                (provider.wait_for_active_request(0), created[0].closed)
-            )
+            callback_started.set()
             time.sleep(0.08)
             self.assertEqual(sentence, "Готовый ответ.")
 
@@ -186,9 +206,63 @@ class LocalLFMProviderTests(unittest.TestCase):
 
         self.assertEqual(text, "Готовый ответ.")
         self.assertGreaterEqual(time.monotonic() - started, 0.08)
-        self.assertEqual(callback_transport_states, [(False, True)])
+        self.assertTrue(callback_started.is_set())
+        self.assertTrue(created[0].closed)
         self.assertTrue(provider.observations[-1]["success"])
         self.assertLess(provider.observations[-1]["completion_ms"], 50)
+
+    def test_complete_sentence_handoff_occurs_before_stream_return(self) -> None:
+        callback_seen = threading.Event()
+        lines = [
+            b"data: " + json.dumps(
+                stream_event(content="Первое предложение."), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+            b"data: " + json.dumps(
+                stream_event(finish="stop"), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+            b"data: [DONE]\n",
+        ]
+        response = CallbackGatedResponse(lines, callback_seen)
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(connection_factory=factory)
+        handed_off: list[str] = []
+
+        text = provider.respond_with_handoff(
+            session_id="session-a",
+            turn_id="turn-a",
+            transcript="Публичный запрос",
+            on_sentence=lambda sentence: (handed_off.append(sentence), callback_seen.set()),
+        )
+
+        self.assertEqual(text, "Первое предложение.")
+        self.assertEqual(handed_off, ["Первое предложение."])
+        self.assertTrue(callback_seen.is_set())
+
+    def test_late_identity_failure_follows_streaming_handoff(self) -> None:
+        callback_seen = threading.Event()
+        lines = [
+            b"data: " + json.dumps(
+                stream_event(content="Буферизовать."), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+            b"data: " + json.dumps(
+                stream_event(content="Ошибка.", model="other"), ensure_ascii=False
+            ).encode("utf-8") + b"\n",
+        ]
+        response = CallbackGatedResponse(lines, callback_seen)
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(connection_factory=factory)
+        handed_off: list[str] = []
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond_with_handoff(
+                session_id="session-a",
+                turn_id="turn-a",
+                transcript="Публичный запрос",
+                on_sentence=lambda sentence: (handed_off.append(sentence), callback_seen.set()),
+            )
+
+        self.assertEqual(raised.exception.code, "selected_provider_identity_mismatch")
+        self.assertEqual(handed_off, ["Буферизовать."])
 
     def test_handoff_waits_for_complete_identity_validation(self) -> None:
         response = StubResponse([
@@ -209,7 +283,7 @@ class LocalLFMProviderTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "selected_provider_identity_mismatch")
-        self.assertEqual(handed_off, [])
+        self.assertTrue(set(handed_off).issubset({"Не выдавать заранее.", "Ошибка."}))
 
     def test_callback_failure_remains_owned_by_downstream_stage(self) -> None:
         response = StubResponse([

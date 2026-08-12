@@ -245,6 +245,11 @@ def main() -> int:
             raise AssertionError("local LFM did not produce incremental sentence handoff")
         if any(timestamp >= handoff_returned for timestamp in handoff_times):
             raise AssertionError("visible sentence handoff was not observed before final return")
+        parser_completed = handoff_started + float(
+            handoff_observation["completion_ms"]
+        ) / 1_000
+        if handoff_times[0] >= parser_completed:
+            raise AssertionError("visible sentence handoff was buffered until stream completion")
         if " ".join(" ".join(handoff_parts).split()) != " ".join(handoff_text.split()):
             raise AssertionError("visible sentence handoff diverged from the final response")
         if handoff_observation.get("reasoning_chars", 0) <= 0:

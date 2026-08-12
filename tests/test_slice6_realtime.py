@@ -384,6 +384,29 @@ class CleanupAdmissionRunner(FakeRunner):
         self.operations.append(f"rollback:{turn_id}")
 
 
+class SpeakingFailureRunner(FakeRunner):
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer
+    ) -> TraceResult:
+        del input_pcm, cancellation
+        for index, (event_type, payload) in enumerate((
+            ("turn.transcribing", {"stage": "stt"}),
+            ("stt.final", {"transcript": "Тест"}),
+            ("turn.thinking", {"stage": "llm_provider"}),
+            ("llm.final", {"response": "Ответ"}),
+            ("turn.speaking", {"stage": "tts"}),
+        ), 1):
+            event_observer(EventEnvelope(
+                session_id=session_id,
+                turn_id=turn_id,
+                sequence=index,
+                event_type=event_type,
+                payload=payload,
+                terminal=False,
+            ).as_dict())
+        raise RuntimeError("late inference failure")
+
+
 class BlockingRunner(FakeRunner):
     def __init__(self) -> None:
         super().__init__()
@@ -428,6 +451,24 @@ async def start_media_wait(
     }).encode())
     if not accepted:
         raise AssertionError("correlated media wait was not accepted")
+
+
+async def acknowledge_playout(
+    session: RealtimeSession, turn_id: str, context
+) -> None:
+    for event_type in ("client.playout-drained", "client.playout-completed"):
+        accepted = await session.handle_client_control(json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": session.stream_epoch,
+            "sequence": session._client_sequence + 1,
+            "media_generation": context.playout_media_generation,
+            "completed_publication_id": context.playout_boundary.completed_publication_id,
+            "type": event_type,
+        }).encode())
+        if not accepted:
+            raise AssertionError(f"{event_type} was not accepted")
 
 
 async def wait_for_turn(session: RealtimeSession) -> None:
@@ -485,10 +526,15 @@ async def wait_for_turn(session: RealtimeSession) -> None:
                 "completed_publication_id": (
                     context.playout_boundary.completed_publication_id
                 ),
-                "type": "client.playout-completed",
+                "type": (
+                    "client.playout-completed"
+                    if context.playout_retired
+                    else "client.playout-drained"
+                ),
             }).encode()
-            if await session.handle_client_control(payload):
-                break
+            accepted = await session.handle_client_control(payload)
+            if accepted and context.playout_retired:
+                continue
         if context.task.done():
             break
         await asyncio.sleep(0.01)
@@ -513,10 +559,10 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(types, [
             "session.ready", "turn.listening", "turn.transcribing", "stt.final",
             "turn.thinking", "llm.final", "turn.speaking", "turn.playout-ready",
-            "turn.completed",
+            "turn.playout-retired", "turn.completed",
         ])
         self.assertEqual(audio.played, [turn_id])
-        self.assertEqual([event["sequence"] for event in events.events], list(range(1, 10)))
+        self.assertEqual([event["sequence"] for event in events.events], list(range(1, 11)))
         self.assertTrue(all(event["schema_version"] == CONTROL_EVENT_VERSION for event in events.events))
         self.assertEqual(events.events[-1]["turn_id"], turn_id)
         self.assertTrue(events.events[-1]["terminal"])
@@ -704,6 +750,27 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events.events[-1]["type"], "session.degraded")
         self.assertEqual(events.events[-1]["payload"]["code"], "audio_drain_timeout")
+
+    async def test_inference_failure_retires_prepared_publication_before_terminal(self) -> None:
+        events = MemoryEventSink()
+        runner = SpeakingFailureRunner()
+        audio = MemoryAudioSink()
+        audio.requires_media_start_ack = True
+        session = RealtimeSession(
+            session_id="session-test-0001", runner=runner, event_sink=events, audio_sink=audio
+        )
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        context = session._active
+        assert context is not None and context.task is not None
+        await asyncio.wait_for(context.task, 2)
+
+        self.assertEqual(audio.cleared, [turn_id])
+        self.assertEqual(runner.discarded_turns, [("session-test-0001", turn_id)])
+        self.assertEqual(events.events[-1]["type"], "turn.failed")
+        self.assertEqual(
+            events.events[-1]["payload"]["media_publication_id"],
+            audio.publication_id,
+        )
 
     async def test_playout_exception_rolls_back_and_emits_terminal_failure(self) -> None:
         events = MemoryEventSink()
@@ -924,17 +991,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         await start_media_wait(
             session, old_turn, context.playout_media_generation, "playout"
         )
-        playout = json.dumps({
-            "schema_version": CLIENT_CONTROL_VERSION,
-            "session_id": session.session_id,
-            "turn_id": old_turn,
-            "stream_epoch": session.stream_epoch,
-            "sequence": session._client_sequence + 1,
-            "media_generation": context.playout_media_generation,
-            "completed_publication_id": context.playout_boundary.completed_publication_id,
-            "type": "client.playout-completed",
-        }).encode()
-        self.assertTrue(await session.handle_client_control(playout))
+        await acknowledge_playout(session, old_turn, context)
         await asyncio.to_thread(runner.delivery_entered.wait, 1)
         next_start = asyncio.create_task(session.start_utterance())
         await asyncio.sleep(0)
@@ -1205,21 +1262,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
                 await start_media_wait(
                     session, turn_id, context.playout_media_generation, "playout"
                 )
-                acknowledgement = json.dumps({
-                    "schema_version": CLIENT_CONTROL_VERSION,
-                    "session_id": session.session_id,
-                    "turn_id": turn_id,
-                    "stream_epoch": session.stream_epoch,
-                    "sequence": session._client_sequence + 1,
-                    "media_generation": context.playout_media_generation,
-                    "completed_publication_id": (
-                        context.playout_boundary.completed_publication_id
-                    ),
-                    "type": "client.playout-completed",
-                }).encode()
-                self.assertTrue(
-                    await session.handle_client_control(acknowledgement)
-                )
+                await acknowledge_playout(session, turn_id, context)
                 await asyncio.wait_for(context.task, 2)
                 self.assertEqual(events.events[-1]["type"], "turn.completed")
 
@@ -1299,7 +1342,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         await start_media_wait(
             session, turn_id, context.playout_media_generation, "playout"
         )
-        valid = json.dumps({
+        premature_complete = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": turn_id,
@@ -1309,7 +1352,9 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             "completed_publication_id": context.playout_boundary.completed_publication_id,
             "type": "client.playout-completed",
         }).encode()
-        self.assertTrue(await session.handle_client_control(valid))
+        self.assertFalse(await session.handle_client_control(premature_complete))
+        await acknowledge_playout(session, turn_id, context)
+        self.assertEqual(events.events[-1]["type"], "turn.playout-retired")
         await asyncio.wait_for(context.task, 2)
         self.assertEqual(events.events[-1]["type"], "turn.completed")
 

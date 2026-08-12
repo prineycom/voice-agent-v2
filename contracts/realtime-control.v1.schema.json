@@ -31,6 +31,7 @@
         "llm.final",
         "turn.speaking",
         "turn.playout-ready",
+        "turn.playout-retired",
         "turn.completed",
         "turn.interrupted",
         "turn.failed"

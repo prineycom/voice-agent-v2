@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import http.client
 import json
+import queue
 import threading
 import time
 from typing import Callable
@@ -49,20 +50,17 @@ class LocalLFMObservation:
     visible_chars: int
 
 
-def _visible_sentence_chunks(text: str) -> tuple[str, ...]:
+def _complete_visible_sentences(text: str, start: int) -> tuple[tuple[str, ...], int]:
     chunks: list[str] = []
-    start = 0
-    for index, character in enumerate(text):
-        if character not in ".!?。！？":
+    cursor = start
+    for index in range(start, len(text)):
+        if text[index] not in ".!?。！？":
             continue
-        chunk = text[start:index + 1].strip()
+        chunk = text[cursor:index + 1].strip()
         if chunk:
             chunks.append(chunk)
-        start = index + 1
-    remaining = text[start:].strip()
-    if remaining:
-        chunks.append(remaining)
-    return tuple(chunks)
+        cursor = index + 1
+    return tuple(chunks), cursor
 
 
 class LocalLFMProvider:
@@ -236,6 +234,7 @@ class LocalLFMProvider:
         generation: int,
         started: float,
         deadline: float,
+        handoff: Callable[[str], None] | None,
     ) -> dict[str, object]:
         connection = self._register_connection(
             generation, max(0.001, deadline - time.monotonic())
@@ -254,6 +253,7 @@ class LocalLFMProvider:
         )
         deadline_guard.daemon = True
         visible: list[str] = []
+        handoff_offset = 0
         visible_chars = visible_bytes = reasoning_chars = stream_events = 0
         visible_first: float | None = None
         finish_reason: str | None = None
@@ -346,6 +346,12 @@ class LocalLFMProvider:
                             usage[key] = value
                 choices = event.get("choices")
                 if choices in (None, []):
+                    if handoff is not None and MODEL_ALIAS in response_models:
+                        sentences, handoff_offset = _complete_visible_sentences(
+                            "".join(visible), handoff_offset
+                        )
+                        for sentence in sentences:
+                            handoff(sentence)
                     continue
                 if not isinstance(choices, list) or not isinstance(choices[0], dict):
                     raise StageFailure(
@@ -377,6 +383,12 @@ class LocalLFMProvider:
                             "llm_provider", "selected_provider_output_out_of_bounds"
                         )
                     visible.append(content)
+                if handoff is not None and MODEL_ALIAS in response_models:
+                    sentences, handoff_offset = _complete_visible_sentences(
+                        "".join(visible), handoff_offset
+                    )
+                    for sentence in sentences:
+                        handoff(sentence)
                 raw_finish = choice.get("finish_reason")
                 if raw_finish is not None:
                     if raw_finish not in {"stop", "eos_token"}:
@@ -401,6 +413,10 @@ class LocalLFMProvider:
             self._raise_if_operation_stopped(
                 generation, deadline, deadline_expired
             )
+            if handoff is not None:
+                remaining = "".join(visible)[handoff_offset:].strip()
+                if remaining:
+                    handoff(remaining)
             completed = time.monotonic()
             result = {
                 "text": output,
@@ -434,7 +450,6 @@ class LocalLFMProvider:
             deadline_guard.cancel()
             deadline_guard.join()
             self._release_connection(generation, connection)
-        self._raise_if_operation_stopped(generation, deadline, deadline_expired)
         return result
 
     def _respond(
@@ -466,6 +481,38 @@ class LocalLFMProvider:
                 "completion_ms": (time.monotonic() - started) * 1_000,
             })
 
+        handoff_queue: queue.Queue[str | None] | None = None
+        handoff_thread: threading.Thread | None = None
+        handoff_errors: list[BaseException] = []
+        handoff_aborted = threading.Event()
+        if on_sentence is not None:
+            handoff_queue = queue.Queue(maxsize=MAX_STREAM_EVENTS)
+
+            def deliver_handoffs() -> None:
+                assert handoff_queue is not None
+                while True:
+                    sentence = handoff_queue.get()
+                    if sentence is None:
+                        return
+                    if handoff_aborted.is_set():
+                        continue
+                    try:
+                        on_sentence(sentence)
+                    except BaseException as error:
+                        handoff_errors.append(error)
+                        handoff_aborted.set()
+
+            handoff_thread = threading.Thread(
+                target=deliver_handoffs,
+                name=f"local-lfm-handoff-{generation}",
+                daemon=True,
+            )
+            handoff_thread.start()
+
+        def enqueue_handoff(sentence: str) -> None:
+            if handoff_queue is not None and not handoff_aborted.is_set():
+                handoff_queue.put_nowait(sentence)
+
         try:
             try:
                 payload = self._payload(session_id, transcript)
@@ -473,13 +520,17 @@ class LocalLFMProvider:
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 if time.monotonic() >= deadline:
                     raise StageFailure("llm_provider", "local_lfm_request_timeout")
-                result = self._execute(payload, generation, started, deadline)
+                result = self._execute(
+                    payload, generation, started, deadline,
+                    enqueue_handoff if on_sentence is not None else None,
+                )
                 text = result["text"]
                 if not isinstance(text, str):
                     raise StageFailure(
                         "llm_provider", "selected_provider_protocol_error"
                     )
             except StageFailure as error:
+                handoff_aborted.set()
                 record_failure(error)
                 raise
             except (
@@ -489,6 +540,7 @@ class LocalLFMProvider:
                 UnicodeError,
                 json.JSONDecodeError,
             ) as cause:
+                handoff_aborted.set()
                 if self._cancelled(generation):
                     code = "selected_provider_cancelled"
                 elif time.monotonic() >= deadline:
@@ -498,15 +550,13 @@ class LocalLFMProvider:
                 error = StageFailure("llm_provider", code)
                 record_failure(error)
                 raise error from cause
-            if on_sentence is not None:
-                for sentence in _visible_sentence_chunks(text):
-                    if self._cancelled(generation):
-                        error = StageFailure(
-                            "llm_provider", "selected_provider_cancelled"
-                        )
-                        record_failure(error)
-                        raise error
-                    on_sentence(sentence)
+            finally:
+                if handoff_queue is not None:
+                    handoff_queue.put(None)
+                if handoff_thread is not None:
+                    handoff_thread.join()
+            if handoff_errors:
+                raise handoff_errors[0]
             if self._cancelled(generation):
                 error = StageFailure("llm_provider", "selected_provider_cancelled")
                 record_failure(error)
@@ -532,6 +582,11 @@ class LocalLFMProvider:
             })
             return text
         finally:
+            handoff_aborted.set()
+            if handoff_thread is not None and handoff_thread.is_alive():
+                if handoff_queue is not None:
+                    handoff_queue.put(None)
+                handoff_thread.join()
             unregister()
             with self._operation_lock:
                 self._cancelled_generations.discard(generation)

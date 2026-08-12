@@ -366,13 +366,32 @@ describe('VoiceClient startup cancellation', () => {
     await vi.waitFor(() => expect(
       turnTrack.getRTCStatsReport.mock.calls.length,
     ).toBeGreaterThan(earlyReads))
-    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3)
-
-    trackReadyState = 'ended'
-    mediaStreamTrack.dispatchEvent(new Event('ended'))
     await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
     expect(JSON.parse(new TextDecoder().decode(
       room.localParticipant.publishData.mock.calls[3][0] as Uint8Array,
+    ))).toMatchObject({
+      media_generation: 2,
+      completed_publication_id: 'publication-turn-1',
+      type: 'client.playout-drained',
+    })
+    expect(trackReadyState).toBe('live')
+
+    emitControl(room, 'turn.playout-retired', 9, {
+      payload: {
+        state: 'awaiting_exact_track_end',
+        media_generation: 2,
+        completed_publication_id: 'publication-turn-1',
+      },
+    })
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4)
+    trackReadyState = 'ended'
+    mediaStreamTrack.dispatchEvent(new Event('ended'))
+    room.emit('trackUnsubscribed', turnTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(5))
+    expect(JSON.parse(new TextDecoder().decode(
+      room.localParticipant.publishData.mock.calls[4][0] as Uint8Array,
     ))).toMatchObject({
       media_generation: 2,
       completed_publication_id: 'publication-turn-1',
@@ -570,6 +589,7 @@ describe('VoiceClient startup cancellation', () => {
       terminal: true,
       payload: {
         stage: 'publication', code: 'audio_playout_exception', media_generation: 2,
+        media_publication_id: 'publication-stale',
       },
     })
     await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
@@ -586,6 +606,28 @@ describe('VoiceClient startup cancellation', () => {
       identity: 'agent-session-test-0001',
     })
     expect(unexpected.attach).not.toHaveBeenCalled()
+    await client.stop()
+  })
+
+  it('releases unsubscribed publication generations without exhausting the bound', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    for (let index = 0; index < 140; index += 1) {
+      const track = { kind: 'audio', attach: vi.fn(), detach: vi.fn() }
+      const publication = { trackSid: `publication-${index}` }
+      const participant = { identity: 'agent-session-test-0001' }
+      room.emit('trackSubscribed', track, publication, participant)
+      room.emit('trackUnsubscribed', track, publication, participant)
+    }
+
+    expect(observed.onConnection).not.toHaveBeenCalledWith(
+      'failed', 'Превышена граница обновления аудиопотока',
+    )
     await client.stop()
   })
 

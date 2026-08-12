@@ -42,6 +42,7 @@ export class AudioPlaybackBoundary {
   private elementBlocked = false
   private contextBlocked = false
   private playoutWaiters = new Set<PlayoutWaiter>()
+  private trackEndWaiters = new Set<PlayoutWaiter>()
 
   constructor(
     private readonly container: HTMLElement,
@@ -95,6 +96,8 @@ export class AudioPlaybackBoundary {
         && mediaTrack.readyState === 'ended'
       ) {
         this.boundaryTrackEnded = true
+        for (const waiter of this.trackEndWaiters) waiter.resolve()
+        this.trackEndWaiters.clear()
         this.scheduleDeliveryValidation(0)
       }
     }
@@ -139,6 +142,29 @@ export class AudioPlaybackBoundary {
         reject,
       })
       if (this.renderFrames >= targetRenderFrames) this.scheduleDeliveryValidation(0)
+    })
+  }
+
+  waitForFiniteTrackEnd(): Promise<void> {
+    const mediaTrack = this.boundaryTrack
+    if (
+      !this.renderArmed
+      || mediaTrack === null
+      || mediaTrack !== this.track?.mediaStreamTrack
+    ) return Promise.reject(new Error('finite audio track boundary is unavailable'))
+    if (this.boundaryTrackEnded && mediaTrack.readyState === 'ended') {
+      return Promise.resolve()
+    }
+    if (mediaTrack.readyState !== 'live') {
+      return Promise.reject(new Error('finite audio track boundary was lost'))
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.trackEndWaiters.add({
+        targetRenderFrames: 0,
+        targetDeliverySampleCount: 0,
+        resolve,
+        reject,
+      })
     })
   }
 
@@ -393,8 +419,6 @@ export class AudioPlaybackBoundary {
                 < waiter.targetDeliverySampleCount
               || latest.emittedSamples - baseline.emittedSamples
                 < waiter.targetDeliverySampleCount
-              || !this.boundaryTrackEnded
-              || mediaTrack.readyState !== 'ended'
             ) continue
             this.playoutWaiters.delete(waiter)
             waiter.resolve()
@@ -416,6 +440,8 @@ export class AudioPlaybackBoundary {
   private rejectPlayoutWaiters(message: string): void {
     for (const waiter of this.playoutWaiters) waiter.reject(new Error(message))
     this.playoutWaiters.clear()
+    for (const waiter of this.trackEndWaiters) waiter.reject(new Error(message))
+    this.trackEndWaiters.clear()
     if (this.deliveryPoll !== null) {
       clearTimeout(this.deliveryPoll)
       this.deliveryPoll = null
