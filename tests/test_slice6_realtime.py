@@ -92,14 +92,13 @@ class MemoryAudioSink:
         self.publication_sequence = 0
         self.publication_id = "publication-0"
 
-    def current_publication_id(self) -> str:
-        return self.publication_id
-
-    def rotate(self) -> MediaBoundary:
-        completed = self.publication_id
+    async def prepare(self, _turn_id: str) -> str:
         self.publication_sequence += 1
         self.publication_id = f"publication-{self.publication_sequence}"
-        return MediaBoundary(completed, self.publication_id)
+        return self.publication_id
+
+    def current_publication_id(self) -> str:
+        return self.publication_id
 
     async def play(self, turn_id, pcm, cancelled) -> MediaBoundary | None:
         self.played.append(turn_id)
@@ -108,7 +107,7 @@ class MemoryAudioSink:
             raise RuntimeError("playout failed")
         if self.block:
             await self.released.wait()
-        return self.rotate() if pcm and not cancelled() else None
+        return MediaBoundary(self.publication_id) if pcm and not cancelled() else None
 
     async def complete(self, turn_id, _boundary) -> None:
         self.completed.append(turn_id)
@@ -120,7 +119,7 @@ class MemoryAudioSink:
         if self.block_clear:
             await self.released.wait()
         self.released.set()
-        return self.rotate().next_publication_id
+        return self.publication_id
 
 
 class FakeRunner:
@@ -387,12 +386,55 @@ class BlockingRunner(FakeRunner):
         self.release.set()
 
 
+async def start_media_wait(
+    session: RealtimeSession,
+    turn_id: str,
+    media_generation: int,
+    wait_kind: str = "media-ready",
+) -> None:
+    accepted = await session.handle_client_control(json.dumps({
+        "schema_version": CLIENT_CONTROL_VERSION,
+        "session_id": session.session_id,
+        "turn_id": turn_id,
+        "stream_epoch": session.stream_epoch,
+        "sequence": session._client_sequence + 1,
+        "media_generation": media_generation,
+        "wait_kind": wait_kind,
+        "type": "client.wait-started",
+    }).encode())
+    if not accepted:
+        raise AssertionError("correlated media wait was not accepted")
+
+
 async def wait_for_turn(session: RealtimeSession) -> None:
     context = session._active
     if context is None or context.task is None:
         return
     for _ in range(200):
-        if session._media_ready_generation < session._media_generation:
+        if (
+            session._media_ready_generation < session._media_generation
+            and session._media_wait_started_generation != session._media_generation
+        ):
+            wait_kind = (
+                "playout"
+                if context.playout_media_generation == session._media_generation
+                else "media-ready"
+            )
+            payload = json.dumps({
+                "schema_version": CLIENT_CONTROL_VERSION,
+                "session_id": session.session_id,
+                "turn_id": session._media_generation_turn_id,
+                "stream_epoch": session.stream_epoch,
+                "sequence": session._client_sequence + 1,
+                "media_generation": session._media_generation,
+                "wait_kind": wait_kind,
+                "type": "client.wait-started",
+            }).encode()
+            await session.handle_client_control(payload)
+        if (
+            session._media_ready_generation < session._media_generation
+            and context.playout_media_generation != session._media_generation
+        ):
             payload = json.dumps({
                 "schema_version": CLIENT_CONTROL_VERSION,
                 "session_id": session.session_id,
@@ -419,7 +461,6 @@ async def wait_for_turn(session: RealtimeSession) -> None:
                 "completed_publication_id": (
                     context.playout_boundary.completed_publication_id
                 ),
-                "media_publication_id": context.playout_boundary.next_publication_id,
                 "type": "client.playout-completed",
             }).encode()
             if await session.handle_client_control(payload):
@@ -515,13 +556,15 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             event for event in events.events
             if event["turn_id"] == old_turn and event["type"] == "turn.interrupted"
         )
+        media_generation = interrupted["payload"]["media_generation"]
+        await start_media_wait(session, old_turn, media_generation)
         accepted = await session.handle_client_control(json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": old_turn,
             "stream_epoch": session.stream_epoch,
-            "sequence": 1,
-            "media_generation": interrupted["payload"]["media_generation"],
+            "sequence": session._client_sequence + 1,
+            "media_generation": media_generation,
             "type": "client.media-ready",
         }).encode())
         self.assertTrue(accepted)
@@ -714,13 +757,15 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("session.degraded", [event["type"] for event in events.events])
         self.assertEqual(runner.reset_sessions, [session.session_id])
 
+        media_generation = acknowledgement["payload"]["media_generation"]
+        await start_media_wait(session, "session", media_generation)
         media_ready = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": "session",
             "stream_epoch": 2,
-            "sequence": 2,
-            "media_generation": acknowledgement["payload"]["media_generation"],
+            "sequence": session._client_sequence + 1,
+            "media_generation": media_generation,
             "type": "client.media-ready",
         }).encode()
         self.assertTrue(await session.handle_client_control(media_ready))
@@ -749,13 +794,15 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(admission.done())
         self.assertFalse(any(event["type"] == "turn.listening" for event in events.events))
 
+        media_generation = acknowledgement["payload"]["media_generation"]
+        await start_media_wait(session, "session", media_generation)
         media_ready = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": "session",
             "stream_epoch": 2,
-            "sequence": 2,
-            "media_generation": acknowledgement["payload"]["media_generation"],
+            "sequence": session._client_sequence + 1,
+            "media_generation": media_generation,
             "type": "client.media-ready",
         }).encode()
         self.assertTrue(await session.handle_client_control(media_ready))
@@ -789,13 +836,15 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         acknowledgement = events.events[-1]
         self.assertEqual(acknowledgement["type"], "session.reconnected")
+        media_generation = acknowledgement["payload"]["media_generation"]
+        await start_media_wait(session, "session", media_generation)
         media_ready = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": "session",
             "stream_epoch": 2,
-            "sequence": 2,
-            "media_generation": acknowledgement["payload"]["media_generation"],
+            "sequence": session._client_sequence + 1,
+            "media_generation": media_generation,
             "type": "client.media-ready",
         }).encode()
         self.assertTrue(await session.handle_client_control(media_ready))
@@ -848,15 +897,17 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             and context.playout_boundary is not None
             and context.playout_media_generation is not None
         )
+        await start_media_wait(
+            session, old_turn, context.playout_media_generation, "playout"
+        )
         playout = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": old_turn,
             "stream_epoch": session.stream_epoch,
-            "sequence": 1,
+            "sequence": session._client_sequence + 1,
             "media_generation": context.playout_media_generation,
             "completed_publication_id": context.playout_boundary.completed_publication_id,
-            "media_publication_id": context.playout_boundary.next_publication_id,
             "type": "client.playout-completed",
         }).encode()
         self.assertTrue(await session.handle_client_control(playout))
@@ -898,13 +949,15 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             event for event in reversed(events.events)
             if event["type"] == "turn.interrupted"
         )
+        media_generation = interrupted["payload"]["media_generation"]
+        await start_media_wait(session, interrupted["turn_id"], media_generation)
         self.assertTrue(await session.handle_client_control(json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": interrupted["turn_id"],
             "stream_epoch": session.stream_epoch,
-            "sequence": 1,
-            "media_generation": interrupted["payload"]["media_generation"],
+            "sequence": session._client_sequence + 1,
+            "media_generation": media_generation,
             "type": "client.media-ready",
         }).encode()))
         third_turn = await session.start_utterance()
@@ -1044,13 +1097,28 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         self.assertEqual(audio.played, [])
         speaking = events.events[-1]
-        ready = json.dumps({
+        media_generation = speaking["payload"]["media_generation"]
+        self.assertEqual(
+            speaking["payload"]["media_publication_id"], audio.publication_id
+        )
+        premature = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": turn_id,
             "stream_epoch": session.stream_epoch,
             "sequence": 1,
-            "media_generation": speaking["payload"]["media_generation"],
+            "media_generation": media_generation,
+            "type": "client.media-ready",
+        }).encode()
+        self.assertFalse(await session.handle_client_control(premature))
+        await start_media_wait(session, turn_id, media_generation)
+        ready = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": session.stream_epoch,
+            "sequence": session._client_sequence + 1,
+            "media_generation": media_generation,
             "type": "client.media-ready",
         }).encode()
         self.assertTrue(await session.handle_client_control(ready))
@@ -1079,6 +1147,12 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         assert context is not None and context.task is not None
         while not events.events or events.events[-1]["type"] != "turn.playout-ready":
             await asyncio.sleep(0.01)
+        self.assertIsNone(session._media_ready_timeout_task)
+        context = session._active
+        assert context is not None and context.playout_media_generation is not None
+        await start_media_wait(
+            session, context.turn_id, context.playout_media_generation, "playout"
+        )
         self.assertIsNotNone(session._media_ready_timeout_task)
         await session.interrupt()
         await asyncio.wait_for(context.task, 2)
@@ -1104,10 +1178,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             events.events[-1]["payload"]["completed_publication_id"],
             context.playout_boundary.completed_publication_id,
         )
-        self.assertEqual(
-            events.events[-1]["payload"]["media_publication_id"],
-            context.playout_boundary.next_publication_id,
-        )
+        self.assertNotIn("media_publication_id", events.events[-1]["payload"])
         self.assertEqual(events.events[-1]["payload"]["final_sample_count"], 1)
         self.assertEqual(events.events[-1]["payload"]["sample_rate_hz"], 16_000)
         self.assertFalse(context.task.done())
@@ -1124,20 +1195,32 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             "sequence": 1,
             "media_generation": context.playout_media_generation,
             "completed_publication_id": context.playout_boundary.completed_publication_id,
-            "media_publication_id": context.playout_boundary.next_publication_id,
             "type": "client.playout-completed",
         }).encode()
         self.assertFalse(await session.handle_client_control(wrong))
+        wrong_kind = json.dumps({
+            "schema_version": CLIENT_CONTROL_VERSION,
+            "session_id": session.session_id,
+            "turn_id": turn_id,
+            "stream_epoch": session.stream_epoch,
+            "sequence": 1,
+            "media_generation": context.playout_media_generation,
+            "wait_kind": "media-ready",
+            "type": "client.wait-started",
+        }).encode()
+        self.assertFalse(await session.handle_client_control(wrong_kind))
         self.assertFalse(context.task.done())
+        await start_media_wait(
+            session, turn_id, context.playout_media_generation, "playout"
+        )
         valid = json.dumps({
             "schema_version": CLIENT_CONTROL_VERSION,
             "session_id": session.session_id,
             "turn_id": turn_id,
             "stream_epoch": session.stream_epoch,
-            "sequence": 2,
+            "sequence": session._client_sequence + 1,
             "media_generation": context.playout_media_generation,
             "completed_publication_id": context.playout_boundary.completed_publication_id,
-            "media_publication_id": context.playout_boundary.next_publication_id,
             "type": "client.playout-completed",
         }).encode()
         self.assertTrue(await session.handle_client_control(valid))

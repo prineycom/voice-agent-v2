@@ -4,7 +4,7 @@ export interface AttachableAudioTrack {
   setAudioContext?(context: AudioContext | undefined): void
   setWebAudioPlugins?(nodes: AudioNode[]): void
   observeRenderedSamples?(
-    observer: (sampleCount: number, sampleRate: number) => void,
+    observer: (sampleCount: number, sampleRate: number, containsSignal?: boolean) => void,
   ): () => void
 }
 
@@ -20,10 +20,13 @@ export class AudioPlaybackBoundary {
   private pendingDetach: { track: AttachableAudioTrack | null; element: HTMLMediaElement } | null = null
   private generation = 0
   private renderedSeconds = 0
+  private renderStarted = false
   private renderObservable = false
   private stopRenderObserver: (() => void) | null = null
   private renderNode: ScriptProcessorNode | null = null
   private audioContext: AudioContext | null = null
+  private elementBlocked = false
+  private contextBlocked = false
   private renderWaiters = new Set<RenderWaiter>()
 
   constructor(
@@ -36,14 +39,6 @@ export class AudioPlaybackBoundary {
     this.track = track
     this.configureRenderObserver(track)
     this.attachFresh()
-  }
-
-  armRenderBoundary(): void {
-    if (!this.renderObservable) {
-      throw new Error('audio render boundary is unavailable')
-    }
-    this.rejectRenderWaiters()
-    this.renderedSeconds = 0
   }
 
   waitForRenderedSamples(sampleCount: number, sampleRate: number): Promise<void> {
@@ -62,6 +57,23 @@ export class AudioPlaybackBoundary {
     })
   }
 
+  async resume(): Promise<void> {
+    const context = this.audioContext
+    if (context !== null && context.state !== 'running') {
+      try {
+        await context.resume()
+      } catch (error) {
+        this.contextBlocked = true
+        this.reportBlocked()
+        throw error
+      }
+      this.contextBlocked = String(context.state) !== 'running'
+      this.reportBlocked()
+      if (this.contextBlocked) throw new Error('audio context remains blocked')
+    }
+    this.reset()
+  }
+
   reset(): void {
     if (this.track === null) return
     this.detachElement()
@@ -70,7 +82,8 @@ export class AudioPlaybackBoundary {
 
   suspend(): void {
     this.detachElement()
-    this.onBlocked(false)
+    this.elementBlocked = false
+    this.reportBlocked()
   }
 
   clear(): void {
@@ -91,17 +104,20 @@ export class AudioPlaybackBoundary {
       } catch {}
     }
     this.renderedSeconds = 0
+    this.renderStarted = false
     this.renderObservable = false
     this.detachElement()
     this.track = null
-    this.onBlocked(false)
+    this.elementBlocked = false
+    this.contextBlocked = false
+    this.reportBlocked()
   }
 
   private configureRenderObserver(track: AttachableAudioTrack): void {
     if (track.observeRenderedSamples !== undefined) {
       this.renderObservable = true
-      this.stopRenderObserver = track.observeRenderedSamples((samples, sampleRate) => {
-        this.recordRenderedSamples(samples, sampleRate)
+      this.stopRenderObserver = track.observeRenderedSamples((samples, sampleRate, signal = true) => {
+        this.recordRenderedSamples(samples, sampleRate, signal)
       })
       return
     }
@@ -112,20 +128,40 @@ export class AudioPlaybackBoundary {
     ) return
     const context = this.audioContext ?? new window.AudioContext({ latencyHint: 'interactive' })
     this.audioContext = context
+    this.contextBlocked = context.state !== 'running'
+    this.reportBlocked()
+    if (this.contextBlocked) {
+      void context.resume().then(
+        () => {
+          this.contextBlocked = context.state !== 'running'
+          this.reportBlocked()
+        },
+        () => {
+          this.contextBlocked = true
+          this.reportBlocked()
+        },
+      )
+    }
     const node = context.createScriptProcessor(1024, 1, 1)
     node.onaudioprocess = (event) => {
       const input = event.inputBuffer
       const output = event.outputBuffer
+      let containsSignal = false
       for (let channel = 0; channel < output.numberOfChannels; channel += 1) {
         const outputData = output.getChannelData(channel)
         const inputData = input.numberOfChannels > channel
           ? input.getChannelData(channel)
           : null
         if (inputData === null) outputData.fill(0)
-        else outputData.set(inputData)
+        else {
+          outputData.set(inputData)
+          if (!containsSignal) {
+            containsSignal = inputData.some((sample) => Math.abs(sample) > 1 / 32_768)
+          }
+        }
       }
       if (input.numberOfChannels > 0) {
-        this.recordRenderedSamples(input.length, input.sampleRate)
+        this.recordRenderedSamples(input.length, input.sampleRate, containsSignal)
       }
     }
     track.setAudioContext(context)
@@ -134,13 +170,21 @@ export class AudioPlaybackBoundary {
     this.renderObservable = true
   }
 
-  private recordRenderedSamples(sampleCount: number, sampleRate: number): void {
+  private recordRenderedSamples(
+    sampleCount: number,
+    sampleRate: number,
+    containsSignal: boolean,
+  ): void {
     if (
       !Number.isFinite(sampleCount)
       || sampleCount <= 0
       || !Number.isFinite(sampleRate)
       || sampleRate <= 0
     ) return
+    if (!this.renderStarted) {
+      if (!containsSignal) return
+      this.renderStarted = true
+    }
     this.renderedSeconds += sampleCount / sampleRate
     for (const waiter of this.renderWaiters) {
       if (this.renderedSeconds < waiter.targetSeconds) continue
@@ -167,12 +211,22 @@ export class AudioPlaybackBoundary {
     this.element = element
     void element.play().then(
       () => {
-        if (generation === this.generation) this.onBlocked(false)
+        if (generation === this.generation) {
+          this.elementBlocked = false
+          this.reportBlocked()
+        }
       },
       () => {
-        if (generation === this.generation) this.onBlocked(true)
+        if (generation === this.generation) {
+          this.elementBlocked = true
+          this.reportBlocked()
+        }
       },
     )
+  }
+
+  private reportBlocked(): void {
+    this.onBlocked(this.elementBlocked || this.contextBlocked)
   }
 
   private detachElement(): void {

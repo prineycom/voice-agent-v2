@@ -203,11 +203,14 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         sink = runtime.LiveKitAudioSink(room, source, observed_sources.append)
 
         await sink.start()
+        self.assertNotIn(("publish", "publication-1"), calls)
+        publication_id = await sink.prepare("turn-test")
         boundary = await sink.play("turn-test", b"\0\0" * 320, lambda: False)
 
+        self.assertEqual(publication_id, "publication-1")
         self.assertEqual(
             boundary,
-            runtime.MediaBoundary("publication-1", "publication-2", 320, 16_000),
+            runtime.MediaBoundary("publication-1", 320, 16_000),
         )
         self.assertEqual(observed_sources, [sink.source])
         self.assertNotIn(("unpublish", "publication-1"), calls)
@@ -215,13 +218,11 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await sink.complete("turn-test", boundary)
 
         self.assertLess(
-            calls.index(("publish", "publication-2")),
             calls.index(("unpublish", "publication-1")),
+            calls.index(("close", "source-2")),
         )
-        self.assertLess(
-            calls.index(("unpublish", "publication-1")),
-            calls.index(("close", "source-1")),
-        )
+        await sink.prepare("turn-next")
+        self.assertIn(("publish", "publication-2"), calls)
 
     def test_live_runner_bounds_session_diagnostics_after_every_turn(self) -> None:
         class Adapter:

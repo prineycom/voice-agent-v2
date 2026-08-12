@@ -132,6 +132,26 @@ function emitControl(
   )
 }
 
+function emitSpeakingBoundary(
+  room: { emit(event: string, ...args: any[]): void },
+  publicationId: string,
+): void {
+  for (const [index, type] of [
+    'session.ready', 'turn.listening', 'turn.transcribing', 'stt.final',
+    'turn.thinking', 'llm.final', 'turn.speaking',
+  ].entries()) {
+    emitControl(room, type, index + 1, {
+      payload: type === 'turn.speaking' ? {
+        state: 'awaiting_media',
+        media_generation: 1,
+        media_publication_id: publicationId,
+        media_ready_timeout_ms: 3_000,
+        media_ready_ack_deadline_ms: 2_750,
+      } : {},
+    })
+  }
+}
+
 afterEach(() => {
   vi.useRealTimers()
   livekit.rooms.length = 0
@@ -176,66 +196,41 @@ describe('VoiceClient startup cancellation', () => {
     expect(room.localParticipant.publishTrack).not.toHaveBeenCalled()
   })
 
-  it('acknowledges only the correlated publication end and fresh track', async () => {
+  it('waits for a fresh per-turn track and its correlated render boundary', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
     const client = new VoiceClient(document.createElement('div'), callbacks())
     await client.start()
     const room = livekit.rooms[0]
-    const oldElement = document.createElement('audio')
-    oldElement.play = vi.fn().mockResolvedValue(undefined)
-    oldElement.pause = vi.fn()
-    oldElement.load = vi.fn()
-    let renderObserver: ((sampleCount: number, sampleRate: number) => void) | null = null
-    const oldTrack = {
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    let renderObserver = (
+      _sampleCount: number, _sampleRate: number, _signal?: boolean,
+    ): void => { throw new Error('render observer was not installed') }
+    const turnTrack = {
       kind: 'audio',
-      attach: vi.fn().mockReturnValue(oldElement),
+      attach: vi.fn().mockReturnValue(element),
       detach: vi.fn().mockReturnValue([]),
-      observeRenderedSamples: vi.fn((observer: (sampleCount: number, sampleRate: number) => void) => {
+      observeRenderedSamples: vi.fn((observer: (samples: number, rate: number, signal?: boolean) => void) => {
         renderObserver = observer
         return vi.fn()
       }),
     }
-    const oldPublication = { trackSid: 'publication-old' }
-    room.emit('trackSubscribed', oldTrack, oldPublication, {
-      identity: 'agent-session-test-0001',
-    })
-    const nextElement = document.createElement('audio')
-    nextElement.play = vi.fn().mockResolvedValue(undefined)
-    nextElement.pause = vi.fn()
-    nextElement.load = vi.fn()
-    const nextTrack = {
-      kind: 'audio',
-      attach: vi.fn().mockReturnValue(nextElement),
-      detach: vi.fn().mockReturnValue([]),
-    }
-    const nextPublication = { trackSid: 'publication-next' }
-    room.emit('trackSubscribed', nextTrack, nextPublication, {
-      identity: 'agent-session-test-0001',
-    })
-    expect(nextTrack.attach).not.toHaveBeenCalled()
+    const publication = { trackSid: 'publication-turn-1' }
 
-    const types = [
+    for (const [index, type] of [
       'session.ready', 'turn.listening', 'turn.transcribing', 'stt.final',
-      'turn.thinking', 'llm.final', 'turn.speaking', 'turn.playout-ready',
-    ]
-    for (const [index, type] of types.entries()) {
+      'turn.thinking', 'llm.final', 'turn.speaking',
+    ].entries()) {
       emitControl(room, type, index + 1, {
         payload: type === 'turn.speaking' ? {
           state: 'awaiting_media',
           media_generation: 1,
-          media_publication_id: 'publication-old',
+          media_publication_id: 'publication-turn-1',
           media_ready_timeout_ms: 3_000,
           media_ready_ack_deadline_ms: 2_750,
-        } : type === 'turn.playout-ready' ? {
-          state: 'awaiting_client_playout_boundary',
-          ack_timeout_ms: 3_000,
-          ack_deadline_ms: 2_750,
-          media_generation: 2,
-          completed_publication_id: 'publication-old',
-          media_publication_id: 'publication-next',
-          final_sample_count: 320,
-          sample_rate_hz: 16_000,
         } : {},
       })
     }
@@ -243,32 +238,54 @@ describe('VoiceClient startup cancellation', () => {
     expect(JSON.parse(new TextDecoder().decode(
       room.localParticipant.publishData.mock.calls[0][0] as Uint8Array,
     ))).toMatchObject({
-      turn_id: 'turn-00000001',
       media_generation: 1,
-      type: 'client.media-ready',
+      wait_kind: 'media-ready',
+      type: 'client.wait-started',
     })
+    expect(turnTrack.attach).not.toHaveBeenCalled()
 
-    room.emit('trackUnsubscribed', oldTrack, oldPublication, {
+    room.emit('trackSubscribed', turnTrack, publication, {
       identity: 'agent-session-test-0001',
     })
-    await Promise.resolve()
-    expect(room.localParticipant.publishData).toHaveBeenCalledOnce()
-    expect(renderObserver).not.toBeNull()
-    renderObserver!(319, 16_000)
-    await Promise.resolve()
-    expect(room.localParticipant.publishData).toHaveBeenCalledOnce()
-    renderObserver!(1, 16_000)
     await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2))
-    expect(nextTrack.attach).toHaveBeenCalledOnce()
-    const encoded = room.localParticipant.publishData.mock.calls[1][0] as Uint8Array
-    expect(JSON.parse(new TextDecoder().decode(encoded))).toMatchObject({
-      turn_id: 'turn-00000001',
-      stream_epoch: 1,
+    expect(turnTrack.attach).toHaveBeenCalledOnce()
+    expect(JSON.parse(new TextDecoder().decode(
+      room.localParticipant.publishData.mock.calls[1][0] as Uint8Array,
+    ))).toMatchObject({ media_generation: 1, type: 'client.media-ready' })
+
+    emitControl(room, 'turn.playout-ready', 8, {
+      payload: {
+        state: 'awaiting_client_playout_boundary',
+        ack_timeout_ms: 3_000,
+        ack_deadline_ms: 2_750,
+        media_generation: 2,
+        completed_publication_id: 'publication-turn-1',
+        final_sample_count: 320,
+        sample_rate_hz: 16_000,
+      },
+    })
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3))
+    expect(JSON.parse(new TextDecoder().decode(
+      room.localParticipant.publishData.mock.calls[2][0] as Uint8Array,
+    ))).toMatchObject({
       media_generation: 2,
-      completed_publication_id: 'publication-old',
-      media_publication_id: 'publication-next',
+      wait_kind: 'playout',
+      type: 'client.wait-started',
+    })
+    renderObserver(10_000, 16_000, false)
+    renderObserver(319, 16_000, true)
+    await Promise.resolve()
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3)
+    renderObserver(1, 16_000, true)
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
+    expect(JSON.parse(new TextDecoder().decode(
+      room.localParticipant.publishData.mock.calls[3][0] as Uint8Array,
+    ))).toMatchObject({
+      media_generation: 2,
+      completed_publication_id: 'publication-turn-1',
       type: 'client.playout-completed',
     })
+    expect(turnTrack.detach).toHaveBeenCalledWith(element)
   })
 
   it('keeps replacement audio detached and coalesces reconnects until epoch acknowledgement', async () => {
@@ -338,8 +355,16 @@ describe('VoiceClient startup cancellation', () => {
     )
 
     expect(replacementTrack.attach).toHaveBeenCalledOnce()
-    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2))
-    const mediaReadyPayload = room.localParticipant.publishData.mock.calls[1][0] as Uint8Array
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(3))
+    const waitPayload = room.localParticipant.publishData.mock.calls[1][0] as Uint8Array
+    expect(JSON.parse(new TextDecoder().decode(waitPayload))).toMatchObject({
+      turn_id: 'session',
+      stream_epoch: 2,
+      media_generation: 1,
+      wait_kind: 'media-ready',
+      type: 'client.wait-started',
+    })
+    const mediaReadyPayload = room.localParticipant.publishData.mock.calls[2][0] as Uint8Array
     expect(JSON.parse(new TextDecoder().decode(mediaReadyPayload))).toMatchObject({
       turn_id: 'session',
       stream_epoch: 2,
@@ -413,61 +438,59 @@ describe('VoiceClient startup cancellation', () => {
     )
   })
 
-  it('requires a fresh media subscription when a partially published turn fails', async () => {
+  it('invalidates failed turn media before accepting a fresh turn publication', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
     const client = new VoiceClient(document.createElement('div'), callbacks())
     await client.start()
     const room = livekit.rooms[0]
-    const firstElement = document.createElement('audio')
-    firstElement.play = vi.fn().mockResolvedValue(undefined)
-    firstElement.pause = vi.fn()
-    firstElement.load = vi.fn()
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
     const staleTrack = {
       kind: 'audio',
-      attach: vi.fn().mockReturnValue(firstElement),
+      attach: vi.fn().mockReturnValue(element),
       detach: vi.fn().mockReturnValue([]),
+      observeRenderedSamples: vi.fn().mockReturnValue(vi.fn()),
     }
-    const publication = { setSubscribed: vi.fn() }
-    room.emit('trackSubscribed', staleTrack, publication, { identity: 'agent-session-test-0001' })
-    emitControl(room, 'session.ready', 1)
-    emitControl(room, 'turn.listening', 2)
-    emitControl(room, 'turn.failed', 3, {
-      terminal: true,
-      payload: { stage: 'publication', code: 'audio_playout_exception' },
-    })
-
-    expect(staleTrack.detach).toHaveBeenCalledWith(firstElement)
-    expect(staleTrack.attach).toHaveBeenCalledOnce()
-    expect(publication.setSubscribed).toHaveBeenLastCalledWith(false)
-
-    room.emit('trackUnsubscribed', staleTrack, publication, {
+    for (const [index, type] of [
+      'session.ready', 'turn.listening', 'turn.transcribing', 'stt.final',
+      'turn.thinking', 'llm.final', 'turn.speaking',
+    ].entries()) {
+      emitControl(room, type, index + 1, {
+        payload: type === 'turn.speaking' ? {
+          state: 'awaiting_media', media_generation: 1,
+          media_publication_id: 'publication-stale',
+          media_ready_timeout_ms: 3_000, media_ready_ack_deadline_ms: 2_750,
+        } : {},
+      })
+    }
+    room.emit('trackSubscribed', staleTrack, { trackSid: 'publication-stale' }, {
       identity: 'agent-session-test-0001',
     })
-    expect(publication.setSubscribed).toHaveBeenLastCalledWith(true)
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2))
 
-    const freshElement = document.createElement('audio')
-    freshElement.play = vi.fn().mockResolvedValue(undefined)
-    freshElement.pause = vi.fn()
-    freshElement.load = vi.fn()
-    const freshTrack = {
-      kind: 'audio',
-      attach: vi.fn().mockReturnValue(freshElement),
-      detach: vi.fn().mockReturnValue([]),
-    }
-    room.emit('trackSubscribed', staleTrack, publication, { identity: 'agent-session-test-0001' })
-    expect(staleTrack.attach).toHaveBeenCalledOnce()
-    expect(room.localParticipant.publishData).not.toHaveBeenCalled()
-    room.emit('trackSubscribed', freshTrack, publication, { identity: 'agent-session-test-0001' })
-    expect(freshTrack.attach).toHaveBeenCalledOnce()
-    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledOnce())
-    const encoded = room.localParticipant.publishData.mock.calls[0][0] as Uint8Array
-    expect(JSON.parse(new TextDecoder().decode(encoded))).toMatchObject({
-      turn_id: 'turn-00000001',
-      stream_epoch: 1,
-      media_generation: 3,
-      type: 'client.media-ready',
+    emitControl(room, 'turn.failed', 8, {
+      terminal: true,
+      payload: {
+        stage: 'publication', code: 'audio_playout_exception', media_generation: 2,
+      },
     })
+    await vi.waitFor(() => expect(room.localParticipant.publishData).toHaveBeenCalledTimes(4))
+
+    expect(staleTrack.detach).toHaveBeenCalledWith(element)
+    const controls = room.localParticipant.publishData.mock.calls.map(([payload]) => (
+      JSON.parse(new TextDecoder().decode(payload as Uint8Array))
+    ))
+    expect(controls.slice(2).map((control) => control.type)).toEqual([
+      'client.wait-started', 'client.media-ready',
+    ])
+    const unexpected = { kind: 'audio', attach: vi.fn(), detach: vi.fn() }
+    room.emit('trackSubscribed', unexpected, { trackSid: 'publication-unexpected' }, {
+      identity: 'agent-session-test-0001',
+    })
+    expect(unexpected.attach).not.toHaveBeenCalled()
     await client.stop()
   })
 
@@ -489,13 +512,25 @@ describe('VoiceClient startup cancellation', () => {
         .mockImplementationOnce(() => { throw new Error('detach failed') })
         .mockReturnValue([]),
     }
-    room.emit('trackSubscribed', track, { setSubscribed: vi.fn() }, {
+    for (const [index, type] of [
+      'session.ready', 'turn.listening', 'turn.transcribing', 'stt.final',
+      'turn.thinking', 'llm.final', 'turn.speaking',
+    ].entries()) {
+      emitControl(room, type, index + 1, {
+        payload: type === 'turn.speaking' ? {
+          state: 'awaiting_media', media_generation: 1,
+          media_publication_id: 'publication-failing',
+          media_ready_timeout_ms: 3_000, media_ready_ack_deadline_ms: 2_750,
+        } : {},
+      })
+    }
+    room.emit('trackSubscribed', track, { trackSid: 'publication-failing' }, {
       identity: 'agent-session-test-0001',
     })
-    emitControl(room, 'session.ready', 1)
-    emitControl(room, 'turn.listening', 2)
 
-    expect(() => emitControl(room, 'turn.failed', 3, { terminal: true })).not.toThrow()
+    expect(() => emitControl(room, 'turn.failed', 8, {
+      terminal: true, payload: { media_generation: 2 },
+    })).not.toThrow()
     expect(observed.onControl).toHaveBeenLastCalledWith(
       expect.objectContaining({ type: 'turn.failed' }),
     )
@@ -507,69 +542,40 @@ describe('VoiceClient startup cancellation', () => {
     expect(room.disconnect).toHaveBeenCalledOnce()
   })
 
-  it('repeats media renewal when another turn invalidates a pending subscription', async () => {
+  it('coalesces consecutive invalidations onto the latest media generation', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
     const client = new VoiceClient(document.createElement('div'), callbacks())
     await client.start()
     const room = livekit.rooms[0]
-    const publication = { setSubscribed: vi.fn() }
-    const element = document.createElement('audio')
-    element.play = vi.fn().mockResolvedValue(undefined)
-    element.pause = vi.fn()
-    element.load = vi.fn()
-    const originalTrack = {
-      kind: 'audio',
-      attach: vi.fn().mockReturnValue(element),
-      detach: vi.fn().mockReturnValue([]),
-    }
-    room.emit('trackSubscribed', originalTrack, publication, {
-      identity: 'agent-session-test-0001',
-    })
     emitControl(room, 'session.ready', 1)
     emitControl(room, 'turn.listening', 2)
-    emitControl(room, 'turn.failed', 3, { terminal: true })
-    room.emit('trackUnsubscribed', originalTrack, publication, {
-      identity: 'agent-session-test-0001',
+    emitControl(room, 'turn.failed', 3, {
+      terminal: true, payload: { media_generation: 1 },
     })
-
     emitControl(room, 'turn.listening', 4, { turnId: 'turn-00000002' })
     emitControl(room, 'turn.failed', 5, {
-      turnId: 'turn-00000002',
-      terminal: true,
-    })
-    const supersededTrack = {
-      kind: 'audio',
-      attach: vi.fn(),
-      detach: vi.fn().mockReturnValue([]),
-    }
-    room.emit('trackSubscribed', supersededTrack, publication, {
-      identity: 'agent-session-test-0001',
+      turnId: 'turn-00000002', terminal: true,
+      payload: { media_generation: 2 },
     })
 
-    expect(supersededTrack.attach).not.toHaveBeenCalled()
-    expect(publication.setSubscribed.mock.calls.map(([subscribed]) => subscribed)).toEqual([
-      false, true, false,
-    ])
-
-    room.emit('trackUnsubscribed', supersededTrack, publication, {
+    await vi.waitFor(() => {
+      const last = room.localParticipant.publishData.mock.calls.at(-1)?.[0] as Uint8Array
+      expect(JSON.parse(new TextDecoder().decode(last)).type).toBe('client.media-ready')
+    })
+    const controls = room.localParticipant.publishData.mock.calls.map(([payload]) => (
+      JSON.parse(new TextDecoder().decode(payload as Uint8Array))
+    ))
+    expect(controls.at(-1)).toMatchObject({
+      turn_id: 'turn-00000002',
+      media_generation: 2,
+      type: 'client.media-ready',
+    })
+    const staleTrack = { kind: 'audio', attach: vi.fn(), detach: vi.fn() }
+    room.emit('trackSubscribed', staleTrack, { trackSid: 'publication-stale' }, {
       identity: 'agent-session-test-0001',
     })
-    const currentElement = document.createElement('audio')
-    currentElement.play = vi.fn().mockResolvedValue(undefined)
-    currentElement.pause = vi.fn()
-    currentElement.load = vi.fn()
-    const currentTrack = {
-      kind: 'audio',
-      attach: vi.fn().mockReturnValue(currentElement),
-      detach: vi.fn().mockReturnValue([]),
-    }
-    room.emit('trackSubscribed', currentTrack, publication, {
-      identity: 'agent-session-test-0001',
-    })
-
-    expect(publication.setSubscribed).toHaveBeenLastCalledWith(true)
-    expect(currentTrack.attach).toHaveBeenCalledOnce()
+    expect(staleTrack.attach).not.toHaveBeenCalled()
     await client.stop()
   })
 
@@ -671,7 +677,10 @@ describe('VoiceClient startup cancellation', () => {
         .mockImplementationOnce(() => { throw new Error('detach failed') })
         .mockReturnValue([]),
     }
-    room.emit('trackSubscribed', remoteTrack, {}, { identity: 'agent-session-test-0001' })
+    emitSpeakingBoundary(room, 'publication-cleanup')
+    room.emit('trackSubscribed', remoteTrack, { trackSid: 'publication-cleanup' }, {
+      identity: 'agent-session-test-0001',
+    })
 
     room.emit('participantDisconnected', { identity: 'agent-session-test-0001' })
 
@@ -733,9 +742,11 @@ describe('VoiceClient startup cancellation', () => {
       attach: vi.fn().mockReturnValue(element),
       detach: vi.fn().mockReturnValue([]),
     }
-    room.emit('trackSubscribed', remoteTrack, {}, { identity: 'agent-session-test-0001' })
-    emitControl(room, 'session.ready', 1)
-    emitControl(room, 'session.degraded', 2, {
+    emitSpeakingBoundary(room, 'publication-degraded')
+    room.emit('trackSubscribed', remoteTrack, { trackSid: 'publication-degraded' }, {
+      identity: 'agent-session-test-0001',
+    })
+    emitControl(room, 'session.degraded', 8, {
       payload: { stage: 'input', code: 'microphone_stream_ended' },
     })
 

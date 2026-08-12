@@ -28,10 +28,10 @@ interface PendingPlayoutBoundary {
   streamEpoch: number
   mediaGeneration: number
   completedPublicationId: string
-  nextPublicationId: string
   finalSampleCount: number
   sampleRateHz: number
   observing: boolean
+  waitStarted: boolean
 }
 
 export interface VoiceClientCallbacks {
@@ -59,20 +59,15 @@ export class VoiceClient {
   private reconnectRequestPending = false
   private activeRemoteTrack: RemoteAudioTrack | null = null
   private pendingRemoteTrack: RemoteAudioTrack | null = null
-  private remotePublication: RemoteTrackPublication | null = null
-  private renewingPublication: RemoteTrackPublication | null = null
-  private renewalPhase: 'idle' | 'unsubscribing' | 'subscribing' = 'idle'
-  private mediaInvalidationGeneration = 0
-  private renewalBoundaryGeneration = 0
-  private freshSubscriptionRequired = false
   private pendingMediaGeneration: number | null = null
   private pendingMediaTurnId: string | null = null
   private expectedMediaPublicationId: string | null = null
   private reconnectMediaGeneration: number | null = null
-  private readonly invalidatedTracks = new WeakSet<RemoteAudioTrack>()
   private readonly publicationTracks = new Map<string, RemoteAudioTrack>()
   private readonly endedPublications = new Set<string>()
   private pendingPlayoutBoundary: PendingPlayoutBoundary | null = null
+  private pendingWaitStartedGeneration: number | null = null
+  private mediaReadyPublishingGeneration: number | null = null
   private streamEpoch = 0
   private playoutGeneration = 0
 
@@ -136,7 +131,7 @@ export class VoiceClient {
   async resumeAudio(): Promise<void> {
     if (this.room === null) return
     await this.room.startAudio()
-    this.playback.reset()
+    await this.playback.resume()
   }
 
   resetPlayback(): void {
@@ -170,12 +165,6 @@ export class VoiceClient {
     this.reconnectRequestPending = false
     this.activeRemoteTrack = null
     this.pendingRemoteTrack = null
-    this.remotePublication = null
-    this.renewingPublication = null
-    this.renewalPhase = 'idle'
-    this.mediaInvalidationGeneration = 0
-    this.renewalBoundaryGeneration = 0
-    this.freshSubscriptionRequired = false
     this.pendingMediaGeneration = null
     this.pendingMediaTurnId = null
     this.expectedMediaPublicationId = null
@@ -183,6 +172,8 @@ export class VoiceClient {
     this.publicationTracks.clear()
     this.endedPublications.clear()
     this.pendingPlayoutBoundary = null
+    this.pendingWaitStartedGeneration = null
+    this.mediaReadyPublishingGeneration = null
     this.streamEpoch = 0
     const errors: unknown[] = []
     const microphone = this.microphone
@@ -253,14 +244,6 @@ export class VoiceClient {
             return
           }
         }
-        this.remotePublication = remotePublication
-        if (
-          this.pendingPlayoutBoundary !== null
-          && publicationId === this.pendingPlayoutBoundary.nextPublicationId
-        ) {
-          void this.completePlayoutBoundary()
-          return
-        }
         if (
           this.pendingMediaGeneration !== null
           && publicationId !== null
@@ -270,48 +253,7 @@ export class VoiceClient {
           void this.publishMediaReady()
           return
         }
-        if (
-          (this.pendingPlayoutBoundary !== null || this.expectedMediaPublicationId !== null)
-          && publicationId !== null
-        ) return
-        if (publicationId !== null && this.activeRemoteTrack !== null) return
-        if (this.freshSubscriptionRequired) {
-          const subscribingPublication = (
-            this.renewalPhase === 'subscribing'
-            && remotePublication === this.renewingPublication
-          )
-          const currentRenewal = (
-            subscribingPublication
-            && this.renewalBoundaryGeneration === this.mediaInvalidationGeneration
-          )
-          if (currentRenewal && this.invalidatedTracks.has(remoteTrack)) return
-          if (currentRenewal) {
-            this.renewalPhase = 'idle'
-            this.renewingPublication = null
-            this.freshSubscriptionRequired = false
-          } else {
-            this.invalidatedTracks.add(remoteTrack)
-            if (subscribingPublication) {
-              this.renewalPhase = 'idle'
-              this.renewingPublication = null
-            }
-            this.beginPublicationRenewal()
-            return
-          }
-        } else if (this.invalidatedTracks.has(remoteTrack)) {
-          return
-        }
-        if (this.reconnecting) {
-          this.pendingRemoteTrack = remoteTrack
-        } else {
-          this.activeRemoteTrack = remoteTrack
-          try {
-            this.playback.setTrack(remoteTrack)
-            void this.publishMediaReady()
-          } catch {
-            void this.failSession('Не удалось безопасно переключить воспроизведение')
-          }
-        }
+        if (this.reconnecting) this.pendingRemoteTrack = remoteTrack
       }
     })
     room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
@@ -322,23 +264,16 @@ export class VoiceClient {
       const publicationId = this.publicationId(publication as RemoteTrackPublication)
       if (publicationId !== null) {
         this.publicationTracks.delete(publicationId)
+        if (
+          this.pendingPlayoutBoundary?.completedPublicationId === publicationId
+        ) {
+          void this.failSession('Аудиопоток завершился до подтверждения воспроизведения')
+        }
         this.endedPublications.add(publicationId)
         if (this.endedPublications.size > MAX_TRACK_GENERATIONS) {
           const oldest = this.endedPublications.values().next().value
           if (typeof oldest === 'string') this.endedPublications.delete(oldest)
         }
-      }
-      if (
-        publication !== this.renewingPublication
-        || this.renewalPhase !== 'unsubscribing'
-      ) return
-      this.renewalPhase = 'subscribing'
-      this.renewalBoundaryGeneration = this.mediaInvalidationGeneration
-      const remotePublication = publication as RemoteTrackPublication
-      try {
-        remotePublication.setSubscribed(true)
-      } catch {
-        void this.failSession('Не удалось безопасно обновить аудиопоток')
       }
     })
     room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
@@ -380,13 +315,13 @@ export class VoiceClient {
           terminalFailure = 'Некорректная граница обновления аудиопотока'
         } else {
           try {
-            if (typeof publicationId === 'string') {
-              this.selectMediaPublication(
-                event.turn_id, mediaGeneration, publicationId,
-              )
-            } else {
-              this.renewPlaybackTrack(event.turn_id, mediaGeneration)
-            }
+            this.invalidatePlaybackTrack()
+            this.pendingMediaTurnId = event.turn_id
+            this.pendingMediaGeneration = mediaGeneration
+            this.expectedMediaPublicationId = null
+            void this.beginWait(
+              event.turn_id, mediaGeneration, 'media-ready', 2_750,
+            ).then(() => this.publishMediaReady())
           } catch {
             terminalFailure = 'Не удалось остановить устаревшее воспроизведение'
           }
@@ -454,6 +389,7 @@ export class VoiceClient {
       this.reconnecting = true
       this.reconnectRequestPending = false
       this.reconnectMediaGeneration = null
+      this.pendingWaitStartedGeneration = null
       let mediaInvalidationFailed = false
       try {
         this.invalidatePlaybackTrack()
@@ -539,14 +475,17 @@ export class VoiceClient {
       || !Number.isSafeInteger(ackDeadlineMs)
       || ackDeadlineMs < 1
       || ackDeadlineMs >= timeoutMs
-      || track === undefined
-      || track !== this.activeRemoteTrack
     ) throw new Error('invalid response media boundary')
-    this.playback.armRenderBoundary()
     this.pendingMediaTurnId = event.turn_id
     this.pendingMediaGeneration = mediaGeneration
     this.expectedMediaPublicationId = publicationId
-    void this.publishMediaReady()
+    void this.beginWait(
+      event.turn_id, mediaGeneration, 'media-ready', ackDeadlineMs,
+    ).then(() => this.publishMediaReady())
+    if (track !== undefined) {
+      this.activateCorrelatedTrack(track)
+      void this.publishMediaReady()
+    }
   }
 
   private beginPlayoutBoundary(event: ControlEvent): void {
@@ -554,7 +493,6 @@ export class VoiceClient {
     const ackDeadlineMs = event.payload.ack_deadline_ms
     const mediaGeneration = event.payload.media_generation
     const completedPublicationId = event.payload.completed_publication_id
-    const nextPublicationId = event.payload.media_publication_id
     const finalSampleCount = event.payload.final_sample_count
     const sampleRateHz = event.payload.sample_rate_hz
     if (
@@ -572,10 +510,6 @@ export class VoiceClient {
       || typeof completedPublicationId !== 'string'
       || completedPublicationId.length < 1
       || completedPublicationId.length > 128
-      || typeof nextPublicationId !== 'string'
-      || nextPublicationId.length < 1
-      || nextPublicationId.length > 128
-      || completedPublicationId === nextPublicationId
       || typeof finalSampleCount !== 'number'
       || !Number.isSafeInteger(finalSampleCount)
       || finalSampleCount < 1
@@ -589,23 +523,35 @@ export class VoiceClient {
       streamEpoch: event.stream_epoch,
       mediaGeneration,
       completedPublicationId,
-      nextPublicationId,
       finalSampleCount,
       sampleRateHz,
       observing: false,
+      waitStarted: false,
     }
     this.clearPlayoutAckTimer()
-    this.playoutAckTimer = setTimeout(() => {
-      void this.failSession('Не удалось подтвердить воспроизведение ответа')
-    }, ackDeadlineMs)
-    void this.completePlayoutBoundary()
+    void this.beginWait(
+      event.turn_id, mediaGeneration, 'playout', ackDeadlineMs,
+    ).then(() => {
+      const boundary = this.pendingPlayoutBoundary
+      if (
+        boundary !== null
+        && boundary.turnId === event.turn_id
+        && boundary.mediaGeneration === mediaGeneration
+      ) {
+        boundary.waitStarted = true
+        void this.completePlayoutBoundary()
+      }
+    })
   }
 
   private async completePlayoutBoundary(): Promise<void> {
     const boundary = this.pendingPlayoutBoundary
     if (boundary === null || boundary.observing || this.stopping) return
-    const nextTrack = this.publicationTracks.get(boundary.nextPublicationId)
-    if (nextTrack === undefined) return
+    if (!boundary.waitStarted) return
+    const completedTrack = this.publicationTracks.get(
+      boundary.completedPublicationId,
+    )
+    if (completedTrack === undefined || completedTrack !== this.activeRemoteTrack) return
     boundary.observing = true
     try {
       await this.playback.waitForRenderedSamples(
@@ -613,7 +559,6 @@ export class VoiceClient {
         boundary.sampleRateHz,
       )
       if (this.pendingPlayoutBoundary !== boundary || this.stopping) return
-      this.activateCorrelatedTrack(nextTrack)
     } catch {
       if (this.pendingPlayoutBoundary === boundary) {
         await this.failSession('Не удалось подтвердить воспроизведение ответа')
@@ -632,7 +577,6 @@ export class VoiceClient {
       sequence: this.clientSequence,
       media_generation: boundary.mediaGeneration,
       completed_publication_id: boundary.completedPublicationId,
-      media_publication_id: boundary.nextPublicationId,
       type: 'client.playout-completed',
     }))
     try {
@@ -643,6 +587,7 @@ export class VoiceClient {
       if (this.pendingPlayoutBoundary === boundary) {
         this.pendingPlayoutBoundary = null
         this.clearPlayoutAckTimer()
+        this.invalidatePlaybackTrack()
       }
     } catch {
       await this.failSession('Не удалось подтвердить воспроизведение ответа')
@@ -672,12 +617,15 @@ export class VoiceClient {
       || publicationId.length > 128
     ) throw new Error('invalid reconnect media generation')
     this.clearReconnectAckTimer()
-    this.reconnectAckTimer = setTimeout(() => {
-      void this.failSession('Сервер не подтвердил готовность аудиопотока')
-    }, mediaReadyAckDeadlineMs)
     this.reconnecting = false
     this.reconnectMediaGeneration = mediaGeneration
     this.pendingRemoteTrack = null
+    this.pendingMediaTurnId = 'session'
+    this.pendingMediaGeneration = mediaGeneration
+    this.expectedMediaPublicationId = publicationId
+    void this.beginWait(
+      'session', mediaGeneration, 'media-ready', mediaReadyAckDeadlineMs,
+    ).then(() => this.publishMediaReady())
     this.selectMediaPublication('session', mediaGeneration, publicationId)
   }
 
@@ -701,10 +649,6 @@ export class VoiceClient {
     if (this.activeRemoteTrack === track) return
     this.invalidatePlaybackTrack()
     this.activeRemoteTrack = track
-    this.expectedMediaPublicationId = null
-    this.freshSubscriptionRequired = false
-    this.renewalPhase = 'idle'
-    this.renewingPublication = null
     this.playback.setTrack(track)
   }
 
@@ -717,9 +661,6 @@ export class VoiceClient {
     this.pendingMediaTurnId = turnId
     this.pendingMediaGeneration = mediaGeneration
     this.expectedMediaPublicationId = publicationId
-    this.freshSubscriptionRequired = false
-    this.renewalPhase = 'idle'
-    this.renewingPublication = null
     const track = this.publicationTracks.get(publicationId)
     if (track !== undefined) {
       this.activateCorrelatedTrack(track)
@@ -728,22 +669,58 @@ export class VoiceClient {
   }
 
   private invalidatePlaybackTrack(): void {
-    if (this.activeRemoteTrack !== null) this.invalidatedTracks.add(this.activeRemoteTrack)
-    if (this.pendingRemoteTrack !== null) this.invalidatedTracks.add(this.pendingRemoteTrack)
     this.activeRemoteTrack = null
     this.pendingRemoteTrack = null
     this.playback.clear()
   }
 
-  private renewPlaybackTrack(turnId?: string, mediaGeneration?: number): void {
-    this.invalidatePlaybackTrack()
-    this.mediaInvalidationGeneration += 1
-    this.freshSubscriptionRequired = true
-    if (turnId !== undefined && mediaGeneration !== undefined) {
-      this.pendingMediaTurnId = turnId
-      this.pendingMediaGeneration = mediaGeneration
+  private async beginWait(
+    turnId: string,
+    mediaGeneration: number,
+    waitKind: 'media-ready' | 'playout',
+    clientDeadlineMs: number,
+  ): Promise<void> {
+    const room = this.room
+    const capability = this.capability
+    if (room === null || capability === null || this.stopping) return
+    this.clearPlayoutAckTimer()
+    this.playoutAckTimer = setTimeout(() => {
+      void this.failSession(
+        waitKind === 'playout'
+          ? 'Не удалось подтвердить воспроизведение ответа'
+          : 'Сервер не подтвердил готовность аудиопотока',
+      )
+    }, clientDeadlineMs)
+    const streamEpoch = this.streamEpoch
+    this.clientSequence += 1
+    const payload = new TextEncoder().encode(JSON.stringify({
+      schema_version: CLIENT_CONTROL_VERSION,
+      session_id: capability.session_id,
+      turn_id: turnId,
+      stream_epoch: streamEpoch,
+      sequence: this.clientSequence,
+      media_generation: mediaGeneration,
+      wait_kind: waitKind,
+      type: 'client.wait-started',
+    }))
+    try {
+      await room.localParticipant.publishData(payload, {
+        reliable: true,
+        topic: CLIENT_CONTROL_TOPIC,
+      })
+      if (
+        this.streamEpoch === streamEpoch
+        && !this.stopping
+        && (
+          this.pendingMediaGeneration === mediaGeneration
+          || this.pendingPlayoutBoundary?.mediaGeneration === mediaGeneration
+        )
+      ) {
+        this.pendingWaitStartedGeneration = mediaGeneration
+      }
+    } catch {
+      await this.failSession('Не удалось запустить подтверждение аудиопотока')
     }
-    this.beginPublicationRenewal()
   }
 
   private async publishMediaReady(): Promise<void> {
@@ -756,10 +733,17 @@ export class VoiceClient {
       || capability === null
       || mediaGeneration === null
       || turnId === null
-      || this.freshSubscriptionRequired
       || this.reconnecting
       || this.stopping
+      || this.pendingWaitStartedGeneration !== mediaGeneration
+      || this.mediaReadyPublishingGeneration === mediaGeneration
+      || (
+        this.expectedMediaPublicationId !== null
+        && this.publicationTracks.get(this.expectedMediaPublicationId)
+          !== this.activeRemoteTrack
+      )
     ) return
+    this.mediaReadyPublishingGeneration = mediaGeneration
     const streamEpoch = this.streamEpoch
     this.clientSequence += 1
     const payload = new TextEncoder().encode(JSON.stringify({
@@ -784,22 +768,22 @@ export class VoiceClient {
       ) {
         this.pendingMediaGeneration = null
         this.pendingMediaTurnId = null
+        this.pendingWaitStartedGeneration = null
         this.expectedMediaPublicationId = null
+        this.clearPlayoutAckTimer()
+        if (turnId === 'session') {
+          this.clearReconnectAckTimer()
+          this.reconnectAckTimer = setTimeout(() => {
+            void this.failSession('Сервер не подтвердил готовность аудиопотока')
+          }, RECONNECT_ACK_TIMEOUT_MS)
+        }
       }
     } catch {
       await this.failSession('Не удалось подтвердить готовность аудиопотока')
-    }
-  }
-
-  private beginPublicationRenewal(): void {
-    const publication = this.remotePublication
-    if (publication === null || this.renewalPhase !== 'idle') return
-    this.renewingPublication = publication
-    this.renewalPhase = 'unsubscribing'
-    try {
-      publication.setSubscribed(false)
-    } catch {
-      void this.failSession('Не удалось безопасно обновить аудиопоток')
+    } finally {
+      if (this.mediaReadyPublishingGeneration === mediaGeneration) {
+        this.mediaReadyPublishingGeneration = null
+      }
     }
   }
 
