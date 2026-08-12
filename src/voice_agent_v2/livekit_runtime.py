@@ -170,6 +170,9 @@ class LiveKitAudioSink(AudioSink):
         self._rotation_lock = asyncio.Lock()
         self._rotation_failed = False
         self._retirement: _PublicationRetirement | None = None
+        self._closing = False
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _publication_id(publication) -> str:
@@ -199,14 +202,31 @@ class LiveKitAudioSink(AudioSink):
     async def _run_retirement(self, state: _PublicationRetirement) -> None:
         try:
             await self.room.local_participant.unpublish_track(state.publication_id)
-            state.source_close_started = True
+            async with self._rotation_lock:
+                if self._retirement is not state:
+                    raise RuntimeError("LiveKit publication retirement state changed")
+                state.source_close_started = True
             await state.source.aclose()
+            source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+            async with self._rotation_lock:
+                if self._retirement is not state:
+                    await source.aclose()
+                    raise RuntimeError("LiveKit publication retirement state changed")
+                self.source = source
+                self.source_changed(source)
+                self.publication = None
+                self._prepared_turn = None
+                self._active_turn = None
+                self._sealed_boundary = None
+                state.complete = True
+                self._retirement = None
         except BaseException as error:
-            state.error = error
-            self._rotation_failed = True
+            async with self._rotation_lock:
+                if self._retirement is state:
+                    state.error = error
+                    state.complete = True
+                    self._rotation_failed = True
             raise
-        finally:
-            state.complete = True
 
     def _reserve_retirement_locked(
         self, publication_id: str, source: rtc.AudioSource
@@ -229,19 +249,8 @@ class LiveKitAudioSink(AudioSink):
         task = state.task
         if task is None:
             raise RuntimeError("LiveKit publication retirement was not started")
-        await asyncio.shield(task)
-
-    def _finish_retirement_locked(self, state: _PublicationRetirement) -> None:
-        if self._retirement is not state:
-            return
-        if not state.complete or state.error is not None:
-            raise RuntimeError("LiveKit publication retirement did not complete")
-        self.source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
-        self.source_changed(self.source)
-        self.publication = None
-        self._prepared_turn = None
-        self._sealed_boundary = None
-        self._retirement = None
+        await asyncio.wait({task})
+        task.result()
 
     async def prepare(self, turn_id: str) -> str:
         while True:
@@ -249,32 +258,36 @@ class LiveKitAudioSink(AudioSink):
             async with self._rotation_lock:
                 if self._rotation_failed:
                     raise RuntimeError("LiveKit audio publication rotation previously failed")
-                if self._sealed_boundary is not None:
+                if self._closing or self._closed:
+                    raise RuntimeError("LiveKit audio sink is closing")
+                if self._retirement is not None:
+                    retirement = self._retirement
+                elif self._sealed_boundary is not None:
                     raise RuntimeError("previous LiveKit audio boundary is not finalized")
-                if self.publication is not None:
+                elif self.publication is not None:
                     if self._prepared_turn == turn_id:
                         return self._publication_id(self.publication)
                     retirement = self._reserve_retirement_locked(
                         self._publication_id(self.publication), self.source
                     )
                 else:
-                    await self.source.aclose()
-                    source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+                    source = self.source
                     try:
                         publication = await self._publish(source)
                         publication_id = self._publication_id(publication)
                     except Exception:
                         await source.aclose()
+                        replacement = rtc.AudioSource(
+                            16_000, 1, queue_size_ms=AUDIO_QUEUE_MS
+                        )
+                        self.source = replacement
+                        self.source_changed(replacement)
                         raise
-                    self.source = source
                     self.publication = publication
                     self._prepared_turn = turn_id
-                    self.source_changed(source)
                     return publication_id
             assert retirement is not None
             await self._wait_for_retirement(retirement)
-            async with self._rotation_lock:
-                self._finish_retirement_locked(retirement)
 
     def current_publication_id(self) -> str:
         if self.publication is None:
@@ -336,8 +349,6 @@ class LiveKitAudioSink(AudioSink):
                 boundary.completed_publication_id, self.source
             )
         await self._wait_for_retirement(retirement)
-        async with self._rotation_lock:
-            self._finish_retirement_locked(retirement)
 
     async def clear(self, turn_id: str) -> str | None:
         async with self._rotation_lock:
@@ -351,9 +362,49 @@ class LiveKitAudioSink(AudioSink):
             if not retirement.source_close_started and not retirement.complete:
                 self.source.clear_queue()
         await self._wait_for_retirement(retirement)
-        async with self._rotation_lock:
-            self._finish_retirement_locked(retirement)
         return publication_id
+
+    async def _run_close(self) -> None:
+        async with self._rotation_lock:
+            retirement = self._retirement
+            if retirement is None and self.publication is not None:
+                retirement = self._reserve_retirement_locked(
+                    self._publication_id(self.publication), self.source
+                )
+        if retirement is not None:
+            await self._wait_for_retirement(retirement)
+        async with self._rotation_lock:
+            if self._rotation_failed:
+                raise RuntimeError("LiveKit audio publication rotation previously failed")
+            source = self.source
+        await source.aclose()
+        async with self._rotation_lock:
+            if self.source is not source or self.publication is not None:
+                raise RuntimeError("LiveKit audio sink changed while closing")
+            self._closed = True
+
+    async def close(self) -> None:
+        async with self._rotation_lock:
+            if self._closed:
+                return
+            self._closing = True
+            task = self._close_task
+            if task is None:
+                task = asyncio.create_task(
+                    self._run_close(), name="livekit-audio-sink-close"
+                )
+                task.add_done_callback(self._consume_retirement)
+                self._close_task = task
+        await asyncio.shield(task)
+
+    async def wait_for_cleanup(self) -> None:
+        task = self._close_task
+        if task is not None:
+            await asyncio.shield(task)
+            return
+        retirement = self._retirement
+        if retirement is not None:
+            await self._wait_for_retirement(retirement)
 
 
 class LiveKitRoomController:
@@ -608,6 +659,7 @@ class LiveKitRoomController:
         async def retry_after_cleanup() -> None:
             try:
                 await self.session.wait_for_cleanup()
+                await self.audio_sink.wait_for_cleanup()
                 await self.close(notify=notify)
             except Exception:
                 pass
@@ -655,10 +707,6 @@ class LiveKitRoomController:
                         pass
                     except Exception as error:
                         errors.append(error)
-                try:
-                    self.audio_source.clear_queue()
-                except Exception as error:
-                    errors.append(error)
                 if errors:
                     raise ExceptionGroup("room resource cleanup failed", errors)
                 if self._transport_failed:
@@ -672,23 +720,28 @@ class LiveKitRoomController:
                         await self.session.disconnect(notify_client=False)
                     except RuntimeError as error:
                         if str(error) in {
-                            "cancellation_cleanup_timeout", "turn_cleanup_timeout"
+                            "cancellation_cleanup_timeout",
+                            "turn_cleanup_timeout",
+                            "audio_drain_timeout",
                         }:
                             self._schedule_close_retry(notify)
                             return
                         raise
+                    await self.audio_sink.close()
                 else:
                     try:
                         await self.session.disconnect()
                     except RuntimeError as error:
                         if str(error) in {
-                            "cancellation_cleanup_timeout", "turn_cleanup_timeout"
+                            "cancellation_cleanup_timeout",
+                            "turn_cleanup_timeout",
+                            "audio_drain_timeout",
                         }:
                             self._schedule_close_retry(notify)
                             return
                         raise
+                    await self.audio_sink.close()
                     await self._disconnect_room()
-                await self.audio_source.aclose()
                 await asyncio.to_thread(self.runner.close, self.session_id)
                 self._cleanup_complete = True
             if notify and not self._close_notified:

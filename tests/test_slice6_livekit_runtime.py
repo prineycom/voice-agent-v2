@@ -128,6 +128,17 @@ class RecordingAudioSource:
         self.calls.append("audio.close")
 
 
+class RecordingAudioSink:
+    def __init__(self, source: RecordingAudioSource) -> None:
+        self.source = source
+
+    async def close(self) -> None:
+        await self.source.aclose()
+
+    async def wait_for_cleanup(self) -> None:
+        return None
+
+
 class RecordingRunner:
     def __init__(self, calls: list[object]) -> None:
         self.calls = calls
@@ -212,20 +223,19 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
             boundary,
             runtime.MediaBoundary("publication-1", 320, 16_000),
         )
-        self.assertEqual(len(observed_sources), 1)
-        self.assertIs(observed_sources[-1], sink.source)
+        self.assertEqual(observed_sources, [])
         self.assertNotIn(("unpublish", "publication-1"), calls)
 
         await sink.complete("turn-test", boundary)
 
         self.assertEqual(calls.count(("unpublish", "publication-1")), 1)
         self.assertLess(
-            calls.index(("drained", "source-2")),
-            calls.index(("close", "source-2")),
+            calls.index(("drained", "source-1")),
+            calls.index(("close", "source-1")),
         )
         self.assertLess(
             calls.index(("unpublish", "publication-1")),
-            calls.index(("close", "source-2")),
+            calls.index(("close", "source-1")),
         )
         await sink.prepare("turn-next")
         self.assertIn(("publish", "publication-2"), calls)
@@ -291,8 +301,8 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         clear_one = asyncio.create_task(sink.clear("turn-test"))
         clear_two = asyncio.create_task(sink.clear("turn-test"))
         await asyncio.sleep(0)
-        self.assertIn(("clear", "source-2"), calls)
-        self.assertNotIn(("close", "source-2"), calls)
+        self.assertIn(("clear", "source-1"), calls)
+        self.assertNotIn(("close", "source-1"), calls)
         unpublish_release.set()
 
         self.assertEqual(await asyncio.wait_for(clear_one, 1), "publication-shared")
@@ -305,9 +315,249 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(
             calls.index(("unpublish-finish", "publication-shared")),
-            calls.index(("close", "source-2")),
+            calls.index(("close", "source-1")),
         )
         self.assertIsNone(sink.publication)
+
+    async def test_retirement_self_finalizes_after_last_waiter_times_out(self) -> None:
+        calls: list[object] = []
+        release = asyncio.Event()
+
+        class Source:
+            sequence = 0
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                Source.sequence += 1
+                self.name = f"source-{Source.sequence}"
+                self.closed = False
+
+            async def capture_frame(self, _frame) -> None:
+                return None
+
+            async def wait_for_playout(self) -> None:
+                return None
+
+            def clear_queue(self) -> None:
+                if self.closed:
+                    raise RuntimeError("disposed source was cleared")
+
+            async def aclose(self) -> None:
+                if self.closed:
+                    raise RuntimeError("source was closed twice")
+                self.closed = True
+                calls.append(("close", self.name))
+
+        class Participant:
+            async def publish_track(self, _track, _options):
+                return types.SimpleNamespace(sid="publication-late")
+
+            async def unpublish_track(self, publication_id: str) -> None:
+                calls.append(("unpublish", publication_id))
+                await release.wait()
+
+        runtime.rtc.AudioSource = Source
+        runtime.rtc.AudioFrame = lambda **kwargs: kwargs
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()),
+            Source(),
+            lambda source: calls.append(("fresh", source.name)),
+        )
+        await sink.prepare("turn-late")
+        boundary = await sink.play("turn-late", b"\0\0" * 320, lambda: False)
+        assert boundary is not None
+
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(sink.complete("turn-late", boundary), 0.01)
+        release.set()
+        for _ in range(20):
+            if sink._retirement is None:
+                break
+            await asyncio.sleep(0)
+
+        self.assertIsNone(sink.publication)
+        self.assertIsNone(sink._retirement)
+        self.assertEqual(calls.count(("unpublish", "publication-late")), 1)
+        self.assertEqual(
+            [call for call in calls if call[0] == "fresh"],
+            [("fresh", "source-2")],
+        )
+        await sink.close()
+        self.assertEqual(calls.count(("close", "source-2")), 1)
+
+    async def test_timed_out_completion_is_joined_by_close(self) -> None:
+        release = asyncio.Event()
+
+        class Source:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.closed = False
+
+            async def capture_frame(self, _frame) -> None:
+                return None
+
+            async def wait_for_playout(self) -> None:
+                return None
+
+            def clear_queue(self) -> None:
+                if self.closed:
+                    raise RuntimeError("disposed source was cleared")
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        class Participant:
+            async def publish_track(self, _track, _options):
+                return types.SimpleNamespace(sid="publication-close")
+
+            async def unpublish_track(self, _publication_id: str) -> None:
+                await release.wait()
+
+        runtime.rtc.AudioSource = Source
+        runtime.rtc.AudioFrame = lambda **kwargs: kwargs
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()),
+            Source(),
+            lambda _source: None,
+        )
+        await sink.prepare("turn-close")
+        boundary = await sink.play("turn-close", b"\0\0" * 320, lambda: False)
+        assert boundary is not None
+
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(sink.complete("turn-close", boundary), 0.01)
+        closing = asyncio.create_task(sink.close())
+        await asyncio.sleep(0)
+        self.assertFalse(closing.done())
+        release.set()
+        await asyncio.wait_for(closing, 1)
+
+        self.assertTrue(sink._closed)
+        self.assertIsNone(sink.publication)
+        self.assertIsNone(sink._retirement)
+
+    async def test_late_retirement_failure_keeps_publication_and_capacity(self) -> None:
+        calls: list[object] = []
+        release = asyncio.Event()
+
+        class Source:
+            sequence = 0
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                Source.sequence += 1
+                self.name = f"source-{Source.sequence}"
+                self.closed = False
+
+            async def capture_frame(self, _frame) -> None:
+                return None
+
+            async def wait_for_playout(self) -> None:
+                return None
+
+            def clear_queue(self) -> None:
+                if self.closed:
+                    raise RuntimeError("disposed source was cleared")
+
+            async def aclose(self) -> None:
+                self.closed = True
+                calls.append(("close", self.name))
+
+        class Participant:
+            async def publish_track(self, _track, _options):
+                return types.SimpleNamespace(sid="publication-failed")
+
+            async def unpublish_track(self, publication_id: str) -> None:
+                calls.append(("unpublish", publication_id))
+                await release.wait()
+                raise RuntimeError("unpublish failed")
+
+        runtime.rtc.AudioSource = Source
+        runtime.rtc.AudioFrame = lambda **kwargs: kwargs
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()), Source(), lambda _source: None
+        )
+        await sink.prepare("turn-failed")
+        boundary = await sink.play("turn-failed", b"\0\0" * 320, lambda: False)
+        assert boundary is not None
+
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(sink.complete("turn-failed", boundary), 0.01)
+        release.set()
+        with self.assertRaises(RuntimeError):
+            await sink.wait_for_cleanup()
+        with self.assertRaises(RuntimeError):
+            await sink.prepare("turn-next")
+        with self.assertRaises(RuntimeError):
+            await sink.clear("turn-failed")
+
+        self.assertEqual(calls.count(("unpublish", "publication-failed")), 1)
+        self.assertEqual([call for call in calls if call[0] == "close"], [])
+        self.assertIsNotNone(sink.publication)
+        self.assertIsNotNone(sink._retirement)
+
+    async def test_timed_out_clear_is_joined_by_prepare_without_duplicate_rotation(self) -> None:
+        calls: list[object] = []
+        release = asyncio.Event()
+
+        class Source:
+            sequence = 0
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                Source.sequence += 1
+                self.name = f"source-{Source.sequence}"
+                self.closed = False
+
+            def clear_queue(self) -> None:
+                if self.closed:
+                    raise RuntimeError("disposed source was cleared")
+                calls.append(("clear", self.name))
+
+            async def aclose(self) -> None:
+                self.closed = True
+                calls.append(("close", self.name))
+
+        class Participant:
+            sequence = 0
+
+            async def publish_track(self, _track, _options):
+                Participant.sequence += 1
+                return types.SimpleNamespace(sid=f"publication-{Participant.sequence}")
+
+            async def unpublish_track(self, publication_id: str) -> None:
+                calls.append(("unpublish", publication_id))
+                await release.wait()
+
+        runtime.rtc.AudioSource = Source
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()), Source(), lambda _source: None
+        )
+        await sink.prepare("turn-one")
+
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(sink.clear("turn-one"), 0.01)
+        preparation = asyncio.create_task(sink.prepare("turn-two"))
+        await asyncio.sleep(0)
+        self.assertFalse(preparation.done())
+        release.set()
+
+        self.assertEqual(await asyncio.wait_for(preparation, 1), "publication-2")
+        self.assertEqual(calls.count(("unpublish", "publication-1")), 1)
+        self.assertEqual(calls.count(("close", "source-1")), 1)
+        self.assertEqual(Source.sequence, 2)
 
     def test_live_runner_bounds_session_diagnostics_after_every_turn(self) -> None:
         class Adapter:
@@ -467,6 +717,7 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         controller.room = RecordingRoom(calls)
         controller.session = RecordingSession(controller.room, calls)
         controller.audio_source = RecordingAudioSource(calls)
+        controller.audio_sink = RecordingAudioSink(controller.audio_source)
         runner = StartupCancellationRunner(calls)
         runner.loop = asyncio.get_running_loop()
         controller.runner = runner
@@ -508,6 +759,7 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         controller.room = RecordingRoom(calls)
         controller.session = DelayedCleanupSession(controller.room, calls)
         controller.audio_source = RecordingAudioSource(calls)
+        controller.audio_sink = RecordingAudioSink(controller.audio_source)
         controller.runner = RecordingRunner(calls)
         closed = asyncio.Event()
 
@@ -539,8 +791,8 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_preserves_normal_and_failed_transport_ordering(self) -> None:
         for transport_failed, expected_prefix in (
-            (False, [("session.disconnect", True), "room.disconnect"]),
-            (True, ["room.disconnect", ("session.disconnect", False)]),
+            (False, [("session.disconnect", True), "audio.close", "room.disconnect"]),
+            (True, ["room.disconnect", ("session.disconnect", False), "audio.close"]),
         ):
             with self.subTest(transport_failed=transport_failed):
                 calls: list[object] = []
@@ -551,6 +803,7 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 controller.room = RecordingRoom(calls)
                 controller.session = RecordingSession(controller.room, calls)
                 controller.audio_source = RecordingAudioSource(calls)
+                controller.audio_sink = RecordingAudioSink(controller.audio_source)
                 controller.runner = RecordingRunner(calls)
                 controller.on_closed = lambda _session_id: asyncio.sleep(0)
                 controller._closed = False
@@ -566,7 +819,7 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await controller.close()
 
                 resource_calls = [call for call in calls if call != "audio.clear"]
-                self.assertEqual(resource_calls[:2], expected_prefix)
+                self.assertEqual(resource_calls[:3], expected_prefix)
                 self.assertTrue(controller._cleanup_complete)
                 self.assertTrue(controller._close_notified)
 
