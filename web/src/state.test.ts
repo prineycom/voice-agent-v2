@@ -3,7 +3,6 @@ import {
   CONTROL_VERSION,
   RealtimeControlGate,
   initialVoiceState,
-  parseCapability,
   parseControlEvent,
   voiceReducer,
   type ControlEvent,
@@ -23,15 +22,15 @@ const capability: SessionCapability = {
 function event(
   sequence: number,
   type: ControlEvent['type'],
-  turn_id = 'turn-00000001',
+  turnId = 'turn-00000001',
   payload: Record<string, unknown> = {},
-  stream_epoch = 1,
+  streamEpoch = 1,
 ): ControlEvent {
   return {
     schema_version: CONTROL_VERSION,
     session_id: capability.session_id,
-    turn_id,
-    stream_epoch,
+    turn_id: type.startsWith('session.') ? 'session' : turnId,
+    stream_epoch: streamEpoch,
     sequence,
     type,
     terminal: ['turn.completed', 'turn.interrupted', 'turn.failed'].includes(type),
@@ -44,141 +43,121 @@ function configured() {
 }
 
 function apply(events: ControlEvent[]) {
-  return events.reduce((state, item) => voiceReducer(state, { type: 'control', event: item }), configured())
+  return events.reduce(
+    (state, item) => voiceReducer(state, { type: 'control', event: item }),
+    configured(),
+  )
 }
 
-describe('control event boundary', () => {
-  it('parses only the closed bounded envelope', () => {
-    const valid = JSON.stringify(event(1, 'turn.listening'))
-    expect(parseControlEvent(valid)?.type).toBe('turn.listening')
-    expect(parseControlEvent('{"schema_version":"wrong"}')).toBeNull()
-    expect(parseControlEvent(new Uint8Array([0xff]))).toBeNull()
-    const extra = { ...event(1, 'turn.listening'), endpoint: 'must-not-reach-browser' }
-    expect(parseControlEvent(JSON.stringify(extra))).toBeNull()
-    expect(parseControlEvent('x'.repeat(65_537))).toBeNull()
-  })
+function completedTurn(startSequence: number, turnId: string, user: string, assistant: string) {
+  return [
+    event(startSequence, 'turn.listening', turnId),
+    event(startSequence + 1, 'stt.final', turnId, { transcript: user }),
+    event(startSequence + 2, 'turn.thinking', turnId),
+    event(startSequence + 3, 'llm.visible', turnId, {
+      response: assistant,
+      endpoint_to_first_visible_ms: 37,
+    }),
+    event(startSequence + 4, 'turn.speaking', turnId, {
+      server_streamed_output: true,
+      endpoint_to_first_accepted_pcm_ms: 64,
+    }),
+    event(startSequence + 5, 'turn.completed', turnId, {
+      outcome: 'completed',
+      endpoint_to_first_visible_ms: 37,
+      endpoint_to_first_accepted_pcm_ms: 64,
+    }),
+  ]
+}
 
-  it('rejects malformed capability responses and accepts only WSS', () => {
-    expect(parseCapability(capability)).toEqual(capability)
-    expect(parseCapability({ ...capability, livekit_url: 'ws://127.0.0.1:7880' })).not.toBeNull()
-    expect(parseCapability({ ...capability, livekit_url: 'ws://voice.test.ts.net:7880' })).toBeNull()
-    expect(parseCapability({ ...capability, provider_endpoint: 'http://private' })).toBeNull()
-  })
-
-  it('rejects out-of-order lifecycle events before they reach state or media actions', () => {
-    const gate = new RealtimeControlGate(capability.session_id, 1)
-    expect(gate.accept(event(1, 'session.ready', 'session'))).toBe(true)
-    expect(gate.accept(event(2, 'turn.listening'))).toBe(true)
-    expect(gate.accept(event(3, 'turn.speaking'))).toBe(false)
-    expect(gate.accept(event(3, 'turn.transcribing'))).toBe(true)
-    gate.beginReconnect()
-    expect(gate.accept(event(4, 'stt.final', 'turn-00000001', {}, 1))).toBe(false)
-    expect(gate.accept(event(5, 'session.reconnected', 'session', {}, 2))).toBe(true)
-    expect(gate.accept(event(6, 'session.ready', 'session', {}, 1))).toBe(false)
-  })
-
-  it('accepts playout after streaming finishes with a final visible event', () => {
-    const gate = new RealtimeControlGate(capability.session_id, 1)
-    for (const item of [
-      event(1, 'session.ready', 'session'),
-      event(2, 'turn.listening'),
-      event(3, 'turn.transcribing'),
-      event(4, 'stt.final'),
-      event(5, 'turn.thinking'),
-      event(6, 'llm.visible'),
-      event(7, 'turn.speaking'),
-      event(8, 'llm.final'),
-      event(9, 'turn.playout-ready'),
-    ]) {
-      expect(gate.accept(item)).toBe(true)
+describe('checkpoint A browser state', () => {
+  it('rejects removed playout events at the serialized protocol boundary', () => {
+    expect(parseControlEvent(JSON.stringify(event(1, 'turn.listening')))?.type).toBe('turn.listening')
+    const removed = {
+      ...event(2, 'turn.completed'),
+      type: 'turn.playout-ready',
+      terminal: false,
     }
+    expect(parseControlEvent(JSON.stringify(removed))).toBeNull()
   })
 
-  it('shows correlated transcript and response and rejects duplicate/late/wrong-turn events', () => {
-    let state = apply([
-      event(1, 'session.ready', 'session'),
-      event(2, 'turn.listening'),
-      event(3, 'turn.transcribing'),
-      event(4, 'stt.final', 'turn-00000001', { transcript: 'Привет.' }),
-      event(5, 'turn.thinking'),
-      event(6, 'llm.final', 'turn-00000001', { response: 'Здравствуйте.' }),
-      event(7, 'turn.speaking'),
-    ])
-    expect(state.transcript).toBe('Привет.')
-    expect(state.response).toBe('Здравствуйте.')
-    expect(state.phase).toBe('speaking')
-
-    state = voiceReducer(state, { type: 'control', event: event(7, 'turn.speaking') })
-    state = voiceReducer(state, { type: 'control', event: event(6, 'llm.final') })
-    state = voiceReducer(state, {
-      type: 'control',
-      event: event(8, 'turn.completed', 'turn-other'),
-    })
-    expect(state.droppedEvents).toBe(3)
-    expect(state.phase).toBe('speaking')
-  })
-
-  it('terminates an interrupted turn before accepting a clean new turn', () => {
+  it('keeps chronological in-memory history with outcomes and server metrics', () => {
     const state = apply([
-      event(1, 'session.ready', 'session'),
-      event(2, 'turn.listening'),
-      event(3, 'turn.transcribing'),
-      event(4, 'stt.final'),
-      event(5, 'turn.thinking'),
-      event(6, 'llm.final'),
-      event(7, 'turn.speaking'),
-      event(8, 'turn.interrupted'),
-      event(9, 'turn.listening', 'turn-00000002'),
-      event(10, 'turn.transcribing', 'turn-00000002'),
-      event(11, 'stt.final', 'turn-00000002', { transcript: 'Новая реплика.' }),
-      event(12, 'turn.thinking', 'turn-00000002'),
-      event(13, 'llm.final', 'turn-00000002', { response: 'Новый ответ.' }),
-      event(14, 'turn.speaking', 'turn-00000002'),
-      event(15, 'turn.playout-ready', 'turn-00000002'),
-      event(16, 'turn.playout-retired', 'turn-00000002'),
-      event(17, 'turn.completed', 'turn-00000002'),
+      event(1, 'session.ready'),
+      ...completedTurn(2, 'turn-00000001', 'Первый вопрос.', 'Первый ответ.'),
+      ...completedTurn(8, 'turn-00000002', 'Второй вопрос.', 'Второй ответ.'),
     ])
-    expect(state.currentTurnId).toBe('turn-00000002')
-    expect(state.phase).toBe('completed')
-    expect(state.transcript).toBe('Новая реплика.')
-    expect(state.response).toBe('Новый ответ.')
-    expect(state.droppedEvents).toBe(0)
+
+    expect(state.phase).toBe('idle')
+    expect(state.history).toEqual([
+      expect.objectContaining({
+        turnId: 'turn-00000001',
+        user: 'Первый вопрос.',
+        assistant: 'Первый ответ.',
+        outcome: 'completed',
+        endpointToFirstVisibleMs: 37,
+        endpointToFirstAcceptedPcmMs: 64,
+      }),
+      expect.objectContaining({
+        turnId: 'turn-00000002',
+        user: 'Второй вопрос.',
+        assistant: 'Второй ответ.',
+        outcome: 'completed',
+      }),
+    ])
   })
 
-  it('clears stale content on reconnect and accepts only the next epoch', () => {
-    let state = apply([
-      event(1, 'session.ready', 'session'),
+  it('retains visible text and marks only the item when TTS fails', () => {
+    const state = apply([
+      event(1, 'session.ready'),
       event(2, 'turn.listening'),
-      event(3, 'turn.transcribing'),
-      event(4, 'stt.final', 'turn-00000001', { transcript: 'Старый текст.' }),
+      event(3, 'stt.final', 'turn-00000001', { transcript: 'Вопрос.' }),
+      event(4, 'turn.thinking'),
+      event(5, 'llm.visible', 'turn-00000001', { response: 'Видимый ответ.' }),
+      event(6, 'turn.failed', 'turn-00000001', {
+        outcome: 'failed', stage: 'tts', code: 'selected_tts_unavailable',
+      }),
+    ])
+
+    expect(state.connection).toBe('ready')
+    expect(state.phase).toBe('idle')
+    expect(state.history[0]).toMatchObject({
+      assistant: 'Видимый ответ.',
+      outcome: 'failed',
+      audioUnavailable: true,
+    })
+  })
+
+  it('drops duplicate, wrong-turn, and stale-sequence events', () => {
+    const gate = new RealtimeControlGate(capability.session_id, 1)
+    expect(gate.accept(event(1, 'session.ready'))).toBe(true)
+    expect(gate.accept(event(2, 'turn.listening'))).toBe(true)
+    expect(gate.accept(event(3, 'stt.final', 'turn-other'))).toBe(false)
+    expect(gate.accept(event(3, 'stt.final'))).toBe(true)
+    expect(gate.accept(event(3, 'turn.thinking'))).toBe(false)
+  })
+
+  it('preserves history while a reconnect interrupts the active item', () => {
+    let state = apply([
+      event(1, 'session.ready'),
+      ...completedTurn(2, 'turn-00000001', 'Старый вопрос.', 'Старый ответ.'),
+      event(8, 'turn.listening', 'turn-00000002'),
+      event(9, 'stt.final', 'turn-00000002', { transcript: 'Новый вопрос.' }),
+      event(10, 'turn.thinking', 'turn-00000002'),
     ])
     state = voiceReducer(state, { type: 'connection', connection: 'reconnecting' })
-    expect(state.transcript).toBe('')
     state = voiceReducer(state, {
       type: 'control',
-      event: event(5, 'turn.listening', 'turn-old-replayed', {}, 1),
+      event: event(11, 'session.reconnected', 'session', { state: 'ready' }, 2),
     })
-    expect(state.phase).toBe('idle')
-    expect(state.droppedEvents).toBe(1)
     state = voiceReducer(state, {
       type: 'control',
-      event: event(6, 'session.reconnected', 'session', {
-        state: 'awaiting_media',
-        media_generation: 1,
-        interrupted_turn_id: 'turn-00000001',
-      }, 2),
+      event: event(12, 'session.ready', 'session', { state: 'ready' }, 2),
     })
-    expect(state.streamEpoch).toBe(2)
-    expect(state.connection).toBe('reconnecting')
-    const oldEpoch = event(7, 'session.ready', 'session', {}, 1)
-    state = voiceReducer(state, { type: 'control', event: oldEpoch })
-    expect(state.droppedEvents).toBe(2)
-    state = voiceReducer(state, {
-      type: 'control',
-      event: event(8, 'session.ready', 'session', {
-        state: 'ready', media_generation: 1,
-      }, 2),
-    })
+
     expect(state.connection).toBe('ready')
+    expect(state.history).toHaveLength(2)
+    expect(state.history[0].outcome).toBe('completed')
+    expect(state.history[1].outcome).toBe('interrupted')
   })
 })

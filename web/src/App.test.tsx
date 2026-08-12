@@ -11,8 +11,8 @@ describe('Slice 6 React shell', () => {
       </VoiceSessionProvider>,
     )
     expect(screen.getByRole('heading', { name: 'Приватный голосовой диалог' })).toBeTruthy()
-    expect(screen.getByText('Транскрипт появится после речи.')).toBeTruthy()
-    expect(screen.getByText('Ответ появится здесь и прозвучит через LiveKit.')).toBeTruthy()
+    expect(screen.getByText('История появится после речи.')).toBeTruthy()
+    expect(screen.getByText('Метрики не подтверждают физическую слышимость.', { exact: false })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Подключить микрофон' })).toBeTruthy()
     expect(document.querySelector('.audio-mount')).toBeTruthy()
   })

@@ -30,8 +30,12 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
   const disconnect = useCallback(async () => {
     const client = clientRef.current
     if (client === null) return
-    await client.stop()
-    if (clientRef.current === client) clientRef.current = null
+    try {
+      await client.stop()
+    } finally {
+      if (clientRef.current === client) clientRef.current = null
+      dispatch({ type: 'reset' })
+    }
   }, [])
 
   const connect = useCallback(async () => {

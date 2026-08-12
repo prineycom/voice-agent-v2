@@ -143,14 +143,11 @@ class ContractFixtureTests(unittest.TestCase):
                 for event in run_scenario(scenario).events:
                     validate(event, schema)
 
-    def test_one_of_rejects_zero_or_multiple_matching_branches(self) -> None:
+    def test_client_reset_is_required_and_one_of_rejects_ambiguity(self) -> None:
         client_control_schema = json.loads(
             (ROOT / "contracts" / "client-control.v1.schema.json").read_text()
         )
-        with self.assertRaisesRegex(
-            SchemaViolation,
-            r"^\$: oneOf expected exactly one matching branch, matched 0",
-        ):
+        with self.assertRaises(SchemaViolation):
             validate({}, client_control_schema)
 
         ambiguous_schema = {

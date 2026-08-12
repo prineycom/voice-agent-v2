@@ -2,52 +2,41 @@ export const CONTROL_VERSION = 'voice-agent.realtime-control.v1'
 export const CLIENT_CONTROL_VERSION = 'voice-agent.client-control.v1'
 export const CONTROL_TOPIC = 'voice-agent.control.v1'
 export const CLIENT_CONTROL_TOPIC = 'voice-agent.client-control.v1'
-export const OUTPUT_MEDIA_MAX_SECONDS = 180
-export const OUTPUT_MEDIA_MAX_SAMPLES = 16_000 * OUTPUT_MEDIA_MAX_SECONDS
 
 const MAX_CONTROL_BYTES = 65_536
 const MAX_SEQUENCE = 1_000_000_000
 const CORRELATION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 export type ConnectionState = 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'closed' | 'failed'
-export type TurnPhase = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'completed' | 'interrupted' | 'failed'
+export type TurnPhase = 'idle' | 'listening' | 'thinking' | 'speaking'
+export type TurnOutcome = 'completed' | 'interrupted' | 'failed'
 export type ControlEventType =
   | 'session.ready'
   | 'session.reconnected'
   | 'session.degraded'
   | 'turn.listening'
-  | 'turn.transcribing'
   | 'stt.final'
   | 'turn.thinking'
   | 'llm.visible'
-  | 'llm.final'
   | 'turn.speaking'
-  | 'turn.playout-ready'
-  | 'turn.playout-retired'
   | 'turn.completed'
   | 'turn.interrupted'
   | 'turn.failed'
 
 const EVENT_TYPES = new Set<ControlEventType>([
   'session.ready', 'session.reconnected', 'session.degraded',
-  'turn.listening', 'turn.transcribing', 'stt.final', 'turn.thinking',
-  'llm.visible', 'llm.final', 'turn.speaking', 'turn.playout-ready', 'turn.playout-retired',
-  'turn.completed',
-  'turn.interrupted', 'turn.failed',
+  'turn.listening', 'stt.final', 'turn.thinking', 'llm.visible',
+  'turn.speaking', 'turn.completed', 'turn.interrupted', 'turn.failed',
 ])
 const TERMINAL_TYPES = new Set<ControlEventType>([
   'turn.completed', 'turn.interrupted', 'turn.failed',
 ])
 const TURN_PREDECESSOR = new Map<ControlEventType, ControlEventType | ControlEventType[]>([
-  ['turn.transcribing', 'turn.listening'],
-  ['stt.final', 'turn.transcribing'],
+  ['stt.final', 'turn.listening'],
   ['turn.thinking', 'stt.final'],
   ['llm.visible', ['turn.thinking', 'llm.visible', 'turn.speaking']],
-  ['llm.final', ['turn.thinking', 'llm.visible', 'turn.speaking']],
-  ['turn.speaking', ['llm.visible', 'llm.final']],
-  ['turn.playout-ready', ['turn.speaking', 'llm.visible', 'llm.final']],
-  ['turn.playout-retired', 'turn.playout-ready'],
-  ['turn.completed', 'turn.playout-retired'],
+  ['turn.speaking', ['turn.thinking', 'llm.visible']],
+  ['turn.completed', ['turn.thinking', 'llm.visible', 'turn.speaking']],
 ])
 
 export interface ControlEvent {
@@ -71,6 +60,16 @@ export interface SessionCapability {
   control_version: typeof CONTROL_VERSION
 }
 
+export interface TurnHistoryItem {
+  turnId: string
+  user: string
+  assistant: string
+  outcome: TurnOutcome | null
+  audioUnavailable: boolean
+  endpointToFirstVisibleMs: number | null
+  endpointToFirstAcceptedPcmMs: number | null
+}
+
 export interface VoiceState {
   connection: ConnectionState
   sessionId: string | null
@@ -82,10 +81,10 @@ export interface VoiceState {
   phase: TurnPhase
   transcript: string
   response: string
+  history: TurnHistoryItem[]
   error: string | null
   droppedEvents: number
   audioBlocked: boolean
-  pendingMediaGeneration: number | null
 }
 
 export const initialVoiceState: VoiceState = {
@@ -99,10 +98,10 @@ export const initialVoiceState: VoiceState = {
   phase: 'idle',
   transcript: '',
   response: '',
+  history: [],
   error: null,
   droppedEvents: 0,
   audioBlocked: false,
-  pendingMediaGeneration: null,
 }
 
 export type VoiceAction =
@@ -150,14 +149,14 @@ export function parseControlEvent(payload: Uint8Array | string): ControlEvent | 
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
   const eventType = value.type
   if (
-    value.schema_version !== CONTROL_VERSION ||
-    typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id) ||
-    typeof value.turn_id !== 'string' || !CORRELATION_ID.test(value.turn_id) ||
-    !Number.isSafeInteger(value.stream_epoch) || (value.stream_epoch as number) < 1 || (value.stream_epoch as number) > MAX_SEQUENCE ||
-    !Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1 || (value.sequence as number) > MAX_SEQUENCE ||
-    typeof eventType !== 'string' || !EVENT_TYPES.has(eventType as ControlEventType) ||
-    typeof value.terminal !== 'boolean' || value.terminal !== TERMINAL_TYPES.has(eventType as ControlEventType) ||
-    !ownObject(value.payload) || !boundedValue(value.payload)
+    value.schema_version !== CONTROL_VERSION
+    || typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id)
+    || typeof value.turn_id !== 'string' || !CORRELATION_ID.test(value.turn_id)
+    || !Number.isSafeInteger(value.stream_epoch) || (value.stream_epoch as number) < 1 || (value.stream_epoch as number) > MAX_SEQUENCE
+    || !Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1 || (value.sequence as number) > MAX_SEQUENCE
+    || typeof eventType !== 'string' || !EVENT_TYPES.has(eventType as ControlEventType)
+    || typeof value.terminal !== 'boolean' || value.terminal !== TERMINAL_TYPES.has(eventType as ControlEventType)
+    || !ownObject(value.payload) || !boundedValue(value.payload)
   ) return null
   return value as unknown as ControlEvent
 }
@@ -183,10 +182,7 @@ export class RealtimeControlGate {
 
   accept(event: ControlEvent): boolean {
     if (event.session_id !== this.sessionId || event.sequence <= this.lastSequence) return false
-    if (
-      this.reconnecting &&
-      (event.type === 'session.reconnected' || event.type === 'session.degraded')
-    ) {
+    if (this.reconnecting && (event.type === 'session.reconnected' || event.type === 'session.degraded')) {
       if (event.turn_id !== 'session' || event.stream_epoch !== this.streamEpoch + 1) return false
       this.streamEpoch = event.stream_epoch
       this.lastSequence = event.sequence
@@ -206,8 +202,8 @@ export class RealtimeControlGate {
       this.lastTurnEvent = event.type
     } else {
       if (
-        event.turn_id !== this.currentTurnId || this.currentTurnTerminal ||
-        !validTurnTransition(this.lastTurnEvent, event.type)
+        event.turn_id !== this.currentTurnId || this.currentTurnTerminal
+        || !validTurnTransition(this.lastTurnEvent, event.type)
       ) return false
       this.lastTurnEvent = event.type
       if (event.terminal) this.currentTurnTerminal = true
@@ -236,14 +232,14 @@ export function parseCapability(value: unknown): SessionCapability | null {
   const expected = ['admission_timeout_ms', 'control_version', 'expires_in_seconds', 'livekit_url', 'session_id', 'stream_epoch', 'token']
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
   if (
-    typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id) ||
-    value.stream_epoch !== 1 ||
-    !validLiveKitUrl(value.livekit_url) ||
-    typeof value.token !== 'string' || value.token.length < 16 || value.token.length > 8192 ||
-    !Number.isSafeInteger(value.expires_in_seconds) || (value.expires_in_seconds as number) < 1 || (value.expires_in_seconds as number) > 600 ||
-    !Number.isSafeInteger(value.admission_timeout_ms) || (value.admission_timeout_ms as number) < 1_000 || (value.admission_timeout_ms as number) > 60_000 ||
-    (value.admission_timeout_ms as number) > (value.expires_in_seconds as number) * 1_000 ||
-    value.control_version !== CONTROL_VERSION
+    typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id)
+    || value.stream_epoch !== 1
+    || !validLiveKitUrl(value.livekit_url)
+    || typeof value.token !== 'string' || value.token.length < 16 || value.token.length > 8192
+    || !Number.isSafeInteger(value.expires_in_seconds) || (value.expires_in_seconds as number) < 1 || (value.expires_in_seconds as number) > 600
+    || !Number.isSafeInteger(value.admission_timeout_ms) || (value.admission_timeout_ms as number) < 1_000 || (value.admission_timeout_ms as number) > 60_000
+    || (value.admission_timeout_ms as number) > (value.expires_in_seconds as number) * 1_000
+    || value.control_version !== CONTROL_VERSION
   ) return null
   return value as unknown as SessionCapability
 }
@@ -255,22 +251,34 @@ function drop(state: VoiceState): VoiceState {
 function validTurnTransition(previous: ControlEventType | null, next: ControlEventType): boolean {
   if (next === 'turn.interrupted' || next === 'turn.failed') return previous !== null
   const predecessors = TURN_PREDECESSOR.get(next)
-  return Array.isArray(predecessors) ? predecessors.includes(previous as ControlEventType) : predecessors === previous
+  return Array.isArray(predecessors)
+    ? predecessors.includes(previous as ControlEventType)
+    : predecessors === previous
 }
 
-function phaseFor(type: ControlEventType): TurnPhase | null {
-  if (type === 'turn.listening') return 'listening'
-  if (type === 'turn.transcribing' || type === 'stt.final') return 'transcribing'
-  if (type === 'turn.thinking' || type === 'llm.visible' || type === 'llm.final') return 'thinking'
-  if (
-    type === 'turn.speaking'
-    || type === 'turn.playout-ready'
-    || type === 'turn.playout-retired'
-  ) return 'speaking'
-  if (type === 'turn.completed') return 'completed'
-  if (type === 'turn.interrupted') return 'interrupted'
-  if (type === 'turn.failed') return 'failed'
-  return null
+function metric(payload: Record<string, unknown>, name: string): number | null {
+  const value = payload[name]
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+function updateHistory(
+  history: TurnHistoryItem[],
+  turnId: string,
+  update: (item: TurnHistoryItem) => TurnHistoryItem,
+): TurnHistoryItem[] {
+  const index = history.findIndex((item) => item.turnId === turnId)
+  if (index < 0) return history
+  const next = history.slice()
+  next[index] = update(next[index])
+  return next
+}
+
+function interruptCurrentHistory(state: VoiceState): TurnHistoryItem[] {
+  if (state.currentTurnId === null || state.currentTurnTerminal) return state.history
+  return updateHistory(state.history, state.currentTurnId, (item) => ({
+    ...item,
+    outcome: 'interrupted',
+  }))
 }
 
 export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState {
@@ -290,14 +298,11 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       return {
         ...state,
         connection: 'reconnecting',
-        currentTurnId: null,
         currentTurnTerminal: true,
         lastTurnEvent: null,
         phase: 'idle',
-        transcript: '',
-        response: '',
+        history: interruptCurrentHistory(state),
         error: null,
-        pendingMediaGeneration: null,
       }
     }
     return {
@@ -309,21 +314,12 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
 
   const event = action.event
   if (state.sessionId === null || event.session_id !== state.sessionId || event.sequence <= state.lastSequence) return drop(state)
-  let next = state
   if (
-    state.connection === 'reconnecting' &&
-    (event.type === 'session.reconnected' || event.type === 'session.degraded')
+    state.connection === 'reconnecting'
+    && (event.type === 'session.reconnected' || event.type === 'session.degraded')
   ) {
     if (event.turn_id !== 'session' || event.stream_epoch !== state.streamEpoch + 1) return drop(state)
     const degraded = event.type === 'session.degraded'
-    const awaitingMedia = (
-      event.type === 'session.reconnected'
-      && event.payload.state === 'awaiting_media'
-      && typeof event.payload.media_generation === 'number'
-      && Number.isSafeInteger(event.payload.media_generation)
-      && event.payload.media_generation > 0
-    )
-    if (!degraded && !awaitingMedia) return drop(state)
     return {
       ...state,
       connection: degraded ? 'failed' : 'reconnecting',
@@ -332,30 +328,13 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       currentTurnId: null,
       currentTurnTerminal: true,
       lastTurnEvent: null,
-      phase: degraded ? 'failed' : 'idle',
-      transcript: '',
-      response: '',
+      phase: 'idle',
       error: degraded ? 'Не удалось безопасно восстановить сессию' : null,
-      pendingMediaGeneration: degraded
-        ? null
-        : event.payload.media_generation as number,
     }
   }
-  if (
-    state.connection === 'reconnecting'
-    && event.type === 'session.ready'
-    && event.turn_id === 'session'
-    && event.stream_epoch === state.streamEpoch
-    && event.payload.state === 'ready'
-    && event.payload.media_generation === state.pendingMediaGeneration
-  ) {
-    return {
-      ...state,
-      connection: 'ready',
-      lastSequence: event.sequence,
-      error: null,
-      pendingMediaGeneration: null,
-    }
+  if (state.connection === 'reconnecting' && event.type === 'session.ready') {
+    if (event.turn_id !== 'session' || event.stream_epoch !== state.streamEpoch) return drop(state)
+    return { ...state, connection: 'ready', lastSequence: event.sequence, error: null }
   }
   if (state.connection === 'reconnecting' || event.stream_epoch !== state.streamEpoch) return drop(state)
   if (event.type.startsWith('session.')) {
@@ -367,39 +346,76 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       error: event.type === 'session.degraded' ? 'Локальный голосовой путь недоступен' : null,
     }
   }
+
+  let next = state
   if (event.type === 'turn.listening') {
     if (!state.currentTurnTerminal || state.currentTurnId === event.turn_id) return drop(state)
+    const item: TurnHistoryItem = {
+      turnId: event.turn_id,
+      user: '',
+      assistant: '',
+      outcome: null,
+      audioUnavailable: false,
+      endpointToFirstVisibleMs: null,
+      endpointToFirstAcceptedPcmMs: null,
+    }
     next = {
       ...state,
       currentTurnId: event.turn_id,
       currentTurnTerminal: false,
       lastTurnEvent: event.type,
+      phase: 'listening',
       transcript: '',
       response: '',
+      history: [...state.history, item],
       error: null,
+      lastSequence: event.sequence,
     }
-  } else if (
-    event.turn_id !== state.currentTurnId || state.currentTurnTerminal ||
-    !validTurnTransition(state.lastTurnEvent, event.type)
-  ) {
-    return drop(state)
+    return next
   }
-  const phase = phaseFor(event.type)
-  if (phase === null) return drop(state)
+  if (
+    event.turn_id !== state.currentTurnId || state.currentTurnTerminal
+    || !validTurnTransition(state.lastTurnEvent, event.type)
+  ) return drop(state)
+
+  let phase: TurnPhase = state.phase
+  if (event.type === 'stt.final' || event.type === 'turn.thinking' || event.type === 'llm.visible') phase = 'thinking'
+  if (event.type === 'turn.speaking') phase = 'speaking'
+  if (event.terminal) phase = 'idle'
   const transcript = event.type === 'stt.final' && typeof event.payload.transcript === 'string'
-    ? event.payload.transcript : next.transcript
-  const response = (event.type === 'llm.visible' || event.type === 'llm.final')
-    && typeof event.payload.response === 'string'
-    ? event.payload.response : next.response
+    ? event.payload.transcript : state.transcript
+  const response = event.type === 'llm.visible' && typeof event.payload.response === 'string'
+    ? event.payload.response : state.response
+  const outcome: TurnOutcome | null = event.type === 'turn.completed'
+    ? 'completed'
+    : event.type === 'turn.interrupted'
+      ? 'interrupted'
+      : event.type === 'turn.failed'
+        ? 'failed'
+        : null
+  const visibleMetric = metric(event.payload, 'endpoint_to_first_visible_ms')
+  const pcmMetric = metric(event.payload, 'endpoint_to_first_accepted_pcm_ms')
+  const history = updateHistory(state.history, event.turn_id, (item) => ({
+    ...item,
+    user: transcript,
+    assistant: response,
+    outcome: outcome ?? item.outcome,
+    audioUnavailable: item.audioUnavailable || (
+      event.type === 'turn.failed' && event.payload.stage === 'tts'
+    ),
+    endpointToFirstVisibleMs: visibleMetric ?? item.endpointToFirstVisibleMs,
+    endpointToFirstAcceptedPcmMs: pcmMetric ?? item.endpointToFirstAcceptedPcmMs,
+  }))
   const error = event.type === 'turn.failed'
-    ? `Ошибка: ${String(event.payload.stage ?? 'turn')}/${String(event.payload.code ?? 'unknown')}`
-    : next.error
+    ? `Ошибка ответа: ${String(event.payload.stage ?? 'turn')}/${String(event.payload.code ?? 'unknown')}`
+    : state.error
   return {
-    ...next,
+    ...state,
     lastSequence: event.sequence,
     phase,
     transcript,
     response,
+    history,
     error,
     currentTurnTerminal: event.terminal,
     lastTurnEvent: event.type,

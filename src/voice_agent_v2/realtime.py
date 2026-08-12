@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Callable, Protocol
 
-from .audio import OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SAMPLES
+from .audio import OUTPUT_MEDIA_MAX_BYTES
 from .contracts import StageFailure, valid_correlation_id
 from .tracer import CancellationToken, TraceResult
 
@@ -26,76 +26,44 @@ SESSION_TURN_ID = "session"
 MAX_CONTROL_BYTES = 65_536
 MAX_EVENT_SEQUENCE = 1_000_000_000
 MAX_DIAGNOSTIC_FAILURES = 20_000
+PCM_PUMP_MAX_BLOCKS = 2
+PCM_PRODUCER_WAIT_SECONDS = 0.02
 PUBLIC_EVENT_TYPES = frozenset({
     "session.ready",
     "session.reconnected",
     "session.degraded",
     "turn.listening",
-    "turn.transcribing",
     "stt.final",
     "turn.thinking",
     "llm.visible",
-    "llm.final",
     "turn.speaking",
-    "turn.playout-ready",
-    "turn.playout-retired",
     "turn.completed",
     "turn.interrupted",
     "turn.failed",
 })
 TERMINAL_EVENT_TYPES = frozenset({"turn.completed", "turn.interrupted", "turn.failed"})
 TURN_PREDECESSOR = {
-    "turn.transcribing": "turn.listening",
-    "stt.final": "turn.transcribing",
+    "stt.final": "turn.listening",
     "turn.thinking": "stt.final",
     "llm.visible": {"turn.thinking", "llm.visible", "turn.speaking"},
-    "llm.final": {"turn.thinking", "llm.visible", "turn.speaking"},
-    "turn.speaking": {"llm.visible", "llm.final"},
-    "turn.playout-ready": {"turn.speaking", "llm.visible", "llm.final"},
-    "turn.playout-retired": "turn.playout-ready",
-    "turn.completed": "turn.playout-retired",
+    "turn.speaking": {"turn.thinking", "llm.visible"},
+    "turn.completed": {"turn.thinking", "llm.visible", "turn.speaking"},
 }
 BARGE_IN_DRAIN_BOUND_MS = 250
 CANCELLATION_CLEANUP_BOUND_MS = 1_000
-AUDIO_RETIREMENT_BOUND_MS = 1_000
 CONTROL_PUBLISH_BOUND_MS = 1_000
-CLIENT_PLAYOUT_ACK_TIMEOUT_MS = 3_000
-CLIENT_MEDIA_READY_TIMEOUT_MS = 3_000
-CLIENT_MEDIA_READY_ACK_MARGIN_MS = 250
-CLIENT_WAIT_STARTED_TIMEOUT_MS = 10_000
 MAX_UTTERANCE_BYTES = 30 * 16_000 * 2
-TERMINAL_CONTROLLER_FAILURE_CODES = frozenset({
-    "local_lfm_handoff_cleanup_failed",
-})
+TERMINAL_CONTROLLER_FAILURE_CODES = frozenset({"local_lfm_handoff_cleanup_failed"})
 
 
 class EventSink(Protocol):
     async def send(self, event: dict[str, object]) -> None: ...
 
 
-@dataclass(frozen=True)
-class MediaBoundary:
-    completed_publication_id: str
-    final_sample_count: int = 1
-    sample_rate_hz: int = 16_000
-
-
 class AudioSink(Protocol):
-    requires_media_start_ack: bool
-
-    async def prepare(self, turn_id: str) -> str: ...
-
-    def current_publication_id(self) -> str: ...
-
     async def write(
         self, turn_id: str, pcm: bytes, cancelled: Callable[[], bool]
     ) -> bool: ...
-
-    async def seal(
-        self, turn_id: str, cancelled: Callable[[], bool]
-    ) -> MediaBoundary | None: ...
-
-    async def complete(self, turn_id: str, boundary: MediaBoundary) -> None: ...
 
     async def clear(self, turn_id: str) -> str | None: ...
 
@@ -119,20 +87,18 @@ class TurnRunner(Protocol):
 class TurnContext:
     turn_id: str
     cancellation: CancellationToken
+    endpoint_monotonic: float
     task: asyncio.Task[None] | None = None
     terminal: bool = False
     rollback_complete: bool = False
     rollback_error: str | None = None
     cancellation_cleanup: asyncio.Task[str | None] | None = None
     worker: asyncio.Task[TraceResult] | None = None
-    playout_ack: asyncio.Future[None] | None = None
-    playout_boundary: MediaBoundary | None = None
-    playout_media_generation: int | None = None
-    playout_retired: bool = False
-    playout_retirement_token: object | None = None
-    playout_retirement: asyncio.Task[None] | None = None
     audio_chunk_sequence: int = 0
     audio_bytes_streamed: int = 0
+    pcm_queue_high_water: int = 0
+    first_visible_ms: float | None = None
+    first_pcm_ms: float | None = None
 
 
 def _bounded_json_value(value: object, depth: int = 0) -> bool:
@@ -143,7 +109,9 @@ def _bounded_json_value(value: object, depth: int = 0) -> bool:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return math.isfinite(value)
     if isinstance(value, list):
-        return len(value) <= 128 and all(_bounded_json_value(item, depth + 1) for item in value)
+        return len(value) <= 128 and all(
+            _bounded_json_value(item, depth + 1) for item in value
+        )
     if isinstance(value, dict):
         return len(value) <= 64 and all(
             isinstance(key, str)
@@ -155,7 +123,7 @@ def _bounded_json_value(value: object, depth: int = 0) -> bool:
 
 
 class ControlEventGate:
-    """Strict receiver gate mirrored by the browser reducer."""
+    """Strict same-session, same-turn, monotonically sequenced receiver gate."""
 
     def __init__(self, session_id: str, stream_epoch: int = 1) -> None:
         if not valid_correlation_id(session_id) or stream_epoch < 1:
@@ -273,33 +241,25 @@ class RealtimeSession:
         self._disconnect_lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[str | None]] = set()
         self._cleanup_error: str | None = None
-        self._media_generation = 0
-        self._media_ready_generation = 0
-        self._media_wait_started_generation = 0
-        self._media_wait_started_kind: str | None = None
-        self._media_generation_turn_id: str | None = None
-        self._media_ready = asyncio.Event()
-        self._media_ready.set()
-        self._media_ready_timeout_task: asyncio.Task[None] | None = None
-        self._media_wait_started_timeout_task: asyncio.Task[None] | None = None
         self.drop_counts = {"stale_event": 0, "client_control": 0}
         self.diagnostic_failure_counts = {"validation": 0, "write": 0, "observer": 0}
 
     def _trace(self, stage: str, event: str, **fields: object) -> None:
-        if self.trace_observer is not None:
-            try:
-                self.trace_observer(stage, event, fields)
-            except Exception as error:
-                if isinstance(error, OSError):
-                    kind = "write"
-                elif isinstance(error, (TypeError, ValueError)):
-                    kind = "validation"
-                else:
-                    kind = "observer"
-                self.diagnostic_failure_counts[kind] = min(
-                    self.diagnostic_failure_counts[kind] + 1,
-                    MAX_DIAGNOSTIC_FAILURES,
-                )
+        if self.trace_observer is None:
+            return
+        try:
+            self.trace_observer(stage, event, fields)
+        except Exception as error:
+            if isinstance(error, OSError):
+                kind = "write"
+            elif isinstance(error, (TypeError, ValueError)):
+                kind = "validation"
+            else:
+                kind = "observer"
+            self.diagnostic_failure_counts[kind] = min(
+                self.diagnostic_failure_counts[kind] + 1,
+                MAX_DIAGNOSTIC_FAILURES,
+            )
 
     @property
     def active_turn_id(self) -> str | None:
@@ -318,31 +278,18 @@ class RealtimeSession:
                 if self._closed:
                     raise RuntimeError("session is closed")
                 if self._active is not None and not self._active.terminal:
-                    _cleanup, drain_error, _publication_id = await self._interrupt_locked(
-                        "barge_in"
-                    )
+                    cleanup, drain_error, _publication_id = await self._interrupt_locked("barge_in")
                     if drain_error is not None:
                         await self._degrade_locked("publication", drain_error)
                         raise RuntimeError("audio publication could not be cancelled safely")
-                    return await self._admit_listening_locked()
-        while True:
-            expected_epoch = self.stream_epoch
-            expected_generation = self._media_generation
-            media_error = await self._await_media_ready()
-            async with self._reconnect_lock:
-                async with self._lock:
-                    if self._closed:
-                        raise RuntimeError("session is closed")
-                    if (
-                        expected_epoch != self.stream_epoch
-                        or expected_generation != self._media_generation
-                        or self._media_ready_generation < self._media_generation
-                    ):
-                        continue
-                    if media_error is not None:
-                        await self._degrade_locked("publication", media_error)
-                        raise RuntimeError(media_error)
-                    return await self._admit_listening_locked()
+                    if cleanup is not None:
+                        self._watch_cleanup(cleanup)
+                elif self._active is not None:
+                    drain_error, _publication_id = await self._clear_audio(SESSION_TURN_ID)
+                    if drain_error is not None:
+                        await self._degrade_locked("publication", drain_error)
+                        raise RuntimeError("audio publication could not be reset safely")
+                return await self._admit_listening_locked()
 
     async def _admit_listening_locked(self) -> str:
         self._turn_sequence += 1
@@ -350,18 +297,25 @@ class RealtimeSession:
         context = TurnContext(
             turn_id=turn_id,
             cancellation=CancellationToken(),
+            endpoint_monotonic=time.monotonic(),
         )
         self._active = context
         await self._emit(turn_id, "turn.listening", {"state": "listening"})
         return turn_id
 
-    async def finish_utterance(self, pcm: bytes) -> str:
+    async def finish_utterance(
+        self, pcm: bytes, *, endpoint_monotonic: float | None = None
+    ) -> str:
         if not pcm or len(pcm) % 2 or len(pcm) > MAX_UTTERANCE_BYTES:
             raise ValueError("utterance PCM is outside the 16 kHz mono s16le bound")
         async with self._lock:
             context = self._active
             if context is None or context.terminal or context.task is not None:
                 raise RuntimeError("there is no listening turn")
+            endpoint = time.monotonic() if endpoint_monotonic is None else endpoint_monotonic
+            if not math.isfinite(endpoint) or endpoint > time.monotonic() + 0.01:
+                raise ValueError("invalid acoustic endpoint timestamp")
+            context.endpoint_monotonic = endpoint
             context.task = asyncio.create_task(
                 self._run_turn(context, bytes(pcm)), name=f"realtime-{context.turn_id}"
             )
@@ -397,11 +351,12 @@ class RealtimeSession:
     async def _clear_audio(self, turn_id: str) -> tuple[str | None, str | None]:
         try:
             publication_id = await asyncio.wait_for(
-                self.audio_sink.clear(turn_id),
-                timeout=BARGE_IN_DRAIN_BOUND_MS / 1000,
+                self.audio_sink.clear(turn_id), BARGE_IN_DRAIN_BOUND_MS / 1000
             )
             if publication_id is not None and (
-                not publication_id or len(publication_id) > 128
+                not isinstance(publication_id, str)
+                or not publication_id
+                or len(publication_id) > 128
             ):
                 return "audio_boundary_invalid", None
         except TimeoutError:
@@ -410,136 +365,25 @@ class RealtimeSession:
             return "audio_drain_failed", None
         return None, publication_id
 
-    def _cancel_playout_retirement(self, context: TurnContext) -> None:
-        context.playout_retirement_token = None
-        retirement = context.playout_retirement
-        context.playout_retirement = None
-        if retirement is not None and retirement is not asyncio.current_task():
-            retirement.cancel()
-
-    @staticmethod
-    def _consume_background_task(task: asyncio.Task[None]) -> None:
+    async def _abandon_audio(self, turn_id: str) -> tuple[str | None, str | None]:
+        abandon = getattr(self.audio_sink, "abandon", None)
+        if abandon is None:
+            return None, None
         try:
-            task.result()
-        except BaseException:
-            pass
-
-    async def _complete_audio_retirement(
-        self, turn_id: str, boundary: MediaBoundary
-    ) -> None:
-        completion = asyncio.create_task(
-            self.audio_sink.complete(turn_id, boundary),
-            name=f"audio-retirement-boundary-{turn_id}",
-        )
-        completion.add_done_callback(self._consume_background_task)
-        try:
-            done, _pending = await asyncio.wait(
-                {completion}, timeout=AUDIO_RETIREMENT_BOUND_MS / 1000
+            publication_id = await asyncio.wait_for(
+                abandon(turn_id), BARGE_IN_DRAIN_BOUND_MS / 1000
             )
-            if not done:
-                raise TimeoutError("audio publication retirement timed out")
-            await completion
-        finally:
-            if not completion.done():
-                completion.cancel()
-
-    async def _send_bounded_event(self, event: dict[str, object]) -> None:
-        delivery = asyncio.create_task(
-            self.event_sink.send(event),
-            name=f"control-publish-{event['type']}-{event['turn_id']}",
-        )
-        delivery.add_done_callback(self._consume_background_task)
-        try:
-            done, _pending = await asyncio.wait(
-                {delivery}, timeout=CONTROL_PUBLISH_BOUND_MS / 1000
-            )
-            if not done:
-                raise TimeoutError("control publication timed out")
-            await delivery
-        finally:
-            if not delivery.done():
-                delivery.cancel()
-
-    async def _retire_playout(
-        self,
-        context: TurnContext,
-        boundary: MediaBoundary,
-        media_generation: int,
-        stream_epoch: int,
-        token: object,
-    ) -> None:
-        error: Exception | None = None
-        try:
-            await self._complete_audio_retirement(context.turn_id, boundary)
-        except asyncio.CancelledError:
-            return
-        except Exception as caught:
-            error = caught
-        reserved_event: dict[str, object] | None = None
-        async with self._lock:
-            if (
-                self._closed
-                or context.terminal
-                or self._active is not context
-                or context.playout_retirement_token is not token
-                or context.playout_boundary != boundary
-                or context.playout_media_generation != media_generation
-                or self._media_generation != media_generation
-                or self.stream_epoch != stream_epoch
+            if publication_id is not None and (
+                not isinstance(publication_id, str)
+                or not publication_id
+                or len(publication_id) > 128
             ):
-                return
-            if error is None:
-                reserved_event = self._reserve_public_event(
-                    context.turn_id,
-                    "turn.playout-retired",
-                    {
-                        "state": "awaiting_publication_unsubscribed",
-                        "media_generation": media_generation,
-                        "completed_publication_id": boundary.completed_publication_id,
-                    },
-                )
-        if reserved_event is not None:
-            try:
-                await self._send_bounded_event(reserved_event)
-            except asyncio.CancelledError:
-                return
-            except Exception as caught:
-                error = caught
-        async with self._lock:
-            if (
-                self._closed
-                or context.terminal
-                or self._active is not context
-                or context.playout_retirement_token is not token
-                or context.playout_boundary != boundary
-                or context.playout_media_generation != media_generation
-                or self._media_generation != media_generation
-                or self.stream_epoch != stream_epoch
-            ):
-                return
-            context.playout_retirement_token = None
-            context.playout_retirement = None
-            if error is not None:
-                if reserved_event is not None:
-                    self._closed = True
-                    self._report_failure("transport", "control_publish_failed")
-                if context.playout_ack is not None and not context.playout_ack.done():
-                    context.playout_ack.set_exception(error)
-                return
-            context.playout_retired = True
-
-    async def _rollback_context(self, context: TurnContext) -> str | None:
-        async with self._runner_lock:
-            if context.rollback_complete:
-                return context.rollback_error
-            discard = getattr(self.runner, "discard_turn", None)
-            try:
-                if discard is not None:
-                    await asyncio.to_thread(discard, self.session_id, context.turn_id)
-            except Exception:
-                context.rollback_error = "context_rollback_failed"
-            context.rollback_complete = True
-            return context.rollback_error
+                return "audio_boundary_invalid", None
+        except TimeoutError:
+            return "audio_drain_timeout", None
+        except Exception:
+            return "audio_drain_failed", None
+        return None, publication_id
 
     def _report_failure(self, stage: str, code: str) -> None:
         if self._failure_reported:
@@ -564,6 +408,19 @@ class RealtimeSession:
         self._closed = True
         await self._publish_degraded_locked(stage, code)
 
+    async def _rollback_context(self, context: TurnContext) -> str | None:
+        async with self._runner_lock:
+            if context.rollback_complete:
+                return context.rollback_error
+            discard = getattr(self.runner, "discard_turn", None)
+            try:
+                if discard is not None:
+                    await asyncio.to_thread(discard, self.session_id, context.turn_id)
+            except Exception:
+                context.rollback_error = "context_rollback_failed"
+            context.rollback_complete = True
+            return context.rollback_error
+
     def _track_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
         self._cleanup_tasks.add(cleanup)
 
@@ -583,27 +440,21 @@ class RealtimeSession:
         timeout_ms: int | None,
         stop: Callable[[], bool] | None = None,
     ) -> str | None:
-        deadline = (
-            None
-            if timeout_ms is None
-            else asyncio.get_running_loop().time() + timeout_ms / 1000
-        )
+        deadline = None if timeout_ms is None else asyncio.get_running_loop().time() + timeout_ms / 1000
         while self._cleanup_tasks:
             if stop is not None and stop():
                 return None
             pending = tuple(self._cleanup_tasks)
             try:
                 if deadline is None:
-                    results = await asyncio.gather(
-                        *(asyncio.shield(task) for task in pending)
-                    )
+                    results = await asyncio.gather(*(asyncio.shield(task) for task in pending))
                 else:
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         return "cancellation_cleanup_timeout"
                     results = await asyncio.wait_for(
                         asyncio.gather(*(asyncio.shield(task) for task in pending)),
-                        timeout=remaining,
+                        remaining,
                     )
             except TimeoutError:
                 return "cancellation_cleanup_timeout"
@@ -616,14 +467,14 @@ class RealtimeSession:
         return self._cleanup_error
 
     async def wait_for_cleanup(self) -> None:
-        error = await self._await_cleanup_barrier(timeout_ms=None)
+        error = await self._await_cleanup_barrier(None)
         if error is not None:
             raise RuntimeError(error)
         context = self._active
         task = context.task if context is not None else None
         if task is not None and task is not asyncio.current_task():
             await asyncio.shield(task)
-        error = await self._await_cleanup_barrier(timeout_ms=None)
+        error = await self._await_cleanup_barrier(None)
         if error is not None:
             raise RuntimeError(error)
 
@@ -639,9 +490,8 @@ class RealtimeSession:
     def _ensure_context_cleanup(
         self, context: TurnContext, *, wait_for_turn: bool = True
     ) -> asyncio.Task[str | None]:
-        cleanup = context.cancellation_cleanup
-        if cleanup is not None:
-            return cleanup
+        if context.cancellation_cleanup is not None:
+            return context.cancellation_cleanup
 
         async def cancel_runner() -> str | None:
             cancel_error: Exception | None = None
@@ -650,17 +500,12 @@ class RealtimeSession:
                 await asyncio.to_thread(self.runner.cancel)
             except Exception as error:
                 cancel_error = error
-            task = context.task
-            worker = context.worker
-            awaited = task if wait_for_turn else worker
+            awaited = context.task if wait_for_turn else context.worker
             if awaited is not None and awaited is not asyncio.current_task():
                 try:
                     await awaited
                 except Exception as error:
                     cancel_error = cancel_error or error
-                finally:
-                    if not wait_for_turn and context.worker is worker:
-                        context.worker = None
             if not context.rollback_complete:
                 context.rollback_error = await self._rollback_context(context)
             if cancel_error is not None:
@@ -679,15 +524,9 @@ class RealtimeSession:
         if context is None or context.terminal:
             return None, None, None
         context.terminal = True
-        self._cancel_playout_retirement(context)
-        if context.playout_ack is not None and not context.playout_ack.done():
-            context.playout_ack.set_result(None)
-
         started = time.monotonic()
         try:
             drain_error, publication_id = await self._clear_audio(context.turn_id)
-            if publication_id is None and context.playout_boundary is not None:
-                publication_id = context.playout_boundary.completed_publication_id
         finally:
             drain_ms = (time.monotonic() - started) * 1000
             cleanup = self._ensure_context_cleanup(context)
@@ -699,13 +538,9 @@ class RealtimeSession:
                 "drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS,
             }
             if publication_id is not None:
-                payload["media_publication_id"] = publication_id
-            await self._emit(
-                context.turn_id,
-                "turn.interrupted",
-                payload,
-                terminal=True,
-            )
+                payload["server_media_publication_id"] = publication_id
+            self._add_metrics(context, payload)
+            await self._emit(context.turn_id, "turn.interrupted", payload, terminal=True)
         return cleanup, drain_error, publication_id
 
     async def _run_turn(self, context: TurnContext, pcm: bytes) -> None:
@@ -716,79 +551,104 @@ class RealtimeSession:
 
     async def _abort_failed_transport(self, context: TurnContext) -> None:
         context.terminal = True
-        self._cancel_playout_retirement(context)
         self._closed = True
         self._report_failure("transport", "control_publish_failed")
         await self._clear_audio(context.turn_id)
-        existing_cleanup = context.cancellation_cleanup
         cleanup = self._ensure_context_cleanup(context, wait_for_turn=False)
-        if existing_cleanup is None:
+        if context.cancellation_cleanup is cleanup:
             context.rollback_error = await cleanup
 
     async def _run_turn_body(self, context: TurnContext, pcm: bytes) -> None:
         if context.terminal or self._closed:
             return
         cleanup_error = await self._await_cleanup_barrier(
-            timeout_ms=CANCELLATION_CLEANUP_BOUND_MS,
+            CANCELLATION_CLEANUP_BOUND_MS,
             stop=lambda: context.terminal or self._closed,
         )
         if cleanup_error is not None:
+            await self._terminate_failed_turn(
+                context,
+                "turn.failed",
+                {"outcome": "failed", "stage": "controller", "code": cleanup_error},
+            )
             async with self._lock:
-                if not context.terminal:
-                    context.terminal = True
-                    await self._emit(
-                        context.turn_id,
-                        "turn.failed",
-                        {"outcome": "failed", "stage": "controller", "code": cleanup_error},
-                        terminal=True,
-                    )
                 await self._degrade_locked("controller", cleanup_error)
-            return
-        if context.terminal or self._closed:
-            return
-        media_error = await self._await_media_ready(context)
-        if media_error is not None:
-            async with self._lock:
-                if not context.terminal:
-                    context.terminal = True
-                    await self._emit(
-                        context.turn_id,
-                        "turn.failed",
-                        {"outcome": "failed", "stage": "publication", "code": media_error},
-                        terminal=True,
-                    )
-                await self._degrade_locked("publication", media_error)
             return
         if context.terminal or self._closed:
             return
 
         loop = asyncio.get_running_loop()
-        observed: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+        event_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+        pcm_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(
+            maxsize=PCM_PUMP_MAX_BLOCKS
+        )
+        pump_errors: list[BaseException] = []
 
         def observe(event: dict[str, object]) -> None:
-            loop.call_soon_threadsafe(observed.put_nowait, ("event", event))
+            delivery = asyncio.run_coroutine_threadsafe(event_queue.put(event), loop)
+            while True:
+                try:
+                    delivery.result(timeout=PCM_PRODUCER_WAIT_SECONDS)
+                    return
+                except TimeoutError:
+                    if context.cancellation.cancelled or context.terminal or self._closed:
+                        delivery.cancel()
+                        return
+
+        async def enqueue_pcm(chunk_index: int, chunk: bytes) -> None:
+            await pcm_queue.put((chunk_index, chunk))
+            context.pcm_queue_high_water = max(
+                context.pcm_queue_high_water, pcm_queue.qsize()
+            )
 
         def observe_audio(chunk_index: int, chunk: bytes) -> None:
-            delivered = threading.Event()
-            outcome: list[BaseException] = []
-            loop.call_soon_threadsafe(
-                observed.put_nowait,
-                ("audio", (chunk_index, bytes(chunk), delivered, outcome)),
+            barrier = asyncio.run_coroutine_threadsafe(event_queue.join(), loop)
+            while True:
+                try:
+                    barrier.result(timeout=PCM_PRODUCER_WAIT_SECONDS)
+                    break
+                except TimeoutError:
+                    if context.cancellation.cancelled or context.terminal or self._closed:
+                        barrier.cancel()
+                        raise StageFailure("tts", "selected_tts_cancelled")
+            delivery = asyncio.run_coroutine_threadsafe(
+                enqueue_pcm(chunk_index, bytes(chunk)), loop
             )
-            deadline = time.monotonic() + (CLIENT_WAIT_STARTED_TIMEOUT_MS + CLIENT_MEDIA_READY_TIMEOUT_MS) / 1_000
-            while not delivered.wait(0.02):
-                if context.cancellation.cancelled or context.terminal or self._closed:
-                    raise StageFailure("tts", "selected_tts_cancelled")
-                if time.monotonic() >= deadline:
-                    raise StageFailure("tts", "audio_stream_backpressure_timeout")
-            if outcome:
-                raise outcome[0]
+            while True:
+                try:
+                    delivery.result(timeout=PCM_PRODUCER_WAIT_SECONDS)
+                    return
+                except TimeoutError:
+                    if context.cancellation.cancelled or context.terminal or self._closed:
+                        delivery.cancel()
+                        raise StageFailure("tts", "selected_tts_cancelled")
+
+        async def consume_events() -> None:
+            while True:
+                event = await event_queue.get()
+                try:
+                    if event is None:
+                        return
+                    await self._relay_internal(context, event)
+                finally:
+                    event_queue.task_done()
+
+        async def consume_pcm() -> None:
+            while True:
+                item = await pcm_queue.get()
+                try:
+                    if item is None:
+                        return
+                    chunk_index, chunk = item
+                    await self._relay_audio_chunk(context, chunk_index, chunk)
+                except BaseException as error:
+                    pump_errors.append(error)
+                    context.cancellation.cancel()
+                    return
+                finally:
+                    pcm_queue.task_done()
 
         run_parameters = inspect.signature(type(self.runner).run_turn).parameters
-        accepts_keywords = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in run_parameters.values()
-        )
         streaming_audio = (
             hasattr(self.audio_sink, "write")
             and "audio_observer" in run_parameters
@@ -809,10 +669,14 @@ class RealtimeSession:
             runner_arguments["audio_observer"] = observe_audio
             runner_arguments["retain_output"] = False
 
+        event_consumer = asyncio.create_task(consume_events(), name=f"events-{context.turn_id}")
+        pcm_consumer = asyncio.create_task(consume_pcm(), name=f"pcm-{context.turn_id}")
         result: TraceResult | None = None
         runner_failure: Exception | None = None
         async with self._runner_lock:
             if context.terminal or self._closed:
+                event_consumer.cancel()
+                pcm_consumer.cancel()
                 return
             worker = asyncio.create_task(
                 asyncio.to_thread(self.runner.run_turn, **runner_arguments),
@@ -820,65 +684,40 @@ class RealtimeSession:
             )
             context.worker = worker
             try:
-                while not worker.done() or not observed.empty():
-                    try:
-                        event = await asyncio.wait_for(observed.get(), timeout=0.01)
-                    except TimeoutError:
-                        continue
-                    kind, value = event
-                    if kind == "event":
-                        assert isinstance(value, dict)
-                        await self._relay_internal(context, value)
-                    else:
-                        chunk_index, chunk, delivered, outcome = value
-                        assert isinstance(chunk_index, int) and isinstance(chunk, bytes)
-                        try:
-                            await self._relay_audio_chunk(context, chunk_index, chunk)
-                        except BaseException as error:
-                            outcome.append(error)
-                        finally:
-                            delivered.set()
                 try:
                     result = await worker
                 except Exception as error:
                     runner_failure = error
+                await event_queue.put(None)
+                await pcm_queue.put(None)
+                await event_consumer
+                await pcm_consumer
             finally:
-                if worker.done() and context.worker is worker:
+                if context.worker is worker:
                     context.worker = None
+                for consumer in (event_consumer, pcm_consumer):
+                    if not consumer.done():
+                        consumer.cancel()
 
+        if pump_errors:
+            error = pump_errors[0]
+            stage = error.stage if isinstance(error, StageFailure) else "publication"
+            code = error.code if isinstance(error, StageFailure) else "audio_stream_failed"
+            await self._terminate_failed_turn(
+                context,
+                "turn.failed",
+                {"outcome": "failed", "stage": stage, "code": code},
+            )
+            return
         if runner_failure is not None or result is None:
             failure_stage = "controller"
-            failure_class = "NoneType"
             failure_code = "inference_runner_failure"
+            failure_class = "NoneType"
             if runner_failure is not None:
-                candidate_class = type(runner_failure).__name__
-                if (
-                    0 < len(candidate_class) <= 128
-                    and candidate_class.isascii()
-                    and all(
-                        character.isalnum() or character == "_"
-                        for character in candidate_class
-                    )
-                ):
-                    failure_class = candidate_class
-                else:
-                    failure_class = "Exception"
+                failure_class = type(runner_failure).__name__[:128]
                 if isinstance(runner_failure, StageFailure):
-                    if runner_failure.stage in {
-                        "stt", "llm_provider", "tts", "publication", "controller"
-                    }:
-                        failure_stage = runner_failure.stage
-                    candidate_code = runner_failure.code
-                    if (
-                        isinstance(candidate_code, str)
-                        and 0 < len(candidate_code) <= 128
-                        and candidate_code.isascii()
-                        and all(
-                            character.isalnum() or character in {"_", "-"}
-                            for character in candidate_code
-                        )
-                    ):
-                        failure_code = candidate_code
+                    failure_stage = runner_failure.stage
+                    failure_code = runner_failure.code
             self._trace(
                 failure_stage,
                 "runner_failed",
@@ -889,137 +728,67 @@ class RealtimeSession:
             await self._terminate_failed_turn(
                 context,
                 "turn.failed",
-                {"outcome": "failed", "stage": "controller", "code": "inference_runner_failure"},
+                {"outcome": "failed", "stage": failure_stage, "code": failure_code},
             )
             return
 
-        while not observed.empty():
-            kind, value = observed.get_nowait()
-            if kind == "event":
-                assert isinstance(value, dict)
-                await self._relay_internal(context, value)
-            else:
-                chunk_index, chunk, delivered, outcome = value
-                assert isinstance(chunk_index, int) and isinstance(chunk, bytes)
-                try:
-                    await self._relay_audio_chunk(context, chunk_index, chunk)
-                except BaseException as error:
-                    outcome.append(error)
-                finally:
-                    delivered.set()
         terminal = result.terminal_event
-        output_pcm = result.output_pcm
-        terminal_payload_candidate = terminal.get("payload")
-        output_bytes = (
-            terminal_payload_candidate.get("output_bytes", len(output_pcm))
-            if isinstance(terminal_payload_candidate, dict)
-            else len(output_pcm)
-        )
-        del result
-        del worker
-        pcm = b""
+        terminal_payload = terminal.get("payload")
         if terminal["type"] != "turn.completed":
-            payload = terminal.get("payload")
-            if not isinstance(payload, dict):
-                payload = {
-                    "outcome": "failed", "stage": "controller",
-                    "code": "inference_runner_protocol_error",
-                }
+            payload = terminal_payload if isinstance(terminal_payload, dict) else {
+                "outcome": "failed",
+                "stage": "controller",
+                "code": "inference_runner_protocol_error",
+            }
             await self._terminate_failed_turn(context, str(terminal["type"]), payload)
             return
-        media_error = await self._await_media_ready(context)
-        if media_error is not None:
-            await self._fail_publication(context, media_error, clear_audio=True)
-            async with self._lock:
-                await self._degrade_locked("publication", media_error)
+        if context.terminal or self._closed:
             return
-        if context.terminal:
-            context.rollback_error = await self._rollback_context(context)
-            if context.rollback_error is not None:
-                async with self._lock:
-                    await self._degrade_locked("controller", context.rollback_error)
-            return
-        if self._closed:
-            return
-        if not isinstance(output_bytes, int) or output_bytes < 1:
-            await self._fail_publication(context, "empty_audio_output", clear_audio=True)
-            return
-        if output_bytes > OUTPUT_MEDIA_MAX_BYTES:
-            await self._fail_publication(
-                context, "audio_output_out_of_bounds", clear_audio=True
-            )
-            return
-        try:
-            if streaming_audio:
-                boundary = await self.audio_sink.seal(
-                    context.turn_id,
-                    lambda: context.terminal or context.cancellation.cancelled,
+
+        output_pcm = result.output_pcm
+        if not streaming_audio:
+            if not output_pcm:
+                await self._terminate_failed_turn(
+                    context,
+                    "turn.failed",
+                    {"outcome": "failed", "stage": "publication", "code": "empty_audio_output"},
                 )
-            else:
-                boundary = await self.audio_sink.play(
-                    context.turn_id,
-                    output_pcm,
-                    lambda: context.terminal or context.cancellation.cancelled,
-                )
-        except Exception:
-            await self._fail_publication(context, "audio_playout_exception", clear_audio=True)
-            return
-        finally:
-            output_pcm = b""
-        if boundary is None:
-            await self._fail_publication(context, "audio_playout_failed", clear_audio=True)
-            return
-        if (
-            not boundary.completed_publication_id
-            or len(boundary.completed_publication_id) > 128
-            or not isinstance(boundary.final_sample_count, int)
-            or isinstance(boundary.final_sample_count, bool)
-            or boundary.final_sample_count < 1
-            or boundary.final_sample_count > OUTPUT_MEDIA_MAX_SAMPLES
-            or boundary.sample_rate_hz != 16_000
-        ):
-            await self._fail_publication(context, "audio_boundary_invalid", clear_audio=True)
-            return
-        async with self._lock:
-            if context.terminal or self._closed or self._active is not context:
                 return
-            context.playout_ack = asyncio.get_running_loop().create_future()
-            context.playout_boundary = boundary
-            context.playout_media_generation = self._invalidate_media(context.turn_id)
-            await self._emit(
-                context.turn_id,
-                "turn.playout-ready",
-                {
-                    "state": "awaiting_client_playout_boundary",
-                    "ack_timeout_ms": CLIENT_PLAYOUT_ACK_TIMEOUT_MS,
-                    "ack_deadline_ms": (
-                        CLIENT_PLAYOUT_ACK_TIMEOUT_MS
-                        - CLIENT_MEDIA_READY_ACK_MARGIN_MS
-                    ),
-                    "media_generation": context.playout_media_generation,
-                    "completed_publication_id": boundary.completed_publication_id,
-                    "final_sample_count": boundary.final_sample_count,
-                    "sample_rate_hz": boundary.sample_rate_hz,
-                },
-            )
-            self._arm_wait_started_timeout(context.playout_media_generation)
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(context.playout_ack),
-                timeout=CLIENT_PLAYOUT_ACK_TIMEOUT_MS / 1000,
-            )
-        except TimeoutError:
-            await self._fail_publication(
-                context, "client_playout_ack_timeout", clear_audio=True
-            )
-            async with self._lock:
-                await self._degrade_locked("transport", "client_playout_ack_timeout")
-            return
-        except Exception:
-            await self._fail_publication(
-                context, "audio_boundary_finalize_failed", clear_audio=True
+            await self._relay_audio_chunk(context, 0, output_pcm)
+        output_bytes = (
+            terminal_payload.get("output_bytes", context.audio_bytes_streamed)
+            if isinstance(terminal_payload, dict)
+            else context.audio_bytes_streamed
+        )
+        if (
+            not isinstance(output_bytes, int)
+            or isinstance(output_bytes, bool)
+            or output_bytes < 1
+            or output_bytes > OUTPUT_MEDIA_MAX_BYTES
+            or context.audio_bytes_streamed != output_bytes
+        ):
+            await self._terminate_failed_turn(
+                context,
+                "turn.failed",
+                {"outcome": "failed", "stage": "publication", "code": "audio_stream_invalid"},
             )
             return
+        finish = getattr(self.audio_sink, "finish", None)
+        if finish is not None:
+            try:
+                accepted = await finish(
+                    context.turn_id,
+                    lambda: context.terminal or context.cancellation.cancelled,
+                )
+            except Exception:
+                accepted = False
+            if not accepted:
+                await self._terminate_failed_turn(
+                    context,
+                    "turn.failed",
+                    {"outcome": "failed", "stage": "publication", "code": "audio_stream_failed"},
+                )
+                return
 
         async with self._lock:
             if context.terminal or self._closed or self._active is not context:
@@ -1028,36 +797,38 @@ class RealtimeSession:
             if delivered is not None:
                 try:
                     async with self._runner_lock:
-                        await asyncio.to_thread(
-                            delivered, self.session_id, context.turn_id
-                        )
+                        await asyncio.to_thread(delivered, self.session_id, context.turn_id)
                 except Exception:
-                    context.rollback_error = await self._rollback_context(context)
                     context.terminal = True
-                    await self._emit(
-                        context.turn_id,
-                        "turn.failed",
-                        {"outcome": "failed", "stage": "controller", "code": "context_commit_failed"},
-                        terminal=True,
-                    )
-                    await self._degrade_locked(
-                        "controller", context.rollback_error or "context_commit_failed"
-                    )
+                    payload = {
+                        "outcome": "failed",
+                        "stage": "controller",
+                        "code": "context_commit_failed",
+                    }
+                    self._add_metrics(context, payload)
+                    await self._emit(context.turn_id, "turn.failed", payload, terminal=True)
+                    await self._degrade_locked("controller", "context_commit_failed")
                     return
             context.terminal = True
-            await self._emit(
-                context.turn_id,
-                "turn.completed",
-                {
-                    "outcome": "completed",
-                    "output_bytes": output_bytes,
-                    "audio_format": {
-                        "encoding": "pcm_s16le", "sample_rate_hz": 16_000,
-                        "channels": 1, "sample_width_bytes": 2,
-                    },
+            payload: dict[str, object] = {
+                "outcome": "completed",
+                "output_bytes": output_bytes,
+                "server_pcm_queue_max_blocks": context.pcm_queue_high_water,
+                "audio_format": {
+                    "encoding": "pcm_s16le",
+                    "sample_rate_hz": 16_000,
+                    "channels": 1,
+                    "sample_width_bytes": 2,
                 },
-                terminal=True,
-            )
+            }
+            self._add_metrics(context, payload)
+            await self._emit(context.turn_id, "turn.completed", payload, terminal=True)
+
+    def _add_metrics(self, context: TurnContext, payload: dict[str, object]) -> None:
+        if context.first_visible_ms is not None:
+            payload["endpoint_to_first_visible_ms"] = context.first_visible_ms
+        if context.first_pcm_ms is not None:
+            payload["endpoint_to_first_accepted_pcm_ms"] = context.first_pcm_ms
 
     async def _terminate_failed_turn(
         self,
@@ -1068,182 +839,29 @@ class RealtimeSession:
         async with self._lock:
             if context.terminal or self._closed or self._active is not context:
                 return
-            self._cancel_playout_retirement(context)
-            drain_error, publication_id = await self._clear_audio(context.turn_id)
-            if publication_id is None and context.playout_boundary is not None:
-                publication_id = context.playout_boundary.completed_publication_id
+            if payload.get("stage") == "publication":
+                drain_error, publication_id = await self._clear_audio(context.turn_id)
+            else:
+                drain_error, publication_id = await self._abandon_audio(context.turn_id)
             context.rollback_error = await self._rollback_context(context)
             context.terminal = True
-            terminal_controller_code = payload.get("code")
-            terminal_controller_failure = (
-                payload.get("stage") == "llm_provider"
-                and isinstance(terminal_controller_code, str)
-                and terminal_controller_code in TERMINAL_CONTROLLER_FAILURE_CODES
-            )
-            if terminal_controller_failure:
-                self._closed = True
             public_payload = dict(payload)
             if publication_id is not None:
-                public_payload["media_publication_id"] = publication_id
-            await self._emit(
-                context.turn_id, event_type, public_payload, terminal=True
+                public_payload["server_media_publication_id"] = publication_id
+            self._add_metrics(context, public_payload)
+            await self._emit(context.turn_id, event_type, public_payload, terminal=True)
+            terminal_code = payload.get("code")
+            terminal_controller_failure = (
+                payload.get("stage") == "llm_provider"
+                and isinstance(terminal_code, str)
+                and terminal_code in TERMINAL_CONTROLLER_FAILURE_CODES
             )
             if terminal_controller_failure:
-                assert isinstance(terminal_controller_code, str)
-                await self._publish_degraded_locked(
-                    "llm_provider", terminal_controller_code
-                )
+                await self._degrade_locked("llm_provider", terminal_code)
             elif drain_error is not None:
                 await self._degrade_locked("publication", drain_error)
             elif context.rollback_error is not None:
                 await self._degrade_locked("controller", context.rollback_error)
-
-    async def _fail_publication(
-        self, context: TurnContext, code: str, *, clear_audio: bool
-    ) -> None:
-        async with self._lock:
-            await self._fail_publication_locked(context, code, clear_audio=clear_audio)
-
-    async def _fail_publication_locked(
-        self, context: TurnContext, code: str, *, clear_audio: bool
-    ) -> None:
-        if context.terminal or self._closed or self._active is not context:
-            return
-        self._cancel_playout_retirement(context)
-        drain_error: str | None = None
-        publication_id: str | None = None
-        if clear_audio:
-            drain_error, publication_id = await self._clear_audio(context.turn_id)
-            if publication_id is None and context.playout_boundary is not None:
-                publication_id = context.playout_boundary.completed_publication_id
-        context.rollback_error = await self._rollback_context(context)
-        context.terminal = True
-        payload: dict[str, object] = {
-            "outcome": "failed", "stage": "publication", "code": code
-        }
-        if publication_id is not None:
-            payload["media_publication_id"] = publication_id
-        await self._emit(
-            context.turn_id,
-            "turn.failed",
-            payload,
-            terminal=True,
-        )
-        if drain_error is not None:
-            await self._degrade_locked("publication", drain_error)
-        elif context.rollback_error is not None:
-            await self._degrade_locked("controller", context.rollback_error)
-
-    async def _await_media_ready(
-        self, context: TurnContext | None = None
-    ) -> str | None:
-        while self._media_ready_generation < self._media_generation:
-            if self._closed or (context is not None and context.terminal):
-                return None
-            await self._media_ready.wait()
-        return None
-
-    def _invalidate_media(self, turn_id: str) -> int:
-        self._media_generation += 1
-        if self._media_generation > MAX_EVENT_SEQUENCE:
-            raise RuntimeError("session media generation exhausted")
-        self._media_generation_turn_id = turn_id
-        self._media_wait_started_generation = 0
-        self._media_wait_started_kind = None
-        self._media_ready.clear()
-        for timeout in (
-            self._media_ready_timeout_task,
-            self._media_wait_started_timeout_task,
-        ):
-            if timeout is not None and not timeout.done():
-                timeout.cancel()
-        self._media_ready_timeout_task = None
-        self._media_wait_started_timeout_task = None
-        return self._media_generation
-
-    def _arm_wait_started_timeout(self, generation: int) -> None:
-        if generation != self._media_generation or self._closed:
-            return
-        timeout = self._media_wait_started_timeout_task
-        if timeout is not None and not timeout.done():
-            timeout.cancel()
-        epoch = self.stream_epoch
-
-        async def expire() -> None:
-            try:
-                await asyncio.sleep(CLIENT_WAIT_STARTED_TIMEOUT_MS / 1000)
-                async with self._lock:
-                    if (
-                        not self._closed
-                        and self.stream_epoch == epoch
-                        and self._media_wait_started_generation < generation
-                    ):
-                        context = self._active
-                        if (
-                            context is not None
-                            and context.playout_media_generation == generation
-                            and context.playout_ack is not None
-                            and not context.playout_ack.done()
-                        ):
-                            context.playout_ack.set_exception(TimeoutError())
-                        self._media_ready.set()
-                        await self._degrade_locked(
-                            "publication", "client_wait_start_timeout"
-                        )
-            except asyncio.CancelledError:
-                raise
-
-        self._media_wait_started_timeout_task = asyncio.create_task(
-            expire(), name=f"media-wait-started-{self.session_id}-{generation}"
-        )
-
-    def _arm_media_ready_timeout(self, generation: int) -> None:
-        if generation != self._media_generation or self._closed:
-            return
-        timeout = self._media_ready_timeout_task
-        if timeout is not None and not timeout.done():
-            timeout.cancel()
-        epoch = self.stream_epoch
-
-        async def expire() -> None:
-            try:
-                await asyncio.sleep(CLIENT_MEDIA_READY_TIMEOUT_MS / 1000)
-                async with self._lock:
-                    if (
-                        not self._closed
-                        and self.stream_epoch == epoch
-                        and self._media_ready_generation < generation
-                    ):
-                        context = self._active
-                        if (
-                            context is not None
-                            and context.playout_media_generation == generation
-                            and context.playout_ack is not None
-                            and not context.playout_ack.done()
-                        ):
-                            context.playout_ack.set_exception(TimeoutError())
-                        self._media_ready.set()
-                        await self._degrade_locked(
-                            "publication", "client_media_ready_timeout"
-                        )
-            except asyncio.CancelledError:
-                raise
-
-        self._media_ready_timeout_task = asyncio.create_task(
-            expire(), name=f"media-ready-{self.session_id}-{generation}"
-        )
-
-    def _confirm_media_ready(self, generation: int) -> None:
-        self._media_ready_generation = generation
-        self._media_ready.set()
-        timeout = self._media_ready_timeout_task
-        if timeout is not None and not timeout.done():
-            timeout.cancel()
-        self._media_ready_timeout_task = None
-        prepare_timeout = self._media_wait_started_timeout_task
-        if prepare_timeout is not None and not prepare_timeout.done():
-            prepare_timeout.cancel()
-        self._media_wait_started_timeout_task = None
 
     async def _relay_audio_chunk(
         self, context: TurnContext, chunk_index: int, chunk: bytes
@@ -1263,9 +881,7 @@ class RealtimeSession:
             or context.audio_bytes_streamed + len(chunk) > OUTPUT_MEDIA_MAX_BYTES
         ):
             raise StageFailure("publication", "audio_stream_invalid")
-        media_error = await self._await_media_ready(context)
-        if media_error is not None or context.terminal or self._closed:
-            return
+        submitted_before = getattr(self.audio_sink, "submitted_bytes", None)
         try:
             accepted = await self.audio_sink.write(
                 context.turn_id,
@@ -1274,8 +890,10 @@ class RealtimeSession:
             )
         except Exception as error:
             self._trace(
-                "publication", "media_write_failed",
-                turn_id=context.turn_id, failure_class=type(error).__name__,
+                "publication",
+                "media_write_failed",
+                turn_id=context.turn_id,
+                failure_class=type(error).__name__,
                 failure_code="audio_stream_failed",
             )
             accepted = False
@@ -1300,10 +918,32 @@ class RealtimeSession:
         context.audio_chunk_sequence += 1
         context.audio_bytes_streamed += len(chunk)
         self._trace(
-            "publication", "media_chunk",
-            turn_id=context.turn_id, chunk_index=chunk_index, byte_count=len(chunk),
+            "publication",
+            "media_chunk",
+            turn_id=context.turn_id,
+            chunk_index=chunk_index,
+            byte_count=len(chunk),
             total_bytes=context.audio_bytes_streamed,
         )
+        submitted_after = getattr(self.audio_sink, "submitted_bytes", None)
+        frame_submitted = (
+            submitted_before is None
+            or submitted_after is None
+            or submitted_after > submitted_before
+        )
+        if context.first_pcm_ms is None and frame_submitted:
+            context.first_pcm_ms = round(
+                max(0.0, (time.monotonic() - context.endpoint_monotonic) * 1000), 3
+            )
+            await self._emit(
+                context.turn_id,
+                "turn.speaking",
+                {
+                    "state": "speaking",
+                    "server_streamed_output": True,
+                    "endpoint_to_first_accepted_pcm_ms": context.first_pcm_ms,
+                },
+            )
 
     async def _relay_internal(self, context: TurnContext, event: dict[str, object]) -> None:
         if context.terminal or self._active is not context:
@@ -1313,38 +953,21 @@ class RealtimeSession:
             self.drop_counts["stale_event"] += 1
             return
         event_type = event.get("type")
-        if event_type in {"turn.listening", "turn.completed"}:
+        if event_type in {
+            "turn.listening", "turn.transcribing", "llm.final", "turn.speaking",
+            "tts.audio", "turn.completed", "turn.interrupted", "turn.failed",
+        }:
             return
         if event_type not in PUBLIC_EVENT_TYPES or not isinstance(event.get("payload"), dict):
             self.drop_counts["stale_event"] += 1
             return
-        terminal = event_type in TERMINAL_EVENT_TYPES
-        if terminal:
-            return
         public_payload = dict(event["payload"])
-        media_generation: int | None = None
-        if event_type == "tts.audio":
-            return
-        if (
-            event_type == "turn.speaking"
-            and self.audio_sink.requires_media_start_ack
-        ):
-            publication_id = await self.audio_sink.prepare(context.turn_id)
-            media_generation = self._invalidate_media(context.turn_id)
-            public_payload.update({
-                "state": "awaiting_media",
-                "media_generation": media_generation,
-                "media_publication_id": publication_id,
-                "media_ready_timeout_ms": CLIENT_MEDIA_READY_TIMEOUT_MS,
-                "media_ready_ack_deadline_ms": (
-                    CLIENT_MEDIA_READY_TIMEOUT_MS - CLIENT_MEDIA_READY_ACK_MARGIN_MS
-                ),
-            })
-        await self._emit(
-            context.turn_id, str(event_type), public_payload, terminal=terminal
-        )
-        if media_generation is not None:
-            self._arm_wait_started_timeout(media_generation)
+        if event_type == "llm.visible" and context.first_visible_ms is None:
+            context.first_visible_ms = round(
+                max(0.0, (time.monotonic() - context.endpoint_monotonic) * 1000), 3
+            )
+            public_payload["endpoint_to_first_visible_ms"] = context.first_visible_ms
+        await self._emit(context.turn_id, str(event_type), public_payload)
 
     async def handle_client_control(self, payload: bytes) -> bool:
         if not payload or len(payload) > MAX_CONTROL_BYTES:
@@ -1355,41 +978,18 @@ class RealtimeSession:
         except (UnicodeError, json.JSONDecodeError):
             self.drop_counts["client_control"] += 1
             return False
-        if not isinstance(event, dict):
+        expected_keys = {
+            "schema_version", "session_id", "stream_epoch", "sequence", "type"
+        }
+        if not isinstance(event, dict) or set(event) != expected_keys:
             self.drop_counts["client_control"] += 1
             return False
-        event_type = event.get("type")
-        if event_type == "client.reconnected":
-            expected_keys = {
-                "schema_version", "session_id", "stream_epoch", "sequence", "type"
-            }
-        elif event_type == "client.media-ready":
-            expected_keys = {
-                "schema_version", "session_id", "turn_id", "stream_epoch",
-                "sequence", "media_generation", "type",
-            }
-        elif event_type == "client.wait-started":
-            expected_keys = {
-                "schema_version", "session_id", "turn_id", "stream_epoch",
-                "sequence", "media_generation", "wait_kind", "type",
-            }
-        elif event_type in {"client.playout-drained", "client.playout-completed"}:
-            expected_keys = {
-                "schema_version", "session_id", "turn_id", "stream_epoch",
-                "sequence", "media_generation", "completed_publication_id", "type",
-            }
-        else:
-            expected_keys = set()
         sequence = event.get("sequence")
         stream_epoch = event.get("stream_epoch")
         if (
-            set(event) != expected_keys
-            or event.get("schema_version") != CLIENT_CONTROL_VERSION
+            event.get("schema_version") != CLIENT_CONTROL_VERSION
             or event.get("session_id") != self.session_id
-            or event_type not in {
-                "client.reconnected", "client.playout-drained",
-                "client.playout-completed", "client.media-ready", "client.wait-started",
-            }
+            or event.get("type") != "client.reconnected"
             or not isinstance(sequence, int)
             or isinstance(sequence, bool)
             or sequence < 1
@@ -1401,128 +1001,6 @@ class RealtimeSession:
         ):
             self.drop_counts["client_control"] += 1
             return False
-        if event_type in {
-            "client.playout-drained", "client.playout-completed",
-            "client.media-ready", "client.wait-started",
-        }:
-            async with self._lock:
-                context = self._active
-                media_generation = event.get("media_generation")
-                wait_kind = event.get("wait_kind")
-                wait_started = (
-                    event_type == "client.wait-started"
-                    and isinstance(media_generation, int)
-                    and not isinstance(media_generation, bool)
-                    and media_generation == self._media_generation
-                    and media_generation != self._media_wait_started_generation
-                    and event.get("turn_id") == self._media_generation_turn_id
-                    and wait_kind in {"media-ready", "playout"}
-                    and (
-                        (
-                            wait_kind == "media-ready"
-                            and (
-                                context is None
-                                or context.playout_media_generation != media_generation
-                            )
-                        )
-                        or (
-                            wait_kind == "playout"
-                            and context is not None
-                            and context.playout_media_generation == media_generation
-                            and context.playout_ack is not None
-                            and not context.playout_ack.done()
-                        )
-                    )
-                )
-                media_ready = (
-                    event_type == "client.media-ready"
-                    and isinstance(media_generation, int)
-                    and not isinstance(media_generation, bool)
-                    and media_generation == self._media_generation
-                    and media_generation > self._media_ready_generation
-                    and media_generation == self._media_wait_started_generation
-                    and self._media_wait_started_kind == "media-ready"
-                    and event.get("turn_id") == self._media_generation_turn_id
-                )
-                boundary = context.playout_boundary if context is not None else None
-                playout_correlated = (
-                    event_type in {"client.playout-drained", "client.playout-completed"}
-                    and context is not None
-                    and not context.terminal
-                    and event.get("turn_id") == context.turn_id
-                    and event.get("media_generation") == self._media_wait_started_generation
-                    and self._media_wait_started_kind == "playout"
-                    and context.playout_ack is not None
-                    and not context.playout_ack.done()
-                    and boundary is not None
-                    and event.get("media_generation")
-                    == context.playout_media_generation
-                    == self._media_generation
-                    and event.get("completed_publication_id")
-                    == boundary.completed_publication_id
-                )
-                playout_drained = (
-                    playout_correlated
-                    and event_type == "client.playout-drained"
-                    and not context.playout_retired
-                    and context.playout_retirement_token is None
-                )
-                playout_complete = (
-                    playout_correlated
-                    and event_type == "client.playout-completed"
-                    and context.playout_retired
-                )
-                if (
-                    sequence <= self._client_sequence
-                    or self._closed
-                    or stream_epoch != self.stream_epoch
-                    or not (media_ready or playout_drained or playout_complete or wait_started)
-                ):
-                    self.drop_counts["client_control"] += 1
-                    return False
-                self._client_sequence = sequence
-                if wait_started:
-                    assert isinstance(media_generation, int)
-                    self._media_wait_started_generation = media_generation
-                    assert isinstance(wait_kind, str)
-                    self._media_wait_started_kind = wait_kind
-                    prepare_timeout = self._media_wait_started_timeout_task
-                    if prepare_timeout is not None and not prepare_timeout.done():
-                        prepare_timeout.cancel()
-                    self._media_wait_started_timeout_task = None
-                    self._arm_media_ready_timeout(media_generation)
-                elif media_ready:
-                    assert isinstance(media_generation, int)
-                    self._confirm_media_ready(media_generation)
-                    if event.get("turn_id") == SESSION_TURN_ID:
-                        await self._emit(
-                            SESSION_TURN_ID,
-                            "session.ready",
-                            {
-                                "state": "ready",
-                                "media_generation": media_generation,
-                            },
-                        )
-                elif playout_drained:
-                    assert context is not None and boundary is not None
-                    assert context.playout_media_generation is not None
-                    self._confirm_media_ready(context.playout_media_generation)
-                    retirement_token = object()
-                    context.playout_retirement_token = retirement_token
-                    context.playout_retirement = asyncio.create_task(
-                        self._retire_playout(
-                            context,
-                            boundary,
-                            context.playout_media_generation,
-                            self.stream_epoch,
-                            retirement_token,
-                        ),
-                        name=f"playout-retirement-{context.turn_id}",
-                    )
-                else:
-                    assert context is not None and context.playout_ack is not None
-                    context.playout_ack.set_result(None)
-                return True
         async with self._reconnect_lock:
             async with self._lock:
                 if sequence <= self._client_sequence or stream_epoch != self.stream_epoch:
@@ -1530,62 +1008,35 @@ class RealtimeSession:
                     return False
                 self._client_sequence = sequence
                 if self._closed:
-                    self.stream_epoch += 1
-                    await self._emit(
-                        SESSION_TURN_ID,
-                        "session.degraded",
-                        {"state": "degraded", "stage": "controller", "code": "session_closed"},
-                    )
-                    self._report_failure("controller", "session_closed")
-                    return True
+                    return False
                 interrupted_turn_id = self.active_turn_id
-                _cleanup, reset_error, publication_id = await self._interrupt_locked(
+                cleanup, reset_error, _publication_id = await self._interrupt_locked(
                     "client_reconnected", notify_client=False
                 )
-                if publication_id is None and reset_error is None:
-                    reset_error, _retired_publication_id = await self._clear_audio(SESSION_TURN_ID)
-                if reset_error is None:
-                    try:
-                        publication_id = await self.audio_sink.prepare(SESSION_TURN_ID)
-                    except Exception:
-                        reset_error = "audio_publication_prepare_failed"
+            if cleanup is not None:
+                reset_error = reset_error or await self._await_cleanup_barrier(
+                    CANCELLATION_CLEANUP_BOUND_MS
+                )
             try:
-                async with asyncio.timeout(CANCELLATION_CLEANUP_BOUND_MS / 1000):
-                    cleanup_error = await self._await_cleanup_barrier(
-                        timeout_ms=CANCELLATION_CLEANUP_BOUND_MS
-                    )
-                    if cleanup_error is not None:
-                        reset_error = cleanup_error
-                    async with self._runner_lock:
-                        reset = getattr(self.runner, "reset_session", None)
-                        if reset is not None:
-                            await asyncio.to_thread(reset, self.session_id)
-            except TimeoutError:
-                reset_error = "reconnect_cleanup_timeout"
+                async with self._runner_lock:
+                    reset = getattr(self.runner, "reset_session", None)
+                    if reset is not None:
+                        await asyncio.to_thread(reset, self.session_id)
             except Exception:
                 reset_error = "reconnect_context_reset_failed"
             async with self._lock:
                 self.stream_epoch += 1
                 if reset_error is None:
-                    media_generation = self._invalidate_media(SESSION_TURN_ID)
                     await self._emit(
                         SESSION_TURN_ID,
                         "session.reconnected",
                         {
-                            "state": "awaiting_media",
-                            "stale_media_discarded": True,
-                            "conversation_context_reset": True,
-                            "media_generation": media_generation,
-                            "media_ready_timeout_ms": CLIENT_MEDIA_READY_TIMEOUT_MS,
-                            "media_ready_ack_deadline_ms": (
-                                CLIENT_MEDIA_READY_TIMEOUT_MS
-                                - CLIENT_MEDIA_READY_ACK_MARGIN_MS
-                            ),
-                            "media_publication_id": publication_id,
+                            "state": "ready",
+                            "stale_server_pcm_discarded": True,
                             "interrupted_turn_id": interrupted_turn_id,
                         },
                     )
-                    self._arm_wait_started_timeout(media_generation)
+                    await self._emit(SESSION_TURN_ID, "session.ready", {"state": "ready"})
                 else:
                     await self._degrade_locked("controller", reset_error)
             return True
@@ -1604,28 +1055,14 @@ class RealtimeSession:
                 self._closed = True
             if drain_error is not None:
                 raise RuntimeError(drain_error)
-            cleanup_error = await self._await_cleanup_barrier(
-                timeout_ms=CANCELLATION_CLEANUP_BOUND_MS
-            )
+            cleanup_error = await self._await_cleanup_barrier(CANCELLATION_CLEANUP_BOUND_MS)
             if cleanup_error is not None:
                 raise RuntimeError(cleanup_error)
             if context is not None and context.task is not None:
                 try:
-                    await asyncio.wait_for(asyncio.shield(context.task), timeout=1.25)
+                    await asyncio.wait_for(asyncio.shield(context.task), 1.25)
                 except TimeoutError as error:
                     raise RuntimeError("turn_cleanup_timeout") from error
-            for attribute in (
-                "_media_ready_timeout_task",
-                "_media_wait_started_timeout_task",
-            ):
-                timeout = getattr(self, attribute)
-                if timeout is not None and timeout is not asyncio.current_task():
-                    timeout.cancel()
-                    try:
-                        await timeout
-                    except asyncio.CancelledError:
-                        pass
-                    setattr(self, attribute, None)
             self._disconnect_complete = True
 
     def _reserve_public_event(
@@ -1660,22 +1097,19 @@ class RealtimeSession:
         *,
         terminal: bool = False,
     ) -> None:
-        media_generation: int | None = None
-        if event_type in {"turn.interrupted", "turn.failed"}:
-            media_generation = self._invalidate_media(turn_id)
-            payload = {**payload, "media_generation": media_generation}
-        event = self._reserve_public_event(
-            turn_id, event_type, payload, terminal=terminal
-        )
+        event = self._reserve_public_event(turn_id, event_type, payload, terminal=terminal)
         try:
             await self.event_sink.send(event)
-            self._trace("control", "published", event_type=event_type, sequence=self._event_sequence)
-            if media_generation is not None:
-                self._arm_wait_started_timeout(media_generation)
+            self._trace(
+                "control", "published", event_type=event_type, sequence=self._event_sequence
+            )
         except Exception as error:
             self._trace(
-                "control", "publish_failed", event_type=event_type,
-                failure_class=type(error).__name__, failure_code="control_publish_failed",
+                "control",
+                "publish_failed",
+                event_type=event_type,
+                failure_class=type(error).__name__,
+                failure_code="control_publish_failed",
             )
             self._closed = True
             self._report_failure("transport", "control_publish_failed")
@@ -1696,9 +1130,15 @@ class EnergyEndpoint:
         pre_roll_ms: int = 200,
         max_utterance_ms: int = 15_000,
     ) -> None:
-        values = (threshold_rms, frame_ms, start_ms, end_silence_ms, min_speech_ms, pre_roll_ms, max_utterance_ms)
+        values = (
+            threshold_rms, frame_ms, start_ms, end_silence_ms,
+            min_speech_ms, pre_roll_ms, max_utterance_ms,
+        )
         if any(value <= 0 for value in values) or any(
-            duration % frame_ms for duration in (start_ms, end_silence_ms, min_speech_ms, pre_roll_ms, max_utterance_ms)
+            duration % frame_ms
+            for duration in (
+                start_ms, end_silence_ms, min_speech_ms, pre_roll_ms, max_utterance_ms,
+            )
         ):
             raise ValueError("endpoint durations must be positive frame multiples")
         self.threshold_rms = threshold_rms
@@ -1723,16 +1163,12 @@ class EnergyEndpoint:
         if sys.byteorder != "little":
             samples.byteswap()
         mean_square = sum(sample * sample for sample in samples) // max(len(samples), 1)
-        rms = int(mean_square ** 0.5)
+        rms = int(mean_square**0.5)
         voiced = rms >= self.threshold_rms
         signals: list[tuple[str, bytes | None]] = []
-
         if not self._speaking:
             self._pre_roll.append(pcm)
-            if voiced:
-                self._candidate_frames += 1
-            else:
-                self._candidate_frames = 0
+            self._candidate_frames = self._candidate_frames + 1 if voiced else 0
             if self._candidate_frames >= self.start_frames:
                 self._speaking = True
                 self._utterance = list(self._pre_roll)
@@ -1740,7 +1176,6 @@ class EnergyEndpoint:
                 self._silence_frames = 0
                 signals.append(("speech_started", None))
             return signals
-
         self._utterance.append(pcm)
         if voiced:
             self._speech_frames += 1

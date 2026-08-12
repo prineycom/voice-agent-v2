@@ -32,7 +32,13 @@ h2, h3, p { margin-top: 0; }
 .turn-heading { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
 .phase { padding: 5px 9px; border-radius: 999px; background: #1b2335; color: #bfc9e4; font-size: .8rem; }
 .phase-speaking { color: #8ff0c6; }
-.phase-interrupted, .phase-failed { color: #ff9ba5; }
+.history-turn { padding: 18px 0; border-top: 1px solid #252d43; }
+.history-turn:first-of-type { border-top: 0; }
+.history-turn .conversation-block { margin-top: 12px; }
+.turn-metrics { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0 0; color: #8490aa; font-size: .78rem; }
+.turn-metrics div { display: flex; gap: 6px; }
+.turn-metrics dt::after { content: ':'; }
+.turn-metrics dd { margin: 0; color: #bfc9e4; }
 .conversation-block { margin-top: 22px; }
 .conversation-block h3 { margin-bottom: 8px; color: #aeb9d5; font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; }
 .conversation-block p { min-height: 1.5em; line-height: 1.55; }

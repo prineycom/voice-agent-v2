@@ -9,7 +9,6 @@ export class AudioPlaybackBoundary {
   private element: HTMLMediaElement | null = null
   private pendingDetach: { track: AttachableAudioTrack | null; element: HTMLMediaElement } | null = null
   private generation = 0
-  private boundaryTrack: MediaStreamTrack | null = null
   private elementBlocked = false
 
   constructor(
@@ -21,32 +20,6 @@ export class AudioPlaybackBoundary {
     this.clear()
     this.track = track
     this.attachFresh()
-  }
-
-  async prepareFinitePlayout(): Promise<void> {
-    const mediaTrack = this.track?.mediaStreamTrack
-    if (
-      this.element === null
-      || mediaTrack === undefined
-      || mediaTrack.readyState !== 'live'
-      || mediaTrack.id.length < 1
-    ) throw new Error('finite audio publication boundary is unavailable')
-    this.boundaryTrack = mediaTrack
-  }
-
-  waitForFinitePlayout(sampleCount: number, sampleRate: number): Promise<void> {
-    const mediaTrack = this.track?.mediaStreamTrack
-    if (
-      !Number.isSafeInteger(sampleCount)
-      || sampleCount < 1
-      || !Number.isSafeInteger(sampleRate)
-      || sampleRate !== 16_000
-      || this.element === null
-      || this.boundaryTrack === null
-      || mediaTrack !== this.boundaryTrack
-      || mediaTrack.readyState !== 'live'
-    ) return Promise.reject(new Error('finite audio publication boundary is unavailable'))
-    return Promise.resolve()
   }
 
   async resume(): Promise<void> {
@@ -65,20 +38,17 @@ export class AudioPlaybackBoundary {
 
   reset(): void {
     if (this.track === null) return
-    this.invalidateBoundary()
     this.detachElement()
     this.attachFresh()
   }
 
   suspend(): void {
-    this.invalidateBoundary()
     this.detachElement()
     this.elementBlocked = false
     this.reportBlocked()
   }
 
   clear(): void {
-    this.invalidateBoundary()
     const errors: unknown[] = []
     try {
       this.detachElement()
@@ -92,17 +62,11 @@ export class AudioPlaybackBoundary {
       this.track = null
       this.pendingDetach = null
     }
-    if (errors.length > 0) {
-      throw new AggregateError(errors, 'audio playback cleanup failed')
-    }
+    if (errors.length > 0) throw new AggregateError(errors, 'audio playback cleanup failed')
   }
 
   async dispose(): Promise<void> {
     this.clear()
-  }
-
-  private invalidateBoundary(): void {
-    this.boundaryTrack = null
   }
 
   private attachFresh(): void {
@@ -162,8 +126,6 @@ export class AudioPlaybackBoundary {
       if (this.element === element) this.element = null
       this.pendingDetach = errors.length === 0 ? null : { track, element }
     }
-    if (errors.length > 0) {
-      throw new AggregateError(errors, 'audio playback cleanup failed')
-    }
+    if (errors.length > 0) throw new AggregateError(errors, 'audio playback cleanup failed')
   }
 }

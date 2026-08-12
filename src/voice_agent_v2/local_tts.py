@@ -94,6 +94,38 @@ class Qwen3TTS:
             raise StageFailure("tts", "selected_tts_unavailable") from error
         return dict(self.ready_metadata)
 
+    @property
+    def process_id(self) -> int | None:
+        process = self._process
+        child = process.process if process is not None else None
+        return child.pid if child is not None and child.poll() is None else None
+
+    def warmup(self, cancellation: CancellationToken | None = None) -> dict[str, object]:
+        """Run one real synthesis request and discard every generated PCM byte."""
+        self.start(cancellation)
+        process_id = self.process_id
+        if process_id is None:
+            raise StageFailure("tts", "selected_tts_unavailable")
+        chunk_count = 0
+        output_bytes = 0
+        for chunk in self.stream_synthesize(
+            session_id="warmup-session",
+            turn_id="warmup-turn",
+            text="Готово.",
+            audio_format=OUTPUT_FORMAT,
+            cancellation=cancellation,
+        ):
+            chunk_count += 1
+            output_bytes += len(chunk)
+        if chunk_count < 1 or output_bytes < 1 or self.process_id != process_id:
+            raise StageFailure("tts", "selected_tts_unavailable")
+        return {
+            "process_id": process_id,
+            "chunk_count": chunk_count,
+            "output_bytes": output_bytes,
+            "discarded": True,
+        }
+
     def create_turn_budget(self) -> TurnTTSBudget:
         return TurnTTSBudget.create()
 

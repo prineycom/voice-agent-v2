@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import timedelta
 import json
 from pathlib import Path
 import secrets
+import time
 from typing import Awaitable, Callable
 
 from livekit import api, rtc
@@ -24,7 +24,6 @@ from .realtime import (
     CONTROL_TOPIC,
     MAX_CONTROL_BYTES,
     AudioSink,
-    MediaBoundary,
     EventSink,
     RealtimeSession,
 )
@@ -43,19 +42,8 @@ class SessionCapacityError(RuntimeError):
     pass
 
 
-@dataclass
-class _PublicationRetirement:
-    publication_id: str
-    source: rtc.AudioSource
-    task: asyncio.Task[None] | None = None
-    error: BaseException | None = None
-    source_close_started: bool = False
-    local_only: bool = False
-    complete: bool = False
-
-
 class LiveTurnRunner:
-    """Reuse the cumulative real controller and preserve rollback on undelivered turns."""
+    """Reuse the cumulative real controller and warm every resident adapter."""
 
     def __init__(self, settings: Slice6Settings) -> None:
         self.stt = WhisperSTT()
@@ -65,11 +53,13 @@ class LiveTurnRunner:
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
         self._startup_cancellation = CancellationToken()
+        self.warmup_metadata: dict[str, object] | None = None
 
     def start(self) -> None:
         self.llm.readiness(self._startup_cancellation)
         self.stt.start(self._startup_cancellation)
         self.tts.start(self._startup_cancellation)
+        self.warmup_metadata = self.tts.warmup(self._startup_cancellation)
 
     def cancel_startup(self) -> None:
         self._startup_cancellation.cancel()
@@ -162,7 +152,7 @@ class LiveKitEventSink(EventSink):
 
 
 class LiveKitAudioSink(AudioSink):
-    requires_media_start_ack = True
+    """One persistent session publication with request-correlated 20 ms writes."""
 
     def __init__(
         self,
@@ -174,13 +164,10 @@ class LiveKitAudioSink(AudioSink):
         self.source = source
         self.source_changed = source_changed
         self.publication = None
-        self._prepared_turn: str | None = None
         self._active_turn: str | None = None
-        self._streamed_samples = 0
-        self._sealed_boundary: tuple[str, MediaBoundary] | None = None
-        self._rotation_lock = asyncio.Lock()
-        self._rotation_failed = False
-        self._retirement: _PublicationRetirement | None = None
+        self._pending_pcm = bytearray()
+        self._submitted_bytes = 0
+        self._lock = asyncio.Lock()
         self._closing = False
         self._closed = False
         self._transport_disconnected = False
@@ -193,8 +180,8 @@ class LiveKitAudioSink(AudioSink):
             raise RuntimeError("LiveKit audio publication has no stable identity")
         return publication_id
 
-    async def _publish(self, source: rtc.AudioSource):
-        track = rtc.LocalAudioTrack.create_audio_track("agent-response", source)
+    async def _publish(self):
+        track = rtc.LocalAudioTrack.create_audio_track("agent-response", self.source)
         options = rtc.TrackPublishOptions()
         options.source = rtc.TrackSource.SOURCE_MICROPHONE
         options.dtx = False
@@ -202,288 +189,126 @@ class LiveKitAudioSink(AudioSink):
         return await self.room.local_participant.publish_track(track, options)
 
     async def start(self) -> None:
-        return None
-
-    @staticmethod
-    def _consume_retirement(task: asyncio.Task[None]) -> None:
-        try:
-            task.result()
-        except BaseException:
-            pass
-
-    async def _run_retirement(self, state: _PublicationRetirement) -> None:
-        try:
-            async with self._rotation_lock:
-                local_only = state.local_only or self._transport_disconnected
-            if not local_only:
-                await self.room.local_participant.unpublish_track(state.publication_id)
-            async with self._rotation_lock:
-                if self._retirement is not state:
-                    raise RuntimeError("LiveKit publication retirement state changed")
-                state.source_close_started = True
-            await state.source.aclose()
-            source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
-            async with self._rotation_lock:
-                if self._retirement is not state:
-                    await source.aclose()
-                    raise RuntimeError("LiveKit publication retirement state changed")
-                self.source = source
-                self.source_changed(source)
-                self.publication = None
-                self._prepared_turn = None
-                self._active_turn = None
-                self._streamed_samples = 0
-                self._sealed_boundary = None
-                state.complete = True
-                self._retirement = None
-        except asyncio.CancelledError:
-            async with self._rotation_lock:
-                superseded = (
-                    self._retirement is state
-                    and state.local_only
-                    and not state.source_close_started
-                )
-            if superseded:
-                raise
-            async with self._rotation_lock:
-                if self._retirement is state:
-                    state.error = asyncio.CancelledError()
-                    state.complete = True
-                    self._rotation_failed = True
-            raise
-        except BaseException as error:
-            async with self._rotation_lock:
-                if self._retirement is state:
-                    state.error = error
-                    state.complete = True
-                    self._rotation_failed = True
-            raise
-
-    def _reserve_retirement_locked(
-        self, publication_id: str, source: rtc.AudioSource
-    ) -> _PublicationRetirement:
-        state = self._retirement
-        if state is not None:
-            if state.publication_id != publication_id or state.source is not source:
-                raise RuntimeError("another LiveKit publication retirement is active")
-            return state
-        state = _PublicationRetirement(publication_id, source)
-        state.task = asyncio.create_task(
-            self._run_retirement(state),
-            name=f"livekit-publication-retirement-{publication_id}",
-        )
-        state.task.add_done_callback(self._consume_retirement)
-        self._retirement = state
-        return state
-
-    async def _wait_for_retirement(self, state: _PublicationRetirement) -> None:
-        task = state.task
-        if task is None:
-            raise RuntimeError("LiveKit publication retirement was not started")
-        await asyncio.wait({task})
-        task.result()
-
-    async def transport_disconnected(self) -> None:
-        async with self._rotation_lock:
-            self._transport_disconnected = True
-            if self.publication is None:
+        async with self._lock:
+            if self._closing or self._closed:
+                raise RuntimeError("LiveKit audio sink is closing")
+            if self.publication is not None:
                 return
-            state = self._reserve_retirement_locked(
-                self._publication_id(self.publication), self.source
-            )
-            state.local_only = True
-            task = state.task
-            if (
-                task is not None
-                and not task.done()
-                and not state.source_close_started
-            ):
-                task.cancel()
-        if task is not None:
-            try:
-                await asyncio.shield(task)
-            except (asyncio.CancelledError, Exception):
-                pass
-        async with self._rotation_lock:
-            if self._retirement is not state or state.complete and state.error is None:
-                return
-            current_task = state.task
-            if current_task is not None and current_task is not task:
-                task = current_task
-            elif state.source_close_started:
-                task = current_task
-            else:
-                state.error = None
-                state.complete = False
-                self._rotation_failed = False
-                task = asyncio.create_task(
-                    self._run_retirement(state),
-                    name=f"livekit-local-retirement-{state.publication_id}",
-                )
-                task.add_done_callback(self._consume_retirement)
-                state.task = task
-        if task is not None:
-            await asyncio.shield(task)
-
-    async def prepare(self, turn_id: str) -> str:
-        while True:
-            retirement: _PublicationRetirement | None = None
-            async with self._rotation_lock:
-                if self._rotation_failed:
-                    raise RuntimeError("LiveKit audio publication rotation previously failed")
-                if self._closing or self._closed:
-                    raise RuntimeError("LiveKit audio sink is closing")
-                if self._retirement is not None:
-                    retirement = self._retirement
-                elif self._sealed_boundary is not None:
-                    raise RuntimeError("previous LiveKit audio boundary is not finalized")
-                elif self.publication is not None:
-                    if self._prepared_turn == turn_id:
-                        return self._publication_id(self.publication)
-                    retirement = self._reserve_retirement_locked(
-                        self._publication_id(self.publication), self.source
-                    )
-                else:
-                    source = self.source
-                    try:
-                        publication = await self._publish(source)
-                        publication_id = self._publication_id(publication)
-                    except Exception:
-                        await source.aclose()
-                        replacement = rtc.AudioSource(
-                            16_000, 1, queue_size_ms=AUDIO_QUEUE_MS
-                        )
-                        self.source = replacement
-                        self.source_changed(replacement)
-                        raise
-                    self.publication = publication
-                    self._prepared_turn = turn_id
-                    return publication_id
-            assert retirement is not None
-            await self._wait_for_retirement(retirement)
+            self.publication = await self._publish()
+            self._publication_id(self.publication)
 
     def current_publication_id(self) -> str:
         if self.publication is None:
-            raise RuntimeError("LiveKit audio publication is not prepared")
+            raise RuntimeError("LiveKit audio publication is not started")
         return self._publication_id(self.publication)
+
+    @property
+    def submitted_bytes(self) -> int:
+        return self._submitted_bytes
 
     async def write(self, turn_id: str, pcm: bytes, cancelled) -> bool:
         if not pcm or len(pcm) % 2 or len(pcm) > OUTPUT_MEDIA_MAX_BYTES:
             return False
-        source = self.source
-        publication = self.publication
-        if publication is None or self._prepared_turn != turn_id:
-            raise RuntimeError("turn audio publication is not prepared")
-        if self._active_turn not in {None, turn_id} or self._sealed_boundary is not None:
-            raise RuntimeError("another LiveKit audio stream is active")
-        self._active_turn = turn_id
-        for offset in range(0, len(pcm), AUDIO_FRAME_BYTES):
-            if cancelled() or self._active_turn != turn_id:
+        async with self._lock:
+            if self._closing or self._closed or self.publication is None:
+                raise RuntimeError("LiveKit audio publication is unavailable")
+            if cancelled():
                 return False
-            chunk = pcm[offset : offset + AUDIO_FRAME_BYTES]
-            frame = rtc.AudioFrame(
-                data=chunk,
-                sample_rate=16_000,
-                num_channels=1,
-                samples_per_channel=len(chunk) // 2,
-            )
-            await source.capture_frame(frame)
-            self._streamed_samples += len(chunk) // 2
-        return not cancelled() and self._active_turn == turn_id
+            if self._active_turn not in {None, turn_id}:
+                raise RuntimeError("another LiveKit audio request is active")
+            if self._active_turn is None:
+                self._submitted_bytes = 0
+            self._active_turn = turn_id
+            self._pending_pcm.extend(pcm)
+            while len(self._pending_pcm) >= AUDIO_FRAME_BYTES:
+                if cancelled() or self._active_turn != turn_id:
+                    return False
+                chunk = bytes(self._pending_pcm[:AUDIO_FRAME_BYTES])
+                del self._pending_pcm[:AUDIO_FRAME_BYTES]
+                frame = rtc.AudioFrame(
+                    data=chunk,
+                    sample_rate=16_000,
+                    num_channels=1,
+                    samples_per_channel=AUDIO_FRAME_BYTES // 2,
+                )
+                await self.source.capture_frame(frame)
+                self._submitted_bytes += len(chunk)
+            return not cancelled() and self._active_turn == turn_id
 
-    async def seal(self, turn_id: str, cancelled) -> MediaBoundary | None:
-        publication = self.publication
-        source = self.source
-        if (
-            publication is None
-            or self._prepared_turn != turn_id
-            or self._active_turn != turn_id
-            or self._streamed_samples < 1
-            or cancelled()
-        ):
-            return None
-        await source.wait_for_playout()
-        if cancelled() or self._active_turn != turn_id:
-            return None
-        boundary = MediaBoundary(
-            self._publication_id(publication), self._streamed_samples, 16_000
-        )
-        async with self._rotation_lock:
+    async def finish(self, turn_id: str, cancelled) -> bool:
+        async with self._lock:
             if (
                 cancelled()
-                or self.publication is not publication
-                or self._prepared_turn != turn_id
-            ):
-                return None
-            self._sealed_boundary = (turn_id, boundary)
-            self._active_turn = None
-        return boundary
-
-    async def play(
-        self, turn_id: str, pcm: bytes, cancelled
-    ) -> MediaBoundary | None:
-        if not await self.write(turn_id, pcm, cancelled):
-            return None
-        return await self.seal(turn_id, cancelled)
-
-    async def complete(self, turn_id: str, boundary: MediaBoundary) -> None:
-        async with self._rotation_lock:
-            if (
-                self._sealed_boundary != (turn_id, boundary)
+                or self._active_turn != turn_id
+                or self._pending_pcm
                 or self.publication is None
-                or self._prepared_turn != turn_id
             ):
-                raise RuntimeError("LiveKit media boundary is not pending")
-            retirement = self._reserve_retirement_locked(
-                boundary.completed_publication_id, self.source
-            )
-        await self._wait_for_retirement(retirement)
+                return False
+            self._active_turn = None
+            return True
 
-    async def clear(self, turn_id: str) -> str | None:
-        async with self._rotation_lock:
+    async def abandon(self, turn_id: str) -> str | None:
+        """Drop only unsubmitted bytes; preserve the accepted server PCM prefix."""
+        async with self._lock:
             if self.publication is None:
                 return None
             publication_id = self._publication_id(self.publication)
             if self._active_turn not in {None, turn_id}:
                 return publication_id
             self._active_turn = None
-            self._streamed_samples = 0
-            retirement = self._reserve_retirement_locked(publication_id, self.source)
-            if not retirement.source_close_started and not retirement.complete:
+            self._pending_pcm.clear()
+            return publication_id
+
+    async def clear(self, turn_id: str) -> str | None:
+        async with self._lock:
+            if self.publication is None:
+                return None
+            publication_id = self._publication_id(self.publication)
+            if self._active_turn not in {None, turn_id}:
+                return publication_id
+            self._active_turn = None
+            self._pending_pcm.clear()
+            self._submitted_bytes = 0
+            self.source.clear_queue()
+            return publication_id
+
+    async def transport_disconnected(self) -> None:
+        async with self._lock:
+            self._transport_disconnected = True
+            self._active_turn = None
+            self._pending_pcm.clear()
+            self._submitted_bytes = 0
+            if self.publication is not None:
                 self.source.clear_queue()
-        await self._wait_for_retirement(retirement)
-        return publication_id
 
     async def _run_close(self) -> None:
-        async with self._rotation_lock:
-            retirement = self._retirement
-            if retirement is None and self.publication is not None:
-                retirement = self._reserve_retirement_locked(
-                    self._publication_id(self.publication), self.source
-                )
-        if retirement is not None:
-            await self._wait_for_retirement(retirement)
-        async with self._rotation_lock:
-            if self._rotation_failed:
-                raise RuntimeError("LiveKit audio publication rotation previously failed")
-            source = self.source
-        await source.aclose()
-        async with self._rotation_lock:
-            if self.source is not source or self.publication is not None:
-                raise RuntimeError("LiveKit audio sink changed while closing")
+        async with self._lock:
+            publication = self.publication
+            publication_id = (
+                self._publication_id(publication) if publication is not None else None
+            )
+            transport_disconnected = self._transport_disconnected
+            self._active_turn = None
+            self._pending_pcm.clear()
+            self._submitted_bytes = 0
+            if publication is not None:
+                self.source.clear_queue()
+        if publication_id is not None and not transport_disconnected:
+            await self.room.local_participant.unpublish_track(publication_id)
+        await self.source.aclose()
+        async with self._lock:
+            if self.publication is publication:
+                self.publication = None
             self._closed = True
 
     async def close(self) -> None:
-        async with self._rotation_lock:
+        async with self._lock:
             if self._closed:
                 return
             self._closing = True
             task = self._close_task
             if task is None:
-                task = asyncio.create_task(
-                    self._run_close(), name="livekit-audio-sink-close"
-                )
-                task.add_done_callback(self._consume_retirement)
+                task = asyncio.create_task(self._run_close(), name="livekit-audio-sink-close")
                 self._close_task = task
         await asyncio.shield(task)
 
@@ -491,10 +316,6 @@ class LiveKitAudioSink(AudioSink):
         task = self._close_task
         if task is not None:
             await asyncio.shield(task)
-            return
-        retirement = self._retirement
-        if retirement is not None:
-            await self._wait_for_retirement(retirement)
 
 
 class LiveKitRoomController:
@@ -718,8 +539,15 @@ class LiveKitRoomController:
 
     async def _consume_microphone(self, track) -> None:
         trace = getattr(self, "trace", None)
+        terminal_silence_ms = 0
+        audio_clock_samples = 0
+        audio_clock_origin: float | None = None
 
         def observe_vad(fields: dict[str, object]) -> None:
+            nonlocal terminal_silence_ms
+            silence = fields.get("silence_duration_ms")
+            if isinstance(silence, int) and not isinstance(silence, bool) and silence >= 0:
+                terminal_silence_ms = silence
             if trace is not None:
                 trace.emit(
                     "vad", str(fields["decision"]),
@@ -738,14 +566,29 @@ class LiveKitRoomController:
         failure_code = "microphone_stream_ended"
         try:
             async for event in stream:
-                for decision in endpoint.feed(bytes(event.frame.data)):
+                frame_pcm = bytes(event.frame.data)
+                frame_samples = len(frame_pcm) // 2
+                if audio_clock_origin is None:
+                    audio_clock_origin = time.monotonic() - frame_samples / 16_000
+                audio_clock_samples += frame_samples
+                for decision in endpoint.feed(frame_pcm):
                     signal, payload = decision.kind, decision.payload
                     if signal == "speech_started":
                         await self.session.start_utterance()
                     elif signal == "speech_discarded":
                         await self.session.discard_utterance()
                     elif signal == "utterance" and payload is not None:
-                        await self.session.finish_utterance(payload)
+                        now = time.monotonic()
+                        endpoint_monotonic = min(
+                            now,
+                            now
+                            if audio_clock_origin is None
+                            else audio_clock_origin
+                            + max(0.0, audio_clock_samples / 16_000 - terminal_silence_ms / 1000),
+                        )
+                        await self.session.finish_utterance(
+                            payload, endpoint_monotonic=endpoint_monotonic
+                        )
         except asyncio.CancelledError:
             raise
         except Exception as error:
