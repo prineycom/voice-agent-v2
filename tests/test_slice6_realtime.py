@@ -1379,16 +1379,12 @@ class Slice6ConfigurationTests(unittest.TestCase):
             "LIVEKIT_INTERNAL_URL": "ws://127.0.0.1:7880",
             "LIVEKIT_PUBLIC_URL": "wss://voice.test.ts.net:7443",
             "SLICE6_APP_PUBLIC_URL": "https://voice.test.ts.net:8443",
-            "LITELLM_BASE_URL": "https://llm.example.test",
-            "LITELLM_TOKEN_FILE": "/untracked/litellm.token",
         }
 
     def test_server_settings_require_public_tls_and_loopback_internal_url(self) -> None:
         settings = Slice6Settings.from_environment(self.environment(), project_root=Path("/project"))
         self.assertEqual(settings.livekit_public_url, "wss://voice.test.ts.net:7443")
         self.assertEqual(settings.app_public_url, "https://voice.test.ts.net:8443")
-        self.assertEqual(settings.litellm_base_url, "https://llm.example.test")
-        self.assertEqual(settings.litellm_token_file, Path("/untracked/litellm.token"))
         self.assertEqual(settings.web_dist, Path("/project/web/dist"))
 
         for key in self.environment():
@@ -1409,6 +1405,11 @@ class Slice6ConfigurationTests(unittest.TestCase):
         mismatched_host["SLICE6_APP_PUBLIC_URL"] = "https://other.test.ts.net:8443"
         with self.assertRaises(Slice6ConfigurationError):
             Slice6Settings.from_environment(mismatched_host)
+        for forbidden in ("LITELLM_BASE_URL", "LITELLM_TOKEN_FILE", "LITELLM_OTHER"):
+            cloud = self.environment()
+            cloud[forbidden] = "forbidden"
+            with self.subTest(forbidden=forbidden), self.assertRaises(Slice6ConfigurationError):
+                Slice6Settings.from_environment(cloud)
 
     def test_capability_origin_is_exact_loopback_or_configured_tailnet_app(self) -> None:
         public = "https://voice.test.ts.net:8443"
@@ -1444,8 +1445,6 @@ class Slice6StartupBoundaryTests(unittest.TestCase):
             "LIVEKIT_API_KEY": "secret-key",
             "LIVEKIT_API_SECRET": "secret-signing-material",
             "LIVEKIT_KEYS": "combined-secret",
-            "LITELLM_BASE_URL": "https://private-provider.test",
-            "LITELLM_TOKEN_FILE": "/untracked/token",
         }
         sanitized = run_slice6.without_server_secrets(environment)
         self.assertEqual(sanitized, {"PATH": "/usr/bin:/bin", "HOME": "/untracked/home"})

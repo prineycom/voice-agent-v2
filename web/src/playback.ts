@@ -127,7 +127,8 @@ export class AudioPlaybackBoundary {
         this.reportBlocked()
         throw error
       }
-      this.contextBlocked = context.state !== 'running'
+      const resumedState = String(context.state)
+      this.contextBlocked = resumedState !== 'running'
       this.reportBlocked()
       if (this.contextBlocked) throw new Error('audio context remains blocked')
     }

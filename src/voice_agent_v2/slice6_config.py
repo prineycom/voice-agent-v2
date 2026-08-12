@@ -9,8 +9,6 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .cloud_llm import parse_provider_endpoint
-
 
 TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 LOOPBACK_APP_ORIGIN = "http://127.0.0.1:8000"
@@ -90,8 +88,6 @@ class Slice6Settings:
     livekit_internal_url: str
     livekit_public_url: str
     app_public_url: str
-    litellm_base_url: str
-    litellm_token_file: Path
     web_dist: Path
     room_token_ttl_seconds: int = 300
     browser_join_timeout_seconds: int = 30
@@ -129,14 +125,10 @@ class Slice6Settings:
             raise Slice6ConfigurationError(
                 "application and LiveKit public URLs must use the same tailnet host"
             )
-        litellm_value = _required(values, "LITELLM_BASE_URL")
-        try:
-            litellm_base_url = parse_provider_endpoint(litellm_value).base_url
-        except Exception as error:
-            raise Slice6ConfigurationError("invalid URL in LITELLM_BASE_URL") from error
-        token_file = Path(_required(values, "LITELLM_TOKEN_FILE"))
-        if not token_file.is_absolute():
-            raise Slice6ConfigurationError("LITELLM_TOKEN_FILE must be absolute")
+        if any(name.startswith("LITELLM_") for name in values):
+            raise Slice6ConfigurationError(
+                "LiteLLM configuration is forbidden in the local-LFM Slice 6 runtime"
+            )
         root = (project_root or Path(__file__).resolve().parents[2]).resolve()
         web_dist = Path(values.get("SLICE6_WEB_DIST", str(root / "web" / "dist"))).resolve()
         return cls(
@@ -145,7 +137,5 @@ class Slice6Settings:
             livekit_internal_url=internal_url,
             livekit_public_url=public_url,
             app_public_url=app_public_url,
-            litellm_base_url=litellm_base_url,
-            litellm_token_file=token_file,
             web_dist=web_dist,
         )

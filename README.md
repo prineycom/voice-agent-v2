@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Cumulative Slices 2–5 delivery accepted; Slice 6 implementation checkpoint awaiting physical-browser acceptance.** The network-denied fake-inference controller cases, installed LiveKit SDK contract, React state/media tests, scoped capability, loopback gateway, and restricted LiveKit bind smoke pass. Real loopback microphone/listening, second-tailnet-browser, barge-in timing, and combined resource evidence are still required and are not claimed. The fixed inference stack and every prior provider/overlap failure remain unchanged; ADR-0006 authorizes the required server-only `LITELLM_BASE_URL` route for this private test, not production security/privacy approval.
+**Combined Slice 6 / Issue #15 implementation checkpoint awaiting physical-browser and full-stack resource acceptance.** The active app uses only the pinned cache-local official LFM2.5 Q4_K_M model on GPU-enabled llama.cpp; LiteLLM/DeepSeek is absent from Slice 6 configuration/readiness/requests and there is no cloud fallback. Network-denied controller tests, installed LiveKit/provider contracts, React state/media tests, focused real two-slot LFM integration, scoped capability, loopback gateway, and restricted LiveKit bind smokes pass. Real loopback/tailnet microphone/listening, actual barge-in timing, sustained coexistence with Whisper/Qwen/LiveKit/browser, and subjective response acceptance remain required and are not claimed. Historical DeepSeek failures and authorizations remain factual in ADR-0005/0006; ADR-0008 supersedes them for the active app.
 
 ## Root verification
 
@@ -33,19 +33,19 @@ One-time setup acquires the checksum-pinned LiveKit server, the pinned Python SD
 cp .env.slice6.example .env.slice6
 ```
 
-Generate a dedicated LiveKit key pair, fill every blank in the ignored `.env.slice6`, and keep the LiteLLM token in an absolute user-owned mode-`0600` file:
+Generate a dedicated LiveKit key pair and fill every blank in the ignored `.env.slice6`:
 
 ```sh
 "${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
 ```
 
-`LITELLM_BASE_URL` has no default; the current authorized private-test value and its limitations are in [ADR-0006](docs/adr/0006-slice-6-live-transcript-and-endpoint-configuration.md). Then this is the single development start command:
+The active app accepts no `LITELLM_*` configuration. `./setup-slice6` verifies, but never downloads or replaces, the exact cache-local Issue #15 model/runtime. Run the focused real provider check with `./verify-local-lfm`; it proves the hashes, loopback endpoint, exact identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, cancellation and recovery. Then this is the single development start command:
 
 ```sh
 ./run-slice6
 ```
 
-It runs in the foreground and cleans up its child processes on exit. Open `http://127.0.0.1:8000` on the host (loopback is a browser secure-context exception) or the configured tailnet HTTPS application URL. The configured paths are loopback TCP `8000` for the gateway and `7880` for LiveKit signaling, Tailscale Serve HTTPS for the application/signaling (example ports `8443`/`7443`), and only tailnet UDP `7882` for WebRTC media. ICE/TCP media, port `7881`, TURN, public exposure, model administration, and detailed health endpoints are disabled/absent. The restricted server bind was measured; the two Tailscale HTTPS paths still require the real second-client gate.
+It verifies and starts the pinned llama.cpp server, LiveKit, gateway/controller, and two foreground Tailscale Serve proxies; all are cleaned up on exit. Open `http://127.0.0.1:8000` on the host (loopback is a browser secure-context exception) or the configured tailnet HTTPS application URL. The configured paths are loopback TCP `18080` for local LFM, `8000` for the gateway, and `7880` for LiveKit signaling; Tailscale Serve HTTPS for the application/signaling (example ports `8443`/`7443`); and only tailnet UDP `7882` for WebRTC media. The LFM endpoint is never proxied or returned to the browser. ICE/TCP media, port `7881`, TURN, public exposure, provider/model administration, and detailed health endpoints are disabled/absent. The restricted server binds were measured; the two Tailscale HTTPS paths still require the real second-client gate.
 
 Run the complete deterministic/installed-runtime/browser check with:
 
@@ -53,7 +53,7 @@ Run the complete deterministic/installed-runtime/browser check with:
 ./verify-slice6
 ```
 
-The command reports the physical-browser gates as required rather than claiming them. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
+The command reports the physical-browser gates as required rather than claiming them. `./verify-local-lfm` is a separate real-model host check and remains outside dependency-free CI. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
 
 ## Final Slice 5 human acceptance
 

@@ -27,13 +27,22 @@ LIVEKIT_VERSION = "1.13.5"
 SIGNAL_PORT = 7880
 RTC_UDP_PORT = 7882
 GATEWAY_PORT = 8000
+LLAMA_PORT = 18080
+LFM_CACHE = Path("/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4")
+LLAMA_BINARY = LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
+LLAMA_BIN_DIRECTORY = LLAMA_BINARY.parent
+CUDA_OVERLAY = LFM_CACHE / "runtime" / "cuda-13.3-overlay" / "lib"
+LFM_MODEL = LFM_CACHE / "model" / "LFM2.5-2.6B-Q4_K_M.gguf"
+LFM_MODEL_SIZE = 1_674_454_848
+LFM_MODEL_SHA256 = "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14"
+LLAMA_BINARY_SHA256 = "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11"
+LOCAL_LFM_ALIAS = "lfm2.5-2.6b-q4-k-m"
 SERVER_SECRET_NAMES = frozenset({
     "LIVEKIT_API_KEY",
     "LIVEKIT_API_SECRET",
     "LIVEKIT_KEYS",
-    "LITELLM_BASE_URL",
-    "LITELLM_TOKEN_FILE",
 })
+FORBIDDEN_CLOUD_NAMES = frozenset({"LITELLM_BASE_URL", "LITELLM_TOKEN_FILE"})
 
 
 def required(name: str) -> str:
@@ -62,6 +71,58 @@ def validate_tailnet_identity(document: object, *, node_ip: str, hostname: str) 
         )
 
 
+def sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_local_lfm_artifacts() -> None:
+    if not LLAMA_BINARY.is_file() or not os.access(LLAMA_BINARY, os.X_OK):
+        raise RuntimeError("pinned local llama.cpp server is unavailable")
+    if not LFM_MODEL.is_file() or LFM_MODEL.stat().st_size != LFM_MODEL_SIZE:
+        raise RuntimeError("pinned local LFM model is unavailable or has the wrong size")
+    if sha256_file(LLAMA_BINARY) != LLAMA_BINARY_SHA256:
+        raise RuntimeError("pinned llama.cpp server checksum mismatch")
+    if sha256_file(LFM_MODEL) != LFM_MODEL_SHA256:
+        raise RuntimeError("pinned local LFM model checksum mismatch")
+
+
+def llama_command() -> list[str]:
+    return [
+        str(LLAMA_BINARY),
+        "--model", str(LFM_MODEL),
+        "--alias", LOCAL_LFM_ALIAS,
+        "--host", "127.0.0.1",
+        "--port", str(LLAMA_PORT),
+        "--ctx-size", "65536",
+        "--parallel", "2",
+        "--threads", "6",
+        "--threads-batch", "6",
+        "--batch-size", "2048",
+        "--ubatch-size", "512",
+        "--split-mode", "none",
+        "--main-gpu", "0",
+        "--n-gpu-layers", "99",
+        "--flash-attn", "on",
+        "--jinja",
+        "--reasoning", "on",
+        "--reasoning-format", "deepseek",
+        "--reasoning-budget", "384",
+        "--no-cache-prompt",
+        "--cache-ram", "0",
+        "--no-cache-idle-slots",
+        "--metrics",
+        "--slots",
+        "--no-webui",
+        "--verbosity", "4",
+    ]
+
+
 def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: float = 30) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -87,6 +148,8 @@ def stop(process: subprocess.Popen) -> None:
 
 
 def main() -> int:
+    if any(name in os.environ for name in FORBIDDEN_CLOUD_NAMES):
+        raise Slice6ConfigurationError("LiteLLM configuration is forbidden in the local-LFM runtime")
     settings = Slice6Settings.from_environment(project_root=ROOT)
     node_ip = required("SLICE6_LIVEKIT_NODE_IP")
     app_https_port = int(required("SLICE6_APP_HTTPS_PORT"))
@@ -138,6 +201,7 @@ def main() -> int:
         raise RuntimeError("Slice 6 tooling is missing; run ./setup-slice6")
     if not settings.web_dist.is_dir():
         raise RuntimeError("Slice 6 web build is missing; run ./setup-slice6")
+    verify_local_lfm_artifacts()
 
     gateway_environment = dict(os.environ)
     gateway_environment["PYTHONPATH"] = str(ROOT / "src")
@@ -149,6 +213,13 @@ def main() -> int:
         f"{settings.livekit_api_key}: {settings.livekit_api_secret}"
     )
     tailscale_environment = without_server_secrets(gateway_environment)
+    llama_environment = without_server_secrets(gateway_environment)
+    for name in tuple(llama_environment):
+        if name.startswith("LITELLM_"):
+            llama_environment.pop(name)
+    llama_environment["HOME"] = str(LFM_CACHE / "runtime" / "home")
+    llama_environment["XDG_CACHE_HOME"] = str(LFM_CACHE / "runtime" / "home" / ".cache")
+    llama_environment["LD_LIBRARY_PATH"] = f"{CUDA_OVERLAY}:{LLAMA_BIN_DIRECTORY}"
     processes: list[subprocess.Popen] = []
     stopping = False
 
@@ -160,6 +231,16 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     try:
+        llama_log = LFM_CACHE / "logs" / "slice6-local-lfm.log"
+        llama_log.parent.mkdir(parents=True, exist_ok=True)
+        llama_output = llama_log.open("ab", buffering=0)
+        local_lfm = subprocess.Popen(
+            llama_command(), cwd=LFM_CACHE, env=llama_environment,
+            stdout=llama_output, stderr=subprocess.STDOUT,
+        )
+        processes.append(local_lfm)
+        wait_for_port(local_lfm, LLAMA_PORT, "local LFM", timeout=30)
+
         livekit = subprocess.Popen([str(binary)], cwd=ROOT, env=livekit_environment)
         processes.append(livekit)
         wait_for_port(livekit, SIGNAL_PORT, "LiveKit")
@@ -185,12 +266,16 @@ def main() -> int:
             f"http://127.0.0.1:{SIGNAL_PORT}",
         ], env=tailscale_environment)
         processes.extend([app_serve, signal_serve])
-        print("Voice Agent v2 Slice 6 development app started")
+        print("Voice Agent v2 Slice 6 local-LFM development app started")
         print(f"loopback: http://127.0.0.1:{GATEWAY_PORT}")
         print(f"tailnet: {app_public_url}")
         print(
             f"LiveKit paths: signaling HTTPS/{signal_https_port}, "
             f"WebRTC UDP/{RTC_UDP_PORT} on tailscale0; ICE/TCP and TURN disabled"
+        )
+        print(
+            f"local LFM: {LOCAL_LFM_ALIAS}, loopback-only HTTP/{LLAMA_PORT}, "
+            "2 slots x 32768 tokens; no cloud provider or fallback"
         )
         print("Press Ctrl+C to stop this development run.")
 
@@ -202,6 +287,9 @@ def main() -> int:
     finally:
         for process in reversed(processes):
             stop(process)
+        llama_output_object = locals().get("llama_output")
+        if llama_output_object is not None:
+            llama_output_object.close()
     return 0
 
 

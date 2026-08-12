@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from importlib.metadata import version
+import hashlib
+import json
 from pathlib import Path
 import socket
 import sys
@@ -33,10 +35,19 @@ from livekit import api
 
 from voice_agent_v2.livekit_runtime import (
     LiveKitRoomController,
+    LiveTurnRunner,
     SessionCapacityError,
     SessionRegistry,
 )
+from voice_agent_v2.local_lfm import LLAMA_ENDPOINT, MODEL_ALIAS, PROVIDER_IDENTITY
 from voice_agent_v2.slice6_config import Slice6Settings
+
+LFM_CACHE = Path("/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4")
+LFM_MODEL = LFM_CACHE / "model" / "LFM2.5-2.6B-Q4_K_M.gguf"
+LLAMA_SERVER = LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
+MODEL_SHA256 = "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14"
+BINARY_SHA256 = "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11"
+MODEL_SIZE = 1_674_454_848
 
 EXPECTED = {
     "livekit": "1.1.14",
@@ -72,6 +83,9 @@ class RunnerStub:
     def __init__(self) -> None:
         self.closed_sessions: list[str] = []
 
+    def cancel(self) -> None:
+        return None
+
     def close(self, session_id: str) -> None:
         self.closed_sessions.append(session_id)
 
@@ -87,6 +101,9 @@ class BlockingStartupRunner(RunnerStub):
         self.entered.set()
         self.release.wait(2)
         self.started = True
+
+    def cancel_startup(self) -> None:
+        return None
 
 
 class FailingSession(SessionStub):
@@ -186,7 +203,7 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     failed_registry._controllers[failed_controller.session_id] = failed_controller
     try:
         await failed_controller.close()
-    except ExceptionGroup:
+    except Exception:
         pass
     else:
         raise AssertionError("cleanup failure unexpectedly released the controller")
@@ -198,6 +215,41 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
         pass
     else:
         raise AssertionError("cleanup failure admitted a replacement session")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_local_lfm_contract(settings: Slice6Settings) -> bool:
+    artifact_present = LFM_MODEL.is_file() and LLAMA_SERVER.is_file()
+    if artifact_present:
+        if LFM_MODEL.stat().st_size != MODEL_SIZE or sha256_file(LFM_MODEL) != MODEL_SHA256:
+            raise AssertionError("pinned local LFM artifact identity differs")
+        if sha256_file(LLAMA_SERVER) != BINARY_SHA256:
+            raise AssertionError("pinned llama.cpp binary identity differs")
+    manifest = json.loads((ROOT / "config" / "local-lfm-v1.json").read_text())
+    if not (
+        manifest["provider_mode"] == "local"
+        and manifest["provider_identity"] == PROVIDER_IDENTITY
+        and manifest["runtime"]["endpoint"] == LLAMA_ENDPOINT
+        and manifest["runtime"]["model_alias"] == MODEL_ALIAS
+        and manifest["runtime"]["parallel_slots"] == 2
+        and manifest["runtime"]["total_context_tokens"] == 65_536
+        and manifest["runtime"]["context_tokens_per_slot"] == 32_768
+        and manifest["runtime"]["gpu_layers"] == 99
+        and manifest["runtime"]["flash_attention"] is True
+        and manifest["runtime"]["automatic_fallback"] is False
+    ):
+        raise AssertionError("tracked local LFM runtime manifest differs")
+    runner = LiveTurnRunner(settings)
+    if runner.llm.provider_mode != "local" or runner.llm.provider_identity != PROVIDER_IDENTITY:
+        raise AssertionError("Slice 6 runner is not wired to the fixed local LFM provider")
+    return artifact_present
 
 
 def main() -> int:
@@ -216,8 +268,6 @@ def main() -> int:
         "LIVEKIT_INTERNAL_URL": "ws://127.0.0.1:7880",
         "LIVEKIT_PUBLIC_URL": "wss://voice.test.ts.net:7443",
         "SLICE6_APP_PUBLIC_URL": "https://voice.test.ts.net:8443",
-        "LITELLM_BASE_URL": "https://llm.example.test",
-        "LITELLM_TOKEN_FILE": "/untracked/test-token",
     }, project_root=ROOT)
     controller = object.__new__(LiveKitRoomController)
     controller.settings = settings
@@ -239,12 +289,18 @@ def main() -> int:
         raise AssertionError(f"room capability is not narrow enough: {grants}")
     if any((grants.room_admin, grants.room_create, grants.room_list, grants.room_record)):
         raise AssertionError("browser capability contains a management grant")
+    artifact_present = verify_local_lfm_contract(settings)
     asyncio.run(verify_room_lifecycle_bounds(settings))
     print("Slice 6 installed-runtime contract: PASS")
     print("SDK pins: " + ", ".join(f"{name}={value}" for name, value in observed.items()))
     print("capability: one room, microphone publish, agent subscribe/data; no management grants")
     print("room lifecycle: startup cancellation drains; incomplete cleanup retains capacity")
-    print("network: no sockets opened; no model, provider, microphone, or physical browser used")
+    print(
+        "local LFM: manifest/provider wiring verified; exact cache hashes="
+        + ("verified" if artifact_present else "not-present (real integration check skipped)")
+        + "; loopback endpoint, 2 x 32768-token slots, no fallback"
+    )
+    print("network: no sockets opened; no model inference, microphone, or physical browser used")
     return 0
 
 

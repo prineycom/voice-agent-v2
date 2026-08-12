@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 from livekit import api, rtc
 
 from .audio import OUTPUT_MEDIA_MAX_BYTES
-from .cloud_llm import LiteLLMProvider
+from .local_lfm import LocalLFMProvider
 from .local_stt import WhisperSTT
 from .local_tts import Qwen3TTS
 from .real_turn import RealTurnController
@@ -44,10 +44,8 @@ class LiveTurnRunner:
 
     def __init__(self, settings: Slice6Settings) -> None:
         self.stt = WhisperSTT()
-        self.llm = LiteLLMProvider(
-            base_url=settings.litellm_base_url,
-            token_path=settings.litellm_token_file,
-        )
+        del settings
+        self.llm = LocalLFMProvider()
         self.tts = Qwen3TTS()
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}

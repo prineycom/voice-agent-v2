@@ -1,6 +1,6 @@
 # Project agent memory
 
-Voice Agent v2 has cumulative Slices 1–5 plus the Slice 6 development LiveKit/React path; physical-browser Slice 6 acceptance remains pending. Run root verification with `./verify`, and use [`README.md`](README.md#slice-6-development-application) plus [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md) for the installed runtime and remaining manual gates.
+Voice Agent v2 has cumulative Slices 1–5 plus the combined Slice 6 / Issue #15 LiveKit/React/local-LFM development path; physical-browser and full-stack resource acceptance remain pending. Active Slice 6 inference is only pinned cache-local LFM2.5 Q4_K_M on llama.cpp per [`config/local-lfm-v1.json`](config/local-lfm-v1.json) and ADR-0008—never infer the historical LiteLLM route is still active. Run `./verify-slice6`; use `./verify-local-lfm` on the canonical host and the evidence checklist for real validation.
 
 - Use [`CONTEXT.md`](CONTEXT.md) for stable terminology.
 - Use [`docs/architecture.md`](docs/architecture.md) for boundaries, contract ownership, lifecycle, failure policy, security, and resource gates.

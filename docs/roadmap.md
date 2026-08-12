@@ -285,7 +285,7 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 > **Authorized 2026-08-11:** Pasha explicitly authorized the failed, operator-opaque LiteLLM `deepseek-v4-flash` route for Slice 6 private live transcript testing. ADR-0006 supersedes ADR-0005's consumed live-traffic scope and requires the endpoint only from untracked server-side `LITELLM_BASE_URL`; current HTTP transport and every prior latency/reliability/privacy limitation remain visible, with no fallback or production approval.
 >
-> **Implementation checkpoint (2026-08-11):** the pinned low-level LiveKit/Python controller, scoped capability gateway, React client, reconnect context reset, and full cancellation/publication seam are implemented. Network-denied fake-inference cases, installed-SDK capability verification, React state/media tests, a loopback gateway smoke, and a restricted-bind LiveKit Server smoke pass. The configured server smoke observed signaling only on `127.0.0.1:7880`, media only on tailnet UDP `7882`, and no ICE/TCP media listener. This is not final acceptance: real loopback microphone/listening, second-tailnet browser, actual 250 ms barge-in, timing, browser capture, and combined resource evidence remain required.
+> **Combined Slice 6 / Issue #15 checkpoint (2026-08-12):** the pinned low-level LiveKit/Python controller, scoped capability gateway, React client, consolidated cancellation/reconnect/playout state machine, and fixed local LFM2.5 Q4_K_M/llama.cpp provider are implemented in one delivery. The active app rejects all LiteLLM configuration and has no cloud fallback; ADR-0008 supersedes ADR-0006 only for the active runtime while preserving its history. Network-denied fake-inference cases, installed SDK/provider manifests, 130 Python tests, 29 React/media tests, a real two-slot local-LFM check, loopback gateway smoke, and restricted-bind LiveKit/llama.cpp smokes pass. Direct evidence shows exactly two `n_ctx_slot=32768` slots at total context 65,536 and local GPU process VRAM about 2.9 GiB. This is not final acceptance: real loopback microphone/listening, second-tailnet browser, actual 250 ms barge-in/render boundary, browser capture, sustained full-stack coexistence and subjective response evidence remain required.
 
 ### User-visible outcome
 
@@ -310,7 +310,7 @@ A user opens the private web app, speaks over LiveKit, hears the locally synthes
 ### Acceptance criteria
 
 - Loopback browser and a second tailnet browser can connect using only tailnet membership plus protocol-required room capability.
-- STT/TTS/local-model inference and all management endpoints remain host-local; an explicitly selected cloud LLM is outbound-only to its allowlisted endpoint. LiveKit and cloud-provider credentials never reach the browser.
+- STT/TTS/local LFM inference and all management endpoints remain host-local. The active app makes no cloud LLM request, requires no provider credential/endpoint, and exposes no inference endpoint or LiveKit signing material to the browser.
 - Published microphone audio yields one correlated transcript and audible agent response over LiveKit.
 - Barge-in marks the prior turn interrupted, stops prior audio within the declared bound, discards old queued events, and completes a new turn without correlation leaks.
 - Disconnect/reconnect cannot replay a stale answer as a new turn.
@@ -327,7 +327,7 @@ Run network-denied deterministic headless media tests, then selected-provider re
 - Real loopback and second-tailnet-client latency traces: **pending physical-browser gate**.
 - Redacted bind/port and scoped-capability review: server bind/capability pass recorded; Tailscale HTTPS/browser path pending.
 - Browser capture showing conversation, transcript state, audible response, reconnect safety, and successful barge-in: **pending physical-browser gate**.
-- Combined LiveKit/browser/real-inference resource evidence inside the preserved Slice 5 reserve: **pending physical-browser gate**.
+- Focused local-LFM identity/two-slot/visible-answer/cancellation evidence: pass; combined Whisper/Qwen/LiveKit/browser sustained resource evidence inside the 12 GB host budget: **pending physical-browser/full-stack gate**.
 
 ## Design Gate V — Grill the avatar module and MVP eye
 

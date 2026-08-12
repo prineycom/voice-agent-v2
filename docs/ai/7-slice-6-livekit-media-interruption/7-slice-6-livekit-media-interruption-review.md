@@ -1,6 +1,6 @@
 # Review: 7-slice-6-livekit-media-interruption
 
-**Source:** `docs/ai/7-slice-6-livekit-media-interruption/7-slice-6-livekit-media-interruption-report.md` and Issue #7
+**Source:** `docs/ai/7-slice-6-livekit-media-interruption/7-slice-6-livekit-media-interruption-report.md`, Issue #7 and mandatory same-PR Issue #15
 **Status:** ✅ implementation review pass; physical acceptance remains explicitly pending
 
 ## Findings
@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | Pre-review stale completion could race a replacement listening event | `src/voice_agent_v2/realtime.py`, `tests/test_slice6_realtime.py` | Completion/context commit and next-turn admission share the session lock; deterministic ordering test passes. |
 | Pre-review reconnect could briefly reattach/replay old media or retain unheard provider context | `realtime.py`, `livekit_runtime.py`, `web/src/state.ts`, `voiceClient.ts`, `playback.ts` and tests | Old epochs are suppressed before media actions; playout is suspended; cleanup is serialized; context resets before the next epoch. |
-| Pre-review unrelated child processes inherited server configuration | `scripts/run_slice6.py`, startup boundary test | Tailscale children receive no LiveKit/LiteLLM server values; LiveKit gets only its dedicated config/key pair. |
+| Pre-review unrelated child processes inherited server configuration | `scripts/run_slice6.py`, startup boundary test | Tailscale children receive no LiveKit/LFM server values; LiveKit gets only its dedicated config/key pair, while llama.cpp receives only its fixed local runtime environment. |
 | Pre-review public URL configuration did not prove the current tailnet host | `slice6_config.py`, `run_slice6.py`, tests | Exact HTTPS origins share one host and startup matches DNS/IP/online state against `tailscale status --json`. |
 | Pre-review capability endpoint admitted cross-site POST consumption | `slice6_config.py`, `slice6_gateway.py`, tests | Capability issuance requires exact loopback or configured tailnet application `Origin`; missing/cross-site origin smoke returns 403. |
 
@@ -30,7 +30,8 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify-slice6` | Historical pre-fix checkpoint | The earlier checkpoint recorded 83 network-denied Python tests and 8 browser tests; later lifecycle regressions require fresh pipeline results, so these counts are not evidence for the current code. |
+| `./verify-slice6` | PASS after lifecycle/local-LFM integration | 130 network-denied Python tests, fixed provider/runtime manifest and cache hash checks, 29 browser tests, typecheck/build. |
+| `./verify-local-lfm` | PASS | Exact hashes, 2 x 32768 slots, concurrent visible Russian output, cancellation and recovery on loopback GPU runtime. |
 | Restricted LiveKit start plus `ss` | PASS | Loopback TCP/7880; redacted tailnet UDP/7882; no TCP media. |
 | Gateway status/security/origin smoke | PASS | Loopback only, safe headers/status, provider endpoint absent, missing/cross-site origin denied. |
 | `sh -n ...`, Python compile, `git diff --check` | PASS | Scripts, Python syntax and whitespace pass. |

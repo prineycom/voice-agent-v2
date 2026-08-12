@@ -1,8 +1,8 @@
 # Do Report: 7-slice-6-livekit-media-interruption
 
-**Source:** https://github.com/prineycom/voice-agent-v2/issues/7
+**Source:** https://github.com/prineycom/voice-agent-v2/issues/7 and mandatory same-PR scope update https://github.com/prineycom/voice-agent-v2/issues/15
 **Parent:** —
-**Status:** ⚠️ partial — implementation and deterministic evidence pass; required physical-browser acceptance is pending
+**Status:** ⚠️ partial — combined LiveKit/local-LFM implementation and automated/focused provider evidence pass; required physical-browser/full-stack resource acceptance is pending
 
 ## Changed files
 
@@ -14,7 +14,7 @@
 | `contracts/` | V1 realtime and client control schemas, fixtures, ownership, limits and reconnect semantics. | 3, 4, 6, 9 |
 | `tests/test_slice6_realtime.py`, browser tests, verification scripts | Network-denied fake-inference success/disconnect/duplicate/late/malformed/interruption/reconnect coverage; installed SDK/JWT scope check; browser state/media tests. | 3, 4, 6 |
 | `setup-slice6`, `run-slice6`, `verify-slice6`, locks, `.env.slice6.example`, CI | Pinned outside-Git setup, single foreground start command, full deterministic/runtime/browser check, behavioral CI. | 1, 6, 9 |
-| `cloud_llm.py`, `real_turn.py`, `process_adapter.py`, `tracer.py` and regression tests | Thread-safe cancellation, observed internal events, bounded adapter termination, undelivered context rollback, asyncio-compatible network denial. | 3–6 |
+| `local_lfm.py`, `real_turn.py`, `process_adapter.py`, `tracer.py` and regression tests | Fixed loopback local provider, hidden-reasoning isolation, thread-safe generation cancellation, bounded adapter/turn output, undelivered context rollback, asyncio-compatible network denial. | 3–6, Issue #15 |
 | `README.md`, `docs/architecture.md`, `docs/roadmap.md`, ADR-0007, evidence report, `AGENTS.md` | Implemented stack, ports, lifecycle, preserved failures, limitations, evidence and exact pending operator gates. | 1–10 |
 
 ## Acceptance coverage
@@ -45,8 +45,14 @@
 | Loopback gateway/status/security/origin smoke | PASS | Exact safe status, security headers, forbidden missing/cross-site origin; no inference/session admitted. |
 | `git diff --check` / Python compile | PASS | No whitespace or syntax errors at checkpoint. |
 
+## Issue #15 same-PR scope
+
+- Active Slice 6 inference is exactly the pinned official LFM2.5 Q4_K_M/llama.cpp runtime in `config/local-lfm-v1.json`; `LITELLM_*` is rejected, no token/endpoint is required, and no cloud fallback remains.
+- `./verify-local-lfm` verifies hashes, loopback-only health/identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, hidden-reasoning isolation, cancellation, slot release and recovery.
+- Historical DeepSeek and BF16/vLLM failures remain preserved rather than rewritten.
+
 ## Unresolved uncertainty
 
-- Pasha must perform and record the exact loopback and second-tailnet-browser checklist in `docs/evidence/slice-6-livekit-media-interruption.md`.
-- Actual microphone endpoint behavior, audible `ryan` output, 250 ms barge-in, reconnect playout suppression, endpoint-to-playout latency, Tailscale HTTPS/ICE selection and combined resource reserve are not claimed.
-- The authorized provider's known latency/empty-response/privacy/provenance/cost failures remain unresolved and may make a real turn fail explicitly.
+- Pasha must perform and record the exact loopback and second-tailnet-browser checklist only against the final local-LFM stack in `docs/evidence/slice-6-livekit-media-interruption.md`.
+- Actual microphone endpoint behavior, audible local-LFM→`ryan` output, 250 ms barge-in, reconnect playout suppression, endpoint-to-playout latency, Tailscale HTTPS/ICE selection and combined llama.cpp+Whisper+Qwen+LiveKit+browser resource reserve are not claimed.
+- Focused local-provider timing/behavior passed, but sustained full-stack and subjective response quality remain unresolved; any timeout/hidden-only/truncated/local-resource failure must fail explicitly with no cloud fallback.

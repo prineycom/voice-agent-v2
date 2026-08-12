@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+from io import BytesIO
+import json
+import threading
+import unittest
+
+from voice_agent_v2.contracts import StageFailure
+from voice_agent_v2.local_lfm import (
+    ALLOWED_PAYLOAD_FIELDS,
+    LLAMA_ENDPOINT,
+    MAX_TOKENS,
+    MODEL_ALIAS,
+    PROVIDER_IDENTITY,
+    REASONING_BUDGET,
+    LocalLFMProvider,
+)
+from voice_agent_v2.tracer import CancellationToken
+
+
+class StubResponse:
+    def __init__(self, events: list[dict], *, status: int = 200) -> None:
+        self.status = status
+        body = b"".join(
+            b"data: " + json.dumps(event).encode() + b"\n" for event in events
+        ) + b"data: [DONE]\n"
+        self.fp = BytesIO(body)
+        self._body = body
+
+    def read(self, limit: int | None = None) -> bytes:
+        return self._body if limit is None else self._body[:limit]
+
+
+class StubConnection:
+    def __init__(self, _host: str, _port: int, *, timeout: float, responses: list[StubResponse]) -> None:
+        self.timeout = timeout
+        self.responses = responses
+        self.requests: list[tuple[str, str, bytes | None, dict | None]] = []
+        self.closed = False
+        self.sock = None
+
+    def request(self, method: str, path: str, body=None, headers=None) -> None:
+        self.requests.append((method, path, body, headers))
+
+    def getresponse(self) -> StubResponse:
+        return self.responses.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def stream_event(*, reasoning: str = "", content: str = "", finish=None, model=MODEL_ALIAS):
+    delta = {}
+    if reasoning:
+        delta["reasoning_content"] = reasoning
+    if content:
+        delta["content"] = content
+    return {
+        "model": model,
+        "choices": [{"index": 0, "finish_reason": finish, "delta": delta}],
+    }
+
+
+class LocalLFMProviderTests(unittest.TestCase):
+    def factory(self, responses: list[StubResponse]):
+        created: list[StubConnection] = []
+
+        def build(host: str, port: int, *, timeout: float):
+            self.assertEqual((host, port), ("127.0.0.1", 18080))
+            connection = StubConnection(host, port, timeout=timeout, responses=responses)
+            created.append(connection)
+            return connection
+
+        return build, created
+
+    def test_identity_endpoint_and_readiness_are_fixed_local_without_credentials(self) -> None:
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        factory, created_response = self.factory([health])
+        provider = LocalLFMProvider(connection_factory=factory)
+        readiness = provider.readiness()
+
+        self.assertEqual(LLAMA_ENDPOINT, "http://127.0.0.1:18080")
+        self.assertEqual(provider.provider_mode, "local")
+        self.assertEqual(provider.provider_identity, PROVIDER_IDENTITY)
+        self.assertFalse(readiness["external_transfer"])
+        self.assertFalse(readiness["automatic_fallback"])
+        self.assertFalse(readiness["credentials_required"])
+        self.assertEqual(readiness["parallel_slots"], 2)
+        self.assertEqual(readiness["context_tokens_per_slot"], 32768)
+        self.assertEqual(created_response[0].requests[0][:2], ("GET", "/health"))
+
+    def test_payload_freezes_voice_sampling_reasoning_and_visible_bounds(self) -> None:
+        provider = LocalLFMProvider(connection_factory=lambda *_a, **_k: None)
+        payload = provider._payload("session-a", "Почему летом день длиннее?")
+        self.assertEqual(set(payload), ALLOWED_PAYLOAD_FIELDS)
+        self.assertEqual(payload["model"], MODEL_ALIAS)
+        self.assertEqual(payload["max_tokens"], MAX_TOKENS)
+        self.assertEqual(payload["reasoning_budget"], REASONING_BUDGET)
+        self.assertEqual(payload["reasoning_format"], "deepseek")
+        self.assertFalse(payload["cache_prompt"])
+        self.assertNotIn("endpoint", json.dumps(payload))
+
+    def test_hidden_reasoning_never_reaches_handoff_or_response(self) -> None:
+        response = StubResponse([
+            stream_event(reasoning="Скрытое рассуждение."),
+            stream_event(content="Короткий видимый ответ."),
+            stream_event(finish="stop"),
+            {"model": MODEL_ALIAS, "choices": [], "usage": {"total_tokens": 12}},
+        ])
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(connection_factory=factory)
+        handed_off: list[str] = []
+        text = provider.respond_with_handoff(
+            session_id="session-a",
+            turn_id="turn-a",
+            transcript="Публичный запрос",
+            on_sentence=handed_off.append,
+        )
+        self.assertEqual(text, "Короткий видимый ответ.")
+        self.assertEqual(handed_off, ["Короткий видимый ответ."])
+        self.assertNotIn("Скрытое", text + "".join(handed_off))
+        self.assertFalse(provider.observations[-1]["external_transfer"])
+        self.assertGreater(provider.observations[-1]["reasoning_chars"], 0)
+
+    def test_context_is_bounded_isolated_and_rollbackable(self) -> None:
+        responses = []
+        for answer in ("Ответ А.", "Ответ Б.", "Ответ А2."):
+            responses.append(StubResponse([
+                stream_event(content=answer),
+                stream_event(finish="stop"),
+            ]))
+        factory, created = self.factory(responses)
+        provider = LocalLFMProvider(connection_factory=factory)
+        provider.respond(session_id="session-a", turn_id="turn-a", transcript="Запрос А")
+        snapshot = provider.snapshot_session("session-a")
+        provider.respond(session_id="session-b", turn_id="turn-b", transcript="Запрос Б")
+        provider.respond(session_id="session-a", turn_id="turn-a2", transcript="Запрос А2")
+
+        payload_b = json.loads(created[1].requests[0][2])
+        payload_a2 = json.loads(created[2].requests[0][2])
+        self.assertNotIn("Запрос А", json.dumps(payload_b, ensure_ascii=False))
+        self.assertIn("Запрос А", json.dumps(payload_a2, ensure_ascii=False))
+        provider.restore_session("session-a", snapshot)
+        self.assertEqual(provider.snapshot_session("session-a"), snapshot)
+
+    def test_identity_finish_empty_and_visible_limit_fail_closed_without_fallback(self) -> None:
+        cases = (
+            ([stream_event(content="Ответ.", model="other"), stream_event(finish="stop")], "selected_provider_identity_mismatch"),
+            ([stream_event(reasoning="только скрыто"), stream_event(finish="stop")], "empty_selected_provider_response"),
+            ([stream_event(content="x" * 501), stream_event(finish="stop")], "selected_provider_output_out_of_bounds"),
+            ([stream_event(content="Ответ."), stream_event(finish="length")], "local_lfm_incomplete_response"),
+        )
+        for events, code in cases:
+            with self.subTest(code=code):
+                factory, _created = self.factory([StubResponse(events)])
+                provider = LocalLFMProvider(connection_factory=factory)
+                with self.assertRaises(StageFailure) as raised:
+                    provider.respond(
+                        session_id="session-a", turn_id="turn-a", transcript="Запрос"
+                    )
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(provider.provider_identity, PROVIDER_IDENTITY)
+                self.assertFalse(provider.observations[-1]["success"])
+
+    def test_pre_cancelled_request_never_opens_transport(self) -> None:
+        opened = False
+
+        def factory(*_args, **_kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("transport must not open")
+
+        token = CancellationToken()
+        token.cancel()
+        provider = LocalLFMProvider(connection_factory=factory)
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond(
+                session_id="session-a", turn_id="turn-a", transcript="Запрос",
+                cancellation=token,
+            )
+        self.assertEqual(raised.exception.code, "selected_provider_cancelled")
+        self.assertFalse(opened)
+
+
+if __name__ == "__main__":
+    unittest.main()
