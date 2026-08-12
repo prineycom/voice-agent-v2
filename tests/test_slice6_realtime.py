@@ -894,13 +894,19 @@ class Slice6ConfigurationTests(unittest.TestCase):
                 self.assertFalse(app_origin_allowed(denied, public))
 
     def test_livekit_config_restricts_signaling_and_media_to_measured_paths(self) -> None:
-        config = livekit_server_config("100.78.238.32")
-        self.assertIn("bind_addresses:\n  - 127.0.0.1", config)
-        self.assertIn("tcp_port: 0", config)
-        self.assertIn("udp_port: 7882", config)
-        self.assertIn("node_ip: 100.78.238.32", config)
-        self.assertIn("- tailscale0", config)
-        self.assertNotIn("7881", config)
+        config = json.loads(livekit_server_config("100.78.238.32"))
+        self.assertEqual(config["port"], 7880)
+        self.assertEqual(config["bind_addresses"], ["127.0.0.1"])
+        self.assertEqual(config["rtc"], {
+            "tcp_port": 0,
+            "udp_port": 7882,
+            "use_external_ip": False,
+            "node_ip": "100.78.238.32",
+            "interfaces": {"includes": ["tailscale0"]},
+            "ips": {"includes": ["100.78.238.32/32"]},
+        })
+        self.assertEqual(config["room"]["max_participants"], 2)
+        self.assertNotIn("turn", config)
         with self.assertRaises(Slice6ConfigurationError):
             livekit_server_config("192.168.1.5")
 

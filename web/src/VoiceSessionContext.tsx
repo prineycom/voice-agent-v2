@@ -28,8 +28,9 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
 
   const disconnect = useCallback(async () => {
     const client = clientRef.current
-    clientRef.current = null
-    if (client !== null) await client.stop()
+    if (client === null) return
+    await client.stop()
+    if (clientRef.current === client) clientRef.current = null
   }, [])
 
   const connect = useCallback(async () => {
@@ -46,11 +47,13 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     try {
       await client.start()
     } catch (error) {
+      let cleanupComplete = false
       try {
         await client.stop()
+        cleanupComplete = true
       } catch {}
       if (clientRef.current === client) {
-        clientRef.current = null
+        if (cleanupComplete) clientRef.current = null
         dispatch({
           type: 'connection',
           connection: 'failed',

@@ -347,6 +347,49 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         self.assertTrue(connection_socket.closed.is_set())
         self.assertEqual(failures[0].code, "selected_provider_cancelled")
 
+    def test_blocked_dns_start_is_cancelled_before_transport_creation(self) -> None:
+        provider = LiteLLMProvider(
+            base_url=self.TEST_BASE_URL,
+            transport_start_timeout_seconds=0.2,
+        )
+        resolver_entered = threading.Event()
+        resolver_release = threading.Event()
+        failures = []
+
+        def blocked_resolution(*_args):
+            resolver_entered.set()
+            resolver_release.wait(1)
+            return [(2, 1, 6, "", ("127.0.0.1", 4000))]
+
+        def respond() -> None:
+            try:
+                provider.respond(
+                    session_id="session-a",
+                    turn_id="turn-a",
+                    transcript="Публичный запрос",
+                )
+            except StageFailure as error:
+                failures.append(error)
+
+        with (
+            patch.object(LiteLLMProvider, "_token", return_value="test-token"),
+            patch(
+                "voice_agent_v2.cloud_llm.socket.getaddrinfo",
+                side_effect=blocked_resolution,
+            ),
+            patch("voice_agent_v2.cloud_llm.socket.socket") as socket_factory,
+        ):
+            worker = threading.Thread(target=respond)
+            worker.start()
+            self.assertTrue(resolver_entered.wait(1))
+            provider.cancel()
+            worker.join(0.5)
+            resolver_release.set()
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(socket_factory.called)
+        self.assertEqual(failures[0].code, "selected_provider_cancelled")
+
     def test_completion_rejects_redirect_without_fallback(self) -> None:
         connection = StubHTTPConnection(StubHTTPResponse(b"", status=307))
         provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)

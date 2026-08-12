@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import queue
 import socket
 import stat
 import sys
@@ -29,6 +30,7 @@ MAX_STREAM_EVENTS = 2048
 MAX_STREAM_LINE_BYTES = 65_536
 MAX_VISIBLE_CHARS = 8192
 MAX_VISIBLE_BYTES = 32_768
+PROVIDER_STARTUP_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -75,43 +77,94 @@ def parse_provider_endpoint(value: str | None) -> ProviderEndpoint:
 
 
 class _RegisteredTCPConnection:
-    def __init__(self, *args, cancelled: Callable[[], bool], **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        cancelled: Callable[[], bool],
+        startup_timeout: float,
+        **kwargs,
+    ) -> None:
         self._cancelled = cancelled
+        self._startup_timeout = startup_timeout
         super().__init__(*args, **kwargs)
 
-    def _connect_registered_socket(self) -> None:
+    def _startup_failure(self, deadline: float) -> OSError | None:
+        if self._cancelled():
+            return OSError(errno.ECANCELED, "provider connection cancelled")
+        if time.monotonic() >= deadline:
+            return OSError(errno.ETIMEDOUT, "provider connection startup timed out")
+        return None
+
+    def _resolve_addresses(self, deadline: float) -> list[tuple]:
+        results: queue.Queue[list[tuple] | BaseException] = queue.Queue(maxsize=1)
+
+        def resolve() -> None:
+            try:
+                value: list[tuple] | BaseException = socket.getaddrinfo(
+                    self.host, self.port, 0, socket.SOCK_STREAM
+                )
+            except BaseException as error:
+                value = error
+            try:
+                results.put_nowait(value)
+            except queue.Full:
+                pass
+
+        threading.Thread(
+            target=resolve,
+            name="voice-provider-resolver",
+            daemon=True,
+        ).start()
+        while True:
+            failure = self._startup_failure(deadline)
+            if failure is not None:
+                raise failure
+            try:
+                value = results.get(
+                    timeout=max(0.001, min(0.01, deadline - time.monotonic()))
+                )
+            except queue.Empty:
+                continue
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+    def _connect_registered_socket(self) -> float:
         sys.audit("http.client.connect", self, self.host, self.port)
-        addresses = socket.getaddrinfo(
-            self.host, self.port, 0, socket.SOCK_STREAM
-        )
+        deadline = time.monotonic() + self._startup_timeout
+        addresses = self._resolve_addresses(deadline)
         last_error: OSError | None = None
         for family, socktype, protocol, _canonical_name, address in addresses:
-            if self._cancelled():
-                raise OSError(errno.ECANCELED, "provider connection cancelled")
+            failure = self._startup_failure(deadline)
+            if failure is not None:
+                raise failure
             candidate = socket.socket(family, socktype, protocol)
             self.sock = candidate
             try:
-                candidate.settimeout(self.timeout)
+                candidate.settimeout(max(0.001, deadline - time.monotonic()))
                 if self.source_address:
                     candidate.bind(self.source_address)
-                if self._cancelled():
-                    raise OSError(errno.ECANCELED, "provider connection cancelled")
+                failure = self._startup_failure(deadline)
+                if failure is not None:
+                    raise failure
                 candidate.connect(address)
-                if self._cancelled():
-                    raise OSError(errno.ECANCELED, "provider connection cancelled")
+                failure = self._startup_failure(deadline)
+                if failure is not None:
+                    raise failure
                 try:
                     candidate.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 except OSError as error:
                     if error.errno != errno.ENOPROTOOPT:
                         raise
-                return
+                return deadline
             except OSError as error:
                 last_error = error
                 candidate.close()
                 if self.sock is candidate:
                     self.sock = None
-                if self._cancelled():
-                    raise OSError(errno.ECANCELED, "provider connection cancelled") from error
+                failure = self._startup_failure(deadline)
+                if failure is not None:
+                    raise failure from error
         if last_error is not None:
             raise last_error
         raise OSError("provider endpoint did not resolve")
@@ -120,17 +173,25 @@ class _RegisteredTCPConnection:
 class _RegisteredHTTPConnection(_RegisteredTCPConnection, http.client.HTTPConnection):
     def connect(self) -> None:
         self._connect_registered_socket()
+        self.sock.settimeout(self.timeout)
 
 
 class _RegisteredHTTPSConnection(_RegisteredTCPConnection, http.client.HTTPSConnection):
     def connect(self) -> None:
-        self._connect_registered_socket()
+        deadline = self._connect_registered_socket()
         server_hostname = self._tunnel_host or self.host
         if self._tunnel_host:
             self._tunnel()
+        failure = self._startup_failure(deadline)
+        if failure is not None:
+            raise failure
         self.sock = self._context.wrap_socket(
             self.sock, server_hostname=server_hostname
         )
+        failure = self._startup_failure(deadline)
+        if failure is not None:
+            raise failure
+        self.sock.settimeout(self.timeout)
 
 
 class LiteLLMProvider:
@@ -144,10 +205,14 @@ class LiteLLMProvider:
         *,
         base_url: str | None = None,
         token_path: Path = TOKEN_PATH,
+        transport_start_timeout_seconds: float = PROVIDER_STARTUP_TIMEOUT_SECONDS,
     ) -> None:
+        if transport_start_timeout_seconds <= 0:
+            raise ValueError("transport_start_timeout_seconds must be positive")
         self._executor = executor
         self._configured_base_url = base_url
         self._token_path = token_path
+        self._transport_start_timeout_seconds = transport_start_timeout_seconds
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._operation_lock = threading.Lock()
         self._operation_generation = 0
@@ -176,8 +241,8 @@ class LiteLLMProvider:
             raise StageFailure("llm_provider", "credential_file_empty")
         return value
 
-    @staticmethod
     def _connection_for(
+        self,
         endpoint: ProviderEndpoint,
         timeout: float,
         cancelled: Callable[[], bool] = lambda: False,
@@ -192,6 +257,7 @@ class LiteLLMProvider:
             endpoint.port,
             timeout=timeout,
             cancelled=cancelled,
+            startup_timeout=min(timeout, self._transport_start_timeout_seconds),
         )
 
     def _capability_gate(self, token: str, endpoint: ProviderEndpoint) -> None:

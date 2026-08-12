@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ipaddress
+import json
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -23,29 +24,26 @@ def livekit_server_config(node_ip: str) -> str:
     address = ipaddress.ip_address(node_ip)
     if address not in TAILSCALE_NETWORK:
         raise Slice6ConfigurationError("SLICE6_LIVEKIT_NODE_IP must be this host's Tailscale IPv4 address")
-    return f"""port: 7880
-bind_addresses:
-  - 127.0.0.1
-rtc:
-  tcp_port: 0
-  udp_port: 7882
-  use_external_ip: false
-  node_ip: {address}
-  interfaces:
-    includes:
-      - tailscale0
-  ips:
-    includes:
-      - {address}/32
-room:
-  auto_create: true
-  max_participants: 2
-  empty_timeout: 60
-  departure_timeout: 15
-logging:
-  level: info
-  json: true
-"""
+    config = {
+        "port": 7880,
+        "bind_addresses": ["127.0.0.1"],
+        "rtc": {
+            "tcp_port": 0,
+            "udp_port": 7882,
+            "use_external_ip": False,
+            "node_ip": str(address),
+            "interfaces": {"includes": ["tailscale0"]},
+            "ips": {"includes": [f"{address}/32"]},
+        },
+        "room": {
+            "auto_create": True,
+            "max_participants": 2,
+            "empty_timeout": 60,
+            "departure_timeout": 15,
+        },
+        "logging": {"level": "info", "json": True},
+    }
+    return json.dumps(config, indent=2) + "\n"
 
 
 def app_origin_allowed(origin: str | None, app_public_url: str) -> bool:

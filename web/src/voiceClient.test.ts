@@ -507,12 +507,17 @@ describe('VoiceClient startup cancellation', () => {
     expect(microphone.stop).toHaveBeenCalledOnce()
   })
 
-  it('attempts every resource cleanup before reporting combined failure', async () => {
+  it('retains failed cleanup handles and releases each one on retry', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
-    const microphone = { stop: vi.fn(() => { throw new Error('stop failed') }) }
+    const microphone = {
+      stop: vi.fn()
+        .mockImplementationOnce(() => { throw new Error('stop failed') })
+        .mockImplementation(() => undefined),
+    }
     livekit.createLocalAudioTrack.mockResolvedValue(microphone)
     const observed = callbacks()
-    const client = new VoiceClient(document.createElement('div'), observed)
+    const container = document.createElement('div')
+    const client = new VoiceClient(container, observed)
     await client.start()
     const room = livekit.rooms[0]
     room.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
@@ -523,7 +528,9 @@ describe('VoiceClient startup cancellation', () => {
     const remoteTrack = {
       kind: 'audio',
       attach: vi.fn().mockReturnValue(element),
-      detach: vi.fn(() => { throw new Error('detach failed') }),
+      detach: vi.fn()
+        .mockImplementationOnce(() => { throw new Error('detach failed') })
+        .mockReturnValue([]),
     }
     room.emit('trackSubscribed', remoteTrack, {}, { identity: 'agent-session-test-0001' })
 
@@ -533,10 +540,41 @@ describe('VoiceClient startup cancellation', () => {
       'failed',
       'Агент голосовой сессии отключился (не удалось полностью освободить транспорт)',
     ))
-    expect(microphone.stop).toHaveBeenCalledOnce()
-    expect(remoteTrack.detach).toHaveBeenCalled()
-    expect(room.disconnect).toHaveBeenCalledOnce()
+    expect(container.childElementCount).toBe(0)
+    expect(element.pause).toHaveBeenCalledOnce()
+    expect(element.load).toHaveBeenCalledOnce()
+
     await expect(client.stop()).resolves.toBeUndefined()
+    expect(microphone.stop).toHaveBeenCalledTimes(2)
+    expect(remoteTrack.detach).toHaveBeenCalledTimes(2)
+    expect(room.disconnect).toHaveBeenCalledTimes(2)
+    expect(observed.onConnection).toHaveBeenLastCalledWith('closed')
+  })
+
+  it('reports manual cleanup failure instead of a false closed state', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    const microphone = {
+      stop: vi.fn()
+        .mockImplementationOnce(() => { throw new Error('stop failed') })
+        .mockImplementation(() => undefined),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValue(microphone)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    room.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
+
+    await expect(client.stop()).rejects.toThrow('resource cleanup failed')
+    expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed',
+      'Не удалось полностью освободить ресурсы голосовой сессии',
+    )
+
+    await expect(client.stop()).resolves.toBeUndefined()
+    expect(microphone.stop).toHaveBeenCalledTimes(2)
+    expect(room.disconnect).toHaveBeenCalledTimes(2)
+    expect(observed.onConnection).toHaveBeenLastCalledWith('closed')
   })
 
   it('releases microphone, playback, and room after terminal degradation', async () => {

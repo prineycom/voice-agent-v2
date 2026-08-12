@@ -6,6 +6,7 @@ export interface AttachableAudioTrack {
 export class AudioPlaybackBoundary {
   private track: AttachableAudioTrack | null = null
   private element: HTMLMediaElement | null = null
+  private pendingDetach: { track: AttachableAudioTrack | null; element: HTMLMediaElement } | null = null
   private generation = 0
 
   constructor(
@@ -74,13 +75,34 @@ export class AudioPlaybackBoundary {
 
   private detachElement(): void {
     this.generation += 1
-    if (this.element === null) return
-    this.track?.detach(this.element)
-    this.element.pause()
-    this.element.removeAttribute('src')
-    this.element.load()
-    this.element.remove()
-    this.element = null
-    this.container.replaceChildren()
+    const pending = this.pendingDetach
+    const track = pending?.track ?? this.track
+    const element = pending?.element ?? this.element
+    if (element === null) return
+    const errors: unknown[] = []
+    try {
+      track?.detach(element)
+    } catch (error) {
+      errors.push(error)
+    } finally {
+      for (const shutdown of [
+        () => element.pause(),
+        () => element.removeAttribute('src'),
+        () => element.load(),
+        () => element.remove(),
+        () => this.container.replaceChildren(),
+      ]) {
+        try {
+          shutdown()
+        } catch (error) {
+          errors.push(error)
+        }
+      }
+      if (this.element === element) this.element = null
+      this.pendingDetach = errors.length === 0 ? null : { track, element }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, 'audio playback cleanup failed')
+    }
   }
 }

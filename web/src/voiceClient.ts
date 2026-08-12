@@ -101,8 +101,8 @@ export class VoiceClient {
         noiseSuppression: true,
         autoGainControl: true,
       })
-      await this.ensureRoomStarting(room, microphone)
       this.microphone = microphone
+      await this.ensureRoomStarting(room, microphone)
       await room.localParticipant.publishTrack(microphone, {
         source: Track.Source.Microphone,
         dtx: false,
@@ -125,21 +125,25 @@ export class VoiceClient {
   }
 
   async stop(): Promise<void> {
-    if (this.stopPromise !== null) return this.stopPromise
     this.stopping = true
     this.startAbort?.abort()
-    this.stopPromise = this.releaseResources()
-    return this.stopPromise
+    return this.beginResourceRelease(true)
   }
 
-  private async releaseResources(notifyClosed = true): Promise<void> {
+  private beginResourceRelease(notifyClosed: boolean): Promise<void> {
+    if (this.stopPromise !== null) return this.stopPromise
+    const cleanup = this.releaseResources(notifyClosed)
+    const tracked = cleanup.finally(() => {
+      if (this.stopPromise === tracked) this.stopPromise = null
+    })
+    this.stopPromise = tracked
+    return tracked
+  }
+
+  private async releaseResources(notifyClosed: boolean): Promise<void> {
     this.clearReconnectAckTimer()
     this.clearInitialReadyTimer()
     this.playoutGeneration += 1
-    const microphone = this.microphone
-    const room = this.room
-    this.microphone = null
-    this.room = null
     this.capability = null
     this.controlGate = null
     this.reconnecting = false
@@ -154,28 +158,39 @@ export class VoiceClient {
     this.freshSubscriptionRequired = false
     this.streamEpoch = 0
     const errors: unknown[] = []
-    try {
+    const microphone = this.microphone
+    if (microphone !== null) {
       try {
-        microphone?.stop()
+        microphone.stop()
+        if (this.microphone === microphone) this.microphone = null
       } catch (error) {
         errors.push(error)
       }
-      try {
-        this.playback.clear()
-      } catch (error) {
-        errors.push(error)
-      }
-      try {
-        if (room !== null) await room.disconnect()
-      } catch (error) {
-        errors.push(error)
-      }
-      if (errors.length > 0) {
-        throw new AggregateError(errors, 'voice session resource cleanup failed')
-      }
-    } finally {
-      if (notifyClosed) this.callbacks.onConnection('closed')
     }
+    try {
+      this.playback.clear()
+    } catch (error) {
+      errors.push(error)
+    }
+    const room = this.room
+    if (room !== null) {
+      try {
+        await room.disconnect()
+        if (this.room === room) this.room = null
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    if (errors.length > 0) {
+      if (notifyClosed) {
+        this.callbacks.onConnection(
+          'failed',
+          'Не удалось полностью освободить ресурсы голосовой сессии',
+        )
+      }
+      throw new AggregateError(errors, 'voice session resource cleanup failed')
+    }
+    if (notifyClosed) this.callbacks.onConnection('closed')
   }
 
   private ensureStarting(): void {
@@ -187,12 +202,11 @@ export class VoiceClient {
     microphone?: LocalAudioTrack,
   ): Promise<void> {
     if (!this.stopping) return
-    try {
-      microphone?.stop()
-    } catch {}
-    try {
-      await room.disconnect()
-    } catch {}
+    if (this.room === null) this.room = room
+    if (microphone !== undefined && this.microphone === null) {
+      this.microphone = microphone
+    }
+    await this.stop()
     throw new Error('voice session start was cancelled')
   }
 
@@ -467,8 +481,7 @@ export class VoiceClient {
     if (this.stopping) return
     this.stopping = true
     this.startAbort?.abort()
-    const cleanup = this.releaseResources(false)
-    this.stopPromise = cleanup.catch(() => undefined)
+    const cleanup = this.beginResourceRelease(false)
     let failure = message
     try {
       await cleanup
