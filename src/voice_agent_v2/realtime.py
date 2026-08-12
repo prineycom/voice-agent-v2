@@ -453,7 +453,7 @@ class RealtimeSession:
             return None, None
         started = time.monotonic()
         context.terminal = True
-        context.cancellation.cancel()
+        await asyncio.to_thread(context.cancellation.cancel)
         if context.playout_ack is not None and not context.playout_ack.done():
             context.playout_ack.set_result(None)
 
@@ -483,7 +483,7 @@ class RealtimeSession:
             await self._abort_failed_transport(context)
 
     async def _abort_failed_transport(self, context: TurnContext) -> None:
-        context.cancellation.cancel()
+        await asyncio.to_thread(context.cancellation.cancel)
         context.terminal = True
         existing_cleanup = context.cancellation_cleanup
         cleanup = self._ensure_context_cleanup(context, wait_for_turn=False)

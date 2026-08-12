@@ -16,6 +16,15 @@ VENV = CACHE / "runtime" / "qwen-tts-venv"
 RUNNER = Path(__file__).resolve().parents[2] / "benchmarks" / "slice2" / "runners" / "qwen3_tts_runner.py"
 LOGS = CACHE / "raw" / "service-logs"
 OUTPUT_FORMAT = AudioFormat()
+TTS_REQUEST_TIMEOUT_SECONDS = 180.0
+MAX_TTS_CHUNKS = 4096
+MAX_TTS_AUDIO_SECONDS = 180
+MAX_TTS_OUTPUT_BYTES = (
+    OUTPUT_FORMAT.sample_rate_hz
+    * OUTPUT_FORMAT.channels
+    * 2
+    * MAX_TTS_AUDIO_SECONDS
+)
 
 
 def _environment() -> dict[str, str]:
@@ -90,7 +99,7 @@ class Qwen3TTS:
                 {
                     "command": "synthesize", "request_id": request_id, "text": text,
                     "emit_pcm": True, "output_sample_rate_hz": OUTPUT_FORMAT.sample_rate_hz,
-                }, 180
+                }, TTS_REQUEST_TIMEOUT_SECONDS
             ):
                 if cancellation is not None and cancellation.cancelled:
                     raise StageFailure("tts", "selected_tts_cancelled")
@@ -102,6 +111,8 @@ class Qwen3TTS:
                     if event["sequence"] != chunks:
                         raise AdapterProcessError("out-of-order TTS chunk")
                     total_bytes += len(data)
+                    if chunks > MAX_TTS_CHUNKS or total_bytes > MAX_TTS_OUTPUT_BYTES:
+                        raise StageFailure("tts", "selected_tts_output_out_of_bounds")
                     first = first or time.monotonic()
                     yield data
                 elif event["event"] == "final":
@@ -118,7 +129,11 @@ class Qwen3TTS:
                     raise AdapterProcessError("unknown TTS event")
             if not final_seen or chunks == 0 or total_bytes == 0:
                 raise AdapterProcessError("TTS produced no audio")
+        except StageFailure:
+            self.cancel()
+            raise
         except (AdapterProcessError, OSError, ValueError, KeyError, TypeError) as error:
+            self.cancel()
             raise StageFailure("tts", "selected_tts_unavailable") from error
         completed = time.monotonic()
         self.observations.append({

@@ -97,9 +97,13 @@ class AdapterProcess:
                 return response
 
     def stream(self, value: dict, timeout_seconds: float) -> Iterator[dict]:
+        deadline = time.monotonic() + timeout_seconds
         self.send(value)
         while True:
-            response = self.receive(timeout_seconds)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AdapterProcessError("adapter timed out")
+            response = self.receive(remaining)
             if response.get("request_id") != value.get("request_id"):
                 raise AdapterProcessError("adapter correlation mismatch")
             if response.get("event") == "error":

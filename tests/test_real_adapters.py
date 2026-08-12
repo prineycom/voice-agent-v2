@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
 from io import BytesIO
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +20,16 @@ from voice_agent_v2.local_tts import OUTPUT_FORMAT, Qwen3TTS
 from voice_agent_v2.process_adapter import AdapterProcess, AdapterProcessError
 from voice_agent_v2.real_turn import RealTurnController
 from voice_agent_v2.tracer import CancellationToken
+
+
+def loopback_resolver(_host: str, port: int, sender) -> None:
+    sender.send((True, [(2, 1, 6, "", ("127.0.0.1", port))]))
+    sender.close()
+
+
+def blocked_resolver(_host: str, _port: int, sender) -> None:
+    del sender
+    time.sleep(10)
 
 
 class FailingProcess:
@@ -199,6 +212,50 @@ class LocalTTSContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "selected_tts_unavailable")
         self.assertFalse(tts.observations)
 
+    def test_tts_chunk_and_audio_duration_bounds_cancel_malformed_adapter(self) -> None:
+        class MalformedStreamingProcess:
+            def __init__(self, chunks: tuple[bytes, ...]) -> None:
+                self.chunks = chunks
+                self.cancelled = False
+
+            def stream(self, value: dict, _timeout: float):
+                for sequence, chunk in enumerate(self.chunks, 1):
+                    yield {
+                        "event": "chunk",
+                        "request_id": value["request_id"],
+                        "sequence": sequence,
+                        "pcm_base64": base64.b64encode(chunk).decode(),
+                        "bytes": len(chunk),
+                    }
+
+            def cancel(self) -> float:
+                self.cancelled = True
+                return 0.0
+
+        cases = (
+            ("MAX_TTS_CHUNKS", 2, (b"\0\0", b"\0\0", b"\0\0")),
+            ("MAX_TTS_OUTPUT_BYTES", 2, (b"\0\0\0\0",)),
+        )
+        for bound, limit, chunks in cases:
+            with self.subTest(bound=bound):
+                process = MalformedStreamingProcess(chunks)
+                tts = Qwen3TTS()
+                tts._process = process
+                tts.ready_metadata = {"event": "ready"}
+                with (
+                    patch(f"voice_agent_v2.local_tts.{bound}", limit),
+                    self.assertRaises(StageFailure) as raised,
+                ):
+                    tuple(tts.stream_synthesize(
+                        session_id="session-test-0001",
+                        turn_id="turn-test-0001",
+                        text="Публичный ответ.",
+                        audio_format=OUTPUT_FORMAT,
+                    ))
+                self.assertEqual(raised.exception.code, "selected_tts_output_out_of_bounds")
+                self.assertTrue(process.cancelled)
+                self.assertIsNone(tts._process)
+
 
 class LiteLLMProviderContractTests(unittest.TestCase):
     TEST_BASE_URL = "http://rpi:4000"
@@ -315,7 +372,10 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         self.assertTrue(connection.closed)
 
     def test_blocked_connection_start_is_cancelled_by_registered_socket(self) -> None:
-        provider = LiteLLMProvider(base_url=self.TEST_BASE_URL)
+        provider = LiteLLMProvider(
+            base_url=self.TEST_BASE_URL,
+            resolver_target=loopback_resolver,
+        )
         connection_socket = BlockingConnectSocket()
         failures = []
 
@@ -331,10 +391,6 @@ class LiteLLMProviderContractTests(unittest.TestCase):
 
         with (
             patch.object(LiteLLMProvider, "_token", return_value="test-token"),
-            patch(
-                "voice_agent_v2.cloud_llm.socket.getaddrinfo",
-                return_value=[(2, 1, 6, "", ("127.0.0.1", 4000))],
-            ),
             patch("voice_agent_v2.cloud_llm.socket.socket", return_value=connection_socket),
         ):
             worker = threading.Thread(target=respond)
@@ -351,15 +407,9 @@ class LiteLLMProviderContractTests(unittest.TestCase):
         provider = LiteLLMProvider(
             base_url=self.TEST_BASE_URL,
             transport_start_timeout_seconds=0.2,
+            resolver_target=blocked_resolver,
         )
-        resolver_entered = threading.Event()
-        resolver_release = threading.Event()
         failures = []
-
-        def blocked_resolution(*_args):
-            resolver_entered.set()
-            resolver_release.wait(1)
-            return [(2, 1, 6, "", ("127.0.0.1", 4000))]
 
         def respond() -> None:
             try:
@@ -373,21 +423,27 @@ class LiteLLMProviderContractTests(unittest.TestCase):
 
         with (
             patch.object(LiteLLMProvider, "_token", return_value="test-token"),
-            patch(
-                "voice_agent_v2.cloud_llm.socket.getaddrinfo",
-                side_effect=blocked_resolution,
-            ),
             patch("voice_agent_v2.cloud_llm.socket.socket") as socket_factory,
         ):
             worker = threading.Thread(target=respond)
             worker.start()
-            self.assertTrue(resolver_entered.wait(1))
+            deadline = time.monotonic() + 1
+            while not any(
+                child.name == "voice-provider-resolver" and child.is_alive()
+                for child in multiprocessing.active_children()
+            ):
+                if time.monotonic() >= deadline:
+                    self.fail("resolver process did not start")
+                time.sleep(0.005)
             provider.cancel()
             worker.join(0.5)
-            resolver_release.set()
 
         self.assertFalse(worker.is_alive())
         self.assertFalse(socket_factory.called)
+        self.assertFalse(any(
+            child.name == "voice-provider-resolver" and child.is_alive()
+            for child in multiprocessing.active_children()
+        ))
         self.assertEqual(failures[0].code, "selected_provider_cancelled")
 
     def test_completion_rejects_redirect_without_fallback(self) -> None:
@@ -690,15 +746,19 @@ class RealTurnControllerTests(unittest.TestCase):
         )))
         first.start()
         self.assertTrue(llm.first_entered.wait(1))
-        token.cancel()
+        canceller = threading.Thread(target=token.cancel)
+        canceller.start()
         self.assertTrue(llm.cancel_entered.wait(1))
         second.start()
         threading.Event().wait(0.05)
+        self.assertTrue(canceller.is_alive())
         self.assertEqual(llm.calls, 1)
         llm.allow_cancel.set()
+        canceller.join(1)
         first.join(1)
         second.join(1)
 
+        self.assertFalse(canceller.is_alive())
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertEqual(llm.calls, 2)
@@ -853,6 +913,26 @@ class LocalSTTContractTests(unittest.TestCase):
 
 
 class AdapterProcessTests(unittest.TestCase):
+    def test_stream_timeout_is_one_wall_clock_deadline(self) -> None:
+        adapter = AdapterProcess([], Path("unused"), {})
+        adapter.send = lambda _value: None
+
+        def emit_slow_events() -> None:
+            time.sleep(0.06)
+            adapter._events.put({"request_id": "request", "event": "chunk"})
+            time.sleep(0.06)
+            adapter._events.put({"request_id": "request", "event": "final"})
+
+        producer = threading.Thread(target=emit_slow_events)
+        producer.start()
+        started = time.monotonic()
+        with self.assertRaisesRegex(AdapterProcessError, "timed out"):
+            tuple(adapter.stream({"request_id": "request"}, 0.1))
+        elapsed = time.monotonic() - started
+        producer.join(1)
+
+        self.assertLess(elapsed, 0.14)
+
     def test_invalid_startup_event_terminates_child_and_resets_resources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             adapter = AdapterProcess(

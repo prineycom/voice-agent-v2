@@ -88,9 +88,6 @@ class RealTurnController:
             emit("turn.failed", payload, True)
             return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
 
-        cancellation_workers: set[threading.Thread] = set()
-        cancellation_workers_lock = threading.Lock()
-
         def cancel_adapters(*adapters) -> None:
             for adapter in adapters:
                 cancel = getattr(adapter, "cancel", None)
@@ -100,30 +97,6 @@ class RealTurnController:
                     except Exception:
                         pass
 
-        def request_adapter_cancellation(adapters: tuple[object, ...]) -> None:
-            def cancel_registered_generation() -> None:
-                cancel_adapters(*adapters)
-
-            worker = threading.Thread(
-                target=cancel_registered_generation,
-                name="voice-turn-cancellation",
-                daemon=True,
-            )
-            with cancellation_workers_lock:
-                cancellation_workers.add(worker)
-            worker.start()
-
-        def await_adapter_cancellation() -> None:
-            while True:
-                with cancellation_workers_lock:
-                    workers = tuple(cancellation_workers)
-                if not workers:
-                    return
-                for worker in workers:
-                    worker.join()
-                    with cancellation_workers_lock:
-                        cancellation_workers.discard(worker)
-
         def interrupted() -> TraceResult:
             emit("turn.interrupted", {
                 "outcome": "interrupted", "audio_chunks_emitted": len(output_chunks),
@@ -131,9 +104,7 @@ class RealTurnController:
             return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
 
         def run_stage(operation, *adapters):
-            unregister = token.register(
-                lambda: request_adapter_cancellation(tuple(adapters))
-            )
+            unregister = token.register(lambda: cancel_adapters(*adapters))
             try:
                 if token.cancelled:
                     raise _TurnInterrupted
@@ -144,7 +115,6 @@ class RealTurnController:
                 raise
             finally:
                 unregister()
-                await_adapter_cancellation()
             if token.cancelled:
                 cancel_adapters(*adapters)
                 raise _TurnInterrupted

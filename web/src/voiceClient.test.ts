@@ -368,6 +368,42 @@ describe('VoiceClient startup cancellation', () => {
     await client.stop()
   })
 
+  it('fails closed without desynchronizing control state when media invalidation throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    const element = document.createElement('audio')
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    const track = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(element),
+      detach: vi.fn()
+        .mockImplementationOnce(() => { throw new Error('detach failed') })
+        .mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', track, { setSubscribed: vi.fn() }, {
+      identity: 'agent-session-test-0001',
+    })
+    emitControl(room, 'session.ready', 1)
+    emitControl(room, 'turn.listening', 2)
+
+    expect(() => emitControl(room, 'turn.failed', 3, { terminal: true })).not.toThrow()
+    expect(observed.onControl).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'turn.failed' }),
+    )
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed',
+      'Не удалось остановить устаревшее воспроизведение',
+    ))
+    expect(track.detach).toHaveBeenCalledTimes(2)
+    expect(room.disconnect).toHaveBeenCalledOnce()
+  })
+
   it('repeats media renewal when another turn invalidates a pending subscription', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })

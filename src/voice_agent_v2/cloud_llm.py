@@ -6,9 +6,9 @@ from dataclasses import dataclass
 import errno
 import http.client
 import json
+import multiprocessing
 import os
 from pathlib import Path
-import queue
 import socket
 import stat
 import sys
@@ -31,6 +31,19 @@ MAX_STREAM_LINE_BYTES = 65_536
 MAX_VISIBLE_CHARS = 8192
 MAX_VISIBLE_BYTES = 32_768
 PROVIDER_STARTUP_TIMEOUT_SECONDS = 10.0
+RESOLVER_SHUTDOWN_TIMEOUT_SECONDS = 0.25
+
+
+def _resolve_provider_host(host: str, port: int, sender) -> None:
+    try:
+        sender.send((True, socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)))
+    except BaseException as error:
+        try:
+            sender.send((False, type(error).__name__, str(error)))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        sender.close()
 
 
 @dataclass(frozen=True)
@@ -82,10 +95,12 @@ class _RegisteredTCPConnection:
         *args,
         cancelled: Callable[[], bool],
         startup_timeout: float,
+        resolver_target: Callable = _resolve_provider_host,
         **kwargs,
     ) -> None:
         self._cancelled = cancelled
         self._startup_timeout = startup_timeout
+        self._resolver_target = resolver_target
         super().__init__(*args, **kwargs)
 
     def _startup_failure(self, deadline: float) -> OSError | None:
@@ -96,38 +111,48 @@ class _RegisteredTCPConnection:
         return None
 
     def _resolve_addresses(self, deadline: float) -> list[tuple]:
-        results: queue.Queue[list[tuple] | BaseException] = queue.Queue(maxsize=1)
-
-        def resolve() -> None:
-            try:
-                value: list[tuple] | BaseException = socket.getaddrinfo(
-                    self.host, self.port, 0, socket.SOCK_STREAM
-                )
-            except BaseException as error:
-                value = error
-            try:
-                results.put_nowait(value)
-            except queue.Full:
-                pass
-
-        threading.Thread(
-            target=resolve,
+        context = multiprocessing.get_context("spawn")
+        receiver, sender = context.Pipe(duplex=False)
+        resolver = context.Process(
+            target=self._resolver_target,
+            args=(self.host, self.port, sender),
             name="voice-provider-resolver",
             daemon=True,
-        ).start()
-        while True:
-            failure = self._startup_failure(deadline)
-            if failure is not None:
-                raise failure
-            try:
-                value = results.get(
-                    timeout=max(0.001, min(0.01, deadline - time.monotonic()))
-                )
-            except queue.Empty:
-                continue
-            if isinstance(value, BaseException):
-                raise value
-            return value
+        )
+        try:
+            resolver.start()
+            sender.close()
+            while True:
+                failure = self._startup_failure(deadline)
+                if failure is not None:
+                    raise failure
+                if not receiver.poll(max(0.001, min(0.01, deadline - time.monotonic()))):
+                    continue
+                try:
+                    result = receiver.recv()
+                except EOFError as error:
+                    raise OSError("provider endpoint resolution failed") from error
+                if not isinstance(result, tuple) or not result or result[0] is not True:
+                    detail = result[2] if isinstance(result, tuple) and len(result) > 2 else "resolver failed"
+                    raise socket.gaierror(str(detail))
+                addresses = result[1]
+                if not isinstance(addresses, list):
+                    raise OSError("provider endpoint resolver returned invalid addresses")
+                return addresses
+        finally:
+            receiver.close()
+            sender.close()
+            if resolver.pid is not None:
+                resolver.join(0)
+                if resolver.is_alive():
+                    resolver.terminate()
+                    resolver.join(RESOLVER_SHUTDOWN_TIMEOUT_SECONDS)
+                if resolver.is_alive():
+                    resolver.kill()
+                    resolver.join(RESOLVER_SHUTDOWN_TIMEOUT_SECONDS)
+                if resolver.is_alive():
+                    raise OSError("provider resolver could not be terminated")
+                resolver.close()
 
     def _connect_registered_socket(self) -> float:
         sys.audit("http.client.connect", self, self.host, self.port)
@@ -206,6 +231,7 @@ class LiteLLMProvider:
         base_url: str | None = None,
         token_path: Path = TOKEN_PATH,
         transport_start_timeout_seconds: float = PROVIDER_STARTUP_TIMEOUT_SECONDS,
+        resolver_target: Callable = _resolve_provider_host,
     ) -> None:
         if transport_start_timeout_seconds <= 0:
             raise ValueError("transport_start_timeout_seconds must be positive")
@@ -213,6 +239,7 @@ class LiteLLMProvider:
         self._configured_base_url = base_url
         self._token_path = token_path
         self._transport_start_timeout_seconds = transport_start_timeout_seconds
+        self._resolver_target = resolver_target
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._operation_lock = threading.Lock()
         self._operation_generation = 0
@@ -258,6 +285,7 @@ class LiteLLMProvider:
             timeout=timeout,
             cancelled=cancelled,
             startup_timeout=min(timeout, self._transport_start_timeout_seconds),
+            resolver_target=self._resolver_target,
         )
 
     def _capability_gate(self, token: str, endpoint: ProviderEndpoint) -> None:

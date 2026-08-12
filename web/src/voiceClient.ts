@@ -249,7 +249,11 @@ export class VoiceClient {
           this.pendingRemoteTrack = remoteTrack
         } else {
           this.activeRemoteTrack = remoteTrack
-          this.playback.setTrack(remoteTrack)
+          try {
+            this.playback.setTrack(remoteTrack)
+          } catch {
+            void this.failSession('Не удалось безопасно переключить воспроизведение')
+          }
         }
       }
     })
@@ -263,7 +267,11 @@ export class VoiceClient {
       this.renewalPhase = 'subscribing'
       this.renewalBoundaryGeneration = this.mediaInvalidationGeneration
       const remotePublication = publication as RemoteTrackPublication
-      remotePublication.setSubscribed(true)
+      try {
+        remotePublication.setSubscribed(true)
+      } catch {
+        void this.failSession('Не удалось безопасно обновить аудиопоток')
+      }
     })
     room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
       if (
@@ -285,15 +293,23 @@ export class VoiceClient {
       ) {
         this.playoutGeneration += 1
       }
-      if (event.type === 'turn.interrupted' || event.type === 'turn.failed') {
-        this.renewPlaybackTrack()
-      }
       let terminalFailure: string | null = null
+      if (event.type === 'turn.interrupted' || event.type === 'turn.failed') {
+        try {
+          this.renewPlaybackTrack()
+        } catch {
+          terminalFailure = 'Не удалось остановить устаревшее воспроизведение'
+        }
+      }
       if (event.type === 'session.ready') {
         this.clearInitialReadyTimer()
       } else if (event.type === 'session.reconnected') {
         this.streamEpoch = event.stream_epoch
-        this.completeReconnect()
+        try {
+          this.completeReconnect()
+        } catch {
+          terminalFailure = 'Не удалось безопасно восстановить аудиопоток'
+        }
       } else if (event.type === 'session.degraded') {
         this.streamEpoch = event.stream_epoch
         this.clearReconnectAckTimer()
@@ -305,7 +321,11 @@ export class VoiceClient {
         terminalFailure = `Голосовая сессия остановлена (${stage}/${code})`
       }
       if (event.type === 'turn.playout-ready') void this.publishPlayoutAck(event)
-      this.callbacks.onControl(event)
+      try {
+        this.callbacks.onControl(event)
+      } catch {
+        terminalFailure ??= 'Не удалось применить состояние голосовой сессии'
+      }
       if (terminalFailure !== null) void this.failSession(terminalFailure)
     })
     room.on(RoomEvent.Reconnecting, () => {
@@ -313,10 +333,18 @@ export class VoiceClient {
       this.clearReconnectAckTimer()
       this.reconnecting = true
       this.reconnectRequestPending = false
-      this.invalidatePlaybackTrack()
+      let mediaInvalidationFailed = false
+      try {
+        this.invalidatePlaybackTrack()
+      } catch {
+        mediaInvalidationFailed = true
+      }
       this.playoutGeneration += 1
       this.controlGate?.beginReconnect()
       this.callbacks.onConnection('reconnecting')
+      if (mediaInvalidationFailed) {
+        void this.failSession('Не удалось остановить аудио при переподключении')
+      }
     })
     room.on(RoomEvent.Reconnected, () => {
       void this.publishReconnect()
@@ -384,10 +412,16 @@ export class VoiceClient {
       return
     }
     const generation = ++this.playoutGeneration
-    const drained = await this.playback.confirmDrain(
-      drainMs,
-      ackTimeoutMs - PLAYOUT_ACK_PUBLISH_MARGIN_MS,
-    )
+    let drained = false
+    try {
+      drained = await this.playback.confirmDrain(
+        drainMs,
+        ackTimeoutMs - PLAYOUT_ACK_PUBLISH_MARGIN_MS,
+      )
+    } catch {
+      await this.failSession('Не удалось подтвердить воспроизведение ответа')
+      return
+    }
     if (generation !== this.playoutGeneration || this.stopping) return
     if (!drained || this.room === null || this.capability === null) {
       await this.failSession('Не удалось подтвердить воспроизведение ответа')
@@ -455,7 +489,11 @@ export class VoiceClient {
     if (publication === null || this.renewalPhase !== 'idle') return
     this.renewingPublication = publication
     this.renewalPhase = 'unsubscribing'
-    publication.setSubscribed(false)
+    try {
+      publication.setSubscribed(false)
+    } catch {
+      void this.failSession('Не удалось безопасно обновить аудиопоток')
+    }
   }
 
   private armInitialReadyTimeout(timeoutMs: number): void {
