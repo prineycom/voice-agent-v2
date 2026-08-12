@@ -69,6 +69,29 @@ class EmptyStreamingProcess(StubStreamingProcess):
         }
 
 
+class CancellationBlockingProcess:
+    instances = []
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.entered = threading.Event()
+        self.cancelled = threading.Event()
+        self.closed = False
+        self.process = None
+        self.__class__.instances.append(self)
+
+    def start(self, _timeout: float) -> dict:
+        self.entered.set()
+        self.cancelled.wait(1)
+        raise AdapterProcessError("startup cancelled")
+
+    def cancel(self) -> float:
+        self.cancelled.set()
+        return 0.0
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class StartupFailingProcess:
     instances = []
 
@@ -467,6 +490,40 @@ class RealTurnControllerTests(unittest.TestCase):
         terminal_index = [event["terminal"] for event in result.events].index(True)
         self.assertEqual(terminal_index, len(result.events) - 1)
         self.assertEqual(sum(event["type"] == "tts.audio" for event in result.events), 1)
+
+    def test_cancellation_during_adapter_startup_is_persistent(self) -> None:
+        CancellationBlockingProcess.instances.clear()
+        token = CancellationToken()
+        stt = WhisperSTT()
+        controller = RealTurnController(stt, FakeLLM(), FakeTTS())
+        result = []
+
+        def run() -> None:
+            result.append(controller.run_turn(
+                session_id="session-test-0001",
+                turn_id="turn-test-0001",
+                input_pcm=b"\0\0" * 160,
+                cancellation=token,
+            ))
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("voice_agent_v2.local_stt.TEMP", Path(directory)),
+            patch("voice_agent_v2.local_stt.AdapterProcess", CancellationBlockingProcess),
+        ):
+            worker = threading.Thread(target=run)
+            worker.start()
+            while not CancellationBlockingProcess.instances:
+                threading.Event().wait(0.001)
+            process = CancellationBlockingProcess.instances[0]
+            self.assertTrue(process.entered.wait(1))
+            token.cancel()
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(process.cancelled.is_set())
+        self.assertEqual(result[0].terminal_event["type"], "turn.interrupted")
+        self.assertIsNone(stt._process)
 
     def test_mid_generation_cancellation_stops_adapters_and_interrupts_once(self) -> None:
         llm = BlockingLLM()

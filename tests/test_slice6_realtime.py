@@ -265,6 +265,51 @@ class StubbornCleanupRunner(FakeRunner):
         self.worker_release.set()
 
 
+class CleanupAdmissionRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_entered = threading.Event()
+        self.cleanup_entered = threading.Event()
+        self.cleanup_release = threading.Event()
+        self.first_release = threading.Event()
+        self.operations: list[str] = []
+
+    def run_turn(self, *, session_id, turn_id, input_pcm, cancellation, event_observer):
+        if turn_id != "turn-00000001":
+            self.operations.append(f"run:{turn_id}")
+            return super().run_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_pcm=input_pcm,
+                cancellation=cancellation,
+                event_observer=event_observer,
+            )
+        del input_pcm
+        self.operations.append(f"run:{turn_id}")
+        self.first_entered.set()
+        self.first_release.wait(2)
+        event = EventEnvelope(
+            session_id=session_id,
+            turn_id=turn_id,
+            sequence=1,
+            event_type="turn.interrupted",
+            payload={"outcome": "interrupted"},
+            terminal=True,
+        ).as_dict()
+        event_observer(event)
+        return TraceResult((event,), b"", b"")
+
+    def cancel(self) -> None:
+        self.cancel_count += 1
+        self.cleanup_entered.set()
+        self.cleanup_release.wait(2)
+        self.first_release.set()
+
+    def discard_turn(self, session_id: str, turn_id: str) -> None:
+        super().discard_turn(session_id, turn_id)
+        self.operations.append(f"rollback:{turn_id}")
+
+
 class BlockingRunner(FakeRunner):
     def __init__(self) -> None:
         super().__init__()
@@ -566,6 +611,37 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(old_completed, new_listening)
 
+    async def test_discarded_intermediate_turn_cannot_bypass_session_cleanup(self) -> None:
+        events = MemoryEventSink()
+        runner = CleanupAdmissionRunner()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.to_thread(runner.first_entered.wait, 1)
+        await session.start_utterance()
+        await asyncio.to_thread(runner.cleanup_entered.wait, 1)
+        await session.finish_utterance(b"\0\0" * 320)
+        await session.discard_utterance()
+        third_turn = await session.start_utterance()
+        await session.finish_utterance(b"\0\0" * 320)
+        third_context = session._active
+        assert third_context is not None and third_context.task is not None
+
+        await asyncio.sleep(0.05)
+        self.assertNotIn(f"run:{third_turn}", runner.operations)
+        runner.cleanup_release.set()
+        await wait_for_turn(session)
+
+        self.assertIn("rollback:turn-00000001", runner.operations)
+        self.assertLess(
+            runner.operations.index("rollback:turn-00000001"),
+            runner.operations.index(f"run:{third_turn}"),
+        )
+
     async def test_disconnect_does_not_confirm_while_prior_cleanup_is_orphaned(self) -> None:
         events = MemoryEventSink()
         runner = StubbornCleanupRunner()
@@ -687,6 +763,7 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         while context.playout_ack is None:
             await asyncio.sleep(0.01)
         self.assertEqual(events.events[-1]["type"], "turn.playout-ready")
+        self.assertEqual(events.events[-1]["payload"]["ack_timeout_ms"], 3_000)
         self.assertFalse(context.task.done())
 
         wrong = json.dumps({

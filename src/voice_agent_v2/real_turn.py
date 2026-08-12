@@ -85,35 +85,27 @@ class RealTurnController:
             return TraceResult(tuple(events), input_pcm, b"".join(output_chunks))
 
         def run_stage(operation, *adapters):
-            if token.cancelled:
-                cancel_adapters(*adapters)
-                raise _TurnInterrupted
-            finished = threading.Event()
-            cancellation_delivered = threading.Event()
+            def request_cancellation() -> None:
+                threading.Thread(
+                    target=cancel_adapters,
+                    args=adapters,
+                    name="voice-turn-cancellation",
+                    daemon=True,
+                ).start()
 
-            def watch_cancellation() -> None:
-                while not finished.wait(0.005):
-                    if token.cancelled:
-                        cancel_adapters(*adapters)
-                        cancellation_delivered.set()
-                        return
-
-            watcher = threading.Thread(
-                target=watch_cancellation, name="voice-turn-cancellation", daemon=True,
-            )
-            watcher.start()
+            unregister = token.register(request_cancellation)
             try:
+                if token.cancelled:
+                    raise _TurnInterrupted
                 result = operation()
             except StageFailure:
                 if token.cancelled:
                     raise _TurnInterrupted
                 raise
             finally:
-                finished.set()
-                watcher.join()
+                unregister()
             if token.cancelled:
-                if not cancellation_delivered.is_set():
-                    cancel_adapters(*adapters)
+                cancel_adapters(*adapters)
                 raise _TurnInterrupted
             return result
 
@@ -125,7 +117,8 @@ class RealTurnController:
         try:
             transcript = run_stage(
                 lambda: self.stt.transcribe(
-                    session_id=session_id, turn_id=turn_id, pcm=input_pcm, audio_format=DEFAULT_AUDIO_FORMAT,
+                    session_id=session_id, turn_id=turn_id, pcm=input_pcm,
+                    audio_format=DEFAULT_AUDIO_FORMAT, cancellation=token,
                 ),
                 self.stt,
             )
@@ -149,7 +142,7 @@ class RealTurnController:
             try:
                 for chunk in self.tts.stream_synthesize(
                     session_id=session_id, turn_id=turn_id, text=sentence,
-                    audio_format=self.tts.output_format,
+                    audio_format=self.tts.output_format, cancellation=token,
                 ):
                     if token.cancelled:
                         raise _TurnInterrupted
@@ -161,9 +154,12 @@ class RealTurnController:
             if hasattr(self.llm, "respond_with_handoff"):
                 return self.llm.respond_with_handoff(
                     session_id=session_id, turn_id=turn_id, transcript=transcript,
-                    on_sentence=synthesize_sentence,
+                    on_sentence=synthesize_sentence, cancellation=token,
                 )
-            response = self.llm.respond(session_id=session_id, turn_id=turn_id, transcript=transcript)
+            response = self.llm.respond(
+                session_id=session_id, turn_id=turn_id, transcript=transcript,
+                cancellation=token,
+            )
             synthesize_sentence(response)
             return response
 

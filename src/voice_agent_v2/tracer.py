@@ -61,13 +61,41 @@ class TraceResult:
 class CancellationToken:
     def __init__(self) -> None:
         self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._callbacks: set[Callable[[], None]] = set()
 
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
+    def register(self, callback: Callable[[], None]) -> Callable[[], None]:
+        with self._lock:
+            if self._cancelled.is_set():
+                invoke = True
+            else:
+                self._callbacks.add(callback)
+                invoke = False
+        if invoke:
+            callback()
+
+        def unregister() -> None:
+            with self._lock:
+                self._callbacks.discard(callback)
+
+        return unregister
+
     def cancel(self) -> None:
-        self._cancelled.set()
+        with self._lock:
+            if self._cancelled.is_set():
+                return
+            self._cancelled.set()
+            callbacks = tuple(self._callbacks)
+            self._callbacks.clear()
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
 
 
 class DeterministicSTT:

@@ -100,6 +100,22 @@ class RecordingSession:
             raise RuntimeError("control transport already disconnected")
 
 
+class DelayedCleanupSession(RecordingSession):
+    def __init__(self, room: RecordingRoom, calls: list[object]) -> None:
+        super().__init__(room, calls)
+        self.cleanup_release = asyncio.Event()
+        self.disconnect_count = 0
+
+    async def disconnect(self, *, notify_client: bool = True) -> None:
+        self.calls.append(("session.disconnect", notify_client))
+        self.disconnect_count += 1
+        if self.disconnect_count == 1:
+            raise RuntimeError("cancellation_cleanup_timeout")
+
+    async def wait_for_cleanup(self) -> None:
+        await self.cleanup_release.wait()
+
+
 class RecordingAudioSource:
     def __init__(self, calls: list[object]) -> None:
         self.calls = calls
@@ -244,6 +260,44 @@ class LiveKitRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await controller._consume_microphone(object())
                 self.assertTrue(stream.closed)
                 self.assertEqual(controller.session.failures, [("input", expected)])
+
+    async def test_cleanup_timeout_holds_capacity_until_late_confirmed_release(self) -> None:
+        calls: list[object] = []
+        controller = runtime.LiveKitRoomController.__new__(
+            runtime.LiveKitRoomController
+        )
+        controller.session_id = "session-test"
+        controller.room = RecordingRoom(calls)
+        controller.session = DelayedCleanupSession(controller.room, calls)
+        controller.audio_source = RecordingAudioSource(calls)
+        controller.runner = RecordingRunner(calls)
+        closed = asyncio.Event()
+
+        async def on_closed(_session_id: str) -> None:
+            closed.set()
+
+        controller.on_closed = on_closed
+        controller._closed = False
+        controller._cleanup_complete = False
+        controller._close_notified = False
+        controller._transport_failed = False
+        controller._close_lock = asyncio.Lock()
+        controller._close_retry_task = None
+        controller._runner_start_task = None
+        controller._browser_join_task = None
+        controller._audio_task = None
+        controller._control_task = None
+
+        await controller.close()
+
+        self.assertFalse(controller._cleanup_complete)
+        self.assertFalse(closed.is_set())
+        self.assertNotIn(("runner.close", "session-test"), calls)
+        controller.session.cleanup_release.set()
+        await asyncio.wait_for(closed.wait(), 1)
+
+        self.assertTrue(controller._cleanup_complete)
+        self.assertEqual(calls.count(("runner.close", "session-test")), 1)
 
     async def test_close_preserves_normal_and_failed_transport_ordering(self) -> None:
         for transport_failed, expected_prefix in (

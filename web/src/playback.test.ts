@@ -82,4 +82,18 @@ describe('audio playout boundary', () => {
 
     await expect(confirmation).resolves.toBe(true)
   })
+
+  it('does not extend the server acknowledgement deadline after recovery', async () => {
+    vi.useFakeTimers()
+    const container = document.createElement('div')
+    const boundary = new AudioPlaybackBoundary(container, vi.fn())
+    boundary.setTrack(new FakeTrack())
+
+    const confirmation = boundary.confirmDrain(250, 1_000)
+    await vi.advanceTimersByTimeAsync(900)
+    boundary.reset()
+    await vi.advanceTimersByTimeAsync(120)
+
+    await expect(confirmation).resolves.toBe(false)
+  })
 })

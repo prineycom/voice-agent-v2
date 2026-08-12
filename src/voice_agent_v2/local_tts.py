@@ -9,6 +9,7 @@ from typing import Iterator
 
 from .contracts import AudioFormat, StageFailure, TTS_VERSION, valid_correlation_id
 from .process_adapter import AdapterProcess, AdapterProcessError
+from .tracer import CancellationToken
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
 VENV = CACHE / "runtime" / "qwen-tts-venv"
@@ -36,14 +37,22 @@ class Qwen3TTS:
         self.ready_metadata: dict | None = None
         self.observations: list[dict] = []
 
-    def start(self) -> dict:
+    def start(self, cancellation: CancellationToken | None = None) -> dict:
         if self._process is not None:
+            if cancellation is not None and cancellation.cancelled:
+                self.cancel()
+                raise StageFailure("tts", "selected_tts_cancelled")
             return dict(self.ready_metadata or {})
         log = LOGS / f"qwen3-tts-{time.monotonic_ns()}.stderr.log"
         process = AdapterProcess([str(VENV / "bin" / "python"), str(RUNNER)], log, _environment())
         self._process = process
         try:
+            if cancellation is not None and cancellation.cancelled:
+                process.cancel()
             self.ready_metadata = process.start(180)
+            if cancellation is not None and cancellation.cancelled:
+                self.cancel()
+                raise StageFailure("tts", "selected_tts_cancelled")
         except (AdapterProcessError, OSError) as error:
             try:
                 process.close()
@@ -54,7 +63,9 @@ class Qwen3TTS:
         return dict(self.ready_metadata)
 
     def stream_synthesize(
-        self, *, session_id: str, turn_id: str, text: str, audio_format: AudioFormat = OUTPUT_FORMAT
+        self, *, session_id: str, turn_id: str, text: str,
+        audio_format: AudioFormat = OUTPUT_FORMAT,
+        cancellation: CancellationToken | None = None,
     ) -> Iterator[bytes]:
         if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
             raise StageFailure("tts", "invalid_correlation_id")
@@ -62,7 +73,9 @@ class Qwen3TTS:
             raise StageFailure("tts", "unsupported_tts_audio_format")
         if not text.strip() or len(text) > 4096:
             raise StageFailure("tts", "tts_text_out_of_bounds")
-        self.start()
+        if cancellation is not None and cancellation.cancelled:
+            raise StageFailure("tts", "selected_tts_cancelled")
+        self.start(cancellation)
         process = self._process
         if process is None:
             raise StageFailure("tts", "selected_tts_unavailable")
@@ -79,6 +92,8 @@ class Qwen3TTS:
                     "emit_pcm": True, "output_sample_rate_hz": OUTPUT_FORMAT.sample_rate_hz,
                 }, 180
             ):
+                if cancellation is not None and cancellation.cancelled:
+                    raise StageFailure("tts", "selected_tts_cancelled")
                 if event["event"] == "chunk":
                     data = base64.b64decode(event["pcm_base64"], validate=True)
                     if len(data) != event["bytes"] or len(data) % 2:

@@ -14,6 +14,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from .contracts import LLM_VERSION, StageFailure, valid_correlation_id
+from .tracer import CancellationToken
 
 BASE_URL_ENV = "LITELLM_BASE_URL"
 ALIAS = "deepseek-v4-flash"
@@ -86,7 +87,10 @@ class LiteLLMProvider:
         self._configured_base_url = base_url
         self._token_path = token_path
         self._contexts: dict[str, list[dict[str, str]]] = {}
-        self._cancelled = threading.Event()
+        self._operation_lock = threading.Lock()
+        self._operation_generation = 0
+        self._cancelled_generation = 0
+        self._connection_generation = 0
         self._connection: http.client.HTTPConnection | http.client.HTTPSConnection | None = None
         self.observations: list[dict] = []
 
@@ -177,11 +181,36 @@ class LiteLLMProvider:
             raise StageFailure("llm_provider", "forbidden_context_field")
         return payload
 
-    def _execute(self, payload: dict, on_sentence: Callable[[str], None] | None = None) -> dict:
+    def _begin_operation(self, cancellation: CancellationToken | None) -> int:
+        with self._operation_lock:
+            self._operation_generation += 1
+            generation = self._operation_generation
+            if cancellation is not None and cancellation.cancelled:
+                self._cancelled_generation = generation
+            return generation
+
+    def _operation_cancelled(self, generation: int) -> bool:
+        with self._operation_lock:
+            return self._cancelled_generation == generation
+
+    def _execute(
+        self, payload: dict, on_sentence: Callable[[str], None] | None, generation: int
+    ) -> dict:
         endpoint = self._endpoint()
         token = self._token()
         connection = self._connection_for(endpoint, 40)
-        self._connection = connection
+        with self._operation_lock:
+            self._connection = connection
+            self._connection_generation = generation
+            cancelled = self._cancelled_generation == generation
+        if cancelled:
+            connection.close()
+            with self._operation_lock:
+                if self._connection_generation == generation:
+                    self._connection = None
+                    self._connection_generation = 0
+            del token
+            raise StageFailure("llm_provider", "selected_provider_cancelled")
         submitted = time.monotonic()
         accepted = None
         visible: list[str] = []
@@ -207,7 +236,7 @@ class LiteLLMProvider:
                 response.read(65536)
                 raise StageFailure("llm_provider", f"selected_provider_http_{response.status}")
             while True:
-                if self._cancelled.is_set():
+                if self._operation_cancelled(generation):
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 line = response.fp.readline(MAX_STREAM_LINE_BYTES + 1)
                 if not line:
@@ -267,7 +296,11 @@ class LiteLLMProvider:
                         raise StageFailure("llm_provider", "selected_provider_output_out_of_bounds")
                     visible_first = visible_first or now
                     visible.append(content_piece)
-                    if on_sentence is not None and response_models == {ALIAS}:
+                    if (
+                        on_sentence is not None
+                        and response_models == {ALIAS}
+                        and not self._operation_cancelled(generation)
+                    ):
                         current = "".join(visible)
                         punctuation = max((current.rfind(mark) for mark in (".", "!", "?", "。", "！", "？")), default=-1)
                         if punctuation >= handoff_offset:
@@ -280,19 +313,30 @@ class LiteLLMProvider:
         except (UnicodeError, json.JSONDecodeError, AttributeError, TypeError, IndexError) as error:
             raise StageFailure("llm_provider", "selected_provider_protocol_error") from error
         except (OSError, TimeoutError, http.client.HTTPException) as error:
-            code = "selected_provider_cancelled" if self._cancelled.is_set() else "selected_provider_transport_error"
+            code = (
+                "selected_provider_cancelled"
+                if self._operation_cancelled(generation)
+                else "selected_provider_transport_error"
+            )
             raise StageFailure("llm_provider", code) from error
         finally:
             completed = time.monotonic()
             connection.close()
-            self._connection = None
+            with self._operation_lock:
+                if self._connection_generation == generation:
+                    self._connection = None
+                    self._connection_generation = 0
             del token
+        if self._operation_cancelled(generation):
+            raise StageFailure("llm_provider", "selected_provider_cancelled")
         if response_models != {ALIAS}:
             raise StageFailure("llm_provider", "selected_provider_identity_mismatch")
         output = "".join(visible).strip()
         if on_sentence is not None and handoff_offset < len("".join(visible)):
             remaining = "".join(visible)[handoff_offset:].strip()
             if remaining:
+                if self._operation_cancelled(generation):
+                    raise StageFailure("llm_provider", "selected_provider_cancelled")
                 on_sentence(remaining)
         if not output:
             raise StageFailure("llm_provider", "empty_selected_provider_response")
@@ -310,17 +354,22 @@ class LiteLLMProvider:
     def _respond(
         self, *, session_id: str, turn_id: str, transcript: str,
         on_sentence: Callable[[str], None] | None,
+        cancellation: CancellationToken | None,
     ) -> str:
         if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
             raise StageFailure("llm_provider", "invalid_correlation_id")
-        self._cancelled.clear()
+        generation = self._begin_operation(cancellation)
+        if self._operation_cancelled(generation):
+            raise StageFailure("llm_provider", "selected_provider_cancelled")
         payload = self._payload(session_id, transcript)
         started = time.monotonic()
         try:
             if self._executor is None:
-                result = self._execute(payload, on_sentence)
+                result = self._execute(payload, on_sentence, generation)
             else:
                 result = self._executor(payload)
+            if self._operation_cancelled(generation):
+                raise StageFailure("llm_provider", "selected_provider_cancelled")
             if not isinstance(result, dict):
                 raise StageFailure("llm_provider", "selected_provider_protocol_error")
             text = result.get("text")
@@ -331,6 +380,8 @@ class LiteLLMProvider:
             if len(text) > MAX_VISIBLE_CHARS or len(text.encode("utf-8")) > MAX_VISIBLE_BYTES:
                 raise StageFailure("llm_provider", "selected_provider_output_out_of_bounds")
             if self._executor is not None and on_sentence is not None:
+                if self._operation_cancelled(generation):
+                    raise StageFailure("llm_provider", "selected_provider_cancelled")
                 on_sentence(text.strip())
         except StageFailure as error:
             self.observations.append({
@@ -353,18 +404,34 @@ class LiteLLMProvider:
         })
         return text.strip()
 
-    def respond(self, *, session_id: str, turn_id: str, transcript: str) -> str:
-        return self._respond(session_id=session_id, turn_id=turn_id, transcript=transcript, on_sentence=None)
+    def respond(
+        self, *, session_id: str, turn_id: str, transcript: str,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
+        return self._respond(
+            session_id=session_id, turn_id=turn_id, transcript=transcript,
+            on_sentence=None, cancellation=cancellation,
+        )
 
     def respond_with_handoff(
-        self, *, session_id: str, turn_id: str, transcript: str, on_sentence: Callable[[str], None]
+        self, *, session_id: str, turn_id: str, transcript: str,
+        on_sentence: Callable[[str], None], cancellation: CancellationToken | None = None,
     ) -> str:
-        return self._respond(session_id=session_id, turn_id=turn_id, transcript=transcript, on_sentence=on_sentence)
+        return self._respond(
+            session_id=session_id, turn_id=turn_id, transcript=transcript,
+            on_sentence=on_sentence, cancellation=cancellation,
+        )
 
     def cancel(self) -> None:
-        self._cancelled.set()
-        if self._connection is not None:
-            self._connection.close()
+        with self._operation_lock:
+            self._cancelled_generation = self._operation_generation
+            connection = (
+                self._connection
+                if self._connection_generation == self._operation_generation
+                else None
+            )
+        if connection is not None:
+            connection.close()
 
     def snapshot_session(self, session_id: str) -> tuple[dict[str, str], ...]:
         return tuple(dict(message) for message in self._contexts.get(session_id, ()))

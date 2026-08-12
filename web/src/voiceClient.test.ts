@@ -185,7 +185,9 @@ describe('VoiceClient startup cancellation', () => {
     ]
     for (const [index, type] of types.entries()) {
       const sessionEvent = type.startsWith('session.')
-      const payload = type === 'turn.playout-ready' ? { drain_bound_ms: 250 } : {}
+      const payload = type === 'turn.playout-ready'
+        ? { drain_bound_ms: 250, ack_timeout_ms: 3_000 }
+        : {}
       room.emit(
         'dataReceived',
         new TextEncoder().encode(JSON.stringify({

@@ -31,8 +31,7 @@ export class AudioPlaybackBoundary {
   }
 
   async confirmDrain(drainMs: number, timeoutMs: number): Promise<boolean> {
-    const maximumDeadline = performance.now() + timeoutMs * 2
-    let deadline = performance.now() + timeoutMs
+    const deadline = performance.now() + timeoutMs
     let element: HTMLMediaElement | null = null
     let generation = 0
     let startTime = 0
@@ -41,7 +40,6 @@ export class AudioPlaybackBoundary {
         element = this.element
         generation = this.generation
         startTime = element?.currentTime ?? 0
-        deadline = Math.min(performance.now() + timeoutMs, maximumDeadline)
       }
       if (element !== null && element.currentTime - startTime >= drainMs / 1000) return true
       await new Promise((resolve) => setTimeout(resolve, 20))

@@ -8,6 +8,7 @@ import wave
 
 from .contracts import AudioFormat, STT_VERSION, StageFailure, valid_correlation_id
 from .process_adapter import AdapterProcess, AdapterProcessError
+from .tracer import CancellationToken
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
 MODEL = CACHE / "artifacts" / "stt-whisper-large-v3-turbo"
@@ -66,8 +67,11 @@ class WhisperSTT:
         self.ready_metadata: dict | None = None
         self.observations: list[dict] = []
 
-    def start(self) -> dict:
+    def start(self, cancellation: CancellationToken | None = None) -> dict:
         if self._process is not None:
+            if cancellation is not None and cancellation.cancelled:
+                self.cancel()
+                raise StageFailure("stt", "selected_stt_cancelled")
             return dict(self.ready_metadata or {})
         command = [
             str(VENV / "bin" / "python"), "-m", "benchmarks.slice2.runners.faster_whisper_runner",
@@ -77,7 +81,12 @@ class WhisperSTT:
         process = AdapterProcess(command, log, _environment())
         self._process = process
         try:
+            if cancellation is not None and cancellation.cancelled:
+                process.cancel()
             self.ready_metadata = process.start(60)
+            if cancellation is not None and cancellation.cancelled:
+                self.cancel()
+                raise StageFailure("stt", "selected_stt_cancelled")
         except (AdapterProcessError, OSError) as error:
             try:
                 process.close()
@@ -87,7 +96,10 @@ class WhisperSTT:
             raise StageFailure("stt", "selected_stt_unavailable") from error
         return dict(self.ready_metadata)
 
-    def transcribe(self, *, session_id: str, turn_id: str, pcm: bytes, audio_format: AudioFormat) -> str:
+    def transcribe(
+        self, *, session_id: str, turn_id: str, pcm: bytes, audio_format: AudioFormat,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
         if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
             raise StageFailure("stt", "invalid_correlation_id")
         if audio_format != EXPECTED_FORMAT:
@@ -99,7 +111,9 @@ class WhisperSTT:
         except OSError as error:
             raise StageFailure("stt", "temporary_audio_setup_failed") from error
         path = TEMP / f"{session_id}-{turn_id}-{time.monotonic_ns()}.wav"
-        self.start()
+        if cancellation is not None and cancellation.cancelled:
+            raise StageFailure("stt", "selected_stt_cancelled")
+        self.start(cancellation)
         process = self._process
         if process is None:
             raise StageFailure("stt", "selected_stt_unavailable")
@@ -114,6 +128,8 @@ class WhisperSTT:
                 {"operation": "transcribe", "request_id": f"{session_id}-{turn_id}", "audio_path": str(path)},
                 60,
             )
+            if cancellation is not None and cancellation.cancelled:
+                raise StageFailure("stt", "selected_stt_cancelled")
         except (AdapterProcessError, OSError) as error:
             raise StageFailure("stt", "selected_stt_unavailable") from error
         finally:

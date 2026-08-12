@@ -191,11 +191,13 @@ class LiveKitRoomController:
             maxsize=BROWSER_CONTROL_QUEUE_SIZE
         )
         self._control_task: asyncio.Task[None] | None = None
+        self._close_retry_task: asyncio.Task[None] | None = None
         self._close_lock = asyncio.Lock()
         self._closed = False
         self._cleanup_complete = False
         self._close_notified = False
         self._transport_failed = False
+        self._room_disconnected = False
         self._browser_ready = False
 
     async def start(self) -> None:
@@ -392,6 +394,28 @@ class LiveKitRoomController:
                 ):
                     await self.session.fail("input", failure_code)
 
+    async def _disconnect_room(self) -> None:
+        if getattr(self, "_room_disconnected", False):
+            return
+        await self.room.disconnect()
+        self._room_disconnected = True
+
+    def _schedule_close_retry(self, notify: bool) -> None:
+        retry = getattr(self, "_close_retry_task", None)
+        if retry is not None and not retry.done():
+            return
+
+        async def retry_after_cleanup() -> None:
+            try:
+                await self.session.wait_for_cleanup()
+                await self.close(notify=notify)
+            except Exception:
+                pass
+
+        self._close_retry_task = asyncio.create_task(
+            retry_after_cleanup(), name=f"cleanup-retry-{self.session_id}"
+        )
+
     async def close(self, *, notify: bool = True) -> None:
         async with self._close_lock:
             self._closed = True
@@ -423,34 +447,37 @@ class LiveKitRoomController:
                     self.audio_source.clear_queue()
                 except Exception as error:
                     errors.append(error)
+                if errors:
+                    raise ExceptionGroup("room resource cleanup failed", errors)
                 if self._transport_failed:
                     try:
-                        await self.room.disconnect()
+                        await self._disconnect_room()
                     except Exception as error:
-                        errors.append(error)
+                        raise ExceptionGroup(
+                            "room resource cleanup failed", [error]
+                        ) from error
                     try:
                         await self.session.disconnect(notify_client=False)
-                    except Exception as error:
-                        errors.append(error)
+                    except RuntimeError as error:
+                        if str(error) in {
+                            "cancellation_cleanup_timeout", "turn_cleanup_timeout"
+                        }:
+                            self._schedule_close_retry(notify)
+                            return
+                        raise
                 else:
                     try:
                         await self.session.disconnect()
-                    except Exception as error:
-                        errors.append(error)
-                    try:
-                        await self.room.disconnect()
-                    except Exception as error:
-                        errors.append(error)
-                try:
-                    await self.audio_source.aclose()
-                except Exception as error:
-                    errors.append(error)
-                try:
-                    await asyncio.to_thread(self.runner.close, self.session_id)
-                except Exception as error:
-                    errors.append(error)
-                if errors:
-                    raise ExceptionGroup("room resource cleanup failed", errors)
+                    except RuntimeError as error:
+                        if str(error) in {
+                            "cancellation_cleanup_timeout", "turn_cleanup_timeout"
+                        }:
+                            self._schedule_close_retry(notify)
+                            return
+                        raise
+                    await self._disconnect_room()
+                await self.audio_source.aclose()
+                await asyncio.to_thread(self.runner.close, self.session_id)
                 self._cleanup_complete = True
             if notify and not self._close_notified:
                 await self.on_closed(self.session_id)

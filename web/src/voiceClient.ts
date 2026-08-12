@@ -21,7 +21,7 @@ import {
 } from './state'
 
 const RECONNECT_ACK_TIMEOUT_MS = 5_000
-const PLAYOUT_CONFIRM_TIMEOUT_MS = 2_000
+const PLAYOUT_ACK_PUBLISH_MARGIN_MS = 250
 
 export interface VoiceClientCallbacks {
   onSession(capability: SessionCapability): void
@@ -335,12 +335,24 @@ export class VoiceClient {
 
   private async publishPlayoutAck(event: ControlEvent): Promise<void> {
     const drainMs = event.payload.drain_bound_ms
-    if (typeof drainMs !== 'number' || !Number.isFinite(drainMs) || drainMs < 0) {
+    const ackTimeoutMs = event.payload.ack_timeout_ms
+    if (
+      typeof drainMs !== 'number'
+      || !Number.isFinite(drainMs)
+      || drainMs < 0
+      || typeof ackTimeoutMs !== 'number'
+      || !Number.isFinite(ackTimeoutMs)
+      || ackTimeoutMs <= PLAYOUT_ACK_PUBLISH_MARGIN_MS
+      || ackTimeoutMs > 10_000
+    ) {
       await this.failSession('Некорректная граница воспроизведения')
       return
     }
     const generation = ++this.playoutGeneration
-    const drained = await this.playback.confirmDrain(drainMs, PLAYOUT_CONFIRM_TIMEOUT_MS)
+    const drained = await this.playback.confirmDrain(
+      drainMs,
+      ackTimeoutMs - PLAYOUT_ACK_PUBLISH_MARGIN_MS,
+    )
     if (generation !== this.playoutGeneration || this.stopping) return
     if (!drained || this.room === null || this.capability === null) {
       await this.failSession('Не удалось подтвердить воспроизведение ответа')

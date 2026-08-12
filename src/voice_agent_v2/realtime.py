@@ -83,7 +83,6 @@ class TurnRunner(Protocol):
 class TurnContext:
     turn_id: str
     cancellation: CancellationToken
-    prior_cleanup: asyncio.Task[str | None] | None = None
     task: asyncio.Task[None] | None = None
     terminal: bool = False
     rollback_complete: bool = False
@@ -222,6 +221,7 @@ class RealtimeSession:
         self._reconnect_lock = asyncio.Lock()
         self._disconnect_lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[str | None]] = set()
+        self._cleanup_error: str | None = None
         self.drop_counts = {"stale_event": 0, "client_control": 0}
 
     @property
@@ -240,7 +240,7 @@ class RealtimeSession:
             async with self._lock:
                 if self._closed:
                     raise RuntimeError("session is closed")
-                prior_cleanup, drain_error = await self._interrupt_locked("barge_in")
+                _cleanup, drain_error = await self._interrupt_locked("barge_in")
                 if drain_error is not None:
                     await self._degrade_locked("publication", drain_error)
                     raise RuntimeError("audio publication could not be cancelled safely")
@@ -249,7 +249,6 @@ class RealtimeSession:
                 context = TurnContext(
                     turn_id=turn_id,
                     cancellation=CancellationToken(),
-                    prior_cleanup=prior_cleanup,
                 )
                 self._active = context
                 await self._emit(turn_id, "turn.listening", {"state": "listening"})
@@ -307,16 +306,17 @@ class RealtimeSession:
         return None
 
     async def _rollback_context(self, context: TurnContext) -> str | None:
-        if context.rollback_complete:
+        async with self._runner_lock:
+            if context.rollback_complete:
+                return context.rollback_error
+            discard = getattr(self.runner, "discard_turn", None)
+            try:
+                if discard is not None:
+                    await asyncio.to_thread(discard, self.session_id, context.turn_id)
+            except Exception:
+                context.rollback_error = "context_rollback_failed"
+            context.rollback_complete = True
             return context.rollback_error
-        discard = getattr(self.runner, "discard_turn", None)
-        try:
-            if discard is not None:
-                await asyncio.to_thread(discard, self.session_id, context.turn_id)
-        except Exception:
-            context.rollback_error = "context_rollback_failed"
-        context.rollback_complete = True
-        return context.rollback_error
 
     def _report_failure(self, stage: str, code: str) -> None:
         if self._failure_reported:
@@ -340,7 +340,66 @@ class RealtimeSession:
 
     def _track_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
         self._cleanup_tasks.add(cleanup)
-        cleanup.add_done_callback(self._cleanup_tasks.discard)
+
+        def complete(task: asyncio.Task[str | None]) -> None:
+            self._cleanup_tasks.discard(task)
+            try:
+                error = task.result()
+            except BaseException:
+                error = "cancellation_cleanup_failed"
+            if error is not None and self._cleanup_error is None:
+                self._cleanup_error = error
+
+        cleanup.add_done_callback(complete)
+
+    async def _await_cleanup_barrier(
+        self,
+        timeout_ms: int | None,
+        stop: Callable[[], bool] | None = None,
+    ) -> str | None:
+        deadline = (
+            None
+            if timeout_ms is None
+            else asyncio.get_running_loop().time() + timeout_ms / 1000
+        )
+        while self._cleanup_tasks:
+            if stop is not None and stop():
+                return None
+            pending = tuple(self._cleanup_tasks)
+            try:
+                if deadline is None:
+                    results = await asyncio.gather(
+                        *(asyncio.shield(task) for task in pending)
+                    )
+                else:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        return "cancellation_cleanup_timeout"
+                    results = await asyncio.wait_for(
+                        asyncio.gather(*(asyncio.shield(task) for task in pending)),
+                        timeout=remaining,
+                    )
+            except TimeoutError:
+                return "cancellation_cleanup_timeout"
+            except BaseException:
+                return "cancellation_cleanup_failed"
+            for task, error in zip(pending, results, strict=True):
+                self._cleanup_tasks.discard(task)
+                if error is not None and self._cleanup_error is None:
+                    self._cleanup_error = error
+        return self._cleanup_error
+
+    async def wait_for_cleanup(self) -> None:
+        error = await self._await_cleanup_barrier(timeout_ms=None)
+        if error is not None:
+            raise RuntimeError(error)
+        context = self._active
+        task = context.task if context is not None else None
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.shield(task)
+        error = await self._await_cleanup_barrier(timeout_ms=None)
+        if error is not None:
+            raise RuntimeError(error)
 
     def _watch_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
         async def finish() -> None:
@@ -350,6 +409,41 @@ class RealtimeSession:
                     await self._degrade_locked("controller", error)
 
         asyncio.create_task(finish(), name=f"watch-{cleanup.get_name()}")
+
+    def _ensure_context_cleanup(
+        self, context: TurnContext, *, wait_for_turn: bool = True
+    ) -> asyncio.Task[str | None]:
+        cleanup = context.cancellation_cleanup
+        if cleanup is not None:
+            return cleanup
+
+        async def cancel_runner() -> str | None:
+            cancel_error: Exception | None = None
+            try:
+                await asyncio.to_thread(self.runner.cancel)
+            except Exception as error:
+                cancel_error = error
+            task = context.task
+            worker = context.worker
+            awaited = task if wait_for_turn else worker
+            if awaited is not None and awaited is not asyncio.current_task():
+                try:
+                    await awaited
+                except Exception as error:
+                    cancel_error = cancel_error or error
+                finally:
+                    if not wait_for_turn and context.worker is worker:
+                        context.worker = None
+            if not context.rollback_complete:
+                context.rollback_error = await self._rollback_context(context)
+            if cancel_error is not None:
+                return "cancellation_cleanup_failed"
+            return context.rollback_error
+
+        cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
+        context.cancellation_cleanup = cleanup
+        self._track_cleanup(cleanup)
+        return cleanup
 
     async def _interrupt_locked(
         self, reason: str, *, notify_client: bool = True
@@ -363,30 +457,10 @@ class RealtimeSession:
         if context.playout_ack is not None and not context.playout_ack.done():
             context.playout_ack.set_result(None)
 
-        async def cancel_runner() -> str | None:
-            cancel_error: Exception | None = None
-            try:
-                await asyncio.to_thread(self.runner.cancel)
-            except Exception as error:
-                cancel_error = error
-            task = context.task
-            if task is not None and task is not asyncio.current_task():
-                try:
-                    await task
-                except Exception as error:
-                    cancel_error = cancel_error or error
-            if not context.rollback_complete:
-                context.rollback_error = await self._rollback_context(context)
-            if cancel_error is not None:
-                return "cancellation_cleanup_failed"
-            return context.rollback_error
-
         try:
             drain_error = await self._clear_audio(context.turn_id)
         finally:
-            cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
-            context.cancellation_cleanup = cleanup
-            self._track_cleanup(cleanup)
+            cleanup = self._ensure_context_cleanup(context)
         if notify_client:
             drain_ms = min((time.monotonic() - started) * 1000, float(BARGE_IN_DRAIN_BOUND_MS))
             await self._emit(
@@ -411,46 +485,33 @@ class RealtimeSession:
     async def _abort_failed_transport(self, context: TurnContext) -> None:
         context.cancellation.cancel()
         context.terminal = True
+        existing_cleanup = context.cancellation_cleanup
+        cleanup = self._ensure_context_cleanup(context, wait_for_turn=False)
         self._closed = True
         self._report_failure("transport", "control_publish_failed")
         await self._clear_audio(context.turn_id)
-        try:
-            await asyncio.to_thread(self.runner.cancel)
-        except Exception:
-            pass
-        worker = context.worker
-        if worker is not None and worker is not asyncio.current_task():
-            try:
-                await worker
-            except Exception:
-                pass
-            finally:
-                if context.worker is worker:
-                    context.worker = None
-        context.rollback_error = await self._rollback_context(context)
+        if existing_cleanup is None:
+            context.rollback_error = await cleanup
 
     async def _run_turn_body(self, context: TurnContext, pcm: bytes) -> None:
-        if context.prior_cleanup is not None:
-            cleanup_error: str | None = None
-            try:
-                cleanup_error = await asyncio.wait_for(
-                    asyncio.shield(context.prior_cleanup),
-                    timeout=CANCELLATION_CLEANUP_BOUND_MS / 1000,
-                )
-            except TimeoutError:
-                cleanup_error = "cancellation_cleanup_timeout"
-            if cleanup_error is not None:
-                async with self._lock:
-                    if not context.terminal:
-                        context.terminal = True
-                        await self._emit(
-                            context.turn_id,
-                            "turn.failed",
-                            {"outcome": "failed", "stage": "controller", "code": cleanup_error},
-                            terminal=True,
-                        )
-                    await self._degrade_locked("controller", cleanup_error)
-                return
+        if context.terminal or self._closed:
+            return
+        cleanup_error = await self._await_cleanup_barrier(
+            timeout_ms=CANCELLATION_CLEANUP_BOUND_MS,
+            stop=lambda: context.terminal or self._closed,
+        )
+        if cleanup_error is not None:
+            async with self._lock:
+                if not context.terminal:
+                    context.terminal = True
+                    await self._emit(
+                        context.turn_id,
+                        "turn.failed",
+                        {"outcome": "failed", "stage": "controller", "code": cleanup_error},
+                        terminal=True,
+                    )
+                await self._degrade_locked("controller", cleanup_error)
+            return
         if context.terminal or self._closed:
             return
 
@@ -460,7 +521,11 @@ class RealtimeSession:
         def observe(event: dict[str, object]) -> None:
             loop.call_soon_threadsafe(observed.put_nowait, event)
 
+        result: TraceResult | None = None
+        runner_failed = False
         async with self._runner_lock:
+            if context.terminal or self._closed:
+                return
             worker = asyncio.create_task(
                 asyncio.to_thread(
                     self.runner.run_turn,
@@ -473,31 +538,35 @@ class RealtimeSession:
                 name=f"inference-{context.turn_id}",
             )
             context.worker = worker
-            while not worker.done() or not observed.empty():
-                try:
-                    event = await asyncio.wait_for(observed.get(), timeout=0.01)
-                except TimeoutError:
-                    continue
-                await self._relay_internal(context, event)
             try:
-                result = await worker
-            except Exception:
-                if not context.terminal:
-                    context.terminal = True
-                    await self._emit(
-                        context.turn_id,
-                        "turn.failed",
-                        {"outcome": "failed", "stage": "controller", "code": "inference_runner_failure"},
-                        terminal=True,
-                    )
-                context.rollback_error = await self._rollback_context(context)
-                if context.rollback_error is not None:
-                    async with self._lock:
-                        await self._degrade_locked("controller", context.rollback_error)
-                return
+                while not worker.done() or not observed.empty():
+                    try:
+                        event = await asyncio.wait_for(observed.get(), timeout=0.01)
+                    except TimeoutError:
+                        continue
+                    await self._relay_internal(context, event)
+                try:
+                    result = await worker
+                except Exception:
+                    runner_failed = True
             finally:
-                if context.worker is worker:
+                if worker.done() and context.worker is worker:
                     context.worker = None
+
+        if runner_failed or result is None:
+            if not context.terminal:
+                context.terminal = True
+                await self._emit(
+                    context.turn_id,
+                    "turn.failed",
+                    {"outcome": "failed", "stage": "controller", "code": "inference_runner_failure"},
+                    terminal=True,
+                )
+            context.rollback_error = await self._rollback_context(context)
+            if context.rollback_error is not None:
+                async with self._lock:
+                    await self._degrade_locked("controller", context.rollback_error)
+            return
 
         while not observed.empty():
             await self._relay_internal(context, observed.get_nowait())
@@ -550,6 +619,7 @@ class RealtimeSession:
                 {
                     "state": "awaiting_client_playout",
                     "drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS,
+                    "ack_timeout_ms": CLIENT_PLAYOUT_ACK_TIMEOUT_MS,
                 },
             )
         try:
@@ -573,7 +643,10 @@ class RealtimeSession:
             delivered = getattr(self.runner, "turn_delivered", None)
             if delivered is not None:
                 try:
-                    await asyncio.to_thread(delivered, self.session_id, context.turn_id)
+                    async with self._runner_lock:
+                        await asyncio.to_thread(
+                            delivered, self.session_id, context.turn_id
+                        )
                 except Exception:
                     context.rollback_error = await self._rollback_context(context)
                     context.terminal = True
@@ -714,13 +787,14 @@ class RealtimeSession:
                     )
                     self._report_failure("controller", "session_closed")
                     return True
-                cleanup, reset_error = await self._interrupt_locked("client_reconnected")
+                _cleanup, reset_error = await self._interrupt_locked("client_reconnected")
             try:
                 async with asyncio.timeout(CANCELLATION_CLEANUP_BOUND_MS / 1000):
-                    if cleanup is not None:
-                        cleanup_error = await asyncio.shield(cleanup)
-                        if cleanup_error is not None:
-                            reset_error = cleanup_error
+                    cleanup_error = await self._await_cleanup_barrier(
+                        timeout_ms=CANCELLATION_CLEANUP_BOUND_MS
+                    )
+                    if cleanup_error is not None:
+                        reset_error = cleanup_error
                     async with self._runner_lock:
                         reset = getattr(self.runner, "reset_session", None)
                         if reset is not None:
@@ -757,19 +831,13 @@ class RealtimeSession:
                         "client_disconnected", notify_client=notify_client
                     )
                 self._closed = True
-                cleanups = tuple(self._cleanup_tasks)
             if drain_error is not None:
                 raise RuntimeError(drain_error)
-            for cleanup in cleanups:
-                try:
-                    cleanup_error = await asyncio.wait_for(
-                        asyncio.shield(cleanup),
-                        timeout=CANCELLATION_CLEANUP_BOUND_MS / 1000,
-                    )
-                except TimeoutError as error:
-                    raise RuntimeError("cancellation_cleanup_timeout") from error
-                if cleanup_error is not None:
-                    raise RuntimeError(cleanup_error)
+            cleanup_error = await self._await_cleanup_barrier(
+                timeout_ms=CANCELLATION_CLEANUP_BOUND_MS
+            )
+            if cleanup_error is not None:
+                raise RuntimeError(cleanup_error)
             if context is not None and context.task is not None:
                 try:
                     await asyncio.wait_for(asyncio.shield(context.task), timeout=1.25)
