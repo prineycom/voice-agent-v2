@@ -59,6 +59,9 @@ CLIENT_MEDIA_READY_TIMEOUT_MS = 3_000
 CLIENT_MEDIA_READY_ACK_MARGIN_MS = 250
 CLIENT_WAIT_STARTED_TIMEOUT_MS = 10_000
 MAX_UTTERANCE_BYTES = 30 * 16_000 * 2
+TERMINAL_CONTROLLER_FAILURE_CODES = frozenset({
+    "local_lfm_handoff_cleanup_failed",
+})
 
 
 class EventSink(Protocol):
@@ -508,10 +511,7 @@ class RealtimeSession:
         if self.failure_handler is not None:
             self.failure_handler(stage, code)
 
-    async def _degrade_locked(self, stage: str, code: str) -> None:
-        if self._closed:
-            return
-        self._closed = True
+    async def _publish_degraded_locked(self, stage: str, code: str) -> None:
         try:
             await self._emit(
                 SESSION_TURN_ID,
@@ -520,6 +520,12 @@ class RealtimeSession:
             )
         finally:
             self._report_failure(stage, code)
+
+    async def _degrade_locked(self, stage: str, code: str) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._publish_degraded_locked(stage, code)
 
     def _track_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
         self._cleanup_tasks.add(cleanup)
@@ -924,13 +930,26 @@ class RealtimeSession:
                 publication_id = context.playout_boundary.completed_publication_id
             context.rollback_error = await self._rollback_context(context)
             context.terminal = True
+            terminal_controller_code = payload.get("code")
+            terminal_controller_failure = (
+                payload.get("stage") == "llm_provider"
+                and isinstance(terminal_controller_code, str)
+                and terminal_controller_code in TERMINAL_CONTROLLER_FAILURE_CODES
+            )
+            if terminal_controller_failure:
+                self._closed = True
             public_payload = dict(payload)
             if publication_id is not None:
                 public_payload["media_publication_id"] = publication_id
             await self._emit(
                 context.turn_id, event_type, public_payload, terminal=True
             )
-            if drain_error is not None:
+            if terminal_controller_failure:
+                assert isinstance(terminal_controller_code, str)
+                await self._publish_degraded_locked(
+                    "llm_provider", terminal_controller_code
+                )
+            elif drain_error is not None:
                 await self._degrade_locked("publication", drain_error)
             elif context.rollback_error is not None:
                 await self._degrade_locked("controller", context.rollback_error)

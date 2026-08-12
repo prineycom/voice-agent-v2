@@ -542,10 +542,10 @@ class LocalLFMProvider:
             if handoff_thread is not None:
                 handoff_thread.join()
 
-        def abort_handoffs() -> None:
+        def abort_handoffs() -> str | None:
             nonlocal handoff_finished
             if handoff_finished:
-                return
+                return None
             handoff_finished = True
             with self._operation_lock:
                 self._handoff_cleanup_generations.add(generation)
@@ -574,10 +574,13 @@ class LocalLFMProvider:
             )
             cleanup_thread.start()
             cleanup_thread.join(self._handoff_cleanup_timeout_seconds)
+            cleanup_code = None
             with self._operation_lock:
                 if cleanup_thread.is_alive() or cleanup_errors:
-                    self._handoff_capacity_error = "local_lfm_handoff_cleanup_failed"
+                    cleanup_code = "local_lfm_handoff_cleanup_failed"
+                    self._handoff_capacity_error = cleanup_code
                 self._handoff_cleanup_generations.discard(generation)
+            return cleanup_code
 
         try:
             try:
@@ -596,7 +599,11 @@ class LocalLFMProvider:
                         "llm_provider", "selected_provider_protocol_error"
                     )
             except StageFailure as error:
-                abort_handoffs()
+                cleanup_code = abort_handoffs()
+                if cleanup_code is not None:
+                    cleanup_error = StageFailure("llm_provider", cleanup_code)
+                    record_failure(cleanup_error)
+                    raise cleanup_error from error
                 record_failure(error)
                 raise
             except (
@@ -606,8 +613,10 @@ class LocalLFMProvider:
                 UnicodeError,
                 json.JSONDecodeError,
             ) as cause:
-                abort_handoffs()
-                if self._cancelled(generation):
+                cleanup_code = abort_handoffs()
+                if cleanup_code is not None:
+                    code = cleanup_code
+                elif self._cancelled(generation):
                     code = "selected_provider_cancelled"
                 elif time.monotonic() >= deadline:
                     code = "local_lfm_request_timeout"

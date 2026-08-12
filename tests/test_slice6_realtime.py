@@ -425,6 +425,27 @@ class SpeakingFailureRunner(FakeRunner):
         raise RuntimeError("late inference failure")
 
 
+class TerminalCleanupFailureRunner(FakeRunner):
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer
+    ) -> TraceResult:
+        del input_pcm, cancellation
+        event = EventEnvelope(
+            session_id=session_id,
+            turn_id=turn_id,
+            sequence=1,
+            event_type="turn.failed",
+            payload={
+                "outcome": "failed",
+                "stage": "llm_provider",
+                "code": "local_lfm_handoff_cleanup_failed",
+            },
+            terminal=True,
+        ).as_dict()
+        event_observer(event)
+        return TraceResult((event,), b"", b"")
+
+
 class BlockingRunner(FakeRunner):
     def __init__(self) -> None:
         super().__init__()
@@ -738,6 +759,54 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.context, [])
         self.assertEqual(runner.operations, ["cancel", "provider-write", "rollback"])
         self.assertEqual(runner.discarded_turns, [("session-test-0001", turn_id)])
+
+    async def test_terminal_handoff_cleanup_failure_closes_admission_before_publish(self) -> None:
+        events = DelayedEventSink("turn.failed")
+        failures: list[tuple[str, str]] = []
+        audio = MemoryAudioSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=TerminalCleanupFailureRunner(),
+            event_sink=events,
+            audio_sink=audio,
+            failure_handler=lambda stage, code: failures.append((stage, code)),
+        )
+
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(events.started.wait(), 1)
+        replacement = asyncio.create_task(session.start_utterance())
+        await asyncio.sleep(0)
+        self.assertFalse(replacement.done())
+
+        events.release.set()
+        context = session._active
+        self.assertIsNotNone(context)
+        assert context is not None and context.task is not None
+        await asyncio.wait_for(context.task, 1)
+        with self.assertRaisesRegex(RuntimeError, "session is closed"):
+            await replacement
+
+        terminal = next(
+            event for event in events.events
+            if event["turn_id"] == turn_id and event["type"] == "turn.failed"
+        )
+        self.assertEqual(
+            terminal["payload"]["code"], "local_lfm_handoff_cleanup_failed"
+        )
+        self.assertEqual(events.events[-1]["type"], "session.degraded")
+        self.assertEqual(events.events[-1]["payload"]["stage"], "llm_provider")
+        self.assertEqual(
+            events.events[-1]["payload"]["code"],
+            "local_lfm_handoff_cleanup_failed",
+        )
+        self.assertEqual(
+            failures,
+            [("llm_provider", "local_lfm_handoff_cleanup_failed")],
+        )
+        self.assertEqual(audio.played, [])
+        self.assertEqual(
+            [event["type"] for event in events.events].count("turn.listening"), 1
+        )
 
     async def test_clear_failure_cancels_runner_and_degrades_session(self) -> None:
         events = MemoryEventSink()

@@ -401,7 +401,7 @@ class LocalLFMProviderTests(unittest.TestCase):
                 )
             self.assertEqual(
                 late_failure.exception.code,
-                "selected_provider_identity_mismatch",
+                "local_lfm_handoff_cleanup_failed",
             )
             self.assertEqual(provider.handoff_capacity_state(), "unavailable")
             with self.assertRaises(StageFailure) as unavailable:
