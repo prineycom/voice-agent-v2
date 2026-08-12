@@ -60,7 +60,7 @@ Result: **PASS** after `./setup-slice6`:
 - the then-current Vitest suite passed;
 - Vite production build: pass.
 
-Browser tests cover the typed reducer/parser, exact capability response, lifecycle/epoch/sequence/turn gates, reconnect suppression, stale event rejection, cancellable startup, React shell, autoplay failure boundary, and detach/reattach drain behavior. The installed runtime check also exercises cancellation during model startup, unclaimed-room expiry, and capacity retention after incomplete cleanup. The app intentionally remains one small bundle; Vite's size advisory is visible but is not hidden as a failure.
+Browser tests cover the typed reducer/parser, exact capability response, lifecycle/epoch/sequence/turn gates, reconnect suppression, stale event rejection, cancellable startup, bounded readiness, agent loss, cleanup failure, fresh-subscription media invalidation, React shell, autoplay failure boundary, and explicit autoplay recovery. The installed runtime check also exercises cancellation during model startup, unclaimed-room expiry, and capacity retention after incomplete cleanup. The app intentionally remains one small bundle; Vite's size advisory is visible but is not hidden as a failure.
 
 ## Measured bind and port evidence
 
@@ -81,7 +81,7 @@ The LiveKit JSON startup observation reported version `1.13.5`, loopback bind, t
 ## Interruption and reconnect policy
 
 - Endpointing uses 20 ms 16 kHz mono frames, 100 ms speech start, 600 ms trailing silence, 200 ms pre-roll, and a 15 s utterance maximum. It is a bounded CPU energy detector, not an unmeasured claim that Silero is unnecessary.
-- Barge-in first terminalizes the old turn, clears the 100 ms LiveKit source queue, tells the browser to detach/reattach playout, cancels the selected provider and process-isolated STT/TTS, rolls back undelivered LLM context, and serializes replacement work.
+- Barge-in first terminalizes the old turn, clears the 100 ms LiveKit source queue, invalidates the browser's old audio subscription and admits only a freshly subscribed track, cancels the selected provider and process-isolated STT/TTS, rolls back undelivered LLM context, and serializes replacement work.
 - During transport reconnect, the browser detaches audio and drops all old-epoch data. The server cancels/drains active work, resets all in-memory conversation context, advances the epoch, and only then reports ready. Cleanup/reset timeout produces `session.degraded` and closes turn admission.
 - Provider failure or empty output remains a hard `turn.failed`; no alternate model, endpoint, alias, transport redirect, local provider, or fabricated answer exists.
 

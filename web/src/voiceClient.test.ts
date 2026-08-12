@@ -37,6 +37,8 @@ vi.mock('livekit-client', () => ({
   Room: livekit.FakeRoom,
   RoomEvent: {
     TrackSubscribed: 'trackSubscribed',
+    TrackUnsubscribed: 'trackUnsubscribed',
+    ParticipantDisconnected: 'participantDisconnected',
     DataReceived: 'dataReceived',
     Reconnecting: 'reconnecting',
     Reconnected: 'reconnected',
@@ -302,7 +304,7 @@ describe('VoiceClient startup cancellation', () => {
     )
   })
 
-  it('recreates the playback boundary when a partially published turn fails', async () => {
+  it('requires a fresh media subscription when a partially published turn fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
     livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
     const client = new VoiceClient(document.createElement('div'), callbacks())
@@ -312,18 +314,13 @@ describe('VoiceClient startup cancellation', () => {
     firstElement.play = vi.fn().mockResolvedValue(undefined)
     firstElement.pause = vi.fn()
     firstElement.load = vi.fn()
-    const secondElement = document.createElement('audio')
-    secondElement.play = vi.fn().mockResolvedValue(undefined)
-    secondElement.pause = vi.fn()
-    secondElement.load = vi.fn()
-    const remoteTrack = {
+    const staleTrack = {
       kind: 'audio',
-      attach: vi.fn()
-        .mockReturnValueOnce(firstElement)
-        .mockReturnValueOnce(secondElement),
+      attach: vi.fn().mockReturnValue(firstElement),
       detach: vi.fn().mockReturnValue([]),
     }
-    room.emit('trackSubscribed', remoteTrack, {}, { identity: 'agent-session-test-0001' })
+    const publication = { setSubscribed: vi.fn() }
+    room.emit('trackSubscribed', staleTrack, publication, { identity: 'agent-session-test-0001' })
     emitControl(room, 'session.ready', 1)
     emitControl(room, 'turn.listening', 2)
     emitControl(room, 'turn.failed', 3, {
@@ -331,10 +328,88 @@ describe('VoiceClient startup cancellation', () => {
       payload: { stage: 'publication', code: 'audio_playout_exception' },
     })
 
-    expect(remoteTrack.detach).toHaveBeenCalledWith(firstElement)
-    expect(remoteTrack.attach).toHaveBeenCalledTimes(2)
-    expect(secondElement.play).toHaveBeenCalledOnce()
+    expect(staleTrack.detach).toHaveBeenCalledWith(firstElement)
+    expect(staleTrack.attach).toHaveBeenCalledOnce()
+    expect(publication.setSubscribed).toHaveBeenLastCalledWith(false)
+
+    room.emit('trackUnsubscribed', staleTrack, publication, {
+      identity: 'agent-session-test-0001',
+    })
+    expect(publication.setSubscribed).toHaveBeenLastCalledWith(true)
+
+    const freshElement = document.createElement('audio')
+    freshElement.play = vi.fn().mockResolvedValue(undefined)
+    freshElement.pause = vi.fn()
+    freshElement.load = vi.fn()
+    const freshTrack = {
+      kind: 'audio',
+      attach: vi.fn().mockReturnValue(freshElement),
+      detach: vi.fn().mockReturnValue([]),
+    }
+    room.emit('trackSubscribed', staleTrack, publication, { identity: 'agent-session-test-0001' })
+    expect(staleTrack.attach).toHaveBeenCalledOnce()
+    room.emit('trackSubscribed', freshTrack, publication, { identity: 'agent-session-test-0001' })
+    expect(freshTrack.attach).toHaveBeenCalledOnce()
     await client.stop()
+  })
+
+  it('fails closed when the agent participant leaves before readiness', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    const microphone = { stop: vi.fn() }
+    livekit.createLocalAudioTrack.mockResolvedValue(microphone)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    room.emit('participantDisconnected', { identity: 'agent-session-test-0001' })
+
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed',
+      'Агент голосовой сессии отключился',
+    ))
+    expect(microphone.stop).toHaveBeenCalledOnce()
+    expect(room.disconnect).toHaveBeenCalledOnce()
+  })
+
+  it('bounds the wait for initial session readiness', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    const microphone = { stop: vi.fn() }
+    livekit.createLocalAudioTrack.mockResolvedValue(microphone)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    await vi.advanceTimersByTimeAsync(30_001)
+
+    expect(microphone.stop).toHaveBeenCalledOnce()
+    expect(room.disconnect).toHaveBeenCalledOnce()
+    expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed',
+      'Сервер не подтвердил готовность голосовой сессии',
+    )
+  })
+
+  it('reports failure and remains stoppable when room cleanup rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    const microphone = { stop: vi.fn() }
+    livekit.createLocalAudioTrack.mockResolvedValue(microphone)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    room.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
+
+    room.emit('participantDisconnected', { identity: 'agent-session-test-0001' })
+
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenLastCalledWith(
+      'failed',
+      'Агент голосовой сессии отключился (не удалось полностью освободить транспорт)',
+    ))
+    await expect(client.stop()).resolves.toBeUndefined()
+    expect(microphone.stop).toHaveBeenCalledOnce()
   })
 
   it('releases microphone, playback, and room after terminal degradation', async () => {

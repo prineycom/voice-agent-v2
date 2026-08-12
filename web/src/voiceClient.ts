@@ -5,6 +5,7 @@ import {
   createLocalAudioTrack,
   type LocalAudioTrack,
   type RemoteAudioTrack,
+  type RemoteTrackPublication,
 } from 'livekit-client'
 import { AudioPlaybackBoundary } from './playback'
 import {
@@ -41,9 +42,15 @@ export class VoiceClient {
   private startAbort: AbortController | null = null
   private stopPromise: Promise<void> | null = null
   private reconnectAckTimer: ReturnType<typeof setTimeout> | null = null
+  private initialReadyTimer: ReturnType<typeof setTimeout> | null = null
   private reconnecting = false
   private reconnectRequestPending = false
+  private activeRemoteTrack: RemoteAudioTrack | null = null
   private pendingRemoteTrack: RemoteAudioTrack | null = null
+  private remotePublication: RemoteTrackPublication | null = null
+  private renewingPublication: RemoteTrackPublication | null = null
+  private freshSubscriptionRequired = false
+  private readonly invalidatedTracks = new WeakSet<RemoteAudioTrack>()
   private streamEpoch = 0
   private playoutGeneration = 0
 
@@ -79,6 +86,7 @@ export class VoiceClient {
       const room = new Room({ adaptiveStream: false, dynacast: false, disconnectOnPageLeave: true })
       this.room = room
       this.registerRoomHandlers(room)
+      this.armInitialReadyTimeout(capability.expires_in_seconds * 1_000)
       await room.connect(capability.livekit_url, capability.token, { autoSubscribe: true })
       await this.ensureRoomStarting(room)
       const microphone = await createLocalAudioTrack({
@@ -120,6 +128,7 @@ export class VoiceClient {
 
   private async releaseResources(notifyClosed = true): Promise<void> {
     this.clearReconnectAckTimer()
+    this.clearInitialReadyTimer()
     this.playoutGeneration += 1
     this.microphone?.stop()
     this.microphone = null
@@ -127,7 +136,11 @@ export class VoiceClient {
     this.controlGate = null
     this.reconnecting = false
     this.reconnectRequestPending = false
+    this.activeRemoteTrack = null
     this.pendingRemoteTrack = null
+    this.remotePublication = null
+    this.renewingPublication = null
+    this.freshSubscriptionRequired = false
     this.streamEpoch = 0
     this.playback.clear()
     const room = this.room
@@ -157,19 +170,37 @@ export class VoiceClient {
   }
 
   private registerRoomHandlers(room: Room): void {
-    room.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
+    room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
       if (
         track.kind === Track.Kind.Audio &&
-        this.capability !== null &&
-        participant.identity === `agent-${this.capability.session_id}`
+        this.isExpectedAgent(participant.identity)
       ) {
         const remoteTrack = track as RemoteAudioTrack
+        if (this.invalidatedTracks.has(remoteTrack)) return
+        this.remotePublication = publication as RemoteTrackPublication
+        if (this.freshSubscriptionRequired) {
+          this.invalidatedTracks.add(remoteTrack)
+          this.beginPublicationRenewal()
+          return
+        }
         if (this.reconnecting) {
           this.pendingRemoteTrack = remoteTrack
         } else {
+          this.activeRemoteTrack = remoteTrack
           this.playback.setTrack(remoteTrack)
         }
       }
+    })
+    room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+      if (
+        track.kind !== Track.Kind.Audio
+        || !this.isExpectedAgent(participant.identity)
+        || publication !== this.renewingPublication
+      ) return
+      this.renewingPublication = null
+      this.freshSubscriptionRequired = false
+      const remotePublication = publication as RemoteTrackPublication
+      remotePublication.setSubscribed(true)
     })
     room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
       if (
@@ -192,10 +223,12 @@ export class VoiceClient {
         this.playoutGeneration += 1
       }
       if (event.type === 'turn.interrupted' || event.type === 'turn.failed') {
-        this.playback.reset()
+        this.renewPlaybackTrack()
       }
       let terminalFailure: string | null = null
-      if (event.type === 'session.reconnected') {
+      if (event.type === 'session.ready') {
+        this.clearInitialReadyTimer()
+      } else if (event.type === 'session.reconnected') {
         this.streamEpoch = event.stream_epoch
         this.completeReconnect()
       } else if (event.type === 'session.degraded') {
@@ -217,10 +250,9 @@ export class VoiceClient {
       this.clearReconnectAckTimer()
       this.reconnecting = true
       this.reconnectRequestPending = false
-      this.pendingRemoteTrack = null
+      this.invalidatePlaybackTrack()
       this.playoutGeneration += 1
       this.controlGate?.beginReconnect()
-      this.playback.suspend()
       this.callbacks.onConnection('reconnecting')
     })
     room.on(RoomEvent.Reconnected, () => {
@@ -231,6 +263,11 @@ export class VoiceClient {
       this.playoutGeneration += 1
       if (!this.stopping) {
         void this.failSession('Соединение с голосовой сессией потеряно')
+      }
+    })
+    room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+      if (this.isExpectedAgent(participant.identity)) {
+        void this.failSession('Агент голосовой сессии отключился')
       }
     })
     room.on(RoomEvent.MediaDevicesError, () => {
@@ -307,10 +344,49 @@ export class VoiceClient {
     const track = this.pendingRemoteTrack
     this.pendingRemoteTrack = null
     if (track === null) {
-      this.playback.reset()
+      this.renewPlaybackTrack()
     } else {
+      this.activeRemoteTrack = track
       this.playback.setTrack(track)
     }
+  }
+
+  private isExpectedAgent(identity: string): boolean {
+    return this.capability !== null && identity === `agent-${this.capability.session_id}`
+  }
+
+  private invalidatePlaybackTrack(): void {
+    if (this.activeRemoteTrack !== null) this.invalidatedTracks.add(this.activeRemoteTrack)
+    if (this.pendingRemoteTrack !== null) this.invalidatedTracks.add(this.pendingRemoteTrack)
+    this.activeRemoteTrack = null
+    this.pendingRemoteTrack = null
+    this.playback.clear()
+  }
+
+  private renewPlaybackTrack(): void {
+    this.invalidatePlaybackTrack()
+    this.freshSubscriptionRequired = true
+    this.beginPublicationRenewal()
+  }
+
+  private beginPublicationRenewal(): void {
+    const publication = this.remotePublication
+    if (publication === null || this.renewingPublication !== null) return
+    this.renewingPublication = publication
+    publication.setSubscribed(false)
+  }
+
+  private armInitialReadyTimeout(timeoutMs: number): void {
+    this.clearInitialReadyTimer()
+    this.initialReadyTimer = setTimeout(() => {
+      void this.failSession('Сервер не подтвердил готовность голосовой сессии')
+    }, timeoutMs)
+  }
+
+  private clearInitialReadyTimer(): void {
+    if (this.initialReadyTimer === null) return
+    clearTimeout(this.initialReadyTimer)
+    this.initialReadyTimer = null
   }
 
   private clearReconnectAckTimer(): void {
@@ -323,8 +399,15 @@ export class VoiceClient {
     if (this.stopping) return
     this.stopping = true
     this.startAbort?.abort()
-    this.stopPromise = this.releaseResources(false)
-    await this.stopPromise
-    this.callbacks.onConnection('failed', message)
+    const cleanup = this.releaseResources(false)
+    this.stopPromise = cleanup.catch(() => undefined)
+    let failure = message
+    try {
+      await cleanup
+    } catch {
+      failure = `${message} (не удалось полностью освободить транспорт)`
+    } finally {
+      this.callbacks.onConnection('failed', failure)
+    }
   }
 }

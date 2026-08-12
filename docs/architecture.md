@@ -202,7 +202,7 @@ A session moves through `connecting`, `ready`, `degraded`, `reconnecting`, and `
 
 ### 6.3 Voice-turn lifecycle
 
-A turn moves through `listening`, `transcribing`, `thinking`, `speaking`, `playout-ready`, then exactly one of `completed`, `interrupted`, or `failed`. `playout-ready` keeps the turn interruptible after the server source queue drains; completion and provider-context commit require a bounded, correlated browser acknowledgement after the attached media clock advances through the declared drain boundary. Implementations may expose finer internal states, but external events must preserve this ordering.
+A turn moves through `listening`, `transcribing`, `thinking`, `speaking`, `playout-ready`, then exactly one of `completed`, `interrupted`, or `failed`. `playout-ready` keeps the turn interruptible after the server source queue drains; completion and provider-context commit require a bounded, correlated browser acknowledgement after the attached media clock advances through the declared drain boundary. Interruption, publication failure, and reconnect permanently invalidate the attached browser audio track; playback resumes only from a fresh unsubscribe/resubscribe generation so delayed packets from the old receiver cannot be reattached. Implementations may expose finer internal states, but external events must preserve this ordering.
 
 On barge-in, the controller:
 

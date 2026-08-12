@@ -23,7 +23,7 @@ class FakeTrack implements AttachableAudioTrack {
 afterEach(() => vi.useRealTimers())
 
 describe('audio playout boundary', () => {
-  it('reattaches the live track to drain browser-side stale audio', async () => {
+  it('reattaches the live track for explicit autoplay recovery', async () => {
     const container = document.createElement('div')
     const blocked: boolean[] = []
     const boundary = new AudioPlaybackBoundary(container, (value) => blocked.push(value))
