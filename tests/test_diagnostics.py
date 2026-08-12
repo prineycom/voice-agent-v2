@@ -21,12 +21,16 @@ class PrivacySafeTraceTests(unittest.TestCase):
             self.assertEqual(record["stream_epoch"], 2)
             self.assertEqual(record["fields"], {"probability": 0.812, "rms": 742})
 
-    def test_rejects_content_secrets_and_unbounded_messages(self) -> None:
+    def test_rejects_content_without_escaping_the_diagnostic_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            trace = PrivacySafeTrace(Path(directory) / "trace.jsonl", TraceIdentity("session-test"))
+            path = Path(directory) / "trace.jsonl"
+            trace = PrivacySafeTrace(path, TraceIdentity("session-test"))
             for fields in ({"transcript": "secret words"}, {"token": "secret"}, {"failure": "x" * 513}):
-                with self.assertRaises(ValueError):
-                    trace.emit("test", "rejected", fields)
+                self.assertFalse(trace.emit("test", "rejected", fields))
+            self.assertFalse(trace.emit("publication", "pcm_chunk", {"byte_count": 640}))
+            self.assertEqual(trace.failure_counts["validation"], 4)
+            self.assertTrue(trace.emit("session", "ready"))
+            self.assertEqual(json.loads(path.read_text())["event"], "ready")
 
     def test_prunes_the_cross_session_trace_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -43,8 +47,10 @@ class PrivacySafeTraceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             trace = PrivacySafeTrace(Path(directory) / "trace.jsonl", TraceIdentity("session-test"))
             with patch("pathlib.Path.open", side_effect=OSError("disk full")):
-                trace.emit("session", "ready")
-            trace.emit("session", "ignored_after_failure")
+                self.assertFalse(trace.emit("session", "ready"))
+            self.assertFalse(trace.emit("session", "ignored_after_failure"))
+            self.assertEqual(trace.failure_counts["write"], 1)
+            self.assertEqual(trace.failure_counts["validation"], 0)
             self.assertFalse(trace.path.exists())
 
 

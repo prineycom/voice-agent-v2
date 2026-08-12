@@ -257,6 +257,8 @@ describe('VoiceClient startup cancellation', () => {
       turnId: 'turn-00000001',
       streamEpoch: 1,
       sequence: 3,
+      serverControlType: 'turn.failed',
+      failureStage: 'tts',
       failureCode: 'deterministic_audio_failure',
     }))
     await client.stop()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -13,7 +14,8 @@ from voice_agent_v2.audio import (
     OUTPUT_MEDIA_MAX_SAMPLES,
     generated_output_pcm,
 )
-from voice_agent_v2.contracts import EventEnvelope
+from voice_agent_v2.contracts import EventEnvelope, StageFailure
+from voice_agent_v2.diagnostics import PrivacySafeTrace, TraceIdentity
 from voice_agent_v2.realtime import (
     BARGE_IN_DRAIN_BOUND_MS,
     CLIENT_CONTROL_VERSION,
@@ -251,6 +253,14 @@ class StreamingCancellationRunner(FakeRunner):
         emit("tts.audio", {"chunk_index": 0, "byte_count": 640})
         emit("turn.completed", {"outcome": "completed", "output_bytes": 640}, True)
         return TraceResult(tuple(events), b"", b"")
+
+
+class StageFailureRunner(FakeRunner):
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer
+    ) -> TraceResult:
+        del session_id, turn_id, input_pcm, cancellation, event_observer
+        raise StageFailure("tts", "selected_tts_unavailable")
 
 
 class SizedOutputRunner(FakeRunner):
@@ -671,6 +681,76 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.events[-1]["type"], "turn.completed")
         self.assertEqual(events.events[-1]["turn_id"], turn_id)
         self.assertFalse(session._closed)
+        self.assertGreater(session.diagnostic_failure_counts["write"], 0)
+        self.assertEqual(session.diagnostic_failure_counts["validation"], 0)
+        self.assertEqual(session.diagnostic_failure_counts["observer"], 0)
+
+    async def test_real_trace_allows_streamed_media_through_seal_and_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            trace = PrivacySafeTrace(path, TraceIdentity("session-test-0001"))
+            events = MemoryEventSink()
+            audio = MemoryAudioSink()
+            session = RealtimeSession(
+                session_id="session-test-0001",
+                runner=StreamingCancellationRunner(),
+                event_sink=events,
+                audio_sink=audio,
+                trace_observer=lambda stage, event, fields: trace.emit(
+                    stage,
+                    event,
+                    fields,
+                    turn_id=str(fields.get("turn_id", "session")),
+                ),
+            )
+            await session.ready()
+            turn_id = await session.submit_utterance(b"\0\0" * 320)
+            await wait_for_turn(session)
+
+            self.assertEqual(events.events[-1]["type"], "turn.completed")
+            self.assertEqual(audio.played, [turn_id])
+            self.assertEqual(audio.completed, [turn_id])
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            media_chunk = next(
+                record for record in records
+                if record["stage"] == "publication" and record["event"] == "media_chunk"
+            )
+            self.assertEqual(media_chunk["turn_id"], turn_id)
+            self.assertEqual(trace.failure_counts, {"validation": 0, "write": 0, "limit": 0})
+
+    async def test_runner_failure_keeps_privacy_safe_class_and_code_in_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            trace = PrivacySafeTrace(path, TraceIdentity("session-test-0001"))
+            events = MemoryEventSink()
+            session = RealtimeSession(
+                session_id="session-test-0001",
+                runner=StageFailureRunner(),
+                event_sink=events,
+                audio_sink=MemoryAudioSink(),
+                trace_observer=lambda stage, event, fields: trace.emit(
+                    stage,
+                    event,
+                    fields,
+                    turn_id=str(fields.get("turn_id", "session")),
+                ),
+            )
+            await session.ready()
+            await session.submit_utterance(b"\0\0" * 320)
+            await wait_for_turn(session)
+
+            self.assertEqual(events.events[-1]["type"], "turn.failed")
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            failure = next(record for record in records if record["event"] == "runner_failed")
+            self.assertEqual(failure["stage"], "tts")
+            self.assertEqual(
+                failure["fields"],
+                {
+                    "turn_id": "turn-00000001",
+                    "failure_class": "StageFailure",
+                    "failure_code": "selected_tts_unavailable",
+                },
+            )
 
     async def test_success_has_correlated_state_and_completion_after_audio(self) -> None:
         events = MemoryEventSink()

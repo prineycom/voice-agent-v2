@@ -15,6 +15,7 @@ MAX_TRACE_RECORDS = 20_000
 MAX_TRACE_DIRECTORY_BYTES = 64 * 1024 * 1024
 MAX_TRACE_FILES = 32
 MAX_TRACE_AGE_SECONDS = 7 * 24 * 60 * 60
+MAX_TRACE_FAILURES = 20_000
 _DIRECTORY_LOCK = threading.Lock()
 _ALLOWED_VALUE_TYPES = (bool, float, int, str, type(None))
 _FORBIDDEN_KEYS = frozenset({
@@ -51,6 +52,7 @@ class PrivacySafeTrace:
         self._bytes = 0
         self._lock = threading.Lock()
         self._write_failed = False
+        self._failure_counts = {"validation": 0, "write": 0, "limit": 0}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with _DIRECTORY_LOCK:
@@ -58,6 +60,17 @@ class PrivacySafeTrace:
             self._bytes = self.path.stat().st_size if self.path.exists() else 0
         except OSError:
             self._write_failed = True
+            self._increment_failure("write")
+
+    @property
+    def failure_counts(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._failure_counts)
+
+    def _increment_failure(self, kind: str) -> None:
+        self._failure_counts[kind] = min(
+            self._failure_counts[kind] + 1, MAX_TRACE_FAILURES
+        )
 
     def child(self, *, turn_id: str, stream_epoch: int) -> PrivacySafeTrace:
         child = object.__new__(PrivacySafeTrace)
@@ -68,6 +81,7 @@ class PrivacySafeTrace:
         child._bytes = self._bytes
         child._lock = self._lock
         child._write_failed = self._write_failed
+        child._failure_counts = self._failure_counts
         return child
 
     def _trace_files(self) -> list[Path]:
@@ -110,15 +124,27 @@ class PrivacySafeTrace:
         *,
         turn_id: str | None = None,
         stream_epoch: int | None = None,
-    ) -> None:
-        values = dict(fields or {})
-        if not _safe_key(stage) or not _safe_key(event):
-            raise ValueError("diagnostic stage/event is forbidden")
-        normalized: dict[str, object] = {}
-        for key, value in values.items():
-            if not isinstance(key, str) or len(key) > 64 or not _safe_key(key):
-                raise ValueError("diagnostic key is forbidden")
-            normalized[key] = _safe_value(value)
+    ) -> bool:
+        try:
+            values = dict(fields or {})
+            if (
+                not isinstance(stage, str)
+                or not isinstance(event, str)
+                or len(stage) > 64
+                or len(event) > 64
+                or not _safe_key(stage)
+                or not _safe_key(event)
+            ):
+                raise ValueError("diagnostic stage/event is forbidden")
+            normalized: dict[str, object] = {}
+            for key, value in values.items():
+                if not isinstance(key, str) or len(key) > 64 or not _safe_key(key):
+                    raise ValueError("diagnostic key is forbidden")
+                normalized[key] = _safe_value(value)
+        except (TypeError, ValueError):
+            with self._lock:
+                self._increment_failure("validation")
+            return False
         document = {
             "schema_version": "voice-agent.slice6-diagnostic.v1",
             "wall_time": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
@@ -133,25 +159,31 @@ class PrivacySafeTrace:
         line = json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n"
         encoded = line.encode("utf-8")
         with self._lock:
+            if self._write_failed:
+                return False
             if (
-                self._write_failed
-                or self._records >= MAX_TRACE_RECORDS
+                self._records >= MAX_TRACE_RECORDS
                 or self._bytes + len(encoded) > MAX_TRACE_BYTES
             ):
-                return
+                self._increment_failure("limit")
+                return False
             try:
                 with _DIRECTORY_LOCK:
                     self._prune_directory(reserve_bytes=0, reserve_files=0)
                     files = self._trace_files()
                     total = sum(path.stat().st_size for path in files)
                     if self.path not in files and len(files) >= MAX_TRACE_FILES:
-                        return
+                        self._increment_failure("limit")
+                        return False
                     if total + len(encoded) > MAX_TRACE_DIRECTORY_BYTES:
-                        return
+                        self._increment_failure("limit")
+                        return False
                     with self.path.open("ab") as destination:
                         destination.write(encoded)
             except OSError:
                 self._write_failed = True
-                return
+                self._increment_failure("write")
+                return False
             self._records += 1
             self._bytes += len(encoded)
+            return True

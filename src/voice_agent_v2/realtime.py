@@ -25,6 +25,7 @@ CLIENT_CONTROL_TOPIC = "voice-agent.client-control.v1"
 SESSION_TURN_ID = "session"
 MAX_CONTROL_BYTES = 65_536
 MAX_EVENT_SEQUENCE = 1_000_000_000
+MAX_DIAGNOSTIC_FAILURES = 20_000
 PUBLIC_EVENT_TYPES = frozenset({
     "session.ready",
     "session.reconnected",
@@ -282,13 +283,23 @@ class RealtimeSession:
         self._media_ready_timeout_task: asyncio.Task[None] | None = None
         self._media_wait_started_timeout_task: asyncio.Task[None] | None = None
         self.drop_counts = {"stale_event": 0, "client_control": 0}
+        self.diagnostic_failure_counts = {"validation": 0, "write": 0, "observer": 0}
 
     def _trace(self, stage: str, event: str, **fields: object) -> None:
         if self.trace_observer is not None:
             try:
                 self.trace_observer(stage, event, fields)
-            except OSError:
-                pass
+            except Exception as error:
+                if isinstance(error, OSError):
+                    kind = "write"
+                elif isinstance(error, (TypeError, ValueError)):
+                    kind = "validation"
+                else:
+                    kind = "observer"
+                self.diagnostic_failure_counts[kind] = min(
+                    self.diagnostic_failure_counts[kind] + 1,
+                    MAX_DIAGNOSTIC_FAILURES,
+                )
 
     @property
     def active_turn_id(self) -> str | None:
@@ -799,7 +810,7 @@ class RealtimeSession:
             runner_arguments["retain_output"] = False
 
         result: TraceResult | None = None
-        runner_failed = False
+        runner_failure: Exception | None = None
         async with self._runner_lock:
             if context.terminal or self._closed:
                 return
@@ -829,13 +840,52 @@ class RealtimeSession:
                             delivered.set()
                 try:
                     result = await worker
-                except Exception:
-                    runner_failed = True
+                except Exception as error:
+                    runner_failure = error
             finally:
                 if worker.done() and context.worker is worker:
                     context.worker = None
 
-        if runner_failed or result is None:
+        if runner_failure is not None or result is None:
+            failure_stage = "controller"
+            failure_class = "NoneType"
+            failure_code = "inference_runner_failure"
+            if runner_failure is not None:
+                candidate_class = type(runner_failure).__name__
+                if (
+                    0 < len(candidate_class) <= 128
+                    and candidate_class.isascii()
+                    and all(
+                        character.isalnum() or character == "_"
+                        for character in candidate_class
+                    )
+                ):
+                    failure_class = candidate_class
+                else:
+                    failure_class = "Exception"
+                if isinstance(runner_failure, StageFailure):
+                    if runner_failure.stage in {
+                        "stt", "llm_provider", "tts", "publication", "controller"
+                    }:
+                        failure_stage = runner_failure.stage
+                    candidate_code = runner_failure.code
+                    if (
+                        isinstance(candidate_code, str)
+                        and 0 < len(candidate_code) <= 128
+                        and candidate_code.isascii()
+                        and all(
+                            character.isalnum() or character in {"_", "-"}
+                            for character in candidate_code
+                        )
+                    ):
+                        failure_code = candidate_code
+            self._trace(
+                failure_stage,
+                "runner_failed",
+                turn_id=context.turn_id,
+                failure_class=failure_class,
+                failure_code=failure_code,
+            )
             await self._terminate_failed_turn(
                 context,
                 "turn.failed",
@@ -1224,7 +1274,7 @@ class RealtimeSession:
             )
         except Exception as error:
             self._trace(
-                "publication", "pcm_write_failed",
+                "publication", "media_write_failed",
                 turn_id=context.turn_id, failure_class=type(error).__name__,
                 failure_code="audio_stream_failed",
             )
@@ -1250,7 +1300,7 @@ class RealtimeSession:
         context.audio_chunk_sequence += 1
         context.audio_bytes_streamed += len(chunk)
         self._trace(
-            "publication", "pcm_chunk",
+            "publication", "media_chunk",
             turn_id=context.turn_id, chunk_index=chunk_index, byte_count=len(chunk),
             total_bytes=context.audio_bytes_streamed,
         )

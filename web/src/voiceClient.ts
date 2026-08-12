@@ -45,6 +45,8 @@ export interface VoiceDiagnosticRecord {
   turnId: string | null
   streamEpoch: number
   sequence: number | null
+  serverControlType?: string
+  failureStage?: string
   failureCode?: string
   failureMessage?: string
 }
@@ -432,10 +434,10 @@ export class VoiceClient {
       const serverFailure = event.type === 'turn.failed' || event.type === 'session.degraded'
       const serverStage = serverFailure && typeof event.payload.stage === 'string'
         ? event.payload.stage
-        : 'control'
+        : event.type === 'session.degraded' ? 'session' : event.type === 'turn.failed' ? 'controller' : 'control'
       const serverCode = serverFailure && typeof event.payload.code === 'string'
         ? event.payload.code
-        : undefined
+        : event.type === 'session.degraded' ? 'degraded' : event.type === 'turn.failed' ? 'unknown_failure' : undefined
       this.recordDiagnostic(serverStage, event.type, event, serverCode)
       try {
         this.callbacks.onControl(event)
@@ -1009,6 +1011,8 @@ export class VoiceClient {
       streamEpoch: control?.stream_epoch ?? this.streamEpoch,
       sequence: control?.sequence ?? null,
     }
+    if (control !== undefined) record.serverControlType = control.type
+    if (control?.type === 'turn.failed') record.failureStage = stage
     if (failureCode !== undefined) record.failureCode = failureCode
     if (failure !== undefined) {
       record.failureMessage = failure instanceof Error
