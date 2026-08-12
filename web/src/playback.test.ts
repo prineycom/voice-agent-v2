@@ -154,6 +154,23 @@ describe('audio playout boundary', () => {
     expect(completed).toBe(true)
   })
 
+  it('counts a short render before the first delivery-stats poll', async () => {
+    const harness = new RenderHarness()
+    installContext(harness)
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+    const track = new FakeTrack()
+    boundary.setTrack(track)
+    await boundary.prepareFinitePlayout()
+    const playout = boundary.waitForFinitePlayout(320, 16_000)
+
+    track.receivedSamples = 960
+    track.emittedSamples = 960
+    harness.render(960)
+    track.end()
+
+    await expect(playout).resolves.toBeUndefined()
+  })
+
   it('does not complete before the correlated finite track has ended', async () => {
     const harness = new RenderHarness()
     installContext(harness)

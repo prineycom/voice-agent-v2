@@ -49,6 +49,22 @@ class LocalLFMObservation:
     visible_chars: int
 
 
+def _visible_sentence_chunks(text: str) -> tuple[str, ...]:
+    chunks: list[str] = []
+    start = 0
+    for index, character in enumerate(text):
+        if character not in ".!?。！？":
+            continue
+        chunk = text[start:index + 1].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = index + 1
+    remaining = text[start:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return tuple(chunks)
+
+
 class LocalLFMProvider:
     """One fixed local provider; no credentials, endpoint choice, alias, or fallback."""
 
@@ -72,6 +88,7 @@ class LocalLFMProvider:
         self._connection_factory = connection_factory
         self._request_timeout_seconds = request_timeout_seconds
         self._contexts: dict[str, list[dict[str, str]]] = {}
+        self._context_lock = threading.Lock()
         self._operation_lock = threading.Lock()
         self._operation_changed = threading.Condition(self._operation_lock)
         self._operation_generation = 0
@@ -158,7 +175,8 @@ class LocalLFMProvider:
     def _payload(self, session_id: str, transcript: str) -> dict[str, object]:
         if not transcript.strip() or len(transcript) > 4_096:
             raise StageFailure("llm_provider", "transcript_out_of_bounds")
-        history = list(self._contexts.get(session_id, ())) [-MAX_CONTEXT_MESSAGES:]
+        with self._context_lock:
+            history = list(self._contexts.get(session_id, ())) [-MAX_CONTEXT_MESSAGES:]
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             *history,
@@ -215,7 +233,6 @@ class LocalLFMProvider:
     def _execute(
         self,
         payload: dict[str, object],
-        on_sentence: Callable[[str], None] | None,
         generation: int,
         started: float,
         deadline: float,
@@ -384,11 +401,6 @@ class LocalLFMProvider:
             self._raise_if_operation_stopped(
                 generation, deadline, deadline_expired
             )
-            if on_sentence is not None:
-                on_sentence(output)
-            self._raise_if_operation_stopped(
-                generation, deadline, deadline_expired
-            )
             completed = time.monotonic()
             result = {
                 "text": output,
@@ -444,6 +456,16 @@ class LocalLFMProvider:
             if cancellation is not None
             else lambda: None
         )
+        def record_failure(error: StageFailure) -> None:
+            self.observations.append({
+                "provider_mode": self.provider_mode,
+                "provider_identity": self.provider_identity,
+                "external_transfer": False,
+                "success": False,
+                "error_class": error.code,
+                "completion_ms": (time.monotonic() - started) * 1_000,
+            })
+
         try:
             try:
                 payload = self._payload(session_id, transcript)
@@ -451,32 +473,14 @@ class LocalLFMProvider:
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 if time.monotonic() >= deadline:
                     raise StageFailure("llm_provider", "local_lfm_request_timeout")
-                result = self._execute(
-                    payload, on_sentence, generation, started, deadline
-                )
+                result = self._execute(payload, generation, started, deadline)
                 text = result["text"]
                 if not isinstance(text, str):
                     raise StageFailure(
                         "llm_provider", "selected_provider_protocol_error"
                     )
-                context = list(self._contexts.get(session_id, ()))
-                context.extend([
-                    {"role": "user", "content": transcript.strip()},
-                    {"role": "assistant", "content": text},
-                ])
-                if self._cancelled(generation):
-                    raise StageFailure("llm_provider", "selected_provider_cancelled")
-                if time.monotonic() >= deadline:
-                    raise StageFailure("llm_provider", "local_lfm_request_timeout")
             except StageFailure as error:
-                self.observations.append({
-                    "provider_mode": self.provider_mode,
-                    "provider_identity": self.provider_identity,
-                    "external_transfer": False,
-                    "success": False,
-                    "error_class": error.code,
-                    "completion_ms": (time.monotonic() - started) * 1_000,
-                })
+                record_failure(error)
                 raise
             except (
                 OSError,
@@ -492,16 +496,28 @@ class LocalLFMProvider:
                 else:
                     code = "local_lfm_transport_error"
                 error = StageFailure("llm_provider", code)
-                self.observations.append({
-                    "provider_mode": self.provider_mode,
-                    "provider_identity": self.provider_identity,
-                    "external_transfer": False,
-                    "success": False,
-                    "error_class": error.code,
-                    "completion_ms": (time.monotonic() - started) * 1_000,
-                })
+                record_failure(error)
                 raise error from cause
-            self._contexts[session_id] = context[-MAX_CONTEXT_MESSAGES:]
+            if on_sentence is not None:
+                for sentence in _visible_sentence_chunks(text):
+                    if self._cancelled(generation):
+                        error = StageFailure(
+                            "llm_provider", "selected_provider_cancelled"
+                        )
+                        record_failure(error)
+                        raise error
+                    on_sentence(sentence)
+            if self._cancelled(generation):
+                error = StageFailure("llm_provider", "selected_provider_cancelled")
+                record_failure(error)
+                raise error
+            with self._context_lock:
+                context = list(self._contexts.get(session_id, ()))
+                context.extend([
+                    {"role": "user", "content": transcript.strip()},
+                    {"role": "assistant", "content": text},
+                ])
+                self._contexts[session_id] = context[-MAX_CONTEXT_MESSAGES:]
             self.observations.append({
                 "provider_mode": self.provider_mode,
                 "provider_identity": self.provider_identity,
@@ -571,13 +587,16 @@ class LocalLFMProvider:
             return True
 
     def snapshot_session(self, session_id: str) -> tuple[dict[str, str], ...]:
-        return tuple(dict(message) for message in self._contexts.get(session_id, ()))
+        with self._context_lock:
+            return tuple(dict(message) for message in self._contexts.get(session_id, ()))
 
     def restore_session(self, session_id: str, snapshot: tuple[dict[str, str], ...]) -> None:
-        if snapshot:
-            self._contexts[session_id] = [dict(message) for message in snapshot]
-        else:
-            self._contexts.pop(session_id, None)
+        with self._context_lock:
+            if snapshot:
+                self._contexts[session_id] = [dict(message) for message in snapshot]
+            else:
+                self._contexts.pop(session_id, None)
 
     def reset_session(self, session_id: str) -> None:
-        self._contexts.pop(session_id, None)
+        with self._context_lock:
+            self._contexts.pop(session_id, None)

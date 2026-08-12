@@ -136,7 +136,8 @@ class LocalLFMProviderTests(unittest.TestCase):
     def test_hidden_reasoning_never_reaches_handoff_or_response(self) -> None:
         response = StubResponse([
             stream_event(reasoning="Скрытое рассуждение."),
-            stream_event(content="Короткий видимый ответ."),
+            stream_event(content="Первый видимый ответ. "),
+            stream_event(content="Второй видимый ответ!"),
             stream_event(finish="stop"),
             {"model": MODEL_ALIAS, "choices": [], "usage": {"total_tokens": 12}},
         ])
@@ -149,11 +150,89 @@ class LocalLFMProviderTests(unittest.TestCase):
             transcript="Публичный запрос",
             on_sentence=handed_off.append,
         )
-        self.assertEqual(text, "Короткий видимый ответ.")
-        self.assertEqual(handed_off, ["Короткий видимый ответ."])
+        self.assertEqual(text, "Первый видимый ответ. Второй видимый ответ!")
+        self.assertEqual(
+            handed_off, ["Первый видимый ответ.", "Второй видимый ответ!"]
+        )
         self.assertNotIn("Скрытое", text + "".join(handed_off))
         self.assertFalse(provider.observations[-1]["external_transfer"])
         self.assertGreater(provider.observations[-1]["reasoning_chars"], 0)
+
+    def test_handoff_runs_after_transport_deadline_and_connection_release(self) -> None:
+        response = StubResponse([
+            stream_event(content="Готовый ответ."),
+            stream_event(finish="stop"),
+        ])
+        factory, created = self.factory([response])
+        provider = LocalLFMProvider(
+            connection_factory=factory, request_timeout_seconds=0.05
+        )
+        callback_transport_states: list[tuple[bool, bool]] = []
+
+        def handoff(sentence: str) -> None:
+            callback_transport_states.append(
+                (provider.wait_for_active_request(0), created[0].closed)
+            )
+            time.sleep(0.08)
+            self.assertEqual(sentence, "Готовый ответ.")
+
+        started = time.monotonic()
+        text = provider.respond_with_handoff(
+            session_id="session-a",
+            turn_id="turn-a",
+            transcript="Публичный запрос",
+            on_sentence=handoff,
+        )
+
+        self.assertEqual(text, "Готовый ответ.")
+        self.assertGreaterEqual(time.monotonic() - started, 0.08)
+        self.assertEqual(callback_transport_states, [(False, True)])
+        self.assertTrue(provider.observations[-1]["success"])
+        self.assertLess(provider.observations[-1]["completion_ms"], 50)
+
+    def test_handoff_waits_for_complete_identity_validation(self) -> None:
+        response = StubResponse([
+            stream_event(content="Не выдавать заранее."),
+            stream_event(content="Ошибка.", model="other"),
+            stream_event(finish="stop"),
+        ])
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(connection_factory=factory)
+        handed_off: list[str] = []
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond_with_handoff(
+                session_id="session-a",
+                turn_id="turn-a",
+                transcript="Публичный запрос",
+                on_sentence=handed_off.append,
+            )
+
+        self.assertEqual(raised.exception.code, "selected_provider_identity_mismatch")
+        self.assertEqual(handed_off, [])
+
+    def test_callback_failure_remains_owned_by_downstream_stage(self) -> None:
+        response = StubResponse([
+            stream_event(content="Готовый ответ."),
+            stream_event(finish="stop"),
+        ])
+        factory, created = self.factory([response])
+        provider = LocalLFMProvider(
+            connection_factory=factory, request_timeout_seconds=0.05
+        )
+        downstream = StageFailure("tts", "selected_tts_output_out_of_bounds")
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond_with_handoff(
+                session_id="session-a",
+                turn_id="turn-a",
+                transcript="Публичный запрос",
+                on_sentence=lambda _sentence: (_ for _ in ()).throw(downstream),
+            )
+
+        self.assertIs(raised.exception, downstream)
+        self.assertEqual(raised.exception.stage, "tts")
+        self.assertTrue(created[0].closed)
 
     def test_context_is_bounded_isolated_and_rollbackable(self) -> None:
         responses = []

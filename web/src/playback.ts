@@ -289,7 +289,6 @@ export class AudioPlaybackBoundary {
       const mediaTrack = this.track?.mediaStreamTrack
       if (
         this.renderArmed
-        && this.renderStarted
         && context.state === 'running'
         && mediaTrack?.readyState === 'live'
         && !mediaTrack.muted
