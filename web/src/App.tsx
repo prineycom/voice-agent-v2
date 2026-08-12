@@ -1,5 +1,5 @@
 import { useVoiceSession } from './VoiceSessionContext'
-import type { ConnectionState, TurnOutcome, TurnPhase } from './state'
+import type { ConnectionState, TurnHistoryItem, TurnOutcome, TurnPhase } from './state'
 import './styles.css'
 
 const connectionLabels: Record<ConnectionState, string> = {
@@ -26,6 +26,11 @@ const outcomeLabels: Record<TurnOutcome, string> = {
 
 function metric(value: number | null): string {
   return value === null ? '—' : `${Math.round(value)} мс`
+}
+
+export function historyUserText(item: TurnHistoryItem): string {
+  if (item.user) return item.user
+  return item.outcome === 'failed' ? 'Речь не распознана' : 'Распознаю речь…'
 }
 
 function ConnectionCard() {
@@ -58,7 +63,7 @@ function ConversationHistory() {
         <article className="history-turn" key={item.turnId}>
           <div className="conversation-block">
             <h3>Вы</h3>
-            <p>{item.user || 'Распознаю речь…'}</p>
+            <p>{historyUserText(item)}</p>
           </div>
           <div className="conversation-block response">
             <h3>Агент</h3>

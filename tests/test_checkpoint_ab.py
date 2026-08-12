@@ -134,6 +134,66 @@ class BurstStreamingRunner(StreamingRunner):
         return TraceResult(tuple(events), b"", b"")
 
 
+class BoundedPumpRunner(StreamingRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunk_started = [threading.Event() for _ in range(3)]
+        self.chunk_returned = [threading.Event() for _ in range(3)]
+        self.producer_final = threading.Event()
+
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
+        audio_observer, trace_observer=None, retain_output=True,
+    ) -> TraceResult:
+        del input_pcm, cancellation, trace_observer, retain_output
+        events: list[dict[str, object]] = []
+
+        def emit(event_type: str, payload: dict[str, object], terminal: bool = False) -> None:
+            event = EventEnvelope(
+                session_id=session_id,
+                turn_id=turn_id,
+                sequence=len(events) + 1,
+                event_type=event_type,
+                payload=payload,
+                terminal=terminal,
+            ).as_dict()
+            events.append(event)
+            event_observer(event)
+
+        emit("turn.transcribing", {"stage": "stt"})
+        emit("stt.final", {"transcript": "Тест."})
+        emit("turn.thinking", {"stage": "llm_provider"})
+        emit("llm.visible", {"response": "Потоковый ответ."})
+        emit("turn.speaking", {"stage": "tts"})
+        for index in range(3):
+            self.chunk_started[index].set()
+            audio_observer(index, bytes([index, 0]) * 320)
+            self.chunk_returned[index].set()
+            emit("tts.audio", {"chunk_index": index, "byte_count": 640})
+        self.producer_final.set()
+        emit("llm.final", {"response": "Потоковый ответ."})
+        emit("turn.completed", {"outcome": "completed", "output_bytes": 1_920}, True)
+        return TraceResult(tuple(events), b"", b"")
+
+
+class ControlledAudio(MemoryAudio):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = [threading.Event() for _ in range(3)]
+        self.release = [asyncio.Event() for _ in range(3)]
+        self.write_index = 0
+
+    async def write(self, _turn_id: str, pcm: bytes, cancelled) -> bool:
+        index = self.write_index
+        self.write_index += 1
+        self.started[index].set()
+        await self.release[index].wait()
+        if cancelled():
+            return False
+        self.chunks.append(pcm)
+        return True
+
+
 class LateTTSFailureRunner(StreamingRunner):
     def run_turn(
         self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
@@ -239,6 +299,40 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(audio.chunks), 5)
         self.assertLess(operations.index("pcm-submitted"), operations.index("synthesis-final"))
         self.assertLessEqual(events.events[-1]["payload"]["server_pcm_queue_max_blocks"], 2)
+
+    async def test_queue_blocks_third_block_and_completion_waits_for_last_write(self) -> None:
+        events = MemoryEvents()
+        audio = ControlledAudio()
+        runner = BoundedPumpRunner()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=runner,
+            event_sink=events,
+            audio_sink=audio,
+        )
+
+        await session.submit_utterance(b"\0\0" * 320)
+        try:
+            self.assertTrue(await asyncio.to_thread(audio.started[0].wait, 0.5))
+            self.assertTrue(await asyncio.to_thread(runner.chunk_returned[1].wait, 0.5))
+            self.assertTrue(await asyncio.to_thread(runner.chunk_started[2].wait, 0.5))
+            await asyncio.sleep(0.05)
+            self.assertFalse(runner.chunk_returned[2].is_set())
+
+            audio.release[0].set()
+            self.assertTrue(await asyncio.to_thread(runner.chunk_returned[2].wait, 0.5))
+            self.assertTrue(await asyncio.to_thread(runner.producer_final.wait, 0.5))
+            audio.release[1].set()
+            self.assertTrue(await asyncio.to_thread(audio.started[2].wait, 0.5))
+            self.assertNotIn("turn.completed", [event["type"] for event in events.events])
+        finally:
+            for release in audio.release:
+                release.set()
+            await asyncio.wait_for(session.wait_for_cleanup(), 1)
+
+        self.assertEqual(len(audio.chunks), 3)
+        self.assertEqual(events.events[-1]["type"], "turn.completed")
+        self.assertEqual(events.events[-1]["payload"]["server_pcm_queue_max_blocks"], 2)
 
     async def test_stale_request_tagged_pcm_is_dropped_before_sink_write(self) -> None:
         events = MemoryEvents()
@@ -385,7 +479,10 @@ class CheckpointBWarmupTests(unittest.TestCase):
             "discarded": True,
         })
         self.assertEqual(tts.process_id, 4242)
-        self.assertEqual(tts.requests[0], ("warmup-session", "warmup-turn"))
+        self.assertEqual(tts.requests, [
+            ("warmup-session", "warmup-turn"),
+            ("session-test", "turn-test"),
+        ])
         self.assertEqual(len(later), 2)
 
 

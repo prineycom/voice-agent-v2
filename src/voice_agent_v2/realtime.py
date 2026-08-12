@@ -589,6 +589,8 @@ class RealtimeSession:
         pcm_queue: asyncio.Queue[PcmPumpItem | None] = asyncio.Queue(
             maxsize=PCM_PUMP_MAX_BLOCKS
         )
+        pcm_capacity = asyncio.Semaphore(PCM_PUMP_MAX_BLOCKS)
+        outstanding_pcm = 0
         pump_errors: list[BaseException] = []
 
         def observe(event: dict[str, object]) -> None:
@@ -603,9 +605,16 @@ class RealtimeSession:
                         return
 
         async def enqueue_pcm(chunk_index: int, chunk: bytes) -> None:
-            await pcm_queue.put(PcmPumpItem(context, chunk_index, chunk))
+            nonlocal outstanding_pcm
+            await pcm_capacity.acquire()
+            try:
+                await pcm_queue.put(PcmPumpItem(context, chunk_index, chunk))
+            except BaseException:
+                pcm_capacity.release()
+                raise
+            outstanding_pcm += 1
             context.pcm_queue_high_water = max(
-                context.pcm_queue_high_water, pcm_queue.qsize()
+                context.pcm_queue_high_water, outstanding_pcm
             )
 
         def observe_audio(chunk_index: int, chunk: bytes) -> None:
@@ -641,6 +650,7 @@ class RealtimeSession:
                     event_queue.task_done()
 
         async def consume_pcm() -> None:
+            nonlocal outstanding_pcm
             while True:
                 item = await pcm_queue.get()
                 try:
@@ -652,6 +662,9 @@ class RealtimeSession:
                     context.cancellation.cancel()
                     return
                 finally:
+                    if item is not None:
+                        outstanding_pcm -= 1
+                        pcm_capacity.release()
                     pcm_queue.task_done()
 
         run_parameters = inspect.signature(type(self.runner).run_turn).parameters

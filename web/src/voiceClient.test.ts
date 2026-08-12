@@ -181,6 +181,29 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     expect(diagnosticOutput).not.toContain('Приватный ответ.')
   })
 
+  it('keeps an unrecognized STT failure in memory without degrading the session', async () => {
+    const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.failed', 3, {
+      outcome: 'failed', stage: 'stt', code: 'selected_stt_unavailable',
+    }, true)
+
+    expect(observed.onControl).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'turn.failed',
+      payload: expect.objectContaining({ stage: 'stt' }),
+    }))
+    expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
+    expect(storageWrite).not.toHaveBeenCalled()
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
   it('keeps a visible prefix and session alive when TTS fails', async () => {
     const observed = callbacks()
     const client = new VoiceClient(document.createElement('div'), observed)

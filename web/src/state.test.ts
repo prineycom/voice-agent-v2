@@ -128,6 +128,29 @@ describe('checkpoint A browser state', () => {
     })
   })
 
+  it('records STT failure without inventing a transcript or degrading the session', () => {
+    const state = apply([
+      event(1, 'session.ready'),
+      event(2, 'turn.listening'),
+      event(3, 'turn.failed', 'turn-00000001', {
+        outcome: 'failed', stage: 'stt', code: 'selected_stt_unavailable',
+      }),
+    ])
+
+    expect(state.connection).toBe('ready')
+    expect(state.phase).toBe('idle')
+    expect(state.currentTurnTerminal).toBe(true)
+    expect(state.history).toEqual([
+      expect.objectContaining({
+        turnId: 'turn-00000001',
+        user: '',
+        assistant: '',
+        outcome: 'failed',
+        audioUnavailable: false,
+      }),
+    ])
+  })
+
   it('drops duplicate, wrong-turn, and stale-sequence events', () => {
     const gate = new RealtimeControlGate(capability.session_id, 1)
     expect(gate.accept(event(1, 'session.ready'))).toBe(true)
