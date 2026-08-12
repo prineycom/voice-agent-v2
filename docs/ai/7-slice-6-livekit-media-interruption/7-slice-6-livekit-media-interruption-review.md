@@ -1,7 +1,7 @@
 # Review: 7-slice-6-livekit-media-interruption
 
 **Source:** `docs/ai/7-slice-6-livekit-media-interruption/7-slice-6-livekit-media-interruption-report.md`, Issue #7 and mandatory same-PR Issue #15
-**Status:** ✅ implementation review pass; physical acceptance remains explicitly pending
+**Status:** Historical implementation-review checkpoint; later no-mistakes fixes supersede its code snapshot. Current acceptance status is owned by [`docs/evidence/slice-6-livekit-media-interruption.md`](../../evidence/slice-6-livekit-media-interruption.md).
 
 ## Findings
 
@@ -30,7 +30,7 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify-slice6` | PASS after lifecycle/local-LFM integration | 130 network-denied Python tests, fixed provider/runtime manifest and cache hash checks, 29 browser tests, typecheck/build. |
+| `./verify-slice6` | PASS at this historical checkpoint | The then-current network-denied Python and browser suites, provider/runtime manifest and cache hash checks, typecheck, and build passed. |
 | `./verify-local-lfm` | PASS | Exact hashes, 2 x 32768 slots, concurrent visible Russian output, cancellation and recovery on loopback GPU runtime. |
 | Restricted LiveKit start plus `ss` | PASS | Loopback TCP/7880; redacted tailnet UDP/7882; no TCP media. |
 | Gateway status/security/origin smoke | PASS | Loopback only, safe headers/status, provider endpoint absent, missing/cross-site origin denied. |

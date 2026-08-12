@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 project architecture
 >
-> **Last updated:** 2026-08-11
+> **Last updated:** 2026-08-12
 
 This document defines the active target architecture. It records user-approved candidate identities and endpoints only at their evidence gate; a gateway investigation is not a passing provider/model selection.
 
@@ -23,15 +23,15 @@ Untested behavior is not implied by a target diagram.
 | ID | Status | Statement |
 | --- | --- | --- |
 | D1 | Decision | V2 is a clean repository. Media, control, STT/TTS, application, and local-inference services run on one Arch Linux PC; the legacy Pi/Desktop inference split is not part of V2. After documented local-LLM failure, one user-operated tailnet LiteLLM gateway is the narrow topology exception and may relay only an approved cloud LLM path. See [ADR-0001](adr/0001-clean-v2-single-host.md) and [ADR-0004](adr/0004-tailnet-litellm-cloud-gateway-evaluation.md). |
-| D2 | Decision | LiveKit, STT, and TTS remain local. The sole local LLM failed its measured gates; one explicit cloud LLM may now be selected only after the separate gateway, model, transport, privacy, cost, and measurement gate passes. Provider failure never causes automatic fallback. See [ADR-0003](adr/0003-local-first-llm-with-explicit-cloud-option.md). |
+| D2 | Decision | LiveKit, STT, and TTS remain local. The original BF16/vLLM local candidate failed its measured gates; ADR-0008 separately selects the measured Q4_K_M/llama.cpp artifact for the active Slice 6 development path. Any future cloud LLM still requires the separate gateway, model, transport, privacy, cost, and measurement gate. Provider failure never causes automatic fallback. See [ADR-0003](adr/0003-local-first-llm-with-explicit-cloud-option.md). |
 | D3 | Decision | The avatar boundary is renderer-agnostic. The MVP module is a deterministic custom animated AI eye; Live2D and 3D are optional later modules. The LLM never emits frames or renderer parameters. See [ADR-0002](adr/0002-renderer-agnostic-avatar-boundary.md). |
 | D4 | Decision | Tailscale membership is sufficient authorization for the private current stage. Protocol credentials are still scoped and protected, but V2 will not invent a second identity system now. |
-| D5 | Decision | Exact STT/LLM/TTS models, quantization, serving choices, and any cloud provider are selected only after repeatable resource, latency, quality, privacy, and required-concurrency gates. User-supplied candidates may be recorded before measurement, but an endpoint or alias alone is not a provider selection. |
+| D5 | Decision | Exact STT/LLM/TTS models, quantization, serving choices, and any cloud provider become accepted selections only after repeatable resource, latency, quality, privacy, and required-concurrency gates. An explicit ADR may pin a development candidate before final acceptance only while every remaining gate stays visible; an endpoint or alias alone is not a provider selection. |
 | D6 | Decision | Custom wake work is optional and deferred until after the core MVP. Kiosk operation is outside current scope. |
 | D7 | Decision | The pinned [legacy repository](#34-pinned-legacy-reference) is provenance, not a dependency. A future slice may selectively migrate a proven contract, component, or test only with fresh V2 validation and recorded origin. |
 | D8 | Decision | The detailed avatar-module and visual-control contract is deferred to a separate Grill/design task that must complete before MVP eye implementation. |
 | D9 | Decision | For the cumulative Slice 2–5 delivery branch, Pasha fixes Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and Qwen3-TTS CustomVoice/`ryan` despite recorded gate failures. Pasha attested the final human microphone/listening turn on 2026-08-11; every automated failure and exception remains visible, and no fallback or false pass is allowed. See [ADR-0005](adr/0005-operator-fixed-slices-2-5-model-stack.md). |
-| D10 | Decision | Slice 6 private live transcript traffic may use the same failed, operator-opaque LiteLLM alias under Pasha's explicit exception. Its endpoint is required only from untracked server-side `LITELLM_BASE_URL`, with no code default, alternate name, redirect, alias, or fallback; the current test value is HTTP and remains non-production. See [ADR-0006](adr/0006-slice-6-live-transcript-and-endpoint-configuration.md). |
+| D10 | Superseded for active Slice 6 | ADR-0006 temporarily authorized Slice 6 private live transcript traffic through the failed, operator-opaque LiteLLM alias with an untracked server-side `LITELLM_BASE_URL` and no default, redirect, alias, or fallback. D12 supersedes that runtime authorization; ADR-0006 remains historical evidence. |
 | D11 | Decision | Slice 6 uses pinned local LiveKit Server with the low-level official Python RTC/API SDK, a loopback FastAPI gateway/controller process, and a React + TypeScript + Vite client using official `livekit-client`. One room admits one browser and one agent; no avatar contract is introduced. See [ADR-0007](adr/0007-slice-6-livekit-react-realtime-boundary.md). |
 | D12 | Decision | Issue #15 supersedes the active ADR-0006 cloud exception inside the same Slice 6 delivery. The app uses only pinned cache-local official LFM2.5 Q4_K_M on GPU-enabled llama.cpp, loopback-only, two 32,768-token slots, no credentials and no cloud fallback. Historical DeepSeek evidence remains factual. See [ADR-0008](adr/0008-local-lfm2-llamacpp-for-slice-6.md). |
 
@@ -51,10 +51,8 @@ flowchart LR
     K["Local LiveKit<br/>realtime media and data"]
     C["Session controller<br/>turn lifecycle and contracts"]
     S["Local STT service"]
-    P["LLM provider adapter<br/>one configured mode"]
-    L["Local LLM<br/>measured failed path"]
-    Q["Allowlisted LiteLLM gateway<br/>tailnet candidate"]
-    X["Approved cloud LLM<br/>explicit measured option"]
+    P["Local LFM provider adapter<br/>fixed Slice 6 mode"]
+    L["Pinned LFM2.5 Q4_K_M<br/>local llama.cpp"]
     V["Local TTS service"]
 
     B <-->|HTTPS / WebRTC| T
@@ -65,8 +63,6 @@ flowchart LR
     C <--> S
     C <--> P
     P <--> L
-    P -.->|explicit cloud mode only| Q
-    Q -.->|one approved model| X
     C <--> V
     C -->|lifecycle and bounded avatar inputs| K
     K --> B
@@ -83,7 +79,7 @@ The diagram expresses logical boundaries, not a framework or container decision.
 | Session controller | Join as the agent participant; own session/turn state, endpointing policy, orchestration, cancellation, provider selection, contract validation, and control-event publication. | Canonical host | CPU/RAM |
 | STT inference service | Turn bounded or streaming audio into transcript results. | Canonical host | GPU/CPU/RAM, as measured |
 | LLM provider adapter | Present one provider-neutral request/result contract and route only to the explicitly configured provider. | Canonical host | CPU/RAM |
-| Local LLM inference service | Produce response text when local mode passes and is selected. | Canonical host; initially preferred | GPU/CPU/RAM, as measured |
+| Local LLM inference service | Produce response text for an explicitly selected local mode; active Slice 6 uses the fixed ADR-0008 artifact/runtime while full-stack acceptance remains pending. | Canonical host; initially preferred | GPU/CPU/RAM, as measured |
 | LiteLLM gateway | Relay only to the explicitly selected cloud alias; expose safe health/model/usage/error metadata; never choose a default or fallback. | Allowlisted user-operated tailnet node; optional and gated | Network/CPU/RAM |
 | Managed cloud LLM | Produce response text only when cloud mode has been explicitly measured, approved, and selected. | Approved external provider; optional | External network/service |
 | TTS inference service | Stream synthesized speech for validated response text. | Canonical host | GPU/CPU/RAM, as measured |
@@ -287,7 +283,7 @@ The following remain outside Git:
 
 The browser never receives LiveKit signing secrets, cloud LLM credentials, or inference-management credentials. Provider secrets are injected only into the controller/provider adapter and are redacted from logs, health, and errors. The application does not read or manage Tailscale node credentials; it relies on the host's existing tailnet membership.
 
-Local model artifacts require identity, revision/hash, license/provenance, expected size, and acquisition instructions in a non-secret manifest. Cloud mode additionally requires a non-secret approval record for provider/model identity, endpoint allowlist, privacy/retention assumptions, and cost/usage observability. A model name alone is not a reproducible or approved configuration.
+Local model artifacts require identity, revision/hash, license/provenance, expected size, and either acquisition instructions or an explicit verify-only canonical-cache precondition in a non-secret manifest. ADR-0008 uses the latter: setup never substitutes or downloads an absent artifact/runtime, and readiness fails closed. Cloud mode additionally requires a non-secret approval record for provider/model identity, endpoint allowlist, privacy/retention assumptions, and cost/usage observability. A model name alone is not a reproducible or approved configuration.
 
 ## 10. Tailscale exposure
 
@@ -352,7 +348,7 @@ The host/model budget slice must pre-register quality and latency thresholds, th
 
 Local LLM candidates, including the user's preferred candidate once supplied, are evaluated first. If none passes, the same slice may evaluate explicit cloud-provider candidates for response quality, first-token/completion latency, sustained availability, streaming/cancellation, cost/usage, credential flow, endpoint/model identity, retention/training policy, and permitted-data boundary. It must never use a cloud result to disguise a failed local measurement.
 
-The slice publishes raw numeric results, local rejection evidence when applicable, privacy review for a cloud selection, and the rationale for exactly one provider mode. Exact models/provider enter tracked configuration only after this gate passes.
+The slice publishes raw numeric results, local rejection evidence when applicable, privacy review for a cloud selection, and the rationale for exactly one provider mode. Exact models/providers enter accepted tracked configuration only after this gate passes. A separately approved measurement/development pin such as ADR-0008 may be tracked earlier only with its unpassed acceptance gates explicit.
 
 ## 12. Known hypotheses and evidence gates
 
