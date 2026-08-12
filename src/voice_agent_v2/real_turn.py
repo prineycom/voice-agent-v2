@@ -298,7 +298,7 @@ class RealTurnController:
             return fail(tts_error)
         if not tts_started:
             return fail(StageFailure("tts", "empty_tts_output"))
-        if not output_chunks:
+        if tts_chunks < 1 or tts_bytes < 1:
             return fail(StageFailure("tts", "empty_tts_output"))
         if token.cancelled:
             cancel_adapters(self.llm, self.tts)

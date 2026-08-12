@@ -48,13 +48,10 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     try {
       await client.start()
     } catch (error) {
-      let cleanupComplete = false
       try {
         await client.stop()
-        cleanupComplete = true
       } catch {}
       if (clientRef.current === client) {
-        if (cleanupComplete) clientRef.current = null
         dispatch({
           type: 'connection',
           connection: 'failed',

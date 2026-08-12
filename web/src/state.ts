@@ -45,7 +45,7 @@ const TURN_PREDECESSOR = new Map<ControlEventType, ControlEventType | ControlEve
   ['llm.visible', ['turn.thinking', 'llm.visible', 'turn.speaking']],
   ['llm.final', ['turn.thinking', 'llm.visible', 'turn.speaking']],
   ['turn.speaking', ['llm.visible', 'llm.final']],
-  ['turn.playout-ready', 'turn.speaking'],
+  ['turn.playout-ready', ['turn.speaking', 'llm.visible', 'llm.final']],
   ['turn.playout-retired', 'turn.playout-ready'],
   ['turn.completed', 'turn.playout-retired'],
 ])
@@ -217,6 +217,19 @@ export class RealtimeControlGate {
   }
 }
 
+function validLiveKitUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 2048) return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'wss:' || (
+      url.protocol === 'ws:'
+      && (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1')
+    )
+  } catch {
+    return false
+  }
+}
+
 export function parseCapability(value: unknown): SessionCapability | null {
   if (!ownObject(value)) return null
   const keys = Object.keys(value).sort()
@@ -225,7 +238,7 @@ export function parseCapability(value: unknown): SessionCapability | null {
   if (
     typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id) ||
     value.stream_epoch !== 1 ||
-    typeof value.livekit_url !== 'string' || !value.livekit_url.startsWith('wss://') || value.livekit_url.length > 2048 ||
+    !validLiveKitUrl(value.livekit_url) ||
     typeof value.token !== 'string' || value.token.length < 16 || value.token.length > 8192 ||
     !Number.isSafeInteger(value.expires_in_seconds) || (value.expires_in_seconds as number) < 1 || (value.expires_in_seconds as number) > 600 ||
     !Number.isSafeInteger(value.admission_timeout_ms) || (value.admission_timeout_ms as number) < 1_000 || (value.admission_timeout_ms as number) > 60_000 ||

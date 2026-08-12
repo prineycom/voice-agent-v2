@@ -203,6 +203,56 @@ class FakeRunner:
         self.reset_sessions.append(session_id)
 
 
+class StreamingCancellationRunner(FakeRunner):
+    def run_turn(
+        self,
+        *,
+        session_id,
+        turn_id,
+        input_pcm,
+        cancellation,
+        event_observer,
+        audio_observer,
+        trace_observer=None,
+        retain_output=True,
+    ) -> TraceResult:
+        del input_pcm, trace_observer, retain_output
+        events = []
+
+        def emit(event_type, payload, terminal=False):
+            event = EventEnvelope(
+                session_id=session_id,
+                turn_id=turn_id,
+                sequence=len(events) + 1,
+                event_type=event_type,
+                payload=payload,
+                terminal=terminal,
+            ).as_dict()
+            events.append(event)
+            event_observer(event)
+
+        for event_type, payload in (
+            ("turn.transcribing", {"stage": "stt"}),
+            ("stt.final", {"transcript": "Тест"}),
+            ("turn.thinking", {"stage": "llm_provider"}),
+            ("llm.visible", {"response": "Ответ"}),
+            ("llm.final", {"response": "Ответ"}),
+            ("turn.speaking", {"stage": "tts"}),
+        ):
+            emit(event_type, payload)
+        try:
+            audio_observer(0, b"\0\0" * 320)
+        except Exception:
+            if not cancellation.cancelled:
+                raise
+        if cancellation.cancelled:
+            emit("turn.interrupted", {"outcome": "interrupted"}, True)
+            return TraceResult(tuple(events), b"", b"")
+        emit("tts.audio", {"chunk_index": 0, "byte_count": 640})
+        emit("turn.completed", {"outcome": "completed", "output_bytes": 640}, True)
+        return TraceResult(tuple(events), b"", b"")
+
+
 class SizedOutputRunner(FakeRunner):
     def __init__(self, output_bytes: int) -> None:
         super().__init__()
@@ -604,6 +654,24 @@ async def wait_for_turn(session: RealtimeSession) -> None:
 
 
 class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_diagnostic_io_failure_does_not_change_transport_outcome(self) -> None:
+        events = MemoryEventSink()
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=FakeRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudioSink(),
+            trace_observer=lambda _stage, _event, _fields: (_ for _ in ()).throw(
+                OSError("disk full")
+            ),
+        )
+        await session.ready()
+        turn_id = await session.submit_utterance(b"\0\0" * 320)
+        await wait_for_turn(session)
+        self.assertEqual(events.events[-1]["type"], "turn.completed")
+        self.assertEqual(events.events[-1]["turn_id"], turn_id)
+        self.assertFalse(session._closed)
+
     async def test_success_has_correlated_state_and_completion_after_audio(self) -> None:
         events = MemoryEventSink()
         audio = MemoryAudioSink()
@@ -664,6 +732,35 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
             for event in events.events[new_start:]
         ))
         self.assertGreaterEqual(runner.cancel_count, 1)
+
+    async def test_streaming_write_cancelled_by_barge_in_does_not_close_replacement(self) -> None:
+        events = MemoryEventSink()
+        audio = MemoryAudioSink(block=True)
+        failures: list[tuple[str, str]] = []
+        session = RealtimeSession(
+            session_id="session-test-0001",
+            runner=StreamingCancellationRunner(),
+            event_sink=events,
+            audio_sink=audio,
+            failure_handler=lambda stage, code: failures.append((stage, code)),
+        )
+        old_turn = await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(audio.started.wait(), 1)
+        new_turn = await session.start_utterance()
+        audio.block = False
+        await session.finish_utterance(b"\0\0" * 320)
+        await wait_for_turn(session)
+
+        self.assertFalse(session._closed)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            [event["type"] for event in events.events if event["turn_id"] == old_turn and event["terminal"]],
+            ["turn.interrupted"],
+        )
+        self.assertEqual(
+            [event["type"] for event in events.events if event["turn_id"] == new_turn][-1],
+            "turn.completed",
+        )
 
     async def test_replacement_waits_for_correlated_fresh_media_subscription(self) -> None:
         events = MemoryEventSink()
@@ -1603,6 +1700,26 @@ class ControlEventGateTests(unittest.TestCase):
         oversized["payload"] = {"value": "x" * 8193}
         self.assertFalse(gate.accept(oversized))
         self.assertEqual(gate.drop_count, 2)
+
+    def test_playout_can_follow_final_text_after_streaming_audio(self) -> None:
+        gate = ControlEventGate("session-test-0001")
+        lifecycle = [
+            ("session.ready", "session"),
+            ("turn.listening", "turn-00000001"),
+            ("turn.transcribing", "turn-00000001"),
+            ("stt.final", "turn-00000001"),
+            ("turn.thinking", "turn-00000001"),
+            ("llm.visible", "turn-00000001"),
+            ("turn.speaking", "turn-00000001"),
+            ("llm.final", "turn-00000001"),
+            ("turn.playout-ready", "turn-00000001"),
+        ]
+        for sequence, (event_type, turn_id) in enumerate(lifecycle, 1):
+            self.assertTrue(gate.accept(self.event(
+                sequence=sequence,
+                event_type=event_type,
+                turn_id=turn_id,
+            )))
 
     def test_reconnect_accepts_only_next_epoch_and_rejects_old_epoch(self) -> None:
         gate = ControlEventGate("session-test-0001")

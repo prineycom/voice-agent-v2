@@ -21,6 +21,7 @@ VAD_MODEL=$VAD_DIR/silero-vad-v6.onnx
 VAD_URL=https://raw.githubusercontent.com/SYSTRAN/faster-whisper/v1.2.1/faster_whisper/assets/silero_vad_v6.onnx
 VAD_SHA256=4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2
 VAD_SIZE=1245151
+VAD_SPEECH_FIXTURE=$CACHE/test-data/real-russian-speech.wav
 
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
   echo "setup-slice6 supports only the measured Linux x86_64 host" >&2
@@ -83,6 +84,7 @@ printf '%s  %s\n' "$VAD_SHA256" "$VAD_MODEL" | sha256sum --check --status || {
   echo "cached Silero VAD size mismatch" >&2
   exit 2
 }
+python3 "$ROOT/scripts/acquire_vad_speech_fixture.py" "$VAD_SPEECH_FIXTURE"
 
 if [ -x "$LLAMA" ] && [ -f "$MODEL" ]; then
   printf '%s  %s\n' "$LLAMA_SHA256" "$LLAMA" | sha256sum --check --status || {

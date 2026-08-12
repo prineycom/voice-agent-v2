@@ -201,6 +201,67 @@ afterEach(() => {
 })
 
 describe('VoiceClient startup cancellation', () => {
+  it('records the exact startup boundary failure', async () => {
+    const observed = callbacks()
+    observed.onDiagnostic = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')))
+    const client = new VoiceClient(document.createElement('div'), observed)
+
+    await expect(client.start()).rejects.toThrow('fetch failed')
+
+    expect(observed.onDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      stage: 'session_request',
+      event: 'failed',
+      failureCode: 'startup_session_request_failed',
+      failureMessage: 'TypeError: fetch failed',
+    }))
+  })
+
+  it('downloads normalized correlated server failure diagnostics', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
+    livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+    const client = new VoiceClient(document.createElement('div'), callbacks())
+    await client.start()
+    const room = livekit.rooms[0]
+    emitControl(room, 'session.ready', 1)
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.failed', 3, {
+      terminal: true,
+      payload: {
+        stage: 'tts',
+        code: 'deterministic_audio_failure',
+        media_generation: 1,
+      },
+    })
+    let downloaded: Blob | null = null
+    const DiagnosticURL = class extends URL {}
+    Object.assign(DiagnosticURL, {
+      createObjectURL: (blob: Blob) => {
+        downloaded = blob
+        return 'blob:diagnostic'
+      },
+      revokeObjectURL: vi.fn(),
+    })
+    vi.stubGlobal('URL', DiagnosticURL)
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    client.downloadDiagnostics()
+
+    expect(downloaded).not.toBeNull()
+    const text = await (downloaded as unknown as Blob).text()
+    const records = text.trim().split('\n').map((line) => JSON.parse(line))
+    expect(records).toContainEqual(expect.objectContaining({
+      stage: 'tts',
+      event: 'turn.failed',
+      sessionId: 'session-test-0001',
+      turnId: 'turn-00000001',
+      streamEpoch: 1,
+      sequence: 3,
+      failureCode: 'deterministic_audio_failure',
+    }))
+    await client.stop()
+  })
+
   it('does not connect after a late capability response', async () => {
     const response = deferred<Response>()
     vi.stubGlobal('fetch', vi.fn().mockReturnValue(response.promise))

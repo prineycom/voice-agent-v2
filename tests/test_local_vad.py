@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 import struct
 import unittest
@@ -56,19 +57,28 @@ class SileroSpeechEndpointTests(unittest.TestCase):
         self.assertEqual(signals, [])
         self.assertGreater(sum(row["decision"] == "candidate_rejected" for row in telemetry), 0)
 
-    def test_cache_local_real_russian_fixture_is_detected_when_available(self) -> None:
-        fixture = Path(
-            "/home/priney/.cache/voice-agent-v2/slice-2/corpora/"
-            "stt-ruls-v1/ruls-test-0000.wav"
-        )
-        model = Path.home() / ".cache/voice-agent-v2/slice-6/models/silero-vad-v6.onnx"
-        try:
-            import numpy  # noqa: F401
-            import onnxruntime  # noqa: F401
-        except ImportError:
-            self.skipTest("installed Slice 6 ONNX runtime is absent")
-        if not fixture.is_file() or not model.is_file():
-            self.skipTest("authorized public Russian fixture or pinned VAD cache is absent")
+    def test_candidate_shorter_than_minimum_speech_never_becomes_public(self) -> None:
+        values = [0.85] * 3 + [0.05] * 8
+        frames = [frame(1200)] * math.ceil(len(values) * 512 / 320)
+        signals, telemetry = self.decisions(values, frames)
+        self.assertEqual(signals, [])
+        self.assertNotIn("speech_started", {row["decision"] for row in telemetry})
+
+    def test_long_idle_does_not_consume_the_next_utterance_budget(self) -> None:
+        values = [0.02] * 470 + [0.9] * 10 + [0.05] * 22
+        frames = [frame(1200)] * math.ceil(len(values) * 512 / 320)
+        signals, _telemetry = self.decisions(values, frames)
+        self.assertEqual([signal.kind for signal in signals], ["speech_started", "utterance"])
+
+    def test_cache_local_real_russian_fixture_is_detected(self) -> None:
+        cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+        fixture = Path(os.environ.get(
+            "VOICE_AGENT_VAD_SPEECH_FIXTURE",
+            str(cache / "voice-agent-v2/slice-6/test-data/real-russian-speech.wav"),
+        ))
+        model = cache / "voice-agent-v2/slice-6/models/silero-vad-v6.onnx"
+        self.assertTrue(fixture.is_file(), "setup-slice6 must acquire the pinned public speech fixture")
+        self.assertTrue(model.is_file(), "setup-slice6 must acquire the pinned Silero model")
         endpoint = SileroSpeechEndpoint(SileroOnnxModel(model))
         signals = []
         with wave.open(str(fixture), "rb") as source:

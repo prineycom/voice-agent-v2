@@ -98,6 +98,7 @@ export class VoiceClient {
     if (this.stopping) throw new Error('voice session start was cancelled')
     const abort = new AbortController()
     this.startAbort = abort
+    let startupStage = 'session_request'
     this.callbacks.onConnection('connecting')
     try {
       const response = await fetch('/api/session', {
@@ -108,6 +109,7 @@ export class VoiceClient {
       })
       this.ensureStarting()
       if (!response.ok) throw new Error(`local voice path unavailable (${response.status})`)
+      startupStage = 'capability'
       const capability = parseCapability(await response.json())
       this.ensureStarting()
       if (capability === null) throw new Error('invalid room capability response')
@@ -117,6 +119,7 @@ export class VoiceClient {
       this.callbacks.onSession(capability)
       this.recordDiagnostic('session', 'capability_received')
 
+      startupStage = 'agent_connection'
       const room = new Room({ adaptiveStream: false, dynacast: false, disconnectOnPageLeave: true })
       this.room = room
       this.registerRoomHandlers(room)
@@ -126,6 +129,7 @@ export class VoiceClient {
       if (!this.hasExpectedAgent(room)) {
         throw new Error('voice session agent is unavailable')
       }
+      startupStage = 'microphone'
       const microphone = await createLocalAudioTrack({
         channelCount: 1,
         echoCancellation: true,
@@ -134,12 +138,22 @@ export class VoiceClient {
       })
       this.microphone = microphone
       await this.ensureRoomStarting(room, microphone)
+      startupStage = 'microphone_publication'
       await room.localParticipant.publishTrack(microphone, {
         source: Track.Source.Microphone,
         dtx: false,
         red: true,
       })
       await this.ensureRoomStarting(room, microphone)
+    } catch (error) {
+      this.recordDiagnostic(
+        startupStage,
+        'failed',
+        undefined,
+        `startup_${startupStage}_failed`,
+        error,
+      )
+      throw error
     } finally {
       if (this.startAbort === abort) this.startAbort = null
     }
@@ -227,13 +241,17 @@ export class VoiceClient {
       }
     }
     if (errors.length > 0) {
+      const cleanupError = new AggregateError(errors, 'voice session resource cleanup failed')
+      this.recordDiagnostic(
+        'cleanup', 'failed', undefined, 'resource_cleanup_failed', cleanupError,
+      )
       if (notifyClosed) {
         this.callbacks.onConnection(
           'failed',
           'Не удалось полностью освободить ресурсы голосовой сессии',
         )
       }
-      throw new AggregateError(errors, 'voice session resource cleanup failed')
+      throw cleanupError
     }
     if (notifyClosed) this.callbacks.onConnection('closed')
   }
@@ -411,7 +429,14 @@ export class VoiceClient {
           terminalFailure = 'Некорректная граница завершения аудиопотока'
         }
       }
-      this.recordDiagnostic('control', 'received', event)
+      const serverFailure = event.type === 'turn.failed' || event.type === 'session.degraded'
+      const serverStage = serverFailure && typeof event.payload.stage === 'string'
+        ? event.payload.stage
+        : 'control'
+      const serverCode = serverFailure && typeof event.payload.code === 'string'
+        ? event.payload.code
+        : undefined
+      this.recordDiagnostic(serverStage, event.type, event, serverCode)
       try {
         this.callbacks.onControl(event)
       } catch {

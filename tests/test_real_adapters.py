@@ -818,6 +818,23 @@ class RealTurnControllerTests(unittest.TestCase):
         self.assertLess(types.index("tts.audio"), types.index("llm.final"))
         self.assertEqual(types.count("tts.audio"), 2)
 
+    def test_streaming_observer_can_complete_without_retaining_audio(self) -> None:
+        observed: list[bytes] = []
+        result = RealTurnController(FakeSTT(), FakeLLM(), FakeTTS()).run_turn(
+            session_id="session-test-0001",
+            turn_id="turn-test-0001",
+            input_pcm=b"\0\0" * 160,
+            audio_observer=lambda _index, chunk: observed.append(chunk),
+            retain_output=False,
+        )
+        self.assertEqual(result.terminal_event["type"], "turn.completed")
+        self.assertEqual(result.output_pcm, b"")
+        self.assertGreater(sum(map(len, observed)), 0)
+        self.assertEqual(
+            result.terminal_event["payload"]["output_bytes"],
+            sum(map(len, observed)),
+        )
+
     def test_late_llm_failure_discards_streamed_tts_buffer(self) -> None:
         class LateFailingLLM(FakeLLM):
             supports_handoff_abort = True

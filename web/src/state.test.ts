@@ -60,7 +60,8 @@ describe('control event boundary', () => {
 
   it('rejects malformed capability responses and accepts only WSS', () => {
     expect(parseCapability(capability)).toEqual(capability)
-    expect(parseCapability({ ...capability, livekit_url: 'ws://127.0.0.1:7880' })).toBeNull()
+    expect(parseCapability({ ...capability, livekit_url: 'ws://127.0.0.1:7880' })).not.toBeNull()
+    expect(parseCapability({ ...capability, livekit_url: 'ws://voice.test.ts.net:7880' })).toBeNull()
     expect(parseCapability({ ...capability, provider_endpoint: 'http://private' })).toBeNull()
   })
 
@@ -74,6 +75,23 @@ describe('control event boundary', () => {
     expect(gate.accept(event(4, 'stt.final', 'turn-00000001', {}, 1))).toBe(false)
     expect(gate.accept(event(5, 'session.reconnected', 'session', {}, 2))).toBe(true)
     expect(gate.accept(event(6, 'session.ready', 'session', {}, 1))).toBe(false)
+  })
+
+  it('accepts playout after streaming finishes with a final visible event', () => {
+    const gate = new RealtimeControlGate(capability.session_id, 1)
+    for (const item of [
+      event(1, 'session.ready', 'session'),
+      event(2, 'turn.listening'),
+      event(3, 'turn.transcribing'),
+      event(4, 'stt.final'),
+      event(5, 'turn.thinking'),
+      event(6, 'llm.visible'),
+      event(7, 'turn.speaking'),
+      event(8, 'llm.final'),
+      event(9, 'turn.playout-ready'),
+    ]) {
+      expect(gate.accept(item)).toBe(true)
+    }
   })
 
   it('shows correlated transcript and response and rejects duplicate/late/wrong-turn events', () => {

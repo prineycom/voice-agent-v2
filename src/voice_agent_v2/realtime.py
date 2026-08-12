@@ -50,7 +50,7 @@ TURN_PREDECESSOR = {
     "llm.visible": {"turn.thinking", "llm.visible", "turn.speaking"},
     "llm.final": {"turn.thinking", "llm.visible", "turn.speaking"},
     "turn.speaking": {"llm.visible", "llm.final"},
-    "turn.playout-ready": "turn.speaking",
+    "turn.playout-ready": {"turn.speaking", "llm.visible", "llm.final"},
     "turn.playout-retired": "turn.playout-ready",
     "turn.completed": "turn.playout-retired",
 }
@@ -285,7 +285,10 @@ class RealtimeSession:
 
     def _trace(self, stage: str, event: str, **fields: object) -> None:
         if self.trace_observer is not None:
-            self.trace_observer(stage, event, fields)
+            try:
+                self.trace_observer(stage, event, fields)
+            except OSError:
+                pass
 
     @property
     def active_turn_id(self) -> str | None:
@@ -822,7 +825,6 @@ class RealtimeSession:
                             await self._relay_audio_chunk(context, chunk_index, chunk)
                         except BaseException as error:
                             outcome.append(error)
-                            raise
                         finally:
                             delivered.set()
                 try:
@@ -853,7 +855,6 @@ class RealtimeSession:
                     await self._relay_audio_chunk(context, chunk_index, chunk)
                 except BaseException as error:
                     outcome.append(error)
-                    raise
                 finally:
                     delivered.set()
         terminal = result.terminal_event
@@ -1211,8 +1212,7 @@ class RealtimeSession:
             or len(chunk) % 2
             or context.audio_bytes_streamed + len(chunk) > OUTPUT_MEDIA_MAX_BYTES
         ):
-            await self._fail_publication(context, "audio_stream_invalid", clear_audio=True)
-            return
+            raise StageFailure("publication", "audio_stream_invalid")
         media_error = await self._await_media_ready(context)
         if media_error is not None or context.terminal or self._closed:
             return
@@ -1230,8 +1230,23 @@ class RealtimeSession:
             )
             accepted = False
         if not accepted:
-            await self._fail_publication(context, "audio_stream_failed", clear_audio=True)
-            raise StageFailure("tts", "audio_stream_failed")
+            if (
+                context.terminal
+                or context.cancellation.cancelled
+                or self._closed
+                or self._active is not context
+            ):
+                self.drop_counts["stale_event"] += 1
+                return
+            raise StageFailure("publication", "audio_stream_failed")
+        if (
+            context.terminal
+            or context.cancellation.cancelled
+            or self._closed
+            or self._active is not context
+        ):
+            self.drop_counts["stale_event"] += 1
+            return
         context.audio_chunk_sequence += 1
         context.audio_bytes_streamed += len(chunk)
         self._trace(

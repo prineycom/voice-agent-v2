@@ -12,6 +12,10 @@ from typing import Mapping
 
 MAX_TRACE_BYTES = 8 * 1024 * 1024
 MAX_TRACE_RECORDS = 20_000
+MAX_TRACE_DIRECTORY_BYTES = 64 * 1024 * 1024
+MAX_TRACE_FILES = 32
+MAX_TRACE_AGE_SECONDS = 7 * 24 * 60 * 60
+_DIRECTORY_LOCK = threading.Lock()
 _ALLOWED_VALUE_TYPES = (bool, float, int, str, type(None))
 _FORBIDDEN_KEYS = frozenset({
     "audio", "content", "pcm", "prompt", "response", "secret", "text", "token", "transcript"
@@ -44,9 +48,16 @@ class PrivacySafeTrace:
         self.identity = identity
         self._started = time.monotonic()
         self._records = 0
-        self._bytes = self.path.stat().st_size if self.path.exists() else 0
+        self._bytes = 0
         self._lock = threading.Lock()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_failed = False
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with _DIRECTORY_LOCK:
+                self._prune_directory(reserve_bytes=MAX_TRACE_BYTES, reserve_files=1)
+            self._bytes = self.path.stat().st_size if self.path.exists() else 0
+        except OSError:
+            self._write_failed = True
 
     def child(self, *, turn_id: str, stream_epoch: int) -> PrivacySafeTrace:
         child = object.__new__(PrivacySafeTrace)
@@ -56,7 +67,40 @@ class PrivacySafeTrace:
         child._records = self._records
         child._bytes = self._bytes
         child._lock = self._lock
+        child._write_failed = self._write_failed
         return child
+
+    def _trace_files(self) -> list[Path]:
+        return [
+            path for path in self.path.parent.glob("*.jsonl")
+            if path.is_file() and not path.is_symlink()
+        ]
+
+    def _prune_directory(self, *, reserve_bytes: int, reserve_files: int) -> None:
+        files = self._trace_files()
+        now = time.time()
+        retained: list[tuple[Path, int, float]] = []
+        for path in files:
+            stat = path.stat()
+            if path != self.path and now - stat.st_mtime > MAX_TRACE_AGE_SECONDS:
+                path.unlink(missing_ok=True)
+            else:
+                retained.append((path, stat.st_size, stat.st_mtime))
+        retained.sort(key=lambda item: item[2])
+        total = sum(size for _path, size, _mtime in retained)
+        while retained and (
+            len(retained) + reserve_files > MAX_TRACE_FILES
+            or total + reserve_bytes > MAX_TRACE_DIRECTORY_BYTES
+        ):
+            index = next(
+                (index for index, item in enumerate(retained) if item[0] != self.path),
+                None,
+            )
+            if index is None:
+                break
+            path, size, _mtime = retained.pop(index)
+            path.unlink(missing_ok=True)
+            total -= size
 
     def emit(
         self,
@@ -89,9 +133,25 @@ class PrivacySafeTrace:
         line = json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n"
         encoded = line.encode("utf-8")
         with self._lock:
-            if self._records >= MAX_TRACE_RECORDS or self._bytes + len(encoded) > MAX_TRACE_BYTES:
+            if (
+                self._write_failed
+                or self._records >= MAX_TRACE_RECORDS
+                or self._bytes + len(encoded) > MAX_TRACE_BYTES
+            ):
                 return
-            with self.path.open("ab") as destination:
-                destination.write(encoded)
+            try:
+                with _DIRECTORY_LOCK:
+                    self._prune_directory(reserve_bytes=0, reserve_files=0)
+                    files = self._trace_files()
+                    total = sum(path.stat().st_size for path in files)
+                    if self.path not in files and len(files) >= MAX_TRACE_FILES:
+                        return
+                    if total + len(encoded) > MAX_TRACE_DIRECTORY_BYTES:
+                        return
+                    with self.path.open("ab") as destination:
+                        destination.write(encoded)
+            except OSError:
+                self._write_failed = True
+                return
             self._records += 1
             self._bytes += len(encoded)

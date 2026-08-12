@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from voice_agent_v2.diagnostics import PrivacySafeTrace, TraceIdentity
+from voice_agent_v2.diagnostics import MAX_TRACE_FILES, PrivacySafeTrace, TraceIdentity
 
 
 class PrivacySafeTraceTests(unittest.TestCase):
@@ -26,6 +27,25 @@ class PrivacySafeTraceTests(unittest.TestCase):
             for fields in ({"transcript": "secret words"}, {"token": "secret"}, {"failure": "x" * 513}):
                 with self.assertRaises(ValueError):
                     trace.emit("test", "rejected", fields)
+
+    def test_prunes_the_cross_session_trace_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(MAX_TRACE_FILES + 5):
+                (root / f"old-{index:03d}.jsonl").write_text("{}\n")
+            trace = PrivacySafeTrace(root / "current.jsonl", TraceIdentity("session-current"))
+            trace.emit("session", "ready")
+            files = list(root.glob("*.jsonl"))
+            self.assertLessEqual(len(files), MAX_TRACE_FILES)
+            self.assertIn(root / "current.jsonl", files)
+
+    def test_diagnostic_write_failure_is_non_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trace = PrivacySafeTrace(Path(directory) / "trace.jsonl", TraceIdentity("session-test"))
+            with patch("pathlib.Path.open", side_effect=OSError("disk full")):
+                trace.emit("session", "ready")
+            trace.emit("session", "ignored_after_failure")
+            self.assertFalse(trace.path.exists())
 
 
 if __name__ == "__main__":

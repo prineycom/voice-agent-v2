@@ -112,6 +112,7 @@ class SileroSpeechEndpoint:
         self.start_windows = start_ms // 32
         self.end_windows = end_silence_ms // 32
         self.min_speech_windows = min_speech_ms // 32
+        self.admission_windows = max(self.start_windows, self.min_speech_windows)
         self.max_input_frames = max_utterance_ms // input_frame_ms
         self._pre_roll: deque[bytes] = deque(maxlen=pre_roll_ms // input_frame_ms)
         self._pending = bytearray()
@@ -122,7 +123,7 @@ class SileroSpeechEndpoint:
         self._speech_windows = 0
         self._silence_windows = 0
         self._window_index = 0
-        self._input_frames = 0
+        self._utterance_input_frames = 0
 
     @staticmethod
     def _rms(pcm: bytes) -> int:
@@ -156,10 +157,10 @@ class SileroSpeechEndpoint:
     def feed(self, pcm: bytes) -> list[VADSignal]:
         if len(pcm) != self.input_frame_bytes:
             raise ValueError("endpoint frame must be 20 ms of 16 kHz mono s16le PCM")
-        self._input_frames += 1
         self._pre_roll.append(pcm)
         if self._speaking:
             self._utterance.append(pcm)
+            self._utterance_input_frames += 1
         self._pending.extend(pcm)
         signals: list[VADSignal] = []
         while len(self._pending) >= self.window_bytes:
@@ -178,9 +179,10 @@ class SileroSpeechEndpoint:
                     self._candidate_windows.clear()
                     self._candidate_voiced = 0
                     self._observe("noise", probability, window)
-                if self._candidate_voiced >= self.start_windows:
+                if self._candidate_voiced >= self.admission_windows:
                     self._speaking = True
                     self._utterance = list(self._pre_roll)
+                    self._utterance_input_frames = len(self._utterance)
                     self._speech_windows = self._candidate_voiced
                     self._silence_windows = 0
                     self._candidate_windows.clear()
@@ -198,7 +200,7 @@ class SileroSpeechEndpoint:
                 self._observe("silence", probability, window)
             if (
                 self._silence_windows >= self.end_windows
-                or self._input_frames >= self.max_input_frames
+                or self._utterance_input_frames >= self.max_input_frames
             ):
                 if self._speech_windows >= self.min_speech_windows:
                     payload = b"".join(self._utterance)
@@ -232,4 +234,4 @@ class SileroSpeechEndpoint:
         self._utterance = []
         self._speech_windows = 0
         self._silence_windows = 0
-        self._input_frames = 0
+        self._utterance_input_frames = 0
