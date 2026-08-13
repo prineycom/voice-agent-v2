@@ -37,6 +37,9 @@ class FailingProcess:
         del value, timeout
         raise OSError("injected process loss")
 
+    def cancel(self) -> float:
+        return 0.0
+
     def close(self) -> None:
         return None
 

@@ -70,8 +70,12 @@ class SileroSpeechEndpointTests(unittest.TestCase):
         signals, _telemetry = self.decisions(values, frames)
         self.assertEqual([signal.kind for signal in signals], ["speech_started", "utterance"])
 
+    @unittest.skipUnless(
+        os.environ.get("VOICE_AGENT_VERIFY_SLICE6_RUNTIME") == "1",
+        "requires explicit Slice 6 runtime verification",
+    )
     def test_cache_local_real_russian_fixture_is_detected(self) -> None:
-        cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
         fixture = Path(os.environ.get(
             "VOICE_AGENT_VAD_SPEECH_FIXTURE",
             str(cache / "voice-agent-v2/slice-6/test-data/real-russian-speech.wav"),
