@@ -18,6 +18,8 @@ CMAKE_ARCHIVE=cmake-4.4.2-linux-x86_64.tar.gz
 CMAKE_SHA256=3ada9a3f5d8a85413579bdd0ea6aa8e8da86efdd6d15c91a1afa517f2021956c
 CMAKE_URL=https://github.com/Kitware/CMake/releases/download/v4.4.2/$CMAKE_ARCHIVE
 CMAKE_ROOT=$CACHE/tooling/cmake-4.4.2-linux-x86_64
+CMAKE_PART=$CMAKE_ROOT.partial
+CMAKE_MARKER=.voice-agent-install-sha256
 NINJA_ARCHIVE=$CACHE/tooling/ninja-linux-v1.13.2.zip
 NINJA_SHA256=5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6
 NINJA_URL=https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip
@@ -42,16 +44,46 @@ command -v curl >/dev/null && command -v git >/dev/null \
 }
 mkdir -p "$CACHE/model" "$CACHE/runtime" "$CACHE/sources" "$CACHE/tooling" "$CACHE/logs"
 
-if [ ! -x "$CMAKE_ROOT/bin/cmake" ]; then
+cmake_payload_valid() {
+  [ -x "$1/bin/cmake" ] \
+    && [ -f "$1/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake" ] \
+    && cmake_version=$("$1/bin/cmake" --version 2>/dev/null) \
+    && case "$cmake_version" in
+      "cmake version $CMAKE_VERSION"*) true ;;
+      *) false ;;
+    esac
+}
+cmake_valid() {
+  cmake_payload_valid "$1" \
+    && [ -f "$1/$CMAKE_MARKER" ] \
+    && IFS= read -r cmake_marker < "$1/$CMAKE_MARKER" \
+    && [ "$cmake_marker" = "$CMAKE_SHA256" ]
+}
+if ! cmake_valid "$CMAKE_ROOT"; then
   curl --fail --location --retry 3 --continue-at - --proto '=https' --tlsv1.2 \
     "$CMAKE_URL" -o "$CACHE/tooling/$CMAKE_ARCHIVE"
   printf '%s  %s\n' "$CMAKE_SHA256" "$CACHE/tooling/$CMAKE_ARCHIVE" | sha256sum --check --status || {
     echo "pinned CMake archive checksum mismatch" >&2
     exit 2
   }
-  tar -xzf "$CACHE/tooling/$CMAKE_ARCHIVE" -C "$CACHE/tooling"
+  rm -rf "$CMAKE_PART"
+  mkdir -p "$CMAKE_PART"
+  tar -xzf "$CACHE/tooling/$CMAKE_ARCHIVE" -C "$CMAKE_PART" --strip-components=1
+  cmake_payload_valid "$CMAKE_PART" || {
+    rm -rf "$CMAKE_PART"
+    echo "incomplete pinned CMake installation" >&2
+    exit 2
+  }
+  printf '%s\n' "$CMAKE_SHA256" > "$CMAKE_PART/$CMAKE_MARKER"
+  cmake_valid "$CMAKE_PART" || {
+    rm -rf "$CMAKE_PART"
+    echo "incomplete pinned CMake installation" >&2
+    exit 2
+  }
+  rm -rf "$CMAKE_ROOT"
+  mv "$CMAKE_PART" "$CMAKE_ROOT"
 fi
-"$CMAKE_ROOT/bin/cmake" --version | grep -F "cmake version $CMAKE_VERSION" >/dev/null || {
+cmake_valid "$CMAKE_ROOT" || {
   echo "pinned CMake runtime mismatch" >&2
   exit 2
 }
