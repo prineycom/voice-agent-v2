@@ -12,6 +12,7 @@ RUNTIME_REVISION=9bc876635af36df537d9bc6d3f57ad1b76e4f74a
 GGML_REVISION=c03b4e2bcece5134827881af90242086daf75be5
 SOURCE=$CACHE/sources/nemo-speech-cpp
 RUNTIME=$CACHE/runtime/nemo-speech-cpp-$RUNTIME_REVISION-cpu
+RUNTIME_PART=$RUNTIME.partial
 CMAKE_VERSION=4.4.2
 CMAKE_ARCHIVE=cmake-4.4.2-linux-x86_64.tar.gz
 CMAKE_SHA256=3ada9a3f5d8a85413579bdd0ea6aa8e8da86efdd6d15c91a1afa517f2021956c
@@ -142,30 +143,40 @@ if ! sentencepiece_valid "$SENTENCEPIECE"; then
   mv "$SENTENCEPIECE_PART" "$SENTENCEPIECE"
 fi
 
-if [ ! -x "$RUNTIME/bin/nemo-speech" ]; then
+runtime_artifact_valid() {
+  runtime_root=$1 relative=$2 expected=$3
+  artifact=$runtime_root/$relative
+  [ -f "$artifact" ] \
+    && printf '%s  %s\n' "$expected" "$artifact" | sha256sum --check --status
+}
+runtime_valid() {
+  runtime_artifact_valid "$1" bin/nemo-speech b8a48d5452fe4cf98a7e111cb6c5b814b1a22b5293c4aad6af0013d1242759b2 \
+    && runtime_artifact_valid "$1" lib/libggml-base.so.0.12.0 d1ba07aa27499f7bf5d85198415687da64cefadf57afb40f8647c5e5644f55a5 \
+    && runtime_artifact_valid "$1" lib/libggml-cpu.so.0.12.0 ef06c5f3268627a6e5e655c3c46f7f8ba04eb0f3ac109f9b213ab6f571600b09 \
+    && runtime_artifact_valid "$1" lib/libggml.so.0.12.0 a5c1a8de5f660e68c5d28c739d302a36192d282ef516ebcc4bc84371eea5a204 \
+    && runtime_artifact_valid "$1" lib/libnemo_speech_asr.so 588b2ed54aa2f7146bbcaaaa816c370be03d61cb74785f96be456fb80747d018 \
+    && runtime_artifact_valid "$1" lib/libnemo_speech_asr_c.so.1 60e18393f020760b545e99d6f146a61d754b65676a740519272765f6c71a74d4
+}
+
+if ! runtime_valid "$RUNTIME"; then
   (cd "$SOURCE" && scripts/configure.sh cpu-asr \
     -DSENTENCEPIECE_LIB="$SENTENCEPIECE/lib/libsentencepiece.a" \
     -DSENTENCEPIECE_INCLUDE_DIR="$SENTENCEPIECE/include")
   (cd "$SOURCE" && cmake --build --preset cpu-asr -j 6)
-  rm -rf "$RUNTIME"
-  cmake --install "$SOURCE/build/cpu-asr" --prefix "$RUNTIME"
-fi
-
-check_artifact() {
-  relative=$1 expected=$2
-  artifact=$RUNTIME/$relative
-  [ -f "$artifact" ] \
-    && printf '%s  %s\n' "$expected" "$artifact" | sha256sum --check --status || {
-    echo "pinned Parakeet runtime artifact mismatch: $relative" >&2
+  rm -rf "$RUNTIME_PART"
+  cmake --install "$SOURCE/build/cpu-asr" --prefix "$RUNTIME_PART"
+  runtime_valid "$RUNTIME_PART" || {
+    rm -rf "$RUNTIME_PART"
+    echo "incomplete pinned Parakeet runtime installation" >&2
     exit 2
   }
+  rm -rf "$RUNTIME"
+  mv "$RUNTIME_PART" "$RUNTIME"
+fi
+runtime_valid "$RUNTIME" || {
+  echo "pinned Parakeet runtime artifact mismatch" >&2
+  exit 2
 }
-check_artifact bin/nemo-speech b8a48d5452fe4cf98a7e111cb6c5b814b1a22b5293c4aad6af0013d1242759b2
-check_artifact lib/libggml-base.so.0.12.0 d1ba07aa27499f7bf5d85198415687da64cefadf57afb40f8647c5e5644f55a5
-check_artifact lib/libggml-cpu.so.0.12.0 ef06c5f3268627a6e5e655c3c46f7f8ba04eb0f3ac109f9b213ab6f571600b09
-check_artifact lib/libggml.so.0.12.0 a5c1a8de5f660e68c5d28c739d302a36192d282ef516ebcc4bc84371eea5a204
-check_artifact lib/libnemo_speech_asr.so 588b2ed54aa2f7146bbcaaaa816c370be03d61cb74785f96be456fb80747d018
-check_artifact lib/libnemo_speech_asr_c.so.1 60e18393f020760b545e99d6f146a61d754b65676a740519272765f6c71a74d4
 
 PYTHONPATH="$ROOT/src:$ROOT" python3 - <<'PY'
 from voice_agent_v2.parakeet_stt import verify_parakeet_artifacts
