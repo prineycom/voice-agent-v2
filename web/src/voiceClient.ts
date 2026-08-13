@@ -61,7 +61,7 @@ export class VoiceClient {
   private reconnecting = false
   private reconnectRequest: {
     room: Room
-    payload: Uint8Array
+    payload: Uint8Array<ArrayBuffer>
   } | null = null
   private activeRemoteTrack: RemoteAudioTrack | null = null
   private streamEpoch = 0
@@ -370,7 +370,7 @@ export class VoiceClient {
 
   private async sendReconnectAttempt(request: {
     room: Room
-    payload: Uint8Array
+    payload: Uint8Array<ArrayBuffer>
   }): Promise<void> {
     try {
       await request.room.localParticipant.publishData(request.payload, {
