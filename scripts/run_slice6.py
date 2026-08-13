@@ -232,6 +232,8 @@ def main() -> int:
     gateway_environment["PYTHONPATH"] = str(ROOT / "src")
     gateway_environment.pop("LIVEKIT_CONFIG", None)
     gateway_environment.pop("LIVEKIT_KEYS", None)
+    lock_fd = gateway_environment.get("VOICE_AGENT_GPU_BAKEOFF_LOCK_FD", "")
+    gateway_pass_fds = (int(lock_fd),) if lock_fd.isdigit() else ()
     livekit_environment = without_server_secrets(gateway_environment)
     livekit_environment["LIVEKIT_CONFIG"] = livekit_server_config(node_ip)
     livekit_environment["LIVEKIT_KEYS"] = (
@@ -278,6 +280,7 @@ def main() -> int:
             ],
             cwd=ROOT,
             env=gateway_environment,
+            pass_fds=gateway_pass_fds,
         )
         processes.append(gateway)
         wait_for_port(gateway, GATEWAY_PORT, "Slice 6 gateway", timeout=20)
