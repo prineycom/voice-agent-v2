@@ -1,13 +1,64 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 
-from tests.test_checkpoint_ab import CheckpointARealtimeTests
+from tests.test_checkpoint_ab import (
+    CheckpointARealtimeTests,
+    MemoryAudio,
+    MemoryEvents,
+    StreamingRunner,
+)
 from voice_agent_v2.realtime import (
     CONTROL_EVENT_VERSION,
     ControlEventGate,
     EnergyEndpoint,
+    RealtimeSession,
 )
+
+
+class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_abandoned_vad_candidate_emits_no_user_turn(self) -> None:
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        turn_id = await session.start_utterance(announce=False)
+        self.assertEqual(events.events, [])
+        self.assertTrue(await session.abandon_unannounced_utterance(turn_id))
+        self.assertEqual(events.events, [])
+        self.assertIsNone(session.active_turn_id)
+
+    async def test_cancelled_candidate_announcement_cannot_launch_a_turn(self) -> None:
+        class BlockingEvents:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+
+            async def send(self, _event: dict[str, object]) -> None:
+                self.started.set()
+                await asyncio.Event().wait()
+
+        events = BlockingEvents()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        await asyncio.wait_for(events.started.wait(), 0.5)
+
+        finish.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await finish
+
+        self.assertIsNone(session.active_turn_id)
+        self.assertIsNone(session._active)
 
 
 class RealtimeCheckpointTests(CheckpointARealtimeTests):

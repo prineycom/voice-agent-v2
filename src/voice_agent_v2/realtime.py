@@ -90,6 +90,7 @@ class TurnContext:
     endpoint_monotonic: float
     task: asyncio.Task[None] | None = None
     terminal: bool = False
+    announced: bool = True
     rollback_complete: bool = False
     rollback_error: str | None = None
     cancellation_cleanup: asyncio.Task[str | None] | None = None
@@ -283,7 +284,7 @@ class RealtimeSession:
             {"state": "ready", "barge_in_drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS},
         )
 
-    async def start_utterance(self) -> str:
+    async def start_utterance(self, *, announce: bool = True) -> str:
         async with self._reconnect_lock:
             async with self._lock:
                 if self._closed:
@@ -300,19 +301,36 @@ class RealtimeSession:
                     if drain_error is not None:
                         await self._degrade_locked("publication", drain_error)
                         raise RuntimeError("audio publication could not be reset safely")
-                return await self._admit_listening_locked()
+                return await self._admit_listening_locked(announce=announce)
 
-    async def _admit_listening_locked(self) -> str:
+    async def _admit_listening_locked(self, *, announce: bool = True) -> str:
         self._turn_sequence += 1
         turn_id = f"turn-{self._turn_sequence:08d}"
         context = TurnContext(
             turn_id=turn_id,
             cancellation=CancellationToken(),
             endpoint_monotonic=time.monotonic(),
+            announced=announce,
         )
         self._active = context
-        await self._emit(turn_id, "turn.listening", {"state": "listening"})
+        if announce:
+            await self._emit(turn_id, "turn.listening", {"state": "listening"})
         return turn_id
+
+    async def abandon_unannounced_utterance(self, turn_id: str) -> bool:
+        async with self._lock:
+            context = self._active
+            if (
+                context is None
+                or context.turn_id != turn_id
+                or context.terminal
+                or context.task is not None
+                or context.announced
+            ):
+                return False
+            context.terminal = True
+            self._active = None
+            return True
 
     async def finish_utterance(
         self, pcm: bytes, *, endpoint_monotonic: float | None = None
@@ -327,6 +345,15 @@ class RealtimeSession:
             if not math.isfinite(endpoint) or endpoint > time.monotonic() + 0.01:
                 raise ValueError("invalid acoustic endpoint timestamp")
             context.endpoint_monotonic = endpoint
+            if not context.announced:
+                try:
+                    await self._emit(context.turn_id, "turn.listening", {"state": "listening"})
+                except BaseException:
+                    context.terminal = True
+                    if self._active is context:
+                        self._active = None
+                    raise
+                context.announced = True
             context.task = asyncio.create_task(
                 self._run_turn(context, bytes(pcm)), name=f"realtime-{context.turn_id}"
             )

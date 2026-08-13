@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -202,6 +203,13 @@ async def main() -> int:
     server: ThreadingHTTPServer | None = None
     server_thread: threading.Thread | None = None
     microphone_subscribed = asyncio.Event()
+    microphone_muted = asyncio.Event()
+    microphone_unmuted = asyncio.Event()
+    agent_reconnecting = asyncio.Event()
+    agent_reconnected = asyncio.Event()
+    microphone_publication_ids: set[str] = set()
+    microphone_stream_tasks: set[asyncio.Task[None]] = set()
+    microphone_signal_frame_count = 0
     browser_controls: list[dict[str, object]] = []
     try:
         await wait_port(livekit_port, livekit)
@@ -249,6 +257,22 @@ async def main() -> int:
         await audio_sink.start()
         persistent_publication_id = audio_sink.current_publication_id()
 
+        async def count_microphone_frames(track) -> None:
+            nonlocal microphone_signal_frame_count
+            stream = rtc.AudioStream.from_track(
+                track=track,
+                capacity=20,
+                sample_rate=16_000,
+                num_channels=1,
+                frame_size_ms=20,
+            )
+            try:
+                async for event in stream:
+                    if any(event.frame.data):
+                        microphone_signal_frame_count += 1
+            finally:
+                await stream.aclose()
+
         @room.on("track_subscribed")
         def track_subscribed(track, publication, participant) -> None:
             if (
@@ -256,7 +280,35 @@ async def main() -> int:
                 and track.kind == rtc.TrackKind.KIND_AUDIO
                 and publication.source == rtc.TrackSource.SOURCE_MICROPHONE
             ):
+                microphone_publication_ids.add(publication.sid)
+                task = asyncio.create_task(count_microphone_frames(track))
+                microphone_stream_tasks.add(task)
+                task.add_done_callback(microphone_stream_tasks.discard)
                 microphone_subscribed.set()
+
+        @room.on("track_muted")
+        def track_muted(participant, publication) -> None:
+            if (
+                participant.identity == browser_identity
+                and publication.source == rtc.TrackSource.SOURCE_MICROPHONE
+            ):
+                microphone_muted.set()
+
+        @room.on("track_unmuted")
+        def track_unmuted(participant, publication) -> None:
+            if (
+                participant.identity == browser_identity
+                and publication.source == rtc.TrackSource.SOURCE_MICROPHONE
+            ):
+                microphone_unmuted.set()
+
+        @room.on("reconnecting")
+        def reconnecting() -> None:
+            agent_reconnecting.set()
+
+        @room.on("reconnected")
+        def reconnected() -> None:
+            agent_reconnected.set()
 
         @room.on("data_received")
         def data_received(packet) -> None:
@@ -305,6 +357,107 @@ async def main() -> int:
         await asyncio.to_thread(connect.click)
         await asyncio.wait_for(microphone_subscribed.wait(), 15)
         await session.ready()
+        await wait_for(
+            lambda: microphone_signal_frame_count >= 3,
+            "official LiveKit subscriber received no browser microphone signal frames",
+        )
+
+        def microphone_publications():
+            participant = room.remote_participants.get(browser_identity)
+            if participant is None:
+                return []
+            return [
+                publication
+                for publication in participant.track_publications.values()
+                if publication.source == rtc.TrackSource.SOURCE_MICROPHONE
+            ]
+
+        initial_publications = microphone_publications()
+        if len(initial_publications) != 1:
+            raise AssertionError(
+                f"expected one browser microphone publication, got {len(initial_publications)}"
+            )
+        browser_microphone_publication_id = initial_publications[0].sid
+        microphone_events_before_off = len(event_sink.events)
+        microphone_toggle = driver.find_element(
+            "xpath", "//button[contains(., 'Микрофон: включён')]"
+        )
+        await asyncio.to_thread(microphone_toggle.click)
+        await asyncio.wait_for(microphone_muted.wait(), 15)
+        await wait_for(
+            lambda: "Микрофон: выключен" in driver.find_element("tag name", "body").text,
+            "React microphone control did not report effective muted state",
+        )
+        await asyncio.sleep(0.3)
+        muted_frame_count = microphone_signal_frame_count
+        await asyncio.sleep(0.5)
+        if microphone_signal_frame_count != muted_frame_count:
+            raise AssertionError("browser microphone signal continued after track_muted")
+        if len(event_sink.events) != microphone_events_before_off:
+            raise AssertionError("microphone off invented a server user turn")
+        muted_publications = microphone_publications()
+        if (
+            len(muted_publications) != 1
+            or muted_publications[0].sid != browser_microphone_publication_id
+            or not muted_publications[0].muted
+        ):
+            raise AssertionError("microphone off replaced or failed to mute its publication")
+
+        microphone_unmuted.clear()
+        microphone_toggle = driver.find_element(
+            "xpath", "//button[contains(., 'Микрофон: выключен')]"
+        )
+        await asyncio.to_thread(microphone_toggle.click)
+        await asyncio.wait_for(microphone_unmuted.wait(), 15)
+        await wait_for(
+            lambda: microphone_signal_frame_count > muted_frame_count,
+            "browser microphone signal did not resume after track_unmuted",
+        )
+        resumed_publications = microphone_publications()
+        if (
+            len(resumed_publications) != 1
+            or resumed_publications[0].sid != browser_microphone_publication_id
+            or resumed_publications[0].muted
+        ):
+            raise AssertionError("microphone on replaced or failed to resume its publication")
+
+        microphone_muted.clear()
+        microphone_toggle = driver.find_element(
+            "xpath", "//button[contains(., 'Микрофон: включён')]"
+        )
+        await asyncio.to_thread(microphone_toggle.click)
+        await asyncio.wait_for(microphone_muted.wait(), 15)
+        await asyncio.sleep(0.3)
+        reconnect_muted_frame_count = microphone_signal_frame_count
+        livekit.send_signal(signal.SIGSTOP)
+        try:
+            await asyncio.wait_for(agent_reconnecting.wait(), 30)
+        finally:
+            livekit.send_signal(signal.SIGCONT)
+        await asyncio.wait_for(agent_reconnected.wait(), 30)
+        await asyncio.sleep(0.5)
+        reconnect_publications = microphone_publications()
+        if (
+            microphone_signal_frame_count != reconnect_muted_frame_count
+            or len(reconnect_publications) != 1
+            or reconnect_publications[0].sid != browser_microphone_publication_id
+            or not reconnect_publications[0].muted
+            or "Микрофон: выключен" not in driver.find_element("tag name", "body").text
+        ):
+            raise AssertionError("transient LiveKit reconnect did not preserve microphone off")
+        if microphone_publication_ids != {browser_microphone_publication_id}:
+            raise AssertionError("microphone toggle or reconnect rotated the browser publication")
+
+        microphone_unmuted.clear()
+        microphone_toggle = driver.find_element(
+            "xpath", "//button[contains(., 'Микрофон: выключен')]"
+        )
+        await asyncio.to_thread(microphone_toggle.click)
+        await asyncio.wait_for(microphone_unmuted.wait(), 15)
+        await wait_for(
+            lambda: microphone_signal_frame_count > reconnect_muted_frame_count,
+            "browser microphone did not cleanly resume after muted reconnect",
+        )
 
         first_turn = await session.submit_utterance(b"\0\0" * 320)
         first_context = session._active
@@ -351,8 +504,8 @@ async def main() -> int:
                 raise AssertionError(f"React history omitted {visible_text!r}")
         if audio_sink.current_publication_id() != persistent_publication_id:
             raise AssertionError("LiveKit publication rotated between turns")
-        if browser_controls:
-            raise AssertionError(f"browser sent unexpected media correctness controls: {browser_controls}")
+        if any(control.get("type") != "client.reconnected" for control in browser_controls):
+            raise AssertionError(f"browser sent unexpected microphone controls: {browser_controls}")
         download = driver.find_element("xpath", "//button[contains(., 'Скачать диагностику')]")
         await asyncio.to_thread(download.click)
         await wait_for(
@@ -402,7 +555,11 @@ async def main() -> int:
             "browser_surface": body,
             "server_event_types": event_types,
             "persistent_publication_id": persistent_publication_id,
-            "browser_media_controls": browser_controls,
+            "browser_reconnect_controls": browser_controls,
+            "browser_microphone_publication_id": browser_microphone_publication_id,
+            "browser_microphone_publication_count": len(reconnect_publications),
+            "microphone_frames_stopped_while_muted": True,
+            "microphone_off_preserved_across_reconnect": True,
             "browser_storage": storage_state,
             "downloaded_diagnostic": str(diagnostic_path),
             "audibility_claimed": False,
@@ -419,6 +576,10 @@ async def main() -> int:
                 await session.disconnect(notify_client=False)
             except Exception:
                 pass
+        for task in tuple(microphone_stream_tasks):
+            task.cancel()
+        if microphone_stream_tasks:
+            await asyncio.gather(*microphone_stream_tasks, return_exceptions=True)
         if audio_sink is not None:
             try:
                 await audio_sink.close()
