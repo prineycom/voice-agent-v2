@@ -157,6 +157,13 @@ def controller_stub(
     controller._browser_ready = False
     controller._browser_join_task = None
     controller._audio_task = None
+    controller._microphone_resume_task = None
+    controller._microphone_track = None
+    controller._microphone_publication_id = None
+    controller._microphone_generation = 0
+    controller._vad_model = object()
+    controller._microphone_muted = False
+    controller._capture_invalidated = False
     controller._control_task = None
     controller._control_queue = asyncio.Queue()
     controller.session = session or SessionStub()
