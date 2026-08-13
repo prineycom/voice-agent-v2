@@ -55,6 +55,16 @@ Run the complete deterministic/installed-runtime/browser check with:
 
 The command also runs a real headless Firefox against official local LiveKit with deterministic fake inference; this proves data-channel/track/publication/error lifecycle only. It reports the physical-browser gates as required rather than claiming them. `./verify-local-lfm` is a separate real-model host check and remains outside dependency-free CI. Privacy-safe server JSONL diagnostics are retained outside Git under `~/.cache/voice-agent-v2/slice-6/diagnostics/`; the browser exposes **Скачать диагностику** for a redacted lifecycle timeline. Neither contains audio or conversation text. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
 
+### Optional accelerated VoxCPM2 TTS experiment
+
+Qwen remains the default and rollback path. The independent `voxcpm2-fast` backend uses pinned
+Nano-vLLM and a licensed public Russian cloning reference; it is selected only by the dedicated
+`./run-voxcpm2-fast-candidate` command. Isolated warm inference is real-time, but the current
+VoxCPM2 + LFM residency already misses the mandatory 1.5 GiB reserve before Whisper is added, so
+the branch is a fail-closed **no-go** for a full-app manual listening test. Setup, real verification,
+measurements, limitations, and rollback are documented in
+[`docs/experiments/voxcpm2-fast-tts.md`](docs/experiments/voxcpm2-fast-tts.md).
+
 ## Final Slice 5 human acceptance
 
 Pasha ran this canonical-host command against PR 14 head `f1a3de997296e6dac87203cf5c2e157945a865b8` on 2026-08-11:
