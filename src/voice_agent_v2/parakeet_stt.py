@@ -291,9 +291,13 @@ class ParakeetSTT:
         self, cancellation: CancellationToken | None = None
     ) -> None:
         metadata = self.ready_metadata
-        if self._process is None or metadata is None or metadata.get("warmed") is not True:
+        if (
+            self.process_id is None
+            or metadata is None
+            or metadata.get("warmed") is not True
+        ):
             self.warmup(cancellation)
-        if self._process is None or self.ready_metadata is None:
+        if self.process_id is None or self.ready_metadata is None:
             raise StageFailure("stt", "selected_stt_unavailable")
         if self.ready_metadata.get("warmed") is not True:
             raise StageFailure("stt", "selected_stt_unavailable")

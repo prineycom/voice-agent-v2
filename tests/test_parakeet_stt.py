@@ -161,7 +161,7 @@ class ParakeetContractTests(unittest.TestCase):
         self.assertTrue(metadata["discarded"])
         self.assertEqual(stt.process_id, 7301)
 
-    def test_start_replaces_a_resident_process_that_exited(self) -> None:
+    def test_transcription_replaces_and_warms_a_resident_process_that_exited(self) -> None:
         stt = ParakeetSTT()
         exited = StubProcess()
         exited.process = Child(7301, returncode=1)
@@ -170,14 +170,23 @@ class ParakeetContractTests(unittest.TestCase):
         stt.ready_metadata = {"event": "ready", "warmed": True}
 
         with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("voice_agent_v2.parakeet_stt.TEMP", Path(directory)),
             patch("voice_agent_v2.parakeet_stt.verify_parakeet_artifacts", return_value={}),
             patch("voice_agent_v2.parakeet_stt.AdapterProcess", return_value=recovered),
         ):
-            ready = stt.start()
+            transcript = stt.transcribe(
+                session_id="session-test-0001",
+                turn_id="turn-test-0001",
+                pcm=b"\xe8\x03" * 1_600,
+                audio_format=AudioFormat(),
+            )
 
+        self.assertEqual(transcript, "Публичный тест.")
         self.assertTrue(exited.closed)
-        self.assertFalse(ready["warmed"])
+        self.assertEqual(recovered.operations, ["warmup", "transcribe"])
         self.assertIs(stt._process, recovered)
+        self.assertTrue(stt.ready_metadata["warmed"])
         self.assertEqual(stt.process_id, 7302)
 
     def test_active_cancellation_recovers_same_adapter_with_warm_residency(self) -> None:
