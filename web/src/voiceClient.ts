@@ -20,6 +20,7 @@ import {
 } from './state'
 
 const RECONNECT_ACK_TIMEOUT_MS = 5_000
+const RECONNECT_RETRY_INTERVAL_MS = 500
 
 export interface VoiceDiagnosticRecord {
   timestamp: string
@@ -55,9 +56,13 @@ export class VoiceClient {
   private startAbort: AbortController | null = null
   private stopPromise: Promise<void> | null = null
   private reconnectAckTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectRetryTimer: ReturnType<typeof setTimeout> | null = null
   private initialReadyTimer: ReturnType<typeof setTimeout> | null = null
   private reconnecting = false
-  private reconnectRequestPending = false
+  private reconnectRequest: {
+    room: Room
+    payload: Uint8Array
+  } | null = null
   private activeRemoteTrack: RemoteAudioTrack | null = null
   private streamEpoch = 0
   private readonly diagnostics: VoiceDiagnosticRecord[] = []
@@ -171,12 +176,12 @@ export class VoiceClient {
   }
 
   private async releaseResources(notifyClosed: boolean): Promise<void> {
-    this.clearReconnectAckTimer()
+    this.clearReconnectTimers()
     this.clearInitialReadyTimer()
     this.capability = null
     this.controlGate = null
     this.reconnecting = false
-    this.reconnectRequestPending = false
+    this.reconnectRequest = null
     this.activeRemoteTrack = null
     this.streamEpoch = 0
     const errors: unknown[] = []
@@ -235,6 +240,10 @@ export class VoiceClient {
       const remoteTrack = track as RemoteAudioTrack
       if (this.activeRemoteTrack === remoteTrack) return
       this.activeRemoteTrack = remoteTrack
+      if (this.reconnecting) {
+        this.recordDiagnostic('playback', 'persistent_track_deferred')
+        return
+      }
       this.playback.setTrack(remoteTrack)
       this.recordDiagnostic('playback', 'persistent_track_attached')
     })
@@ -264,10 +273,21 @@ export class VoiceClient {
       }
       let terminalFailure: string | null = null
       if (event.type === 'session.ready') {
+        const reconnectCompleted = this.reconnecting
         this.clearInitialReadyTimer()
-        this.clearReconnectAckTimer()
-        this.reconnectRequestPending = false
+        this.clearReconnectTimers()
+        this.reconnectRequest = null
         this.reconnecting = false
+        if (reconnectCompleted && this.activeRemoteTrack !== null) {
+          try {
+            this.playback.setTrack(this.activeRemoteTrack)
+            this.recordDiagnostic('playback', 'persistent_track_reattached')
+          } catch (error) {
+            this.recordDiagnostic(
+              'playback', 'reattach_failed', undefined, 'playback_reattach_failed', error,
+            )
+          }
+        }
       } else if (event.type === 'session.reconnected') {
         this.streamEpoch = event.stream_epoch
       } else if (event.type === 'session.degraded') {
@@ -293,9 +313,9 @@ export class VoiceClient {
     })
     room.on(RoomEvent.Reconnecting, () => {
       if (this.reconnecting) return
-      this.clearReconnectAckTimer()
+      this.clearReconnectTimers()
       this.reconnecting = true
-      this.reconnectRequestPending = false
+      this.reconnectRequest = null
       try {
         this.playback.suspend()
       } catch (error) {
@@ -305,11 +325,10 @@ export class VoiceClient {
       this.callbacks.onConnection('reconnecting')
     })
     room.on(RoomEvent.Reconnected, () => {
-      if (this.activeRemoteTrack !== null) this.playback.reset()
       void this.publishReconnect()
     })
     room.on(RoomEvent.Disconnected, () => {
-      this.clearReconnectAckTimer()
+      this.clearReconnectTimers()
       if (!this.stopping) void this.failSession('Соединение с голосовой сессией потеряно')
     })
     room.on(RoomEvent.ParticipantDisconnected, (participant) => {
@@ -323,35 +342,54 @@ export class VoiceClient {
   }
 
   private async publishReconnect(): Promise<void> {
-    if (
-      this.room === null
-      || this.capability === null
-      || !this.reconnecting
-      || this.reconnectRequestPending
-    ) return
-    this.reconnectRequestPending = true
+    if (this.room === null || this.capability === null || !this.reconnecting) return
+    if (this.reconnectRequest !== null) return
     this.clientSequence += 1
-    const payload = new TextEncoder().encode(JSON.stringify({
-      schema_version: CLIENT_CONTROL_VERSION,
-      session_id: this.capability.session_id,
-      stream_epoch: this.streamEpoch,
-      sequence: this.clientSequence,
-      type: 'client.reconnected',
-    }))
-    this.clearReconnectAckTimer()
+    const request = {
+      room: this.room,
+      payload: new TextEncoder().encode(JSON.stringify({
+        schema_version: CLIENT_CONTROL_VERSION,
+        session_id: this.capability.session_id,
+        stream_epoch: this.streamEpoch,
+        sequence: this.clientSequence,
+        type: 'client.reconnected',
+      })),
+    }
+    this.reconnectRequest = request
+    this.clearReconnectTimers()
     this.reconnectAckTimer = setTimeout(() => {
-      void this.failSession('Сервер не подтвердил восстановление сессии')
+      if (this.reconnectRequest === request) {
+        void this.failSession(
+          'Сервер не подтвердил восстановление сессии',
+          'reconnect_ack_timeout',
+        )
+      }
     }, RECONNECT_ACK_TIMEOUT_MS)
-    const room = this.room
-    const streamEpoch = this.streamEpoch
+    await this.sendReconnectAttempt(request)
+  }
+
+  private async sendReconnectAttempt(request: {
+    room: Room
+    payload: Uint8Array
+  }): Promise<void> {
     try {
-      await room.localParticipant.publishData(payload, {
+      await request.room.localParticipant.publishData(request.payload, {
         reliable: true,
         topic: CLIENT_CONTROL_TOPIC,
       })
     } catch (error) {
-      if (!this.isSuperseded(room, streamEpoch)) {
-        await this.failSession('Не удалось восстановить сессию', 'reconnect_publish_failed', error)
+      if (this.reconnectRequest === request && !this.stopping) {
+        this.recordDiagnostic(
+          'reconnect', 'publish_retry_failed', undefined, 'reconnect_publish_failed', error,
+        )
+      }
+    } finally {
+      if (this.reconnectRequest === request && this.reconnecting && !this.stopping) {
+        if (this.reconnectRetryTimer !== null) clearTimeout(this.reconnectRetryTimer)
+        this.reconnectRetryTimer = setTimeout(() => {
+          this.reconnectRetryTimer = null
+          void this.sendReconnectAttempt(request)
+        }, RECONNECT_RETRY_INTERVAL_MS)
       }
     }
   }
@@ -378,14 +416,11 @@ export class VoiceClient {
     this.initialReadyTimer = null
   }
 
-  private clearReconnectAckTimer(): void {
-    if (this.reconnectAckTimer === null) return
-    clearTimeout(this.reconnectAckTimer)
+  private clearReconnectTimers(): void {
+    if (this.reconnectAckTimer !== null) clearTimeout(this.reconnectAckTimer)
+    if (this.reconnectRetryTimer !== null) clearTimeout(this.reconnectRetryTimer)
     this.reconnectAckTimer = null
-  }
-
-  private isSuperseded(room: Room, streamEpoch: number): boolean {
-    return this.room !== room || this.streamEpoch !== streamEpoch || this.stopping
+    this.reconnectRetryTimer = null
   }
 
   private recordDiagnostic(

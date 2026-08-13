@@ -238,6 +238,8 @@ class RealtimeSession:
         self._event_sequence = 0
         self._turn_sequence = 0
         self._client_sequence = 0
+        self._last_reconnect_request: tuple[int, int] | None = None
+        self._last_reconnect_payload: dict[str, object] | None = None
         self._active: TurnContext | None = None
         self._closed = False
         self._failure_reported = False
@@ -1032,18 +1034,39 @@ class RealtimeSession:
         ):
             self.drop_counts["client_control"] += 1
             return False
+        request_key = (sequence, stream_epoch)
         async with self._reconnect_lock:
             async with self._lock:
+                if (
+                    request_key == self._last_reconnect_request
+                    and self._last_reconnect_payload is not None
+                    and stream_epoch + 1 == self.stream_epoch
+                    and not self._closed
+                ):
+                    await self._emit(
+                        SESSION_TURN_ID,
+                        "session.reconnected",
+                        dict(self._last_reconnect_payload),
+                    )
+                    await self._emit(SESSION_TURN_ID, "session.ready", {"state": "ready"})
+                    return True
                 if sequence <= self._client_sequence or stream_epoch != self.stream_epoch:
                     self.drop_counts["client_control"] += 1
                     return False
                 self._client_sequence = sequence
                 if self._closed:
                     return False
+                context = self._active
                 interrupted_turn_id = self.active_turn_id
-                cleanup, reset_error, _publication_id = await self._interrupt_locked(
-                    "client_reconnected", notify_client=False
-                )
+                if context is not None and not context.terminal:
+                    cleanup, reset_error, _publication_id = await self._interrupt_locked(
+                        "client_reconnected", notify_client=False
+                    )
+                else:
+                    cleanup = None
+                    reset_error, _publication_id = await self._clear_audio(
+                        context.turn_id if context is not None else SESSION_TURN_ID
+                    )
             if cleanup is not None:
                 reset_error = reset_error or await self._await_cleanup_barrier(
                     CANCELLATION_CLEANUP_BOUND_MS
@@ -1058,14 +1081,17 @@ class RealtimeSession:
             async with self._lock:
                 self.stream_epoch += 1
                 if reset_error is None:
+                    reconnect_payload: dict[str, object] = {
+                        "state": "ready",
+                        "stale_server_pcm_discarded": True,
+                        "interrupted_turn_id": interrupted_turn_id,
+                    }
+                    self._last_reconnect_request = request_key
+                    self._last_reconnect_payload = reconnect_payload
                     await self._emit(
                         SESSION_TURN_ID,
                         "session.reconnected",
-                        {
-                            "state": "ready",
-                            "stale_server_pcm_discarded": True,
-                            "interrupted_turn_id": interrupted_turn_id,
-                        },
+                        dict(reconnect_payload),
                     )
                     await self._emit(SESSION_TURN_ID, "session.ready", {"state": "ready"})
                 else:

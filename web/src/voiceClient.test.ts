@@ -44,6 +44,7 @@ vi.mock('livekit-client', () => ({
     ParticipantDisconnected: 'participantDisconnected',
     DataReceived: 'dataReceived',
     Reconnecting: 'reconnecting',
+    SignalReconnecting: 'signalReconnecting',
     Reconnected: 'reconnected',
     Disconnected: 'disconnected',
     MediaDevicesError: 'mediaDevicesError',
@@ -231,20 +232,118 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     }))
   })
 
-  it('publishes only the reset control after a transport reconnect', async () => {
-    const client = new VoiceClient(document.createElement('div'), callbacks())
+  it('retries one logical reset when delivery resolves without an observed ACK', async () => {
+    vi.useFakeTimers()
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
     await client.start()
     const room = livekit.rooms[0]
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    const initialTrack = { kind: 'audio' }
+    const recoveredTrack = { kind: 'audio' }
+    room.emit(
+      'trackSubscribed', initialTrack, {}, { identity: 'agent-session-test-0001' },
+    )
+
     room.emit('reconnecting')
     room.emit('reconnected')
-    await Promise.resolve()
+    room.emit(
+      'trackSubscribed', recoveredTrack, {}, { identity: 'agent-session-test-0001' },
+    )
+    await vi.advanceTimersByTimeAsync(600)
 
-    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(1)
-    const [bytes, options] = room.localParticipant.publishData.mock.calls[0]
-    expect(JSON.parse(new TextDecoder().decode(bytes))).toMatchObject({
+    expect(AudioPlaybackBoundary.prototype.suspend).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.reset).not.toHaveBeenCalled()
+
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2)
+    const [firstBytes, options] = room.localParticipant.publishData.mock.calls[0]
+    const [retryBytes] = room.localParticipant.publishData.mock.calls[1]
+    const firstRequest = JSON.parse(new TextDecoder().decode(firstBytes))
+    expect(firstRequest).toMatchObject({
       type: 'client.reconnected',
       stream_epoch: 1,
     })
+    expect(new TextDecoder().decode(retryBytes)).toBe(new TextDecoder().decode(firstBytes))
     expect(options.topic).toBe('voice-agent.client-control.v1')
+
+    emitControl(room, 'session.reconnected', 10, { state: 'ready' }, false, 2)
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(1)
+    emitControl(room, 'session.ready', 11, { state: 'ready' }, false, 2)
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(2)
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenLastCalledWith(recoveredTrack)
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2)
+    expect(observed.onConnection).toHaveBeenCalledWith('reconnecting')
+    expect(observed.onControl).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.ready', stream_epoch: 2,
+    }))
+  })
+
+  it('recovers when the first reconnect ACK is lost and drops outage controls', async () => {
+    vi.useFakeTimers()
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    emitControl(room, 'turn.listening', 2)
+
+    room.emit('reconnecting')
+    room.emit('reconnected')
+    emitControl(room, 'llm.visible', 3, { response: 'stale old epoch' })
+    emitControl(room, 'session.ready', 4, { state: 'ready' }, false, 2)
+    await vi.advanceTimersByTimeAsync(600)
+
+    expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2)
+    expect(observed.onDrop).toHaveBeenCalledTimes(2)
+    emitControl(room, 'session.reconnected', 5, { state: 'ready' }, false, 2)
+    emitControl(room, 'session.ready', 6, { state: 'ready' }, false, 2)
+    emitControl(room, 'turn.listening', 7, {}, false, 2)
+
+    expect(observed.onControl).not.toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ response: 'stale old epoch' }),
+    }))
+    expect(observed.onControl).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'turn.listening', stream_epoch: 2,
+    }))
+  })
+
+  it('fails reconnect in bounded time when no reset ACK arrives', async () => {
+    vi.useFakeTimers()
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+
+    room.emit('reconnecting')
+    room.emit('reconnected')
+    await vi.advanceTimersByTimeAsync(5_100)
+
+    expect(room.localParticipant.publishData.mock.calls.length).toBeGreaterThan(1)
+    expect(room.localParticipant.publishData.mock.calls.length).toBeLessThanOrEqual(11)
+    expect(observed.onConnection).toHaveBeenCalledWith(
+      'failed', 'Сервер не подтвердил восстановление сессии',
+    )
+  })
+
+  it('does not reset playback or session for signal-only reconnects', async () => {
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    room.emit(
+      'trackSubscribed', { kind: 'audio' }, {}, { identity: 'agent-session-test-0001' },
+    )
+
+    room.emit('signalReconnecting')
+    room.emit('reconnected')
+    await Promise.resolve()
+
+    expect(room.localParticipant.publishData).not.toHaveBeenCalled()
+    expect(AudioPlaybackBoundary.prototype.reset).not.toHaveBeenCalled()
+    expect(observed.onConnection).not.toHaveBeenCalledWith('reconnecting')
   })
 })

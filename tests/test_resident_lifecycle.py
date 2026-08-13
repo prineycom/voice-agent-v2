@@ -79,6 +79,7 @@ class ResidentLLM(ResidentAdapter):
         self.complete_next = False
         self.fail_next = False
         self.entered = threading.Event()
+        self.reset_count = 0
         self._contexts: dict[str, tuple[dict[str, str], ...]] = {}
 
     def readiness(self, _cancellation=None) -> dict[str, object]:
@@ -91,6 +92,7 @@ class ResidentLLM(ResidentAdapter):
         self._contexts[session_id] = tuple(snapshot)
 
     def reset_session(self, session_id: str) -> None:
+        self.reset_count += 1
         self._contexts.pop(session_id, None)
 
     def respond_with_handoff(
@@ -287,6 +289,8 @@ class ResidentLifecycleTests(unittest.IsolatedAsyncioTestCase):
             "type": "client.reconnected",
         }).encode()
         self.assertTrue(await session.handle_client_control(reconnect))
+        self.assertTrue(await session.handle_client_control(reconnect))
+        self.assertEqual(runner.llm.reset_count, 1)
         self.assertEqual(
             (runner.stt.process_id, runner.llm.process_id, runner.tts.process_id),
             initial_ids,

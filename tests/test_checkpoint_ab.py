@@ -67,6 +67,20 @@ class StreamingRunner:
         return None
 
 
+class ReconnectRunner(StreamingRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resets = 0
+        self.cancellations = 0
+
+    def cancel(self) -> None:
+        self.cancellations += 1
+        super().cancel()
+
+    def reset_session(self, _session_id: str) -> None:
+        self.resets += 1
+
+
 class MemoryAudio:
     def __init__(
         self, *, write_delay: float = 0, operations: list[str] | None = None
@@ -401,6 +415,53 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audio.abandoned, ["turn-00000001"])
         self.assertEqual(events.events[-1]["type"], "turn.failed")
         self.assertEqual(events.events[-1]["payload"]["stage"], "tts")
+
+    async def test_reconnect_retry_replays_ack_without_repeating_reset(self) -> None:
+        events = MemoryEvents()
+        audio = MemoryAudio()
+        runner = ReconnectRunner()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=runner,
+            event_sink=events,
+            audio_sink=audio,
+        )
+        previous = realtime_module.TurnContext(
+            turn_id="turn-00000001",
+            cancellation=realtime_module.CancellationToken(),
+            endpoint_monotonic=0,
+        )
+        session._active = previous
+        request = json.dumps({
+            "schema_version": "voice-agent.client-control.v1",
+            "session_id": "session-test",
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+
+        self.assertTrue(await asyncio.wait_for(session.handle_client_control(request), 0.5))
+        self.assertEqual(runner.resets, 1)
+        self.assertEqual(runner.cancellations, 1)
+        self.assertEqual(session.stream_epoch, 2)
+        self.assertEqual(audio.cleared, ["turn-00000001"])
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["session.reconnected", "session.ready"],
+        )
+
+        events.events.clear()  # The first reliable data delivery was not observed by the browser.
+        self.assertTrue(await asyncio.wait_for(session.handle_client_control(request), 0.5))
+
+        self.assertEqual(runner.resets, 1)
+        self.assertEqual(runner.cancellations, 1)
+        self.assertEqual(session.stream_epoch, 2)
+        self.assertEqual(audio.cleared, ["turn-00000001"])
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["session.reconnected", "session.ready"],
+        )
+        self.assertTrue(all(event["stream_epoch"] == 2 for event in events.events))
 
     async def test_removed_media_ack_is_rejected_without_affecting_session(self) -> None:
         session = RealtimeSession(
