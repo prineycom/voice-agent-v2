@@ -1,0 +1,10 @@
+{
+  "schema_version": "voice-agent.realtime-control.v1",
+  "session_id": "session-synthetic-0001",
+  "turn_id": "turn-synthetic-0001",
+  "stream_epoch": 1,
+  "sequence": 1,
+  "type": "turn.listening",
+  "terminal": false,
+  "payload": {"state": "listening"}
+}

@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Cumulative Slices 2–5 delivery accepted by Pasha on 2026-08-11.** The deterministic Slice 1 tracer remains executable. The branch runs real local Whisper large-v3-turbo, only LiteLLM alias `deepseek-v4-flash` at the exact temporary endpoint `http://rpi:4000`, and local Qwen3 CustomVoice/`ryan`. After the PipeWire correction, Pasha completed the documented microphone/listening command and attested that the full physical-microphone → Whisper → selected LLM → Qwen playback experience worked. Automated public-corpus diagnostics still include the recorded provider and overlap failures; this human acceptance does not reclassify any failed gate. Slice 6 has not started.
+**Combined Slice 6 / Issue #15 manual acceptance failed on 2026-08-12; the authorized correction remains awaiting a new physical-browser and full-stack resource acceptance.** The active app uses only the pinned cache-local official LFM2.5 Q4_K_M model on GPU-enabled llama.cpp; LiteLLM/DeepSeek is absent from Slice 6 configuration/readiness/requests and there is no cloud fallback. Network-denied controller tests, installed LiveKit/provider contracts, React state/media tests, focused real two-slot LFM integration, scoped capability, loopback gateway, and restricted LiveKit bind smokes pass. Real loopback/tailnet microphone/listening, actual barge-in timing, sustained coexistence with Whisper/Qwen/LiveKit/browser, and subjective response acceptance remain required and are not claimed. Historical DeepSeek failures and authorizations remain factual in ADR-0005/0006; ADR-0008 supersedes them for the active app.
 
 ## Root verification
 
@@ -23,6 +23,37 @@ It uses only POSIX `sh` and the Python 3.11+ standard library, creates isolated 
 ```
 
 The command reports each preserved path. Both PCM files use signed 16-bit little-endian mono samples at 16 kHz; `output.pcm` contains the deterministic audible tone. The destination must not already exist, preventing accidental replacement of prior evidence. The toolchain is a Slice 1 reproducibility choice only; it does not select the future production application or inference framework.
+
+## Slice 6 development application
+
+One-time setup acquires the checksum-pinned LiveKit server, the pinned Python SDK/runtime, and locked browser packages into ignored cache/build directories. It does not download models or place configuration, credentials, recordings, or generated audio in Git:
+
+```sh
+./setup-slice6
+cp .env.slice6.example .env.slice6
+```
+
+Generate a dedicated LiveKit key pair and fill every blank in the ignored `.env.slice6`:
+
+```sh
+"${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
+```
+
+The active app accepts no `LITELLM_*` configuration. `./setup-slice6` verifies, but never downloads or replaces, the exact cache-local Issue #15 model/runtime. Run the focused real provider check with `./verify-local-lfm`; it proves the hashes, loopback endpoint, exact identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, cancellation and recovery. Run `./verify-real-streaming` to start/reuse the exact loopback LFM plus resident Qwen and prove the first PCM chunk arrives before total sentence/TTS completion; it logs timings/counts only, not content or audibility. Then this is the single development start command:
+
+```sh
+./run-slice6
+```
+
+It verifies and starts the pinned llama.cpp server, LiveKit, gateway/controller, and two foreground Tailscale Serve proxies; all are cleaned up on exit. Open `http://127.0.0.1:8000` on the host (loopback is a browser secure-context exception) or the configured tailnet HTTPS application URL. The configured paths are loopback TCP `18080` for local LFM, `8000` for the gateway, and `7880` for LiveKit signaling; Tailscale Serve HTTPS for the application/signaling (example ports `8443`/`7443`); and only tailnet UDP `7882` for WebRTC media. The LFM endpoint is never proxied or returned to the browser. ICE/TCP media, port `7881`, TURN, public exposure, provider/model administration, and detailed health endpoints are disabled/absent. The restricted server binds were measured; the two Tailscale HTTPS paths still require the real second-client gate.
+
+Run the complete deterministic/installed-runtime/browser check with:
+
+```sh
+./verify-slice6
+```
+
+The command also runs a real headless Firefox against official local LiveKit with deterministic fake inference; this proves data-channel/track/publication/error lifecycle only. It reports the physical-browser gates as required rather than claiming them. `./verify-local-lfm` is a separate real-model host check and remains outside dependency-free CI. Privacy-safe server JSONL diagnostics are retained outside Git under `~/.cache/voice-agent-v2/slice-6/diagnostics/`; the browser exposes **Скачать диагностику** for a redacted lifecycle timeline. Neither contains audio or conversation text. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
 
 ## Final Slice 5 human acceptance
 
@@ -51,7 +82,7 @@ Microphone capture is bounded to 1–30 seconds. The command removes temporary m
 - The detailed avatar-module and visual-control contract requires a dedicated Grill/design task before MVP eye implementation.
 - Live2D and 3D remain possible later avatar modules; neither is an MVP renderer decision.
 - Optional wake-word activation, including any custom Russian wake model, begins only after the core MVP is reliable.
-- Production cloud identity/provenance, privacy/cost facts, and application-framework choices wait for later approval; the narrow operator-attested alias exception covered public diagnostics and the now-completed single final human turn, not further live or production use.
+- Production cloud identity/provenance, privacy/cost facts, and approval remain deferred. ADR-0006 separately permits Slice 6 private live testing but not production use; every earlier provider failure and unknown remains explicit.
 - Selective migration from the legacy repository waits for a concrete vertical slice and fresh validation.
 
 ## Non-goals

@@ -15,14 +15,20 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
+sys.path.insert(1, str(ROOT / "src"))
 
 
 class NetworkAccessDenied(RuntimeError):
     pass
 
 
-def deny_network(event: str, _args: tuple[object, ...]) -> None:
+def deny_network(event: str, args: tuple[object, ...]) -> None:
+    # asyncio uses a local AF_UNIX socketpair as its selector wake-up pipe.
+    # It cannot reach a network; all IP socket creation and every other socket
+    # operation remain denied.
+    if event == "socket.__new__" and len(args) > 1 and args[1] == socket.AF_UNIX:
+        return
     if event.startswith("socket."):
         raise NetworkAccessDenied(f"network operation denied: {event}")
 
@@ -124,7 +130,7 @@ def main() -> int:
     event_order = " > ".join(str(event["type"]) for event in success.events)
     print("Voice Agent v2 Slice 1 verification")
     print("toolchain: Python 3.11+ standard library only (slice-local choice)")
-    print("network: denied by Python audit policy; no sockets permitted")
+    print("network: IP sockets denied by Python audit policy; local asyncio AF_UNIX wake-up only")
     print("cache: two independent empty temporary run roots")
     print(f"correlation: session={FIXED_SESSION_ID} turn={FIXED_TURN_ID}")
     print(f"events: {event_order}")
@@ -144,6 +150,10 @@ def main() -> int:
         print(f"case {scenario}: terminal={terminal_type} detail={detail} terminal_count=1")
 
     print(f"behavioral_tests: pass count={result.testsRun}")
+    print(
+        "slice6_headless_media: success disconnect duplicate/late/malformed "
+        "interruption/reconnect=PASS fake_inference=true IP_network=denied"
+    )
     print("legacy_material: none inspected or used")
     print("RESULT: PASS")
     return 0

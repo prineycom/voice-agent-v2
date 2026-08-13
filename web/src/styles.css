@@ -1,0 +1,67 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #eef2ff;
+  background: #080b13;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button { font: inherit; }
+
+.app-shell {
+  width: min(880px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 56px 0 32px;
+}
+
+header { margin-bottom: 28px; }
+h1 { margin: 6px 0 12px; font-size: clamp(2rem, 6vw, 3.7rem); line-height: 1; letter-spacing: -0.04em; }
+h2, h3, p { margin-top: 0; }
+.lede { max-width: 620px; color: #aeb9d5; font-size: 1.05rem; line-height: 1.6; }
+.eyebrow { margin-bottom: 6px; color: #84a7ff; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.layout { display: grid; grid-template-columns: minmax(220px, .7fr) minmax(0, 1.5fr); gap: 16px; }
+.card { border: 1px solid #252d43; border-radius: 18px; background: #101521; padding: 22px; }
+.connection-card { position: relative; align-self: start; }
+.connection-card h2 { margin-bottom: 0; font-size: 1.4rem; }
+.status-dot { position: absolute; top: 24px; right: 24px; width: 12px; height: 12px; border-radius: 50%; background: #65708b; }
+.status-ready { background: #49d79c; box-shadow: 0 0 20px #49d79c88; }
+.status-connecting, .status-reconnecting { background: #ffd166; }
+.status-failed { background: #ff6b7a; }
+.turn-heading { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+.phase { padding: 5px 9px; border-radius: 999px; background: #1b2335; color: #bfc9e4; font-size: .8rem; }
+.phase-speaking { color: #8ff0c6; }
+.history-turn { padding: 18px 0; border-top: 1px solid #252d43; }
+.history-turn:first-of-type { border-top: 0; }
+.history-turn .conversation-block { margin-top: 12px; }
+.turn-metrics { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0 0; color: #8490aa; font-size: .78rem; }
+.turn-metrics div { display: flex; gap: 6px; }
+.turn-metrics dt::after { content: ':'; }
+.turn-metrics dd { margin: 0; color: #bfc9e4; }
+.conversation-block { margin-top: 22px; }
+.conversation-block h3 { margin-bottom: 8px; color: #aeb9d5; font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; }
+.conversation-block p { min-height: 1.5em; line-height: 1.55; }
+.response { padding-top: 18px; border-top: 1px solid #252d43; }
+.error { grid-column: 1 / -1; margin: 18px 0 0; color: #ff9ba5; line-height: 1.4; }
+.technical { margin: 18px 0 0; color: #8490aa; font-size: .78rem; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+button { border: 1px solid #34405d; border-radius: 12px; background: #161d2d; color: #eef2ff; padding: 11px 16px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: #668cff; }
+button.primary { border-color: #5277e7; background: #5277e7; }
+button.microphone-toggle { min-width: 190px; font-weight: 700; }
+button.microphone-on { border-color: #49d79c; background: #123b31; color: #b8f7dc; }
+button.microphone-off { border-color: #ff8290; background: #3b1820; color: #ffc0c7; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.microphone-error { flex-basis: 100%; margin: 2px 0 0; color: #ff9ba5; line-height: 1.4; }
+.audio-mount { width: 0; height: 0; overflow: hidden; }
+footer { margin-top: 28px; color: #6f7b95; font-size: .8rem; }
+
+@media (max-width: 680px) {
+  .app-shell { padding-top: 32px; }
+  .layout { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}

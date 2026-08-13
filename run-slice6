@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CONFIG=$ROOT/.env.slice6
+[ -f "$CONFIG" ] || {
+  echo "Missing required untracked server configuration: $CONFIG" >&2
+  echo "Copy .env.slice6.example to .env.slice6 and set every required value." >&2
+  exit 2
+}
+set -a
+# This file is explicit operator-owned server configuration and must remain untracked.
+. "$CONFIG"
+set +a
+
+CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
+PYTHON=$CACHE/runtime/venv/bin/python
+[ -x "$PYTHON" ] || {
+  echo "Slice 6 runtime is missing; run ./setup-slice6" >&2
+  exit 2
+}
+exec "$PYTHON" "$ROOT/scripts/run_slice6.py"

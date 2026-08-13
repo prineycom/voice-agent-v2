@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 project architecture
 >
-> **Last updated:** 2026-08-11
+> **Last updated:** 2026-08-12
 
 This document defines the active target architecture. It records user-approved candidate identities and endpoints only at their evidence gate; a gateway investigation is not a passing provider/model selection.
 
@@ -23,20 +23,23 @@ Untested behavior is not implied by a target diagram.
 | ID | Status | Statement |
 | --- | --- | --- |
 | D1 | Decision | V2 is a clean repository. Media, control, STT/TTS, application, and local-inference services run on one Arch Linux PC; the legacy Pi/Desktop inference split is not part of V2. After documented local-LLM failure, one user-operated tailnet LiteLLM gateway is the narrow topology exception and may relay only an approved cloud LLM path. See [ADR-0001](adr/0001-clean-v2-single-host.md) and [ADR-0004](adr/0004-tailnet-litellm-cloud-gateway-evaluation.md). |
-| D2 | Decision | LiveKit, STT, and TTS remain local. The sole local LLM failed its measured gates; one explicit cloud LLM may now be selected only after the separate gateway, model, transport, privacy, cost, and measurement gate passes. Provider failure never causes automatic fallback. See [ADR-0003](adr/0003-local-first-llm-with-explicit-cloud-option.md). |
+| D2 | Decision | LiveKit, STT, and TTS remain local. The original BF16/vLLM local candidate failed its measured gates; ADR-0008 separately selects the measured Q4_K_M/llama.cpp artifact for the active Slice 6 development path. Any future cloud LLM still requires the separate gateway, model, transport, privacy, cost, and measurement gate. Provider failure never causes automatic fallback. See [ADR-0003](adr/0003-local-first-llm-with-explicit-cloud-option.md). |
 | D3 | Decision | The avatar boundary is renderer-agnostic. The MVP module is a deterministic custom animated AI eye; Live2D and 3D are optional later modules. The LLM never emits frames or renderer parameters. See [ADR-0002](adr/0002-renderer-agnostic-avatar-boundary.md). |
 | D4 | Decision | Tailscale membership is sufficient authorization for the private current stage. Protocol credentials are still scoped and protected, but V2 will not invent a second identity system now. |
-| D5 | Decision | Exact STT/LLM/TTS models, quantization, serving choices, and any cloud provider are selected only after repeatable resource, latency, quality, privacy, and required-concurrency gates. User-supplied candidates may be recorded before measurement, but an endpoint or alias alone is not a provider selection. |
+| D5 | Decision | Exact STT/LLM/TTS models, quantization, serving choices, and any cloud provider become accepted selections only after repeatable resource, latency, quality, privacy, and required-concurrency gates. An explicit ADR may pin a development candidate before final acceptance only while every remaining gate stays visible; an endpoint or alias alone is not a provider selection. |
 | D6 | Decision | Custom wake work is optional and deferred until after the core MVP. Kiosk operation is outside current scope. |
 | D7 | Decision | The pinned [legacy repository](#34-pinned-legacy-reference) is provenance, not a dependency. A future slice may selectively migrate a proven contract, component, or test only with fresh V2 validation and recorded origin. |
 | D8 | Decision | The detailed avatar-module and visual-control contract is deferred to a separate Grill/design task that must complete before MVP eye implementation. |
 | D9 | Decision | For the cumulative Slice 2–5 delivery branch, Pasha fixes Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and Qwen3-TTS CustomVoice/`ryan` despite recorded gate failures. Pasha attested the final human microphone/listening turn on 2026-08-11; every automated failure and exception remains visible, and no fallback or false pass is allowed. See [ADR-0005](adr/0005-operator-fixed-slices-2-5-model-stack.md). |
+| D10 | Superseded for active Slice 6 | ADR-0006 temporarily authorized Slice 6 private live transcript traffic through the failed, operator-opaque LiteLLM alias with an untracked server-side `LITELLM_BASE_URL` and no default, redirect, alias, or fallback. D12 supersedes that runtime authorization; ADR-0006 remains historical evidence. |
+| D11 | Decision | Slice 6 uses pinned local LiveKit Server with the low-level official Python RTC/API SDK, a loopback FastAPI gateway/controller process, and a React + TypeScript + Vite client using official `livekit-client`. One room admits one browser and one agent; no avatar contract is introduced. See [ADR-0007](adr/0007-slice-6-livekit-react-realtime-boundary.md). |
+| D12 | Decision | Issue #15 supersedes the active ADR-0006 cloud exception inside the same Slice 6 delivery. The app uses only pinned cache-local official LFM2.5 Q4_K_M on GPU-enabled llama.cpp, loopback-only, two 32,768-token slots, no credentials and no cloud fallback. Historical DeepSeek evidence remains factual. See [ADR-0008](adr/0008-local-lfm2-llamacpp-for-slice-6.md). |
 
 ## 3. System boundary
 
 ### 3.1 Active product boundary
 
-The canonical Arch PC contains every media, control, local STT/TTS, application, and local-inference process. The sole local LLM failed the measured gate. The cumulative cloud path added one narrowly allowlisted LiteLLM relay on a user-operated tailnet node and one explicitly configured operator-attested cloud route. Normal production activation still requires the remaining provider/privacy gates; ADR-0005 authorized the failed alias only for cumulative Slices 3–5 and the final human turn completed on 2026-08-11. The relay is not a second inference/control plane and never acts as fallback.
+The canonical Arch PC contains every media, control, STT/TTS, application, and inference process. Historical Slices 2–5 used the operator-fixed failed LiteLLM route under ADR-0005, and ADR-0006 briefly authorized it for Slice 6 implementation. ADR-0008 now supersedes that active path: the combined Slice 6 / Issue #15 app uses only the pinned cache-local official LFM2.5 Q4_K_M artifact on local GPU-enabled llama.cpp. No Slice 6 transcript crosses a cloud/provider boundary, and there is no active LiteLLM credential, endpoint, alias or fallback. Historical cloud evidence remains preserved rather than relabelled.
 
 The ordinary browser may run on the canonical PC. A browser on another tailnet device is an optional presentation endpoint: it performs no required inference or orchestration, but it runs the selected avatar module.
 
@@ -48,10 +51,8 @@ flowchart LR
     K["Local LiveKit<br/>realtime media and data"]
     C["Session controller<br/>turn lifecycle and contracts"]
     S["Local STT service"]
-    P["LLM provider adapter<br/>one configured mode"]
-    L["Local LLM<br/>measured failed path"]
-    Q["Allowlisted LiteLLM gateway<br/>tailnet candidate"]
-    X["Approved cloud LLM<br/>explicit measured option"]
+    P["Local LFM provider adapter<br/>fixed Slice 6 mode"]
+    L["Pinned LFM2.5 Q4_K_M<br/>local llama.cpp"]
     V["Local TTS service"]
 
     B <-->|HTTPS / WebRTC| T
@@ -62,8 +63,6 @@ flowchart LR
     C <--> S
     C <--> P
     P <--> L
-    P -.->|explicit cloud mode only| Q
-    Q -.->|one approved model| X
     C <--> V
     C -->|lifecycle and bounded avatar inputs| K
     K --> B
@@ -80,11 +79,11 @@ The diagram expresses logical boundaries, not a framework or container decision.
 | Session controller | Join as the agent participant; own session/turn state, endpointing policy, orchestration, cancellation, provider selection, contract validation, and control-event publication. | Canonical host | CPU/RAM |
 | STT inference service | Turn bounded or streaming audio into transcript results. | Canonical host | GPU/CPU/RAM, as measured |
 | LLM provider adapter | Present one provider-neutral request/result contract and route only to the explicitly configured provider. | Canonical host | CPU/RAM |
-| Local LLM inference service | Produce response text when local mode passes and is selected. | Canonical host; initially preferred | GPU/CPU/RAM, as measured |
+| Local LLM inference service | Produce response text for an explicitly selected local mode; active Slice 6 uses the fixed ADR-0008 artifact/runtime while full-stack acceptance remains pending. | Canonical host; initially preferred | GPU/CPU/RAM, as measured |
 | LiteLLM gateway | Relay only to the explicitly selected cloud alias; expose safe health/model/usage/error metadata; never choose a default or fallback. | Allowlisted user-operated tailnet node; optional and gated | Network/CPU/RAM |
 | Managed cloud LLM | Produce response text only when cloud mode has been explicitly measured, approved, and selected. | Approved external provider; optional | External network/service |
 | TTS inference service | Stream synthesized speech for validated response text. | Canonical host | GPU/CPU/RAM, as measured |
-| Browser client | Capture/play media, show session state, host the selected avatar module, and derive speech-synchronous visual input from actual playout. | Local browser by default; tailnet browser optional | Client CPU/GPU |
+| Browser client | Capture/play media, show session state, host the selected avatar module, and derive speech-synchronous visual input from the local decoded audio signal without treating it as physical-speaker proof. | Local browser by default; tailnet browser optional | Client CPU/GPU |
 | Avatar module | Render one visual implementation behind the avatar-host boundary. | Browser client | Client CPU/GPU |
 
 ### 3.3 Outside the active boundary
@@ -116,12 +115,12 @@ Media and control remain distinct even when LiveKit transports both.
 
 1. The browser obtains application assets and a short-lived, room-scoped LiveKit capability from the web gateway over the tailnet or loopback.
 2. The browser joins a realtime session and publishes microphone audio to local LiveKit.
-3. The session controller consumes the audio. It owns utterance boundaries and creates one turn correlation ID per accepted utterance.
+3. The session controller consumes 20 ms frames resampled by the official LiveKit SDK to 16 kHz mono PCM. A checksum-pinned cache-local Silero v6 ONNX model runs on CPU in 32 ms windows and owns public speech admission/barge-in: start requires 96 ms above probability 0.60, continuation uses 0.35 hysteresis, trailing silence is 640 ms, pre-roll is 256 ms, and utterances are capped at 15 s. Absolute energy is privacy-safe telemetry only and cannot start a turn. Rejected noise candidates never emit `turn.listening` or cancel resident inference. This adapts the pinned legacy `infra/pi/agent/agent.py` Silero behavior without importing its competing livekit-agents pipeline.
 4. The controller streams or submits audio to local STT. Partial transcript events may improve feedback; only a final transcript can advance the turn to response generation.
-5. The controller sends the final transcript and permitted conversation context through the LLM provider adapter to the one explicitly configured provider. In local mode the request stays on-host. In cloud mode only approved fields traverse the allowlisted endpoint. TLS remains the target; for the current private test Pasha temporarily accepts exact HTTP endpoint `http://rpi:4000` without runtime DNS/route/TSMP proof, while the gateway's onward provider hop remains operator-opaque.
+5. The controller sends the final transcript and bounded per-session context only to the fixed loopback `LocalLFMProvider`. llama.cpp owns two 32,768-token slots; hidden reasoning is parsed separately and never reaches the response, UI or TTS. Wrong identity, hidden-only, over-limit, truncated, timeout and cancellation outcomes fail explicitly. No Slice 6 provider endpoint or credential is configurable.
 6. The selected LLM provider returns response text. Provider identity and the external-transfer fact, when applicable, remain associated with the turn; provider failure cannot select another provider.
-7. The controller sends validated response text to local TTS and publishes ordered transcript/lifecycle events. LLM generation and TTS may overlap only in a way proven safe by the measured budget.
-8. TTS audio is published through LiveKit. The controller publishes turn/lifecycle state, while the browser derives a bounded speech envelope from actual playout.
+7. Each complete validated visible LFM sentence is published to the browser immediately and handed to the resident Qwen/`ryan` adapter while the provider SSE stream remains open. Hidden reasoning is excluded before both boundaries. Valid text does not wait for TTS and an audio failure cannot retract it.
+8. One persistent LiveKit audio publication and source are created before session readiness. A request-tagged queue holds at most two Qwen acoustic blocks; its consumer validates contiguous chunks, submits 20 ms frames, and overlaps earlier server PCM submission with later LFM/TTS work. A late provider failure stops future output but preserves the accepted visible/PCM prefix; confirmed new speech clears the source queue and rejects later stale chunks. Browser playback observations are telemetry only and do not prove physical speaker output.
 9. The browser avatar host routes validated lifecycle, speech-envelope, palette/state, and optional external-target inputs to the selected module. The MVP eye module deterministically owns motion and frames.
 10. Completion, interruption, or failure emits exactly one terminal turn event. All work and turn-bound avatar input for the turn is released or cancelled.
 
@@ -140,9 +139,10 @@ Media and control remain distinct even when LiveKit transports both.
 | STT request/result | Session controller ↔ STT service | STT service | Versioned audio metadata, session/turn correlation, ordered partial/final results, terminal error/cancel. |
 | LLM provider request/result | Session controller ↔ selected LLM provider | Session controller/provider adapter | Versioned permitted-context envelope, provider mode/identity, correlated bounded response text, explicit terminal error/cancel, no fallback. |
 | TTS request/stream | Session controller ↔ TTS service | TTS service | Correlated text input, declared audio format, ordered chunks, one terminal outcome, cancellation. |
-| Realtime event envelope | Session controller → browser | Session controller | Schema version, session ID, turn ID where applicable, event sequence, event type, payload, terminal semantics. |
+| Realtime event envelope | Session controller → browser | Session controller | Schema version, session ID, turn ID where applicable, connection epoch, session-wide sequence, closed event type, bounded payload, lifecycle order, and terminal semantics. Reliable LiveKit data uses topic `voice-agent.control.v1`; wrong-version/session/epoch/turn, duplicate, late, out-of-order, oversized, and malformed events are dropped before media/UI actions. |
+| Client control envelope | Browser → session controller | Session controller | A session-wide increasing sequence admits only the current-epoch reconnect notice. Browser track subscription, autoplay, and playback observations are non-authoritative telemetry and never determine turn success. |
 | Avatar module interface | Avatar host/media adapter → selected avatar module | Avatar host | Version/capabilities, bounded validated inputs, explicit cancellation/fallback; detailed shape waits for the design gate. |
-| Speech envelope | Browser playout analyser → avatar module | Browser media adapter | Derived from actual playout, bounded rate/range, correlated lifecycle, no raw audio in the control event. |
+| Speech envelope | Browser decoded-audio analyser → avatar module | Browser media adapter | Derived from the decoded audio signal, bounded rate/range, correlated lifecycle, no raw audio in the control event, and never treated as physical-speaker evidence. |
 | External tracking target | Approved trigger producer → avatar host | Avatar host | Optional, bounded coordinates/age/confidence, stale-input rejection; producer implementation is separate. |
 | Render state | Avatar module internal | Avatar module | Deterministic mapping from validated inputs; never accepted from an LLM or network as frame data. |
 | Health/readiness report | Each service → operator/controller | Owning service | Liveness distinct from readiness; build, provider mode, and loaded-model/module identity; no secrets. |
@@ -153,13 +153,13 @@ Contract versions change for semantic compatibility, not every implementation re
 
 - Exactly one provider mode is configured for a deployment/session; request failure never changes it.
 - Local mode uses a host-local endpoint and locally managed model artifact.
-- Cloud mode uses one allowlisted endpoint, explicit gateway alias and underlying provider/model identity, and a server-side credential from an explicitly authorized untracked source. The current ADR-0005 exception allows only `http://rpi:4000` with redirects rejected and without runtime network proof; HTTPS is deferred.
+- Cloud mode uses one allowlisted endpoint, explicit gateway alias and underlying provider/model identity, and a server-side credential from an explicitly authorized untracked source. For Slice 6, ADR-0006 requires the endpoint from untracked server-side `LITELLM_BASE_URL` with no default or alternate name; its current accepted value is `http://rpi:4000`, redirects and fallback remain rejected, and HTTPS is deferred.
 - Cloud requests contain only final transcript and explicitly permitted context fields—never raw microphone/TTS audio, arbitrary local files, environment values, or credentials.
 - Before activation, cloud-provider retention/training policy, privacy terms, cost model, and region where relevant are recorded and approved.
 - Provider mode/identity, correlation, external-transfer fact, latency, usage/cost when available, and error class are observable without logging request/response content.
 - Switching provider is an explicit configuration and readiness transition, not transparent retry behavior.
 
-The local LFM identity and failure are recorded. For temporary Slice 2 public-synthetic measurement, the user selected LiteLLM alias `deepseek-v4-flash` and accepts an operator-attested opaque DeepSeek route even though the active config did not prove its mapping. Cost, retention/training, region, and deeper provenance are intentionally unevaluated under this narrow exception. ADR-0005 subsequently authorized the same failed alias only for cumulative Slices 3–5 and the single final live microphone/listening turn attested on 2026-08-11. That consumed exception does not approve general private transcript transfer, production use, or Slice 6.
+The original local LFM BF16/vLLM failure and the historical operator-fixed LiteLLM `deepseek-v4-flash` evidence remain recorded. ADR-0005 authorized that failed cloud alias only for cumulative Slices 3–5; ADR-0006 temporarily extended private testing to Slice 6. ADR-0008 supersedes the active route with a different measured artifact/runtime: official LFM2.5 Q4_K_M on llama.cpp. This does not retroactively make the BF16/vLLM result or any DeepSeek gate pass.
 
 ### 5.2 Avatar-boundary constraints
 
@@ -195,11 +195,13 @@ The exact supervisor, packaging, and start order are **hypotheses** until the op
 
 ### 6.2 Realtime-session lifecycle
 
-A session moves through `connecting`, `ready`, `degraded`, `reconnecting`, and `closed`. Conversation context is scoped to the session unless a later retention decision explicitly adds persistence. Reconnection must not replay a stale response as a new turn.
+A session moves through `connecting`, `ready`, `degraded`, `reconnecting`, and `closed`. Conversation content is scoped to current-page browser memory and is never copied into diagnostics or persistence. A joined browser is not ready until the Qwen public synthesis warm-up has completed, the single agent track has been published, and its permitted microphone track is subscribed. The same bounded admission timer covers room join and microphone publication. On the current interim Slice 6 reconnect path the browser detaches playback, rejects pre-reconnect epochs, and sends one bounded increasing reconnect notice; the controller cancels active work, clears the persistent source queue, waits for serialized cancellation, resets provider context, advances the stream epoch, and publishes readiness. The narrower history-preserving reconnect redesign remains deferred beyond Checkpoints A and B.
+
+Every admission waits for all session-level cancel/rollback work; interrupt and discard register that work before replacement admission; reconnect waits for the same barrier before resetting context; transport failure registers cleanup before room shutdown; and close retains capacity until cleanup and the active turn have both terminated. Adapter operations atomically register with their turn cancellation token and retain that cancellation across late process or HTTP-resource startup.
 
 ### 6.3 Voice-turn lifecycle
 
-A turn moves through `listening`, `transcribing`, `thinking`, `speaking`, then exactly one of `completed`, `interrupted`, or `failed`. Implementations may expose finer internal states, but external events must preserve this ordering.
+The public browser phase is one of `idle`, `listening`, `thinking`, or `speaking`; history records exactly one terminal outcome of `completed`, `interrupted`, or `failed`. Internal STT/LFM/TTS events may be finer grained. The shared finite output contract is mono 16 kHz s16le PCM capped at 180 seconds. `turn.speaking` begins only after the first frame is accepted by the server media pump. `turn.completed` follows local generation final plus submission of every accepted frame; it has no browser acknowledgement or track-retirement predecessor. The persistent track remains published across turns and is closed/unpublished only with the session. History records server-authoritative acoustic-endpoint-to-first-visible and endpoint-to-first-accepted-PCM durations; the PCM label means server streamed output, never physical audibility. Autoplay failure is nonfatal UI/telemetry.
 
 On barge-in, the controller:
 
@@ -213,7 +215,15 @@ On barge-in, the controller:
 
 The cumulative pre-LiveKit tracer now has three concrete adapters: process-isolated local Whisper large-v3-turbo, a single-alias LiteLLM `deepseek-v4-flash` HTTP adapter, and process-isolated local Qwen3 CustomVoice/`ryan`. The provider adapter admits only a final transcript and a bounded memory-only per-session context, filters request fields, ignores hidden reasoning content, and has no fallback. Readiness performs a bearer-authenticated, content-free exact-alias capability check; neither readiness nor request admission runs DNS-class, route-interface, Tailscale peer, TSMP/WireGuard, freshness, TTL, or related shell-command proof. Streamed content reaches the TTS handoff only after the response has echoed exactly `deepseek-v4-flash`; a missing or alternate response identity fails the turn. Qwen's native 24 kHz stream is HQ-converted in its process boundary to the preserved TTS v1 16 kHz mono PCM contract and emitted as validated ordered chunks without an output path by default.
 
-The controller hands complete provider sentences to TTS while the provider stream remains open, but buffers audio events until `llm.final` so the public lifecycle ordering remains stable. Cancellation terminates delivery with one correlated terminal event and no later chunks. This tracer proves inference contracts; it does not implement LiveKit publication, browser behavior, or a durable conversation store. Default execution persists neither microphone input, transcript/response, nor synthesized audio.
+The controller hands each complete visible provider sentence to the UI and TTS while the provider stream remains open. For Slice 6 it forwards Qwen PCM immediately to the correlated LiveKit source instead of retaining the full response; standalone tracer callers may retain bounded PCM for their explicit diagnostics. Cancellation terminates future delivery with one correlated terminal event and no later chunks. A provider failure after a streamed prefix cannot retract that already delivered prefix. Default execution persists neither microphone input, transcript/response, nor synthesized audio.
+
+### 6.5 Slice 6 development runtime
+
+The pinned implementation is LiveKit Server `1.13.5`; Python `livekit` `1.1.14`, `livekit-api` `1.2.0`, FastAPI `0.141.1`, and Uvicorn `0.52.1`; and React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, and official `livekit-client` `2.21.0`. The gateway and controller share a Python process but retain separate static/capability, room/media, session, and inference objects. The browser capability expires after 300 seconds and grants only one generated room, microphone publication, agent subscription, and data publication; it has no room-management grant. Issuance also requires the exact loopback or configured tailnet application `Origin`, preventing a cross-site form from consuming the one-session path without inventing a second user identity system. One measured session is admitted at a time.
+
+The agent reuses `RealTurnController` and the Slice 3–5 process-isolated Whisper/Qwen adapters rather than creating a second inference pipeline. `LiveTurnRunner` supplies the fixed local LFM provider and performs one real discard-only Qwen/`ryan` synthesis before readiness; later requests reuse that process. Live microphone bytes remain memory-only except for the existing fail-closed Whisper temporary-file boundary. Agent PCM uses one persistent session LiveKit source with the existing 100 ms sender queue plus a request-tagged producer/consumer queue of at most two Qwen acoustic blocks and no extra prefill. Barge-in clears the source queue and serializes replacement work. Checkpoints A and B intentionally retain the existing cancellation/rollback internals until the later request-scoped cancellation checkpoint. Automated lifecycle evidence makes no claim about physical playback. Actual microphone capture, audibility, microphone-to-stop timing, and speaker render timing remain physical-browser acceptance measurements.
+
+`./run-slice6` is a foreground development orchestrator only. Deployment supervision, reboot behavior, durable readiness and restart policy remain Slice 9.
 
 ## 7. Failure semantics
 
@@ -224,7 +234,7 @@ No failure silently switches LLM provider, moves another inference capability to
 | LiveKit unavailable | Hard for realtime use | Client shows unavailable/reconnecting; no inference turn is admitted. |
 | Host microphone duration, recorder availability/setup/startup/nonzero/timeout/output, or cleanup failure | Hard before turn admission | Capture remains within the 1–30 second bound. PipeWire status 1 is accepted only for exact-size bounded PCM. Every other capture failure emits content-free `microphone_capture`/`turn.failed` evidence without a Python traceback or STT/LLM/TTS admission. Cleanup is mandatory; if deletion and scrubbing cannot establish that no input remains, the failure evidence reports `input_retained=true`. |
 | STT unavailable, temporary-audio setup/request/cleanup, or output failure | Hard for the affected voice turn | No transcript is fabricated and no downstream inference is admitted. The CLI normalizes the stage failure to content-free `turn.failed` output without a Python traceback. Temporary audio is deleted or scrubbed before a transcript is accepted; an unconfirmed cleanup reports its retention state. |
-| Selected LLM provider unavailable or fails | Hard for the affected response | No fabricated answer or alternate-provider request. No TTS handoff occurs before the selected response identity is proven; if a later stream failure follows a validated sentence handoff, buffered synthesized audio is discarded, no public audio chunk is emitted, and the turn fails with provider mode visible to the operator/user state. |
+| Selected LLM provider unavailable or fails | Hard for the affected response | No fabricated answer or alternate-provider request. No visible/TTS handoff occurs before the exact selected identity is proven. A late failure stops future visible text/PCM and fails explicitly; an already published validated sentence/PCM prefix is non-retractable and never represented as atomic rollback. |
 | Cloud credential, endpoint allowlist, or approved privacy metadata invalid | Hard for cloud-mode readiness | Cloud mode remains unready; secrets are not exposed and local mode is not selected automatically. |
 | TTS unavailable or fails | Hard for supported spoken output; text is salvageable | Valid response text may remain visible, but the spoken turn is marked degraded/failed rather than complete. |
 | Avatar input invalid, missing, late, or stale | Soft | Avatar host rejects it and chooses the designed safe deterministic state; voice continues and validation failure is counted without private content. |
@@ -244,7 +254,7 @@ Every turn must be diagnosable without recording its private content by default.
 - Session and turn correlation IDs.
 - State transitions and one terminal outcome per turn.
 - Audio duration/bytes, not raw audio.
-- Endpoint-to-STT-final, selected-provider time-to-first-token and completion, TTS time-to-first-audio, first playout, and total-turn timing.
+- Endpoint-to-STT-final, selected-provider time-to-first-token and completion, TTS time-to-first-audio, first programmatically observed browser audio signal, and total-turn timing; physical audibility/timing is recorded only by manual acceptance.
 - Cloud external-transfer fact, provider request ID, usage/token and cost data when available, and error class—never prompt/response content.
 - Cancellation latency and stale/duplicate/drop counts.
 - Per-service/provider request counts, failures, queue depth, and readiness changes.
@@ -259,7 +269,7 @@ Raw recordings, transcripts, prompts, responses, model artifacts, tokens, and en
 
 ### 9.1 Tracked configuration
 
-Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, artifact manifests, LLM provider mode, allowlisted provider endpoint/model identity, approved privacy-policy metadata, and example variable names. Startup rejects invalid, missing, or incompatible required values.
+Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, and the exact local LFM artifact/runtime/generation manifest. The active Slice 6 provider has no endpoint or credential configuration: llama.cpp is fixed at host loopback, and startup rejects every `LITELLM_*` value. Startup verifies the cache-local model size/hash and llama.cpp binary hash before admission.
 
 ### 9.2 Untracked local state
 
@@ -273,7 +283,7 @@ The following remain outside Git:
 
 The browser never receives LiveKit signing secrets, cloud LLM credentials, or inference-management credentials. Provider secrets are injected only into the controller/provider adapter and are redacted from logs, health, and errors. The application does not read or manage Tailscale node credentials; it relies on the host's existing tailnet membership.
 
-Local model artifacts require identity, revision/hash, license/provenance, expected size, and acquisition instructions in a non-secret manifest. Cloud mode additionally requires a non-secret approval record for provider/model identity, endpoint allowlist, privacy/retention assumptions, and cost/usage observability. A model name alone is not a reproducible or approved configuration.
+Local model artifacts require identity, revision/hash, license/provenance, expected size, and either acquisition instructions or an explicit verify-only canonical-cache precondition in a non-secret manifest. ADR-0008 uses the latter: setup never substitutes or downloads an absent artifact/runtime, and readiness fails closed. Cloud mode additionally requires a non-secret approval record for provider/model identity, endpoint allowlist, privacy/retention assumptions, and cost/usage observability. A model name alone is not a reproducible or approved configuration.
 
 ## 10. Tailscale exposure
 
@@ -281,10 +291,10 @@ Local model artifacts require identity, revision/hash, license/provenance, expec
 
 - Expose only the HTTPS application entry point and the minimum LiveKit signaling/media paths needed by a tailnet browser.
 - Bind STT, TTS, any selected local LLM, health details, model lifecycle controls, and controller administration to loopback or an equally host-local transport.
-- Permit provider-adapter traffic only to exact endpoint `http://rpi:4000`. For the current private test Pasha accepts this temporary HTTP transport without runtime Tailscale proof; the adapter still rejects redirects and does not add another endpoint or fallback. HTTPS is deferred.
+- Bind the fixed llama.cpp OpenAI-compatible endpoint only to `127.0.0.1:18080`. Do not expose it through Tailscale Serve, browser capabilities/assets, or a model-management surface. The app accepts no LiteLLM configuration and has no cloud fallback.
 - Keep LiveKit signing material in the web gateway; issue narrow room capabilities because LiveKit requires them as protocol credentials, not as a second user-auth subsystem.
 - Do not publish a public fallback route or alternate provider route.
-- Record the actual tailnet ports and transport behavior in the LiveKit slice after loopback and remote-client validation.
+- Slice 6 configures the gateway at loopback TCP `8000` and LiveKit signaling at loopback TCP `7880`; Tailscale Serve terminates application/signaling HTTPS on explicit operator ports (the example uses `8443`/`7443`). LiveKit advertises only the host Tailscale IPv4 and binds WebRTC media to UDP `7882` on `tailscale0`; ICE/TCP media (`7881`) and TURN are disabled. A host smoke measured `127.0.0.1:7880`, tailnet UDP `7882`, and no TCP media listener. The configured Tailscale HTTPS paths remain unaccepted until the second-client browser gate.
 
 **Hypothesis:** Tailscale transport plus scoped LiveKit capabilities will meet browser microphone, WebRTC, and interruption requirements without an additional reverse-proxy identity layer. The LiveKit slice must measure this from a second tailnet client.
 
@@ -321,7 +331,7 @@ The measured peak must account for:
 - browser/MVP-eye rendering on the canonical host;
 - host services, filesystem cache, and failure/restart transients.
 
-The Slice 2 overlap measurement observed a Qwen3+Whisper peak of `7,494 MiB`, leaving `4,788 MiB`, with CPU p95 `66.67%`; it also observed failed latency regressions. The cumulative Slice 5 public diagnostics observed peak VRAM up to `7,600 MiB` (reserve `4,682 MiB`) with more than `24 GiB` RAM available. A first diagnostic completed three turns plus interruption; the final TTS-v1-format run completed two turns, explicitly failed one empty provider response, and could not reach the cancellation seam after another provider failure. These results preserve the known provider instability rather than disguising it. They bound only the fixed ADR-0005 stack and do not erase earlier component failures. Browser/LiveKit headroom remains a hypothesis until the later media slice.
+The Slice 2 overlap measurement observed a Qwen3+Whisper peak of `7,494 MiB`, leaving `4,788 MiB`, with CPU p95 `66.67%`; it also observed failed latency regressions. The cumulative Slice 5 cloud-provider diagnostics observed peak local VRAM up to `7,600 MiB` with more than `24 GiB` RAM available. Focused Issue #15 two-slot llama.cpp runs observed about `2,900 MiB` process VRAM, visible TTFT about 0.91–1.73 seconds and completion about 1.21–1.98 seconds for simultaneous public prompts. These isolated/local-subset facts cannot be added or used to claim coexistence. The combined resident llama.cpp + Whisper + Qwen + LiveKit + browser path must be measured under overlap/barge-in and retain a safe reserve on the 12,282 MiB device before acceptance.
 
 ### 11.3 Measurements required before model/provider selection
 
@@ -338,7 +348,7 @@ The host/model budget slice must pre-register quality and latency thresholds, th
 
 Local LLM candidates, including the user's preferred candidate once supplied, are evaluated first. If none passes, the same slice may evaluate explicit cloud-provider candidates for response quality, first-token/completion latency, sustained availability, streaming/cancellation, cost/usage, credential flow, endpoint/model identity, retention/training policy, and permitted-data boundary. It must never use a cloud result to disguise a failed local measurement.
 
-The slice publishes raw numeric results, local rejection evidence when applicable, privacy review for a cloud selection, and the rationale for exactly one provider mode. Exact models/provider enter tracked configuration only after this gate passes.
+The slice publishes raw numeric results, local rejection evidence when applicable, privacy review for a cloud selection, and the rationale for exactly one provider mode. Exact models/providers enter accepted tracked configuration only after this gate passes. A separately approved measurement/development pin such as ADR-0008 may be tracked earlier only with its unpassed acceptance gates explicit.
 
 ## 12. Known hypotheses and evidence gates
 

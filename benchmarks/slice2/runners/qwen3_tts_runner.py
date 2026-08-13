@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+import signal
 import sys
 import time
 
@@ -19,6 +20,14 @@ from faster_qwen3_tts import FasterQwen3TTS
 MODEL = Path("/home/priney/.cache/voice-agent-v2/slice-2/artifacts/tts-qwen3-12hz-17b-customvoice")
 OUTPUT_ROOT = Path("/home/priney/.cache/voice-agent-v2/slice-2/generated/qwen3-tts").resolve()
 SAMPLE_RATE = 24000
+_active_request_id: str | None = None
+_cancelled_request_id: str | None = None
+
+
+def request_cancel(_signum, _frame) -> None:
+    global _cancelled_request_id
+    if _active_request_id is not None:
+        _cancelled_request_id = _active_request_id
 
 
 def emit(value: dict) -> None:
@@ -43,6 +52,8 @@ def pcm16(chunk, sample_rate: int, output_sample_rate: int = SAMPLE_RATE) -> byt
 
 
 def main() -> int:
+    global _active_request_id, _cancelled_request_id
+    signal.signal(signal.SIGUSR1, request_cancel)
     started = time.monotonic()
     model = FasterQwen3TTS.from_pretrained(
         str(MODEL), device="cuda", dtype=torch.bfloat16,
@@ -72,12 +83,15 @@ def main() -> int:
         if output_sample_rate not in {16_000, SAMPLE_RATE}:
             emit({"event": "error", "request_id": request_id, "error_class": "unsupported_output_sample_rate"})
             continue
+        _active_request_id = request_id
+        _cancelled_request_id = None
         begin = time.monotonic()
         first = None
         chunks = 0
         total_bytes = 0
         try:
             handle = path.open("xb") if path is not None else None
+            stream = None
             try:
                 stream = model.generate_custom_voice_streaming(
                     text=str(command["text"]), speaker="ryan", language="Russian", instruct=None,
@@ -85,6 +99,8 @@ def main() -> int:
                     top_p=0.9, do_sample=True, repetition_penalty=1.05, chunk_size=4,
                 )
                 for audio, sample_rate, _metadata in stream:
+                    if _cancelled_request_id == request_id:
+                        break
                     data = pcm16(audio, int(sample_rate), output_sample_rate)
                     if not data:
                         continue
@@ -100,6 +116,9 @@ def main() -> int:
                             "pcm_base64": base64.b64encode(data).decode("ascii"), "bytes": len(data),
                         })
             finally:
+                close_stream = getattr(stream, "close", None)
+                if close_stream is not None:
+                    close_stream()
                 if handle is not None:
                     handle.close()
             torch.cuda.synchronize()
@@ -111,6 +130,7 @@ def main() -> int:
                 "audio_bytes": total_bytes, "chunk_count": chunks,
                 "audio_duration_seconds": total_bytes / (output_sample_rate * 2),
                 "sample_rate_hz": output_sample_rate, "channels": 1, "encoding": "pcm_s16le",
+                "cancelled": _cancelled_request_id == request_id,
             })
         except Exception as error:  # adapter boundary: class only, no content or environment
             try:
@@ -119,6 +139,9 @@ def main() -> int:
             except OSError:
                 pass
             emit({"event": "error", "request_id": request_id, "error_class": type(error).__name__})
+        finally:
+            _active_request_id = None
+            _cancelled_request_id = None
     return 0
 
 

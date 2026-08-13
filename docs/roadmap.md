@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 product delivery
 >
-> **Last updated:** 2026-08-11
+> **Last updated:** 2026-08-12
 
 This roadmap is a sequence of independently deliverable vertical slices. It contains no calendar estimates. A slice starts only when its dependencies and incoming evidence gate are satisfied; it finishes only with the stated user-visible behavior and evidence.
 
@@ -87,7 +87,7 @@ Run the root verification command from an empty-cache, network-denied environmen
 
 ## Slice 2 — Measured host/model and LLM-provider budget
 
-> **Cumulative-delivery override (2026-08-11):** Pasha fixed Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and pinned-legacy Qwen3 CustomVoice/`ryan` for Slices 2–5 despite recorded hard-gate misses. Failed gates remain failed and are never relabelled. The branch proceeded through Slice 5 and Pasha attested the final human microphone/listening test on 2026-08-11. Slice 6 has not started.
+> **Cumulative-delivery override (2026-08-11):** Pasha fixed Whisper large-v3-turbo, LiteLLM `deepseek-v4-flash`, and pinned-legacy Qwen3 CustomVoice/`ryan` for Slices 2–5 despite recorded hard-gate misses. Failed gates remain failed and are never relabelled. The branch proceeded through Slice 5 and Pasha attested the final human microphone/listening test on 2026-08-11. Slice 6 had not started at this checkpoint; its current status is recorded below.
 >
 > **Post-review runtime transport correction (2026-08-11):** historical Slice 2 Tailscale discovery/measurement evidence remains unchanged, but Slice 4–5 runtime readiness and request admission no longer perform DNS/route/TSMP/WireGuard proof. Pasha accepts exact temporary HTTP endpoint `http://rpi:4000` for the private test setup; bearer-authenticated alias capability, redirect rejection, output bounds, cancellation, redaction, and no fallback remain required. HTTPS is deferred.
 
@@ -236,7 +236,7 @@ Run the fixed evaluation set, multi-turn session-isolation cases, permitted-fiel
 
 ## Slice 5 — Real local-STT/TTS spoken conversation
 
-> **Checkpoint:** cumulative public diagnostics proved complete real Whisper → `deepseek-v4-flash` → Qwen3 turns and interruption, with peak VRAM at most `7,600 MiB`. The final contract-format run transparently completed two of three turns and hit the already-known empty provider response on the third; its cancellation case also stopped at provider failure before TTS. After the PipeWire correction, Pasha ran the final physical microphone/listening command and attested overall success on 2026-08-11. The automated failures remain failed, and Slice 6 is not started.
+> **Checkpoint:** cumulative public diagnostics proved complete real Whisper → `deepseek-v4-flash` → Qwen3 turns and interruption, with peak VRAM at most `7,600 MiB`. The final contract-format run transparently completed two of three turns and hit the already-known empty provider response on the third; its cancellation case also stopped at provider failure before TTS. After the PipeWire correction, Pasha ran the final physical microphone/listening command and attested overall success on 2026-08-11. The automated failures remain failed. Slice 6 had not started at this checkpoint; its current status is recorded below.
 
 ### User-visible outcome
 
@@ -283,7 +283,9 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 ## Slice 6 — Local LiveKit media and interruption
 
-> **Not started:** the Slice 5 human gate is accepted, but this documentation update does not authorize or begin Slice 6.
+> **Authorized 2026-08-11:** Pasha explicitly authorized the failed, operator-opaque LiteLLM `deepseek-v4-flash` route for Slice 6 private live transcript testing. ADR-0006 supersedes ADR-0005's consumed live-traffic scope and requires the endpoint only from untracked server-side `LITELLM_BASE_URL`; current HTTP transport and every prior latency/reliability/privacy limitation remain visible, with no fallback or production approval.
+>
+> **Combined Slice 6 / Issue #15 checkpoint (2026-08-12):** the first physical Firefox attempt failed. The same-PR correction now includes simplification Checkpoints A and B: browser media acknowledgements no longer determine correctness, completion means local generation plus server PCM submission, current-page history shows terminal outcomes and server endpoint metrics, and one persistent session track is fed by a two-block Qwen PCM pump after a real discard-only resident-Qwen warm-up. Pinned cache-local Silero v6 still owns speech admission, visible LFM sentences remain incremental, and the active fixed local LFM2.5 Q4_K_M/llama.cpp path has no cloud fallback. Request-scoped cancellation, prefix context, reconnect redesign, and the final deletion sweep remain later Checkpoints C–E. Automated evidence makes no microphone, `ryan` audibility, physical playback, or 250 ms claim; manual checkpoint 1 remains required and the failed physical status is not relabelled.
 
 ### User-visible outcome
 
@@ -308,7 +310,7 @@ A user opens the private web app, speaks over LiveKit, hears the locally synthes
 ### Acceptance criteria
 
 - Loopback browser and a second tailnet browser can connect using only tailnet membership plus protocol-required room capability.
-- STT/TTS/local-model inference and all management endpoints remain host-local; an explicitly selected cloud LLM is outbound-only to its allowlisted endpoint. LiveKit and cloud-provider credentials never reach the browser.
+- STT/TTS/local LFM inference and all management endpoints remain host-local. The active app makes no cloud LLM request, requires no provider credential/endpoint, and exposes no inference endpoint or LiveKit signing material to the browser.
 - Published microphone audio yields one correlated transcript and audible agent response over LiveKit.
 - Barge-in marks the prior turn interrupted, stops prior audio within the declared bound, discards old queued events, and completes a new turn without correlation leaks.
 - Disconnect/reconnect cannot replay a stale answer as a new turn.
@@ -321,10 +323,11 @@ Run network-denied deterministic headless media tests, then selected-provider re
 
 ### Evidence required before Design Gate V
 
-- Headless success/fault/interruption results.
-- Real loopback and second-tailnet-client latency traces.
-- Redacted bind/port and scoped-capability review.
-- Browser capture showing conversation, transcript state, and successful barge-in.
+- Headless success/fault/interruption results: deterministic pass recorded in [`docs/evidence/slice-6-livekit-media-interruption.md`](evidence/slice-6-livekit-media-interruption.md).
+- Real loopback and second-tailnet-client latency traces: **pending physical-browser gate**.
+- Redacted bind/port and scoped-capability review: server bind/capability pass recorded; Tailscale HTTPS/browser path pending.
+- Browser capture showing conversation, transcript state, audible response, reconnect safety, and successful barge-in: **pending physical-browser gate**.
+- Focused local-LFM identity/two-slot/visible-answer/cancellation evidence: pass; combined Whisper/Qwen/LiveKit/browser sustained resource evidence inside the 12 GB host budget: **pending physical-browser/full-stack gate**.
 
 ## Design Gate V — Grill the avatar module and MVP eye
 

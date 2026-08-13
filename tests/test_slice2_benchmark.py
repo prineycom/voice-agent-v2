@@ -169,10 +169,21 @@ class Slice2CommittedEvidenceTests(unittest.TestCase):
                 else [result["preregistration_commit"]]
             )
             for commit in commits:
-                completed = subprocess.run(
-                    ["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=ROOT, check=False
+                object_check = subprocess.run(
+                    ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                    cwd=ROOT,
+                    check=False,
                 )
-                self.assertEqual(completed.returncode, 0, result_path.name)
+                self.assertEqual(object_check.returncode, 0, result_path.name)
+                historical = subprocess.run(
+                    ["git", "show", f"{commit}:benchmarks/config/preregistration.v1.json"],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(historical.returncode, 0, result_path.name)
+                self.assertEqual(json.loads(historical.stdout), preregistration, result_path.name)
 
     def test_fixture_revisions_are_content_addressable(self) -> None:
         for name in (

@@ -130,7 +130,7 @@ class TracerBehaviorTests(unittest.TestCase):
 
 class ContractFixtureTests(unittest.TestCase):
     def test_contract_examples_satisfy_their_schemas(self) -> None:
-        for name in ("stt", "llm-provider", "tts"):
+        for name in ("stt", "llm-provider", "tts", "realtime-control", "client-control"):
             with self.subTest(contract=name):
                 schema = json.loads((ROOT / "contracts" / f"{name}.v1.schema.json").read_text())
                 fixture = json.loads((FIXTURES / f"{name}.v1.json").read_text())
@@ -142,6 +142,26 @@ class ContractFixtureTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 for event in run_scenario(scenario).events:
                     validate(event, schema)
+
+    def test_client_reset_is_required_and_one_of_rejects_ambiguity(self) -> None:
+        client_control_schema = json.loads(
+            (ROOT / "contracts" / "client-control.v1.schema.json").read_text()
+        )
+        with self.assertRaises(SchemaViolation):
+            validate({}, client_control_schema)
+
+        ambiguous_schema = {
+            "oneOf": [
+                {"type": "object", "additionalProperties": False},
+                {"type": "object", "additionalProperties": False},
+            ]
+        }
+        with self.assertRaisesRegex(
+            SchemaViolation,
+            r"^\$: oneOf expected exactly one matching branch, matched 2 "
+            r"\(matching branches \[0, 1\]\)$",
+        ):
+            validate({}, ambiguous_schema)
 
     def test_identifier_constraints_enforce_whole_value_and_length(self) -> None:
         contracts = {

@@ -13,8 +13,17 @@ import time
 from typing import Iterator
 
 
+MAX_PROTOCOL_LINE_BYTES = 1_048_576
+MAX_PROTOCOL_QUEUE_EVENTS = 32
+MAX_REQUEST_EVENTS = 256
+
+
 class AdapterProcessError(RuntimeError):
     pass
+
+
+class AdapterRequestError(AdapterProcessError):
+    """A correlated request failed while the resident adapter stayed healthy."""
 
 
 class AdapterProcess:
@@ -24,14 +33,16 @@ class AdapterProcess:
         self.environment = environment
         self.process: subprocess.Popen[str] | None = None
         self._log = None
-        self._events: queue.Queue[dict | BaseException | None] = queue.Queue()
+        self._events: queue.Queue[dict | BaseException | None] = queue.Queue(
+            maxsize=MAX_PROTOCOL_QUEUE_EVENTS
+        )
         self._reader: threading.Thread | None = None
         self._cancel_requested = threading.Event()
 
     def start(self, timeout_seconds: float) -> dict:
         if self.process is not None:
             raise AdapterProcessError("adapter already started")
-        self._events = queue.Queue()
+        self._events = queue.Queue(maxsize=MAX_PROTOCOL_QUEUE_EVENTS)
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log = self.log_path.open("x", encoding="utf-8")
@@ -45,13 +56,38 @@ class AdapterProcess:
                 raise AdapterProcessError("adapter startup cancelled")
             assert process.stdout is not None
 
+            def publish(value: dict | BaseException | None) -> None:
+                try:
+                    self._events.put_nowait(value)
+                except queue.Full as error:
+                    raise AdapterProcessError("adapter event queue overflow") from error
+
+            def fail_reader(error: BaseException) -> None:
+                try:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=0.25)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                while True:
+                    try:
+                        self._events.get_nowait()
+                    except queue.Empty:
+                        break
+                self._events.put_nowait(error)
+
             def read() -> None:
                 try:
-                    for line in process.stdout:
-                        self._events.put(json.loads(line))
-                    self._events.put(None)
+                    while True:
+                        line = process.stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1)
+                        if line == "":
+                            publish(None)
+                            return
+                        if len(line.encode("utf-8")) > MAX_PROTOCOL_LINE_BYTES:
+                            raise AdapterProcessError("adapter protocol line exceeds size bound")
+                        publish(json.loads(line))
                 except BaseException as error:
-                    self._events.put(error)
+                    fail_reader(error)
 
             self._reader = threading.Thread(target=read, name="voice-agent-adapter-reader", daemon=True)
             self._reader.start()
@@ -86,29 +122,56 @@ class AdapterProcess:
         return value
 
     def request(self, value: dict, timeout_seconds: float) -> dict:
+        deadline = time.monotonic() + timeout_seconds
+        event_count = 0
         self.send(value)
-        while True:
-            response = self.receive(timeout_seconds)
-            if response.get("request_id") != value.get("request_id"):
-                raise AdapterProcessError("adapter correlation mismatch")
-            if response.get("event") == "error":
-                raise AdapterProcessError(str(response.get("error_class", "adapter_error")))
-            if response.get("event") == "final":
-                return response
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AdapterProcessError("adapter timed out")
+                response = self.receive(remaining)
+                event_count += 1
+                if event_count > MAX_REQUEST_EVENTS:
+                    raise AdapterProcessError("adapter request event bound exceeded")
+                if response.get("request_id") != value.get("request_id"):
+                    raise AdapterProcessError("adapter correlation mismatch")
+                if response.get("event") == "error":
+                    raise AdapterRequestError(str(response.get("error_class", "adapter_error")))
+                if response.get("event") == "final":
+                    return response
+        except AdapterRequestError:
+            raise
+        except AdapterProcessError:
+            try:
+                self.cancel()
+            except (OSError, subprocess.SubprocessError):
+                pass
+            raise
 
     def stream(self, value: dict, timeout_seconds: float) -> Iterator[dict]:
+        deadline = time.monotonic() + timeout_seconds
         self.send(value)
         while True:
-            response = self.receive(timeout_seconds)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AdapterProcessError("adapter timed out")
+            response = self.receive(remaining)
             if response.get("request_id") != value.get("request_id"):
                 raise AdapterProcessError("adapter correlation mismatch")
             if response.get("event") == "error":
-                raise AdapterProcessError(str(response.get("error_class", "adapter_error")))
+                raise AdapterRequestError(str(response.get("error_class", "adapter_error")))
             yield response
             if response.get("event") == "final":
                 return
 
-    def cancel(self, timeout_seconds: float = 5.0) -> float:
+    def interrupt_request(self) -> None:
+        """Notify a cooperative runner without terminating its resident process."""
+        process = self.process
+        if process is not None and process.poll() is None:
+            os.kill(process.pid, signal.SIGUSR1)
+
+    def cancel(self, timeout_seconds: float = 0.25) -> float:
         self._cancel_requested.set()
         process = self.process
         if process is None or process.poll() is not None:

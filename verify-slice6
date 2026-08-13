@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
+PYTHON=$CACHE/runtime/venv/bin/python
+[ -x "$PYTHON" ] || {
+  echo "Slice 6 runtime is missing; run ./setup-slice6" >&2
+  exit 2
+}
+
+"$ROOT/verify"
+VOICE_AGENT_VERIFY_SLICE6_RUNTIME=1 PYTHONPATH="$ROOT/src:$ROOT" \
+  "$PYTHON" -B -m unittest \
+  tests.test_backend_readiness.BackendReadinessTests.test_local_lfm_waits_for_healthy_model_after_port_bind \
+  tests.test_local_vad.SileroSpeechEndpointTests.test_cache_local_real_russian_fixture_is_detected
+PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_slice6_runtime.py"
+(
+  cd "$ROOT/web"
+  npm run typecheck
+  npm test
+  npm run build
+)
+PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_firefox_livekit.py"
+printf '%s\n' 'Slice 6 deterministic media/browser verification: PASS'
+printf '%s\n' 'Manual loopback microphone/listening and second-tailnet-client evidence: REQUIRED, not claimed'

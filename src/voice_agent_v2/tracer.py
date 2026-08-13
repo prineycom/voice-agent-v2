@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
+import threading
 from typing import Callable, Iterable
 
 from .audio import DEFAULT_AUDIO_FORMAT, generated_input_pcm, generated_output_pcm
@@ -59,14 +60,55 @@ class TraceResult:
 
 class CancellationToken:
     def __init__(self) -> None:
-        self._cancelled = False
+        self._cancelled = threading.Event()
+        self._condition = threading.Condition()
+        self._callbacks: dict[int, Callable[[], None]] = {}
+        self._dispatching: set[int] = set()
+        self._next_registration = 0
 
     @property
     def cancelled(self) -> bool:
-        return self._cancelled
+        return self._cancelled.is_set()
+
+    def register(self, callback: Callable[[], None]) -> Callable[[], None]:
+        with self._condition:
+            self._next_registration += 1
+            registration = self._next_registration
+            if self._cancelled.is_set():
+                invoke = True
+            else:
+                self._callbacks[registration] = callback
+                invoke = False
+        if invoke:
+            callback()
+
+        def unregister() -> None:
+            with self._condition:
+                self._callbacks.pop(registration, None)
+                while registration in self._dispatching:
+                    self._condition.wait()
+
+        return unregister
 
     def cancel(self) -> None:
-        self._cancelled = True
+        with self._condition:
+            if self._cancelled.is_set():
+                while self._dispatching:
+                    self._condition.wait()
+                return
+            self._cancelled.set()
+            callbacks = tuple(self._callbacks.items())
+            self._callbacks.clear()
+            self._dispatching.update(registration for registration, _ in callbacks)
+        for registration, callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
+            finally:
+                with self._condition:
+                    self._dispatching.discard(registration)
+                    self._condition.notify_all()
 
 
 class DeterministicSTT:

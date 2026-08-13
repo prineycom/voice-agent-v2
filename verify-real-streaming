@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PYTHON="${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/runtime/venv/bin/python"
+[ -x "$PYTHON" ] || { echo 'Slice 6 runtime is missing; run ./setup-slice6' >&2; exit 2; }
+PYTHONPATH="$ROOT/src" exec "$PYTHON" -B "$ROOT/scripts/verify_real_streaming.py"
