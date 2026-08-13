@@ -241,10 +241,7 @@ class ParakeetContractTests(unittest.TestCase):
         self.assertEqual(stt.process_id, 7302)
 
     def test_parakeet_launch_requires_the_shared_lock_after_configuration(self) -> None:
-        lock_path = Path(
-            "/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock"
-        )
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        shared_lock = "/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copy2(Path(__file__).parents[1] / "run-slice6", root / "run-slice6")
@@ -257,13 +254,34 @@ class ParakeetContractTests(unittest.TestCase):
             (root / ".env.slice6").write_text(
                 "VOICE_AGENT_STT_BACKEND=parakeet\n", encoding="utf-8"
             )
+
+            # Intercept canonical lock setup, then delegate contention to real flock
+            # on a temporary file so CI never writes into the deployment host cache.
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "mkdir").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "flock").write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$3\" > \"$LOCK_ARGUMENT\"\n"
+                "shift 3\n"
+                "exec \"$REAL_FLOCK\" --exclusive --nonblock \"$TEST_LOCK\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "mkdir").chmod(0o755)
+            (fake_bin / "flock").chmod(0o755)
+            lock_argument = root / "lock-argument"
+            test_lock = root / "gpu-bakeoff.lock"
             environment = {
                 **os.environ,
                 "HOME": str(root),
                 "XDG_CACHE_HOME": str(cache),
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "LOCK_ARGUMENT": str(lock_argument),
                 "MARKER": str(marker),
+                "REAL_FLOCK": shutil.which("flock", path=os.environ["PATH"]),
+                "TEST_LOCK": str(test_lock),
             }
-            with lock_path.open("a+b") as lock:
+            with test_lock.open("a+b") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 completed = subprocess.run(
                     [str(root / "run-slice6")],
@@ -274,6 +292,8 @@ class ParakeetContractTests(unittest.TestCase):
                     check=False,
                 )
                 launched = marker.exists()
+            observed_lock = lock_argument.read_text(encoding="utf-8").strip()
+        self.assertEqual(observed_lock, shared_lock)
         self.assertNotEqual(completed.returncode, 0)
         self.assertFalse(launched)
 
