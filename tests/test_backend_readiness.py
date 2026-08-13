@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
 import threading
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,10 @@ class RunningProcess:
 
 
 class BackendReadinessTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("VOICE_AGENT_VERIFY_SLICE6_RUNTIME") == "1",
+        "requires the Slice 6 runtime verification phase",
+    )
     def test_local_lfm_waits_for_healthy_model_after_port_bind(self) -> None:
         model_ready = threading.Event()
         health_requested = threading.Event()

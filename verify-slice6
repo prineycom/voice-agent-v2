@@ -10,6 +10,10 @@ PYTHON=$CACHE/runtime/venv/bin/python
 }
 
 "$ROOT/verify"
+VOICE_AGENT_VERIFY_SLICE6_RUNTIME=1 PYTHONPATH="$ROOT/src:$ROOT" \
+  "$PYTHON" -B -m unittest \
+  tests.test_backend_readiness.BackendReadinessTests.test_local_lfm_waits_for_healthy_model_after_port_bind \
+  tests.test_local_vad.SileroSpeechEndpointTests.test_cache_local_real_russian_fixture_is_detected
 PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_slice6_runtime.py"
 (
   cd "$ROOT/web"
