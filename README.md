@@ -57,16 +57,7 @@ The command also runs a real headless Firefox against official local LiveKit wit
 
 ### Optional Parakeet STT experiment
 
-Whisper remains the default. This branch can explicitly run the pinned local Parakeet challenger without changing the default deployment:
-
-```sh
-./setup-parakeet-stt
-./verify-parakeet-stt
-./verify-parakeet-overlap
-./run-parakeet-candidate
-```
-
-Automated public-corpus evidence is a **no-go for replacing Whisper**: Parakeet Q8 scored 12.384% clean WER versus Whisper's 11.455%, and its clean final p95 was 1551 ms versus 294 ms. The isolated full resident stack preserved 4483 MiB VRAM reserve. No physical Russian recognition is claimed. See [`docs/experiments/parakeet-stt.md`](docs/experiments/parakeet-stt.md) for selection, evidence bounds, rollback, and manual-test procedure.
+Whisper remains the default. This branch includes a pinned local Parakeet challenger, but its automated evidence is a **no-go for replacing Whisper** and no physical Russian recognition is claimed. See [`docs/experiments/parakeet-stt.md`](docs/experiments/parakeet-stt.md) for the isolated setup/run commands, measured evidence, bounds, and rollback.
 
 ## Final Slice 5 human acceptance
 
