@@ -38,12 +38,23 @@ class VoxCPM2FastTTS(Qwen3TTS):
                 "TOKENIZERS_PARALLELISM": "false",
                 "PYTHONHASHSEED": "0",
                 "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
-                "VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD": os.environ.get(
-                    "VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD", ""
+                "VOICE_AGENT_GPU_BAKEOFF_LOCK_FD": os.environ.get(
+                    "VOICE_AGENT_GPU_BAKEOFF_LOCK_FD", ""
                 ),
             }
         )
         return environment
+
+    def _pass_fds(self) -> tuple[int, ...]:
+        value = os.environ.get("VOICE_AGENT_GPU_BAKEOFF_LOCK_FD", "")
+        if not value.isdigit():
+            return ()
+        descriptor = int(value)
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            return ()
+        return (descriptor,)
 
     def _validate_ready(self, metadata: dict) -> None:
         expected = {

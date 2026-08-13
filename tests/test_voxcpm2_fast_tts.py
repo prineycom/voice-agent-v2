@@ -8,6 +8,7 @@ import sys
 import types
 import unittest
 
+from scripts.verify_voxcpm2_fast import validate_resources
 from voice_agent_v2.contracts import StageFailure
 from voice_agent_v2.local_tts import Qwen3TTS, create_local_tts
 from voice_agent_v2.slice6_config import Slice6ConfigurationError, Slice6Settings
@@ -132,22 +133,42 @@ class VoxCPM2AdapterContractTests(unittest.TestCase):
         self.assertEqual(environment["HF_HUB_OFFLINE"], "1")
         self.assertEqual(environment["TRANSFORMERS_OFFLINE"], "1")
         self.assertEqual(environment["NANOVLLM_SERVERPOOL_NUM_KVCACHE_BLOCKS"], "16")
+        self.assertIn("VOICE_AGENT_GPU_BAKEOFF_LOCK_FD", environment)
         self.assertNotIn("LITELLM_BASE_URL", environment)
         self.assertNotIn("HTTP_PROXY", environment)
         self.assertTrue(environment["VOICE_AGENT_VOXCPM2_MANIFEST"].endswith(
             "config/voxcpm2-fast-tts-v1.json"
         ))
 
-    def test_real_runner_refuses_to_touch_gpu_without_bakeoff_lock(self) -> None:
+    def test_real_runner_rejects_forged_bakeoff_lock_environment(self) -> None:
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "voxcpm2_fast_runner.py")],
             input="", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+            env={
+                "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                "VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD": "1",
+            },
             timeout=5,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
-        self.assertIn("requires the GPU bakeoff lock", result.stderr)
+        self.assertIn("requires an inherited GPU bakeoff lock FD", result.stderr)
+
+    def test_resource_validation_requires_live_samples_and_vram_reserve(self) -> None:
+        with self.assertRaises(AssertionError):
+            validate_resources(
+                {"successful_live_gpu_samples": 0, "minimum_gpu_free_mib": 4096},
+                reserve_mib=1536,
+            )
+        with self.assertRaises(AssertionError):
+            validate_resources(
+                {"successful_live_gpu_samples": 2, "minimum_gpu_free_mib": 1535},
+                reserve_mib=1536,
+            )
+        validate_resources(
+            {"successful_live_gpu_samples": 2, "minimum_gpu_free_mib": 1536},
+            reserve_mib=1536,
+        )
 
 
 if __name__ == "__main__":

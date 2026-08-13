@@ -98,7 +98,7 @@ if [ "$VERIFY_ONLY" = false ]; then
   [ -x "$RUNTIME/bin/python" ] || "$PYTHON" -m venv "$RUNTIME"
   mkdir -p "$CACHE/uv-cache" "$CACHE/home" "$CACHE/xdg" "$CACHE/huggingface"
   HOME=$CACHE/home XDG_CACHE_HOME=$CACHE/xdg UV_CACHE_DIR=$CACHE/uv-cache \
-    "$UV" pip sync --python "$RUNTIME/bin/python" "$LOCK"
+    "$UV" pip sync --require-hashes --python "$RUNTIME/bin/python" "$LOCK"
   sha256sum "$LOCK" > "$CACHE/runtime-requirements.sha256"
 fi
 
@@ -110,7 +110,14 @@ EXPECTED_LOCK_SHA=$(sha256sum "$LOCK" | cut -d' ' -f1)
 }
 EXPECTED_PACKAGES=$CACHE/runtime-expected-packages.lock
 INSTALLED_PACKAGES=$CACHE/runtime-installed-packages.lock
-grep -v '^#' "$LOCK" | sed 's/#sha256=[0-9a-f]*$//' > "$EXPECTED_PACKAGES"
+awk '
+  /^[[:space:]]*#/ || /^[[:space:]]*$/ || /^[[:space:]]*--hash=/ { next }
+  {
+    sub(/[[:space:]]*\\$/, "")
+    sub(/#sha256=[0-9a-f][0-9a-f]*$/, "")
+    print
+  }
+' "$LOCK" > "$EXPECTED_PACKAGES"
 "$UV" pip freeze --python "$RUNTIME/bin/python" 2>/dev/null > "$INSTALLED_PACKAGES"
 cmp -s "$EXPECTED_PACKAGES" "$INSTALLED_PACKAGES" || {
   echo "VoxCPM2 installed package set drifted from the tracked lock" >&2; exit 2;

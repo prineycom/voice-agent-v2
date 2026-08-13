@@ -27,10 +27,14 @@ class AdapterRequestError(AdapterProcessError):
 
 
 class AdapterProcess:
-    def __init__(self, command: list[str], log_path: Path, environment: dict[str, str]) -> None:
+    def __init__(
+        self, command: list[str], log_path: Path, environment: dict[str, str],
+        pass_fds: tuple[int, ...] = (),
+    ) -> None:
         self.command = command
         self.log_path = log_path
         self.environment = environment
+        self.pass_fds = pass_fds
         self.process: subprocess.Popen[str] | None = None
         self._log = None
         self._events: queue.Queue[dict | BaseException | None] = queue.Queue(
@@ -49,6 +53,7 @@ class AdapterProcess:
             process = subprocess.Popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
                 text=True, bufsize=1, start_new_session=True, env=self.environment,
+                pass_fds=self.pass_fds,
             )
             self.process = process
             if self._cancel_requested.is_set():

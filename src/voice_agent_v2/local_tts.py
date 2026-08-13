@@ -114,6 +114,9 @@ class Qwen3TTS:
     def _validate_ready(self, metadata: dict) -> None:
         del metadata
 
+    def _pass_fds(self) -> tuple[int, ...]:
+        return ()
+
     def start(self, cancellation: CancellationToken | None = None) -> dict:
         if self._process is not None:
             if cancellation is not None and cancellation.cancelled:
@@ -121,7 +124,8 @@ class Qwen3TTS:
             return dict(self.ready_metadata or {})
         log = self.logs / f"{self.log_prefix}-{time.monotonic_ns()}.stderr.log"
         process = AdapterProcess(
-            [str(self.venv / "bin" / "python"), str(self.runner)], log, self._environment()
+            [str(self.venv / "bin" / "python"), str(self.runner)], log, self._environment(),
+            pass_fds=self._pass_fds(),
         )
         self._process = process
         unregister = (

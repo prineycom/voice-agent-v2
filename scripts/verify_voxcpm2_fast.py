@@ -12,7 +12,7 @@ import wave
 
 from voice_agent_v2.contracts import StageFailure
 from voice_agent_v2.tracer import CancellationToken
-from voice_agent_v2.voxcpm2_tts import VoxCPM2FastTTS
+from voice_agent_v2.voxcpm2_tts import MANIFEST, VoxCPM2FastTTS
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/experiments/voxcpm2-fast-tts")
 EVIDENCE = CACHE / "evidence"
@@ -33,6 +33,9 @@ class ResourceSampler:
         self.peak_process_tree_rss_mib = 0.0
         self.gpu_processes: dict[str, dict[str, object]] = {}
         self.root_pid: int | None = None
+        self.successful_samples = 0
+        self.successful_live_gpu_samples = 0
+        self.failure: BaseException | None = None
         self.thread = threading.Thread(target=self.run, name="voxcpm2-resource-sampler", daemon=True)
 
     def start(self) -> None:
@@ -73,8 +76,6 @@ class ResourceSampler:
             timeout=5,
         )
         used, free = (int(item.strip()) for item in result.stdout.strip().split(","))
-        self.peak_gpu_used_mib = max(self.peak_gpu_used_mib, used)
-        self.minimum_gpu_free_mib = min(self.minimum_gpu_free_mib, free)
         compute = subprocess.run(
             [
                 "/usr/bin/nvidia-smi",
@@ -84,35 +85,50 @@ class ResourceSampler:
             check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=5,
         )
+        gpu_processes: list[tuple[str, str, int]] = []
         for line in compute.stdout.splitlines():
             parts = [part.strip() for part in line.split(",")]
             if len(parts) != 3 or not parts[0].isdigit() or not parts[2].isdigit():
                 continue
-            record = self.gpu_processes.setdefault(
-                parts[0], {"process_name": parts[1], "peak_used_mib": 0}
-            )
-            record["peak_used_mib"] = max(int(record["peak_used_mib"]), int(parts[2]))
+            gpu_processes.append((parts[0], parts[1], int(parts[2])))
         memory = {}
         for line in Path("/proc/meminfo").read_text().splitlines():
             name, value = line.split(":", 1)
             memory[name] = int(value.split()[0])
         host_used = (memory["MemTotal"] - memory["MemAvailable"]) // 1024
+        process_tree_rss_mib = self.descendants_rss_mib()
+        self.peak_gpu_used_mib = max(self.peak_gpu_used_mib, used)
+        self.minimum_gpu_free_mib = min(self.minimum_gpu_free_mib, free)
+        for pid, process_name, process_used_mib in gpu_processes:
+            record = self.gpu_processes.setdefault(
+                pid, {"process_name": process_name, "peak_used_mib": 0}
+            )
+            record["peak_used_mib"] = max(int(record["peak_used_mib"]), process_used_mib)
         self.peak_host_used_mib = max(self.peak_host_used_mib, host_used)
         self.peak_process_tree_rss_mib = max(
-            self.peak_process_tree_rss_mib, self.descendants_rss_mib()
+            self.peak_process_tree_rss_mib, process_tree_rss_mib
         )
+        self.successful_samples += 1
+        if self.root_pid is not None and Path(f"/proc/{self.root_pid}").exists():
+            self.successful_live_gpu_samples += 1
 
     def run(self) -> None:
         while not self.stop_event.is_set():
             try:
                 self.sample()
-            except (OSError, ValueError, subprocess.SubprocessError):
-                pass
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                self.failure = error
+                self.stop_event.set()
+                return
             self.stop_event.wait(0.1)
 
     def stop(self) -> None:
         self.stop_event.set()
         self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise RuntimeError("VoxCPM2 resource sampler did not stop")
+        if self.failure is not None:
+            raise RuntimeError("VoxCPM2 resource sampling failed") from self.failure
         self.sample()
 
     def as_dict(self) -> dict[str, object]:
@@ -121,6 +137,8 @@ class ResourceSampler:
             "minimum_gpu_free_mib": self.minimum_gpu_free_mib,
             "peak_host_used_mib": self.peak_host_used_mib,
             "peak_process_tree_rss_mib": round(self.peak_process_tree_rss_mib, 3),
+            "successful_samples": self.successful_samples,
+            "successful_live_gpu_samples": self.successful_live_gpu_samples,
             "gpu_processes": self.gpu_processes,
         }
 
@@ -145,9 +163,16 @@ def observation_metrics(observation: dict) -> dict[str, object]:
     }
 
 
+def validate_resources(resources: dict[str, object], *, reserve_mib: int) -> None:
+    if int(resources["successful_live_gpu_samples"]) < 1:
+        raise AssertionError("no successful resource sample observed the live GPU adapter")
+    if int(resources["minimum_gpu_free_mib"]) < reserve_mib:
+        raise AssertionError("real VoxCPM2 verification violated the configured VRAM reserve")
+
+
 def main() -> int:
-    if os.environ.get("VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD") != "1":
-        raise RuntimeError("real VoxCPM2 verification requires the GPU bakeoff lock")
+    if not os.environ.get("VOICE_AGENT_GPU_BAKEOFF_LOCK_FD", "").isdigit():
+        raise RuntimeError("real VoxCPM2 verification requires an inherited GPU bakeoff lock FD")
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     SAMPLES.mkdir(parents=True, exist_ok=True)
     for sample_id, _text in SENTENCES:
@@ -156,6 +181,7 @@ def main() -> int:
     sampler = ResourceSampler()
     adapter = VoxCPM2FastTTS()
     sampler.start()
+    sampler_finalized = False
     evidence: dict[str, object] = {
         "schema_version": "voice-agent.voxcpm2-fast-real-evidence.v1",
         "content_retained_in_evidence": False,
@@ -243,10 +269,22 @@ def main() -> int:
             },
             "sample_paths": [str(SAMPLES / f"{sample_id}.wav") for sample_id, _ in SENTENCES],
         })
+        try:
+            sampler.stop()
+        finally:
+            sampler_finalized = True
+        resources = sampler.as_dict()
+        reserve_mib = int(
+            json.loads(MANIFEST.read_text(encoding="utf-8"))["resource_gate"]["vram_reserve_mib"]
+        )
+        validate_resources(resources, reserve_mib=reserve_mib)
+        evidence["resources"] = resources
     finally:
-        adapter.close()
-        sampler.stop()
-    evidence["resources"] = sampler.as_dict()
+        try:
+            if not sampler_finalized:
+                sampler.stop()
+        finally:
+            adapter.close()
     path = EVIDENCE / "real-adapter-measurement.json"
     path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print("Accelerated VoxCPM2 real adapter verification: PASS")

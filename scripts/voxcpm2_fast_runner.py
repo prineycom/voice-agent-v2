@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
+import fcntl
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -17,6 +20,9 @@ sys.stdout = sys.stderr  # third-party progress must never corrupt protocol stdo
 
 MANIFEST_PATH = Path(
     "/home/priney/.cache/voice-agent-v2/experiments/voxcpm2-fast-tts/invalid-manifest"
+)
+GPU_BAKEOFF_LOCK = Path(
+    "/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock"
 )
 _active_request_id: str | None = None
 _cancelled_request_id: str | None = None
@@ -49,6 +55,40 @@ def verify_file(path: Path, *, size_bytes: int, expected_sha256: str) -> None:
         raise RuntimeError("pinned VoxCPM2 artifact verification failed")
 
 
+def require_gpu_bakeoff_lock() -> None:
+    value = os.environ.get("VOICE_AGENT_GPU_BAKEOFF_LOCK_FD", "")
+    if not value.isdigit():
+        raise RuntimeError("accelerated VoxCPM2 inference requires an inherited GPU bakeoff lock FD")
+    descriptor = int(value)
+    try:
+        inherited = os.fstat(descriptor)
+        expected = GPU_BAKEOFF_LOCK.stat()
+    except OSError as error:
+        raise RuntimeError(
+            "accelerated VoxCPM2 inference requires an inherited GPU bakeoff lock FD"
+        ) from error
+    if (inherited.st_dev, inherited.st_ino) != (expected.st_dev, expected.st_ino):
+        raise RuntimeError("inherited GPU bakeoff lock FD references the wrong file")
+    probe = os.open(GPU_BAKEOFF_LOCK, os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+        else:
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            raise RuntimeError("inherited GPU bakeoff lock FD is not locked")
+    finally:
+        os.close(probe)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EAGAIN):
+            raise RuntimeError("inherited GPU bakeoff lock FD does not own the lock") from error
+        raise
+
+
 def gpu_free_mib() -> int:
     result = subprocess.run(
         [
@@ -66,7 +106,7 @@ def gpu_free_mib() -> int:
 
 def load_manifest() -> tuple[dict, Path, Path]:
     manifest_path = Path(
-        __import__("os").environ.get("VOICE_AGENT_VOXCPM2_MANIFEST", str(MANIFEST_PATH))
+        os.environ.get("VOICE_AGENT_VOXCPM2_MANIFEST", str(MANIFEST_PATH))
     ).resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != "voice-agent.voxcpm2-fast-tts.v1":
@@ -104,8 +144,7 @@ def pcm16(values, resampler, *, last: bool = False) -> bytes:
 def main() -> int:
     global _active_request_id, _cancelled_request_id
     signal.signal(signal.SIGUSR1, request_cancel)
-    if __import__("os").environ.get("VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD") != "1":
-        raise RuntimeError("accelerated VoxCPM2 inference requires the GPU bakeoff lock")
+    require_gpu_bakeoff_lock()
     manifest, model_path, reference_path = load_manifest()
     inference = manifest["inference"]
     gate = manifest["resource_gate"]

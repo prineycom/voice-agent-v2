@@ -6,9 +6,10 @@ CACHE=/home/priney/.cache/voice-agent-v2/experiments/voxcpm2-fast-tts
 LOCK=/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock
 "$ROOT/setup-voxcpm2-fast" --verify-only
 command -v flock >/dev/null || { echo "flock is required" >&2; exit 2; }
-exec flock --exclusive "$LOCK" env \
-  VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD=1 \
-  PYTHONPATH="$ROOT/src" \
-  HOME="$CACHE/home" XDG_CACHE_HOME="$CACHE/xdg" HF_HOME="$CACHE/huggingface" \
-  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false PYTHONHASHSEED=0 \
-  "$CACHE/runtime/bin/python" "$ROOT/scripts/verify_voxcpm2_fast.py"
+exec 9>"$LOCK"
+flock --exclusive 9
+export VOICE_AGENT_GPU_BAKEOFF_LOCK_FD=9
+export PYTHONPATH="$ROOT/src"
+export HOME="$CACHE/home" XDG_CACHE_HOME="$CACHE/xdg" HF_HOME="$CACHE/huggingface"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false PYTHONHASHSEED=0
+exec "$CACHE/runtime/bin/python" "$ROOT/scripts/verify_voxcpm2_fast.py"
