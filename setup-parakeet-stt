@@ -44,6 +44,29 @@ command -v curl >/dev/null && command -v git >/dev/null \
 }
 mkdir -p "$CACHE/model" "$CACHE/runtime" "$CACHE/sources" "$CACHE/tooling" "$CACHE/logs"
 
+sha256_valid() {
+  [ -f "$1" ] \
+    && printf '%s  %s\n' "$2" "$1" | sha256sum --check --status
+}
+download_sha256() {
+  download_url=$1 download_output=$2 download_hash=$3 download_retries=$4
+  sha256_valid "$download_output" "$download_hash" && return 0
+  if [ -f "$download_output" ]; then
+    if curl --fail --location --retry "$download_retries" --continue-at - \
+      --proto '=https' --tlsv1.2 "$download_url" -o "$download_output" \
+      && sha256_valid "$download_output" "$download_hash"; then
+      return 0
+    fi
+    rm -f "$download_output"
+  fi
+  curl --fail --location --retry "$download_retries" --proto '=https' --tlsv1.2 \
+    "$download_url" -o "$download_output"
+  if ! sha256_valid "$download_output" "$download_hash"; then
+    rm -f "$download_output"
+    return 1
+  fi
+}
+
 cmake_payload_valid() {
   [ -x "$1/bin/cmake" ] \
     && [ -f "$1/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake" ] \
@@ -60,9 +83,7 @@ cmake_valid() {
     && [ "$cmake_marker" = "$CMAKE_SHA256" ]
 }
 if ! cmake_valid "$CMAKE_ROOT"; then
-  curl --fail --location --retry 3 --continue-at - --proto '=https' --tlsv1.2 \
-    "$CMAKE_URL" -o "$CACHE/tooling/$CMAKE_ARCHIVE"
-  printf '%s  %s\n' "$CMAKE_SHA256" "$CACHE/tooling/$CMAKE_ARCHIVE" | sha256sum --check --status || {
+  download_sha256 "$CMAKE_URL" "$CACHE/tooling/$CMAKE_ARCHIVE" "$CMAKE_SHA256" 3 || {
     echo "pinned CMake archive checksum mismatch" >&2
     exit 2
   }
@@ -89,9 +110,7 @@ cmake_valid "$CMAKE_ROOT" || {
 }
 
 if [ ! -x "$CACHE/tooling/ninja" ]; then
-  curl --fail --location --retry 3 --continue-at - --proto '=https' --tlsv1.2 \
-    "$NINJA_URL" -o "$NINJA_ARCHIVE"
-  printf '%s  %s\n' "$NINJA_SHA256" "$NINJA_ARCHIVE" | sha256sum --check --status || {
+  download_sha256 "$NINJA_URL" "$NINJA_ARCHIVE" "$NINJA_SHA256" 3 || {
     echo "pinned Ninja archive checksum mismatch" >&2
     exit 2
   }
@@ -111,17 +130,16 @@ export PATH="$CMAKE_ROOT/bin:$CACHE/tooling:$PATH"
 model_valid() {
   [ -f "$1" ] \
     && [ "$(stat -c '%s' "$1")" = "$MODEL_SIZE" ] \
-    && printf '%s  %s\n' "$MODEL_SHA256" "$1" | sha256sum --check --status
+    && sha256_valid "$1" "$MODEL_SHA256"
 }
 if model_valid "$MODEL"; then
   rm -f "$MODEL_PART"
 else
   rm -f "$MODEL"
-  if [ -f "$MODEL_PART" ] && [ "$(stat -c '%s' "$MODEL_PART")" -gt "$MODEL_SIZE" ]; then
-    rm -f "$MODEL_PART"
-  fi
-  curl --fail --location --retry 5 --continue-at - --proto '=https' --tlsv1.2 \
-    "$MODEL_URL" -o "$MODEL_PART"
+  download_sha256 "$MODEL_URL" "$MODEL_PART" "$MODEL_SHA256" 5 || {
+    echo "pinned Parakeet GGUF size/checksum mismatch" >&2
+    exit 2
+  }
   model_valid "$MODEL_PART" || {
     rm -f "$MODEL_PART"
     echo "pinned Parakeet GGUF size/checksum mismatch" >&2

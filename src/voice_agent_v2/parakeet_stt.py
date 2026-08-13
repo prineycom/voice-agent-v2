@@ -170,10 +170,20 @@ class ParakeetSTT:
         return process.cancel(timeout_seconds=0.25) if process is not None else 0.0
 
     def start(self, cancellation: CancellationToken | None = None) -> dict[str, object]:
-        if self._process is not None:
+        existing = self._process
+        if existing is not None:
             if cancellation is not None and cancellation.cancelled:
                 raise StageFailure("stt", "selected_stt_cancelled")
-            return dict(self.ready_metadata or {})
+            if self.process_id is not None:
+                return dict(self.ready_metadata or {})
+            try:
+                existing.close()
+            except (AdapterProcessError, OSError):
+                pass
+            finally:
+                if self._process is existing:
+                    self._process = None
+                    self.ready_metadata = None
         artifact_metadata = verify_parakeet_artifacts()
         command = [
             sys.executable,

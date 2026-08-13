@@ -20,12 +20,12 @@ from voice_agent_v2.tracer import CancellationToken
 
 
 class Child:
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, returncode: int | None = None) -> None:
         self.pid = pid
+        self.returncode = returncode
 
-    @staticmethod
-    def poll():
-        return None
+    def poll(self) -> int | None:
+        return self.returncode
 
 
 class StubProcess:
@@ -160,6 +160,25 @@ class ParakeetContractTests(unittest.TestCase):
         self.assertEqual(metadata["process_id"], 7301)
         self.assertTrue(metadata["discarded"])
         self.assertEqual(stt.process_id, 7301)
+
+    def test_start_replaces_a_resident_process_that_exited(self) -> None:
+        stt = ParakeetSTT()
+        exited = StubProcess()
+        exited.process = Child(7301, returncode=1)
+        recovered = StubProcess(pid=7302)
+        stt._process = exited
+        stt.ready_metadata = {"event": "ready", "warmed": True}
+
+        with (
+            patch("voice_agent_v2.parakeet_stt.verify_parakeet_artifacts", return_value={}),
+            patch("voice_agent_v2.parakeet_stt.AdapterProcess", return_value=recovered),
+        ):
+            ready = stt.start()
+
+        self.assertTrue(exited.closed)
+        self.assertFalse(ready["warmed"])
+        self.assertIs(stt._process, recovered)
+        self.assertEqual(stt.process_id, 7302)
 
     def test_active_cancellation_recovers_same_adapter_with_warm_residency(self) -> None:
         stt = ParakeetSTT()
