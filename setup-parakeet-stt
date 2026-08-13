@@ -24,6 +24,7 @@ SENTENCEPIECE_REVISION=17d7580d6407802f85855d2cc9190634e2c95624
 SENTENCEPIECE_SOURCE=$CACHE/sources/sentencepiece
 SENTENCEPIECE_BUILD=$CACHE/sources/sentencepiece-build
 SENTENCEPIECE=$CACHE/tooling/sentencepiece-$SENTENCEPIECE_REVISION
+SENTENCEPIECE_PART=$SENTENCEPIECE.partial
 
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
   echo "Parakeet setup supports only the measured Linux x86_64 host" >&2
@@ -108,26 +109,37 @@ git -C "$SOURCE" submodule update --init --depth 1 ggml
   exit 2
 }
 
-if [ ! -f "$SENTENCEPIECE/lib/libsentencepiece.a" ]; then
+sentencepiece_valid() {
+  [ -f "$1/lib/libsentencepiece.a" ] \
+    && [ -f "$1/include/sentencepiece_processor.h" ] \
+    && [ -f "$1/share/licenses/sentencepiece/LICENSE" ]
+}
+if ! sentencepiece_valid "$SENTENCEPIECE"; then
   if [ ! -d "$SENTENCEPIECE_SOURCE/.git" ]; then
     git clone --filter=blob:none --no-checkout https://github.com/google/sentencepiece.git "$SENTENCEPIECE_SOURCE"
   fi
   git -C "$SENTENCEPIECE_SOURCE" fetch --depth 1 origin "$SENTENCEPIECE_REVISION"
   git -C "$SENTENCEPIECE_SOURCE" checkout --detach --force "$SENTENCEPIECE_REVISION"
-  rm -rf "$SENTENCEPIECE_BUILD" "$SENTENCEPIECE"
+  rm -rf "$SENTENCEPIECE_BUILD" "$SENTENCEPIECE_PART"
   cmake -G Ninja -S "$SENTENCEPIECE_SOURCE" -B "$SENTENCEPIECE_BUILD" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     '-DCMAKE_CXX_FLAGS=-include cstdint' -DSPM_BUILD_TEST=OFF \
     -DSPM_ENABLE_SHARED=OFF -DSPM_ENABLE_TCMALLOC=OFF
   cmake --build "$SENTENCEPIECE_BUILD" --target sentencepiece-static -j 4
-  install -d "$SENTENCEPIECE/lib" "$SENTENCEPIECE/include" \
-    "$SENTENCEPIECE/share/licenses/sentencepiece"
+  install -d "$SENTENCEPIECE_PART/lib" "$SENTENCEPIECE_PART/include" \
+    "$SENTENCEPIECE_PART/share/licenses/sentencepiece"
   install -m 0644 "$SENTENCEPIECE_BUILD/src/libsentencepiece.a" \
-    "$SENTENCEPIECE/lib/libsentencepiece.a"
+    "$SENTENCEPIECE_PART/lib/libsentencepiece.a"
   install -m 0644 "$SENTENCEPIECE_SOURCE/src/sentencepiece_processor.h" \
-    "$SENTENCEPIECE/include/sentencepiece_processor.h"
+    "$SENTENCEPIECE_PART/include/sentencepiece_processor.h"
   install -m 0644 "$SENTENCEPIECE_SOURCE/LICENSE" \
-    "$SENTENCEPIECE/share/licenses/sentencepiece/LICENSE"
+    "$SENTENCEPIECE_PART/share/licenses/sentencepiece/LICENSE"
+  sentencepiece_valid "$SENTENCEPIECE_PART" || {
+    echo "incomplete pinned SentencePiece installation" >&2
+    exit 2
+  }
+  rm -rf "$SENTENCEPIECE"
+  mv "$SENTENCEPIECE_PART" "$SENTENCEPIECE"
 fi
 
 if [ ! -x "$RUNTIME/bin/nemo-speech" ]; then

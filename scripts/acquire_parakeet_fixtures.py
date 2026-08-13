@@ -33,6 +33,14 @@ def request(url: str, *, method: str = "GET"):
     )
 
 
+def fixture_matches(path: Path, sample: dict[str, object]) -> bool:
+    return (
+        path.is_file()
+        and path.stat().st_size == sample["bytes"]
+        and sha256(path) == sample["sha256"]
+    )
+
+
 def main() -> int:
     document = json.loads(MANIFEST.read_text(encoding="utf-8"))
     if document.get("schema_version") != "voice-agent.parakeet-stt-evaluation.v1":
@@ -47,9 +55,15 @@ def main() -> int:
         reference = references[sample["id"]]
         output = DESTINATION / sample["filename"]
         if output.exists():
-            if output.stat().st_size != sample["bytes"] or sha256(output) != sample["sha256"]:
+            if not fixture_matches(output, sample):
                 raise ValueError(f"cached public fixture identity mismatch: {output.name}")
             continue
+        partial = output.with_suffix(".wav.partial")
+        if partial.exists():
+            if fixture_matches(partial, sample):
+                partial.replace(output)
+                continue
+            partial.unlink()
         query = urllib.parse.urlencode({
             "dataset": corpus["dataset"],
             "config": "default",
@@ -71,14 +85,12 @@ def main() -> int:
         asset_url = values["audio"][0]["src"]
         if corpus["revision"] not in asset_url:
             raise ValueError("public fixture URL is not tied to the pinned corpus revision")
-        partial = output.with_suffix(".wav.partial")
-        if partial.exists():
-            raise ValueError(f"partial fixture requires inspection: {partial}")
         with urllib.request.urlopen(request(asset_url), timeout=120) as response, partial.open("xb") as sink:
             shutil.copyfileobj(response, sink, length=1024 * 1024)
-        if partial.stat().st_size != sample["bytes"] or sha256(partial) != sample["sha256"]:
+        if not fixture_matches(partial, sample):
+            partial.unlink(missing_ok=True)
             raise ValueError(f"downloaded public fixture identity mismatch: {sample['id']}")
-        partial.rename(output)
+        partial.replace(output)
     (DESTINATION / "manifest.json").write_text(
         json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
