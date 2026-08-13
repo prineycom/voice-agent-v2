@@ -1,0 +1,121 @@
+{
+  "schema_version": "voice-agent.voxcpm2-fast-tts.v1",
+  "status": "experimental-no-default",
+  "cache_root": "/home/priney/.cache/voice-agent-v2/experiments/voxcpm2-fast-tts",
+  "model": {
+    "identity": "openbmb/VoxCPM2",
+    "revision": "bffb3df5a29440629464e5e839f4d214c8714c3d",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/openbmb/VoxCPM2",
+    "directory": "model/openbmb-VoxCPM2-bffb3df5a29440629464e5e839f4d214c8714c3d",
+    "files": [
+      {
+        "path": "audiovae.pth",
+        "size_bytes": 376951122,
+        "sha256": "94b5d51e107e0507d4acc976cfdadb64edd6fd06d1f751dadbf2fd1594274bf1"
+      },
+      {
+        "path": "config.json",
+        "size_bytes": 4336,
+        "sha256": "405f0dcd92f7feba6011ed4eac5c8d4f74cba9712f07fd5cfa3063bbdd95402c"
+      },
+      {
+        "path": "model.safetensors",
+        "size_bytes": 4580080592,
+        "sha256": "f7f964cfa9da23653baec6e6f7750719977ad944ed9f95fe52fe3a620506891d"
+      },
+      {
+        "path": "special_tokens_map.json",
+        "size_bytes": 1632,
+        "sha256": "068594063e37662c02b21acf42ebb334ef6a74fb810e68a2368f88f08351de76"
+      },
+      {
+        "path": "tokenization_voxcpm2.py",
+        "size_bytes": 2895,
+        "sha256": "84489ea32b6ee0cae22ed5480cacb6df85c46624c3119be9a2021c3649a12729"
+      },
+      {
+        "path": "tokenizer.json",
+        "size_bytes": 3676772,
+        "sha256": "f8984687e4a92a3503d521396d454b7d68e9fdaab2a0288eb3536c7c1aa4bc20"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size_bytes": 5059,
+        "sha256": "e78a3ebb48a0b9437efd1823b6b726c823da89e49dd8bcc90c02419d9baa772b"
+      }
+    ]
+  },
+  "runtime": {
+    "name": "nano-vllm-voxcpm",
+    "version": "2.0.4",
+    "revision": "0cc522ca22971213f5fda5d4b2c4457f294aab85",
+    "license": "MIT",
+    "upstream": "https://github.com/a710128/nanovllm-voxcpm",
+    "official_voxcpm_source_revision": "ee8161e9e1b7b082cb5721a3a9980da4204401e6",
+    "python": {
+      "version": "3.12.12",
+      "release": "astral-sh/python-build-standalone@20260211",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "size_bytes": 33887801,
+      "sha256": "1dbaa624a09e15afe7efbdac08d42993135a68db8d34f986ef6977a6d77bdc3c"
+    },
+    "uv": {
+      "version": "0.12.4",
+      "url": "https://files.pythonhosted.org/packages/ea/e6/b8f4c5f3b01ec504207edf733ffa51e896bd4b87479fc83261f3b5ba3cb2/uv-0.12.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "size_bytes": 23553966,
+      "sha256": "3bb292d959fa73000d524159cd5f3c1aa1cf2db9cc3005ccdec06911a9998e84"
+    },
+    "torch": {
+      "version": "2.9.1+cu130",
+      "sha256": "e70e1b18881e6b3c1ce402d0a989da39f956a3a057526e03c354df23d704ce9b"
+    },
+    "torchaudio": {
+      "version": "2.9.1+cu130",
+      "sha256": "a6c58d5e846da5a90d50bd425e2c24368747cd04297d95c6dd51d3f7f85fea26"
+    },
+    "flash_attention": {
+      "version": "2.8.3+cu13torch2.9cxx11abiTRUE",
+      "release": "Dao-AILab/flash-attention@v2.8.3.post1",
+      "sha256": "14609b65ebddd28d5087434b01019c9be093c92d44fe95def97b9f28905081dc"
+    }
+  },
+  "reference": {
+    "id": "ruls-public-reader-4471",
+    "mode": "ultimate-cloning",
+    "dataset": "istupakov/russian_librispeech",
+    "revision": "a519c986bb3342cc8136d3d14e5ad8a4f1e1a2bd",
+    "split": "test",
+    "row_index": 999,
+    "source_audio_path": "audio/4471/2145/poemi_11_pushkin_0025.wav",
+    "text": "а там заря златобагряна сквозь лес увеселяет взор",
+    "duration_seconds": 4.74,
+    "license": "CC-BY-4.0 dataset card; upstream OpenSLR SLR96 states public domain in the USA",
+    "attribution": "OpenSLR SLR96 Russian LibriSpeech and Hugging Face conversion by istupakov",
+    "cache_path": "assets/ruls-test-0999.wav",
+    "size_bytes": 151724,
+    "sha256": "5850bd7eed576530d4f89cf25a9d793f573e86546c3a9c0a67448ba10144121c"
+  },
+  "inference": {
+    "device": 0,
+    "sample_rate_hz": 48000,
+    "output_sample_rate_hz": 16000,
+    "inference_timesteps": 10,
+    "max_num_batched_tokens": 4096,
+    "max_num_seqs": 1,
+    "max_model_len": 4096,
+    "max_generate_length": 1024,
+    "kv_cache_blocks": 16,
+    "gpu_memory_utilization": 0.8,
+    "enforce_eager": false,
+    "temperature": 1.0,
+    "cfg_value": 2.0,
+    "seed": 42
+  },
+  "resource_gate": {
+    "vram_reserve_mib": 1536,
+    "minimum_free_before_load_mib": 9728,
+    "derivation": "Measured candidate process peak 8184 MiB plus the non-negotiable 1536 MiB reserve, rounded up.",
+    "failure_policy": "Fail readiness before model load; never fall back to Qwen or cloud."
+  }
+}

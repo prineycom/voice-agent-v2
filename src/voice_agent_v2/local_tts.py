@@ -49,19 +49,17 @@ class TurnTTSBudget:
         self.remaining_seconds()
 
 
-def _environment() -> dict[str, str]:
-    return {
-        "HOME": str(CACHE / "home"), "XDG_CACHE_HOME": str(CACHE / "xdg"),
-        "HF_HOME": str(CACHE / "huggingface"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
-    }
-
-
 class Qwen3TTS:
     version = TTS_VERSION
     identity = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice@0c0e3051f131929182e2c023b9537f8b1c68adfe"
     output_format = OUTPUT_FORMAT
+    cache = CACHE
+    venv = VENV
+    runner = RUNNER
+    logs = LOGS
+    log_prefix = "qwen3-tts"
+    voice = "ryan"
+    language = "Russian"
 
     def __init__(self) -> None:
         self._process: AdapterProcess | None = None
@@ -104,13 +102,27 @@ class Qwen3TTS:
                 self._active_request = None
             self._cancelled_requests.discard(generation)
 
+    def _environment(self) -> dict[str, str]:
+        return {
+            "HOME": str(self.cache / "home"), "XDG_CACHE_HOME": str(self.cache / "xdg"),
+            "HF_HOME": str(self.cache / "huggingface"), "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1", "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        }
+
+    def _validate_ready(self, metadata: dict) -> None:
+        del metadata
+
     def start(self, cancellation: CancellationToken | None = None) -> dict:
         if self._process is not None:
             if cancellation is not None and cancellation.cancelled:
                 raise StageFailure("tts", "selected_tts_cancelled")
             return dict(self.ready_metadata or {})
-        log = LOGS / f"qwen3-tts-{time.monotonic_ns()}.stderr.log"
-        process = AdapterProcess([str(VENV / "bin" / "python"), str(RUNNER)], log, _environment())
+        log = self.logs / f"{self.log_prefix}-{time.monotonic_ns()}.stderr.log"
+        process = AdapterProcess(
+            [str(self.venv / "bin" / "python"), str(self.runner)], log, self._environment()
+        )
         self._process = process
         unregister = (
             cancellation.register(process.cancel)
@@ -121,10 +133,11 @@ class Qwen3TTS:
             if cancellation is not None and cancellation.cancelled:
                 process.cancel()
             self.ready_metadata = process.start(180)
+            self._validate_ready(self.ready_metadata)
             if cancellation is not None and cancellation.cancelled:
                 self.cancel()
                 raise StageFailure("tts", "selected_tts_cancelled")
-        except (AdapterProcessError, OSError) as error:
+        except (AdapterProcessError, OSError, ValueError) as error:
             try:
                 process.close()
             finally:
@@ -261,7 +274,7 @@ class Qwen3TTS:
             self._finish_request(generation)
         completed = time.monotonic()
         self.observations.append({
-            "identity": self.identity, "speaker": "ryan", "language": "Russian",
+            "identity": self.identity, "speaker": self.voice, "language": self.language,
             "chunk_count": chunks, "output_bytes": total_bytes,
             "first_signal_ms": ((first or completed) - started) * 1000,
             "completion_ms": (completed - started) * 1000,
@@ -288,3 +301,14 @@ class Qwen3TTS:
 
     def close(self) -> None:
         self.cancel()
+
+
+def create_local_tts(backend: str = "qwen") -> Qwen3TTS:
+    """Create exactly one configured local TTS backend; failures never fall back."""
+    if backend == "qwen":
+        return Qwen3TTS()
+    if backend == "voxcpm2-fast":
+        from .voxcpm2_tts import VoxCPM2FastTTS
+
+        return VoxCPM2FastTTS()
+    raise ValueError("unsupported local TTS backend")

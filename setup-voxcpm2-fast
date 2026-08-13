@@ -1,0 +1,127 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CACHE=/home/priney/.cache/voice-agent-v2/experiments/voxcpm2-fast-tts
+MANIFEST=$ROOT/config/voxcpm2-fast-tts-v1.json
+LOCK=$ROOT/requirements-voxcpm2-fast.lock
+VERIFY_ONLY=false
+case ${1-} in
+  "") ;;
+  --verify-only) VERIFY_ONLY=true ;;
+  *) echo "usage: ./setup-voxcpm2-fast [--verify-only]" >&2; exit 2 ;;
+esac
+
+[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
+  echo "accelerated VoxCPM2 setup supports only the measured Linux x86_64 host" >&2
+  exit 2
+}
+command -v nvidia-smi >/dev/null && command -v sha256sum >/dev/null || {
+  echo "nvidia-smi and sha256sum are required" >&2
+  exit 2
+}
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || {
+  echo "Python 3.11 or newer is required to bootstrap the cache-local runtime" >&2
+  exit 2
+}
+
+if [ "$VERIFY_ONLY" = true ]; then
+  python3 "$ROOT/scripts/acquire_voxcpm2_fast.py" --verify-only
+else
+  command -v curl >/dev/null && command -v tar >/dev/null || {
+    echo "curl and tar are required for pinned runtime acquisition" >&2
+    exit 2
+  }
+  python3 "$ROOT/scripts/acquire_voxcpm2_fast.py"
+fi
+
+PYTHON_DIR=$CACHE/python/cpython-3.12.12-linux-x86_64-gnu
+PYTHON=$PYTHON_DIR/bin/python3.12
+RUNTIME=$CACHE/runtime
+UV_VENV=$CACHE/bootstrap
+UV=$UV_VENV/bin/uv
+UV_URL=https://files.pythonhosted.org/packages/ea/e6/b8f4c5f3b01ec504207edf733ffa51e896bd4b87479fc83261f3b5ba3cb2/uv-0.12.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+UV_SHA256=3bb292d959fa73000d524159cd5f3c1aa1cf2db9cc3005ccdec06911a9998e84
+PYTHON_ARCHIVE=cpython-3.12.12+20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+PYTHON_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+PYTHON_SHA256=1dbaa624a09e15afe7efbdac08d42993135a68db8d34f986ef6977a6d77bdc3c
+
+if [ "$VERIFY_ONLY" = false ] && [ ! -x "$UV" ]; then
+  mkdir -p "$CACHE/bootstrap-downloads" "$CACHE/pip-cache" "$CACHE/home"
+  UV_WHEEL=$CACHE/bootstrap-downloads/uv-0.12.4.whl
+  if [ ! -f "$UV_WHEEL" ]; then
+    curl --fail --location --proto '=https' --tlsv1.2 "$UV_URL" -o "$UV_WHEEL.partial"
+    printf '%s  %s\n' "$UV_SHA256" "$UV_WHEEL.partial" | sha256sum --check --status || {
+      echo "pinned uv wheel checksum mismatch" >&2; exit 2;
+    }
+    mv "$UV_WHEEL.partial" "$UV_WHEEL"
+  fi
+  printf '%s  %s\n' "$UV_SHA256" "$UV_WHEEL" | sha256sum --check --status || {
+    echo "cached uv wheel checksum mismatch" >&2; exit 2;
+  }
+  HOME=$CACHE/home PIP_CACHE_DIR=$CACHE/pip-cache python3 -m venv "$UV_VENV"
+  HOME=$CACHE/home PIP_CACHE_DIR=$CACHE/pip-cache "$UV_VENV/bin/python" -m pip install \
+    --disable-pip-version-check --no-deps "$UV_WHEEL"
+fi
+[ -x "$UV" ] && $UV --version | grep -F "uv 0.12.4" >/dev/null || {
+  echo "pinned cache-local uv 0.12.4 is absent" >&2; exit 2;
+}
+
+if [ "$VERIFY_ONLY" = false ] && [ ! -x "$PYTHON" ]; then
+  mkdir -p "$CACHE/downloads" "$CACHE/python"
+  ARCHIVE=$CACHE/downloads/$PYTHON_ARCHIVE
+  if [ ! -f "$ARCHIVE" ]; then
+    curl --fail --location --proto '=https' --tlsv1.2 "$PYTHON_URL" -o "$ARCHIVE.partial"
+    printf '%s  %s\n' "$PYTHON_SHA256" "$ARCHIVE.partial" | sha256sum --check --status || {
+      echo "pinned CPython archive checksum mismatch" >&2; exit 2;
+    }
+    mv "$ARCHIVE.partial" "$ARCHIVE"
+  fi
+  printf '%s  %s\n' "$PYTHON_SHA256" "$ARCHIVE" | sha256sum --check --status || {
+    echo "cached CPython archive checksum mismatch" >&2; exit 2;
+  }
+  TEMP=$(mktemp -d "$CACHE/python-setup.XXXXXX")
+  trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+  tar -xzf "$ARCHIVE" -C "$TEMP"
+  [ -x "$TEMP/python/bin/python3.12" ] || {
+    echo "pinned CPython archive has an unexpected layout" >&2; exit 2;
+  }
+  mv "$TEMP/python" "$PYTHON_DIR"
+  rm -rf "$TEMP"
+  trap - EXIT HUP INT TERM
+fi
+[ -x "$PYTHON" ] && [ "$($PYTHON --version)" = "Python 3.12.12" ] || {
+  echo "pinned cache-local CPython 3.12.12 is absent" >&2; exit 2;
+}
+
+if [ "$VERIFY_ONLY" = false ]; then
+  [ -x "$RUNTIME/bin/python" ] || "$PYTHON" -m venv "$RUNTIME"
+  mkdir -p "$CACHE/uv-cache" "$CACHE/home" "$CACHE/xdg" "$CACHE/huggingface"
+  HOME=$CACHE/home XDG_CACHE_HOME=$CACHE/xdg UV_CACHE_DIR=$CACHE/uv-cache \
+    "$UV" pip sync --python "$RUNTIME/bin/python" "$LOCK"
+  sha256sum "$LOCK" > "$CACHE/runtime-requirements.sha256"
+fi
+
+[ -x "$RUNTIME/bin/python" ] || { echo "VoxCPM2 runtime is absent" >&2; exit 2; }
+EXPECTED_LOCK_SHA=$(sha256sum "$LOCK" | cut -d' ' -f1)
+[ -f "$CACHE/runtime-requirements.sha256" ] \
+  && [ "$(cut -d' ' -f1 "$CACHE/runtime-requirements.sha256")" = "$EXPECTED_LOCK_SHA" ] || {
+  echo "VoxCPM2 runtime does not match the tracked requirements lock" >&2; exit 2;
+}
+EXPECTED_PACKAGES=$CACHE/runtime-expected-packages.lock
+INSTALLED_PACKAGES=$CACHE/runtime-installed-packages.lock
+grep -v '^#' "$LOCK" | sed 's/#sha256=[0-9a-f]*$//' > "$EXPECTED_PACKAGES"
+"$UV" pip freeze --python "$RUNTIME/bin/python" 2>/dev/null > "$INSTALLED_PACKAGES"
+cmp -s "$EXPECTED_PACKAGES" "$INSTALLED_PACKAGES" || {
+  echo "VoxCPM2 installed package set drifted from the tracked lock" >&2; exit 2;
+}
+HOME=$CACHE/home XDG_CACHE_HOME=$CACHE/xdg HF_HOME=$CACHE/huggingface \
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 "$RUNTIME/bin/python" - <<'PY'
+import flash_attn, nanovllm_voxcpm, torch, torchaudio
+assert flash_attn.__version__ == "2.8.3"
+assert nanovllm_voxcpm.__version__ == "2.0.4"
+assert torch.__version__ == "2.9.1+cu130" and torch.version.cuda == "13.0"
+assert torchaudio.__version__ == "2.9.1+cu130"
+PY
+
+echo "Pinned accelerated VoxCPM2 candidate ready outside Git: $CACHE"

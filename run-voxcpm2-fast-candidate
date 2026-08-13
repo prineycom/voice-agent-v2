@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+LOCK=/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock
+command -v flock >/dev/null || { echo "flock is required" >&2; exit 2; }
+"$ROOT/setup-voxcpm2-fast" --verify-only
+
+# Hold the cross-experiment GPU lock for the complete LiveKit/LFM/STT/TTS process lifetime.
+exec flock --exclusive --nonblock "$LOCK" env \
+  VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD=1 \
+  VOICE_AGENT_TTS_BACKEND=voxcpm2-fast \
+  "$ROOT/run-slice6"

@@ -92,6 +92,7 @@ class Slice6Settings:
     room_token_ttl_seconds: int = 300
     browser_join_timeout_seconds: int = 30
     max_sessions: int = 1
+    tts_backend: str = "qwen"
 
     @classmethod
     def from_environment(
@@ -129,6 +130,9 @@ class Slice6Settings:
             raise Slice6ConfigurationError(
                 "LiteLLM configuration is forbidden in the local-LFM Slice 6 runtime"
             )
+        tts_backend = values.get("VOICE_AGENT_TTS_BACKEND", "qwen")
+        if tts_backend not in {"qwen", "voxcpm2-fast"}:
+            raise Slice6ConfigurationError("unsupported VOICE_AGENT_TTS_BACKEND")
         root = (project_root or Path(__file__).resolve().parents[2]).resolve()
         web_dist = Path(values.get("SLICE6_WEB_DIST", str(root / "web" / "dist"))).resolve()
         return cls(
@@ -138,4 +142,5 @@ class Slice6Settings:
             livekit_public_url=public_url,
             app_public_url=app_public_url,
             web_dist=web_dist,
+            tts_backend=tts_backend,
         )

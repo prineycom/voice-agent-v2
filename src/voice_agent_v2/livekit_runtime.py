@@ -17,7 +17,7 @@ from .audio import OUTPUT_MEDIA_MAX_BYTES
 from .diagnostics import PrivacySafeTrace, TraceIdentity
 from .local_lfm import LocalLFMProvider
 from .local_stt import WhisperSTT
-from .local_tts import Qwen3TTS
+from .local_tts import create_local_tts
 from .real_turn import RealTurnController
 from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
 from .realtime import (
@@ -48,9 +48,8 @@ class LiveTurnRunner:
 
     def __init__(self, settings: Slice6Settings) -> None:
         self.stt = WhisperSTT()
-        del settings
         self.llm = LocalLFMProvider()
-        self.tts = Qwen3TTS()
+        self.tts = create_local_tts(settings.tts_backend)
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
         self._startup_cancellation = CancellationToken()
