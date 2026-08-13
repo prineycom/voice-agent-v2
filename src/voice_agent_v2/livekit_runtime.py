@@ -396,6 +396,7 @@ class LiveKitRoomController:
         self._microphone_track = None
         self._microphone_publication_id: str | None = None
         self._microphone_generation = 0
+        self._vad_model: SileroOnnxModel | None = None
         self._microphone_muted = False
         self._capture_invalidated = False
         self._browser_join_task: asyncio.Task[None] | None = None
@@ -415,6 +416,8 @@ class LiveKitRoomController:
 
     async def start(self) -> None:
         try:
+            if self._vad_model is None:
+                self._vad_model = await asyncio.to_thread(SileroOnnxModel)
             if not getattr(self.runner, "_started", False):
                 self._runner_start_task = asyncio.create_task(
                     asyncio.to_thread(self.runner.start), name=f"startup-{self.session_id}"
@@ -717,17 +720,23 @@ class LiveKitRoomController:
                     stream_epoch=getattr(self.session, "stream_epoch", 1),
                 )
 
-        endpoint = SileroSpeechEndpoint(SileroOnnxModel(), telemetry=observe_vad)
-        stream = rtc.AudioStream.from_track(
-            track=track,
-            capacity=20,
-            sample_rate=16_000,
-            num_channels=1,
-            frame_size_ms=AUDIO_FRAME_MS,
-        )
+        endpoint: SileroSpeechEndpoint | None = None
+        stream = None
         failure_code = "microphone_stream_ended"
         listening_turn_id: str | None = None
         try:
+            model = self._vad_model
+            if model is None:
+                raise RuntimeError("resident microphone VAD is unavailable")
+            model.reset()
+            endpoint = SileroSpeechEndpoint(model, telemetry=observe_vad)
+            stream = rtc.AudioStream.from_track(
+                track=track,
+                capacity=20,
+                sample_rate=16_000,
+                num_channels=1,
+                frame_size_ms=AUDIO_FRAME_MS,
+            )
             async for event in stream:
                 if (
                     generation != self._microphone_generation
@@ -790,10 +799,13 @@ class LiveKitRoomController:
                 and not self._closed
             )
             try:
-                if not current_generation and listening_turn_id is not None:
-                    await self.session.abandon_unannounced_utterance(listening_turn_id)
-                    listening_turn_id = None
-                if current_generation:
+                if not current_generation:
+                    if listening_turn_id is not None:
+                        await self.session.abandon_unannounced_utterance(listening_turn_id)
+                        listening_turn_id = None
+                    if endpoint is not None:
+                        endpoint.reset()
+                elif endpoint is not None:
                     for decision in endpoint.flush():
                         signal, payload = decision.kind, decision.payload
                         if signal == "utterance" and payload is not None:
@@ -805,10 +817,20 @@ class LiveKitRoomController:
                             await self.session.abandon_unannounced_utterance(listening_turn_id)
                             listening_turn_id = None
             finally:
-                try:
-                    await stream.aclose()
-                except Exception:
-                    failure_code = "microphone_stream_failed"
+                if stream is not None:
+                    try:
+                        await stream.aclose()
+                    except Exception as error:
+                        failure_code = "microphone_stream_failed"
+                        if trace is not None:
+                            trace.emit(
+                                "input", "microphone_failed",
+                                {
+                                    "failure_class": type(error).__name__,
+                                    "failure_code": failure_code,
+                                },
+                                stream_epoch=getattr(self.session, "stream_epoch", 1),
+                            )
                 if (
                     current_generation
                     and self._audio_task is asyncio.current_task()

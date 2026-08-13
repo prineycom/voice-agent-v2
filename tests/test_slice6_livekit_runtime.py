@@ -34,6 +34,9 @@ class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):
                 flush_calls += 1
                 return [types.SimpleNamespace(kind="utterance", payload=b"stale speech")]
 
+            def reset(self) -> None:
+                return None
+
         class Stream:
             async def __aiter__(self):
                 yield types.SimpleNamespace(frame=types.SimpleNamespace(data=b"\0\0" * 320))
@@ -70,7 +73,6 @@ class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):
             async def fail(self, stage: str, code: str) -> None:
                 self.failures.append((stage, code))
 
-        runtime.SileroOnnxModel = lambda: object()
         runtime.SileroSpeechEndpoint = lambda *_args, **_kwargs: Endpoint()
         runtime.rtc.AudioStream = types.SimpleNamespace(
             from_track=lambda **_kwargs: Stream()
@@ -84,6 +86,7 @@ class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):
         controller._microphone_muted = False
         controller._microphone_resume_task = None
         controller._microphone_generation = 1
+        controller._vad_model = types.SimpleNamespace(reset=lambda: None)
         controller._microphone_track = object()
         controller._audio_task = asyncio.create_task(
             controller._consume_microphone(controller._microphone_track, 1)
@@ -100,6 +103,145 @@ class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flush_calls, 0)
         self.assertTrue(controller._capture_invalidated)
         self.assertIs(controller._audio_task.done(), True)
+
+    async def test_consumer_generations_reuse_one_resident_vad_model(self) -> None:
+        runtime = load_runtime()
+        starts = [asyncio.Event(), asyncio.Event()]
+        endpoint_models: list[object] = []
+
+        class Model:
+            def __init__(self) -> None:
+                self.reset_calls = 0
+
+            def reset(self) -> None:
+                self.reset_calls += 1
+
+        class Endpoint:
+            def __init__(self, model, **_kwargs) -> None:
+                self.model = model
+                endpoint_models.append(model)
+
+            def feed(self, _pcm: bytes):
+                return []
+
+            def flush(self):
+                return []
+
+            def reset(self) -> None:
+                self.model.reset()
+
+        class Stream:
+            def __init__(self, index: int) -> None:
+                self.index = index
+
+            async def __aiter__(self):
+                starts[self.index].set()
+                await asyncio.Event().wait()
+                if False:
+                    yield None
+
+            async def aclose(self) -> None:
+                return None
+
+        class Session:
+            stream_epoch = 1
+            failures: list[tuple[str, str]] = []
+
+            async def fail(self, stage: str, code: str) -> None:
+                self.failures.append((stage, code))
+
+        stream_count = 0
+
+        def open_stream(**_kwargs):
+            nonlocal stream_count
+            stream = Stream(stream_count)
+            stream_count += 1
+            return stream
+
+        runtime.SileroOnnxModel = lambda: (_ for _ in ()).throw(
+            AssertionError("consumer generation cold-loaded Silero")
+        )
+        runtime.SileroSpeechEndpoint = Endpoint
+        runtime.rtc.AudioStream = types.SimpleNamespace(from_track=open_stream)
+        controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
+        controller.session_id = "session-test"
+        controller.session = Session()
+        controller.trace = None
+        controller._closed = False
+        controller._capture_invalidated = False
+        controller._microphone_muted = False
+        controller._microphone_generation = 0
+        controller._microphone_track = object()
+        controller._audio_task = None
+        model = Model()
+        controller._vad_model = model
+
+        controller._start_microphone_consumer(controller._microphone_track)
+        await asyncio.wait_for(starts[0].wait(), 0.5)
+        controller._microphone_muted = True
+        old = controller._retire_microphone_consumer()
+        assert old is not None
+        await asyncio.gather(old, return_exceptions=True)
+
+        controller._microphone_muted = False
+        controller._start_microphone_consumer(controller._microphone_track)
+        await asyncio.wait_for(starts[1].wait(), 0.5)
+        controller._microphone_muted = True
+        fresh = controller._retire_microphone_consumer()
+        assert fresh is not None
+        await asyncio.gather(fresh, return_exceptions=True)
+
+        self.assertEqual(endpoint_models, [model, model])
+        self.assertEqual(stream_count, 2)
+        self.assertGreaterEqual(model.reset_calls, 4)
+        self.assertEqual(controller.session.failures, [])
+
+    async def test_current_generation_setup_failure_fails_closed_with_trace(self) -> None:
+        runtime = load_runtime()
+
+        class Model:
+            def reset(self) -> None:
+                raise OSError("vad reset failed")
+
+        class Session:
+            stream_epoch = 4
+
+            def __init__(self) -> None:
+                self.failures: list[tuple[str, str]] = []
+
+            async def fail(self, stage: str, code: str) -> None:
+                self.failures.append((stage, code))
+
+        class Trace:
+            def __init__(self) -> None:
+                self.events: list[tuple[str, str, dict[str, object], int]] = []
+
+            def emit(self, stage, event, fields, *, stream_epoch) -> None:
+                self.events.append((stage, event, fields, stream_epoch))
+
+        controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
+        controller.session_id = "session-test"
+        controller.session = Session()
+        controller.trace = Trace()
+        controller._closed = False
+        controller._capture_invalidated = False
+        controller._microphone_muted = False
+        controller._microphone_generation = 1
+        controller._vad_model = Model()
+        task = asyncio.create_task(controller._consume_microphone(object(), 1))
+        controller._audio_task = task
+
+        await asyncio.wait_for(task, 0.5)
+
+        self.assertEqual(
+            controller.session.failures,
+            [("input", "microphone_stream_failed")],
+        )
+        self.assertEqual(len(controller.trace.events), 1)
+        stage, event, fields, stream_epoch = controller.trace.events[0]
+        self.assertEqual((stage, event, stream_epoch), ("input", "microphone_failed", 4))
+        self.assertEqual(fields["failure_class"], "OSError")
+        self.assertEqual(fields["failure_code"], "microphone_stream_failed")
 
     async def test_livekit_mute_events_retire_then_resume_one_fresh_consumer(self) -> None:
         runtime = load_runtime()

@@ -21,8 +21,12 @@ from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
 
 from voice_agent_v2.contracts import EventEnvelope
-from voice_agent_v2.livekit_runtime import LiveKitAudioSink, LiveKitEventSink
-from voice_agent_v2.realtime import CLIENT_CONTROL_TOPIC, MAX_CONTROL_BYTES, RealtimeSession
+from voice_agent_v2.livekit_runtime import (
+    LiveKitAudioSink,
+    LiveKitEventSink,
+    LiveKitRoomController,
+)
+from voice_agent_v2.realtime import RealtimeSession
 from voice_agent_v2.tracer import TraceResult
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +56,9 @@ async def wait_port(port: int, process: subprocess.Popen, timeout: float = 10) -
 
 
 class DeterministicRunner:
+    def __init__(self) -> None:
+        self.run_count = 0
+
     def run_turn(
         self,
         *,
@@ -65,6 +72,7 @@ class DeterministicRunner:
         retain_output=True,
     ) -> TraceResult:
         del input_pcm, trace_observer, retain_output
+        self.run_count += 1
         events = []
 
         def emit(event_type, payload, terminal=False):
@@ -82,7 +90,7 @@ class DeterministicRunner:
         emit("turn.transcribing", {"stage": "stt"})
         emit("stt.final", {"transcript": "Детерминированная речь."})
         emit("turn.thinking", {"stage": "llm_provider"})
-        if turn_id.endswith("2"):
+        if self.run_count == 3:
             emit("llm.visible", {"response": "Видимый префикс перед ошибкой."})
             emit(
                 "turn.failed",
@@ -127,6 +135,53 @@ class RecordingEventSink(LiveKitEventSink):
     async def send(self, event: dict[str, object]) -> None:
         self.events.append(event)
         await super().send(event)
+
+
+class DeterministicVadModel:
+    def __init__(self) -> None:
+        self.speech = True
+        self.infer_calls = 0
+        self.reset_calls = 0
+
+    def infer(self, _pcm_s16le: bytes) -> float:
+        self.infer_calls += 1
+        return 1.0 if self.speech else 0.0
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
+class ControllerRecordingSession(RealtimeSession):
+    def __init__(self, *, browser_controls: list[dict[str, object]], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.browser_controls = browser_controls
+        self.started_utterances: list[str] = []
+        self.abandoned_utterances: list[str] = []
+        self.finished_utterances: list[str] = []
+
+    async def start_utterance(self, *, announce: bool = True) -> str:
+        turn_id = await super().start_utterance(announce=announce)
+        self.started_utterances.append(turn_id)
+        return turn_id
+
+    async def abandon_unannounced_utterance(self, turn_id: str) -> bool:
+        abandoned = await super().abandon_unannounced_utterance(turn_id)
+        if abandoned:
+            self.abandoned_utterances.append(turn_id)
+        return abandoned
+
+    async def finish_utterance(
+        self, pcm: bytes, *, endpoint_monotonic: float | None = None
+    ) -> str:
+        turn_id = await super().finish_utterance(
+            pcm, endpoint_monotonic=endpoint_monotonic
+        )
+        self.finished_utterances.append(turn_id)
+        return turn_id
+
+    async def handle_client_control(self, payload: bytes) -> bool:
+        self.browser_controls.append(json.loads(payload))
+        return await super().handle_client_control(payload)
 
 
 def handler_for(root: Path, capability: dict[str, object]):
@@ -198,7 +253,8 @@ async def main() -> int:
     room = rtc.Room()
     audio_source: rtc.AudioSource | None = None
     audio_sink: LiveKitAudioSink | None = None
-    session: RealtimeSession | None = None
+    session: ControllerRecordingSession | None = None
+    controller: LiveKitRoomController | None = None
     driver = None
     server: ThreadingHTTPServer | None = None
     server_thread: threading.Thread | None = None
@@ -208,9 +264,8 @@ async def main() -> int:
     agent_reconnecting = asyncio.Event()
     agent_reconnected = asyncio.Event()
     microphone_publication_ids: set[str] = set()
-    microphone_stream_tasks: set[asyncio.Task[None]] = set()
-    microphone_signal_frame_count = 0
     browser_controls: list[dict[str, object]] = []
+    vad_model = DeterministicVadModel()
     try:
         await wait_port(livekit_port, livekit)
         agent_token = (
@@ -247,31 +302,45 @@ async def main() -> int:
         )
         event_sink = RecordingEventSink(room, browser_identity)
         failures: list[tuple[str, str]] = []
-        session = RealtimeSession(
+        controller = LiveKitRoomController.__new__(LiveKitRoomController)
+        controller.room = room
+        controller.session_id = session_id
+        controller.browser_identity = browser_identity
+        controller.audio_sink = audio_sink
+        controller.trace = None
+        controller._audio_task = None
+        controller._microphone_resume_task = None
+        controller._microphone_track = None
+        controller._microphone_publication_id = None
+        controller._microphone_generation = 0
+        controller._microphone_muted = False
+        controller._capture_invalidated = False
+        controller._vad_model = vad_model
+        controller._browser_join_task = None
+        controller._runner_start_task = None
+        controller._control_queue = asyncio.Queue(maxsize=32)
+        controller._control_task = None
+        controller._close_retry_task = None
+        controller._close_lock = asyncio.Lock()
+        controller._closed = False
+        controller._cleanup_complete = True
+        controller._close_notified = True
+        controller._transport_failed = False
+        controller._room_disconnected = False
+        controller._browser_ready = False
+        session = ControllerRecordingSession(
             session_id=session_id,
             runner=DeterministicRunner(),
             event_sink=event_sink,
             audio_sink=audio_sink,
             failure_handler=lambda stage, code: failures.append((stage, code)),
+            reconnect_reset_handler=controller._invalidate_microphone_for_reconnect,
+            browser_controls=browser_controls,
         )
+        controller.session = session
+        controller._register_handlers()
         await audio_sink.start()
         persistent_publication_id = audio_sink.current_publication_id()
-
-        async def count_microphone_frames(track) -> None:
-            nonlocal microphone_signal_frame_count
-            stream = rtc.AudioStream.from_track(
-                track=track,
-                capacity=20,
-                sample_rate=16_000,
-                num_channels=1,
-                frame_size_ms=20,
-            )
-            try:
-                async for event in stream:
-                    if any(event.frame.data):
-                        microphone_signal_frame_count += 1
-            finally:
-                await stream.aclose()
 
         @room.on("track_subscribed")
         def track_subscribed(track, publication, participant) -> None:
@@ -281,9 +350,6 @@ async def main() -> int:
                 and publication.source == rtc.TrackSource.SOURCE_MICROPHONE
             ):
                 microphone_publication_ids.add(publication.sid)
-                task = asyncio.create_task(count_microphone_frames(track))
-                microphone_stream_tasks.add(task)
-                task.add_done_callback(microphone_stream_tasks.discard)
                 microphone_subscribed.set()
 
         @room.on("track_muted")
@@ -310,17 +376,6 @@ async def main() -> int:
         def reconnected() -> None:
             agent_reconnected.set()
 
-        @room.on("data_received")
-        def data_received(packet) -> None:
-            if (
-                packet.participant is not None
-                and packet.participant.identity == browser_identity
-                and packet.topic == CLIENT_CONTROL_TOPIC
-                and 0 < len(packet.data) <= MAX_CONTROL_BYTES
-            ):
-                browser_controls.append(json.loads(bytes(packet.data)))
-                asyncio.create_task(session.handle_client_control(bytes(packet.data)))
-
         capability = {
             "session_id": session_id,
             "stream_epoch": 1,
@@ -341,7 +396,7 @@ async def main() -> int:
         options.set_preference("media.navigator.streams.fake", True)
         options.set_preference("media.navigator.permission.disabled", True)
         options.set_preference("media.autoplay.default", 0)
-        download_root = CACHE / "firefox-downloads"
+        download_root = EVIDENCE_ROOT / "firefox-downloads"
         download_root.mkdir(parents=True, exist_ok=True)
         for old in download_root.glob("voice-agent-diagnostic-*.jsonl"):
             old.unlink()
@@ -356,10 +411,9 @@ async def main() -> int:
         connect = driver.find_element("xpath", "//button[contains(., 'Подключить микрофон')]")
         await asyncio.to_thread(connect.click)
         await asyncio.wait_for(microphone_subscribed.wait(), 15)
-        await session.ready()
         await wait_for(
-            lambda: microphone_signal_frame_count >= 3,
-            "official LiveKit subscriber received no browser microphone signal frames",
+            lambda: len(session.started_utterances) == 1,
+            "official LiveKit microphone track did not reach the controller VAD boundary",
         )
 
         def microphone_publications():
@@ -378,6 +432,7 @@ async def main() -> int:
                 f"expected one browser microphone publication, got {len(initial_publications)}"
             )
         browser_microphone_publication_id = initial_publications[0].sid
+        stale_candidate_turn = session.started_utterances[0]
         microphone_events_before_off = len(event_sink.events)
         microphone_toggle = driver.find_element(
             "xpath", "//button[contains(., 'Микрофон: включён')]"
@@ -388,13 +443,17 @@ async def main() -> int:
             lambda: "Микрофон: выключен" in driver.find_element("tag name", "body").text,
             "React microphone control did not report effective muted state",
         )
-        await asyncio.sleep(0.3)
-        muted_frame_count = microphone_signal_frame_count
+        await wait_for(
+            lambda: session.abandoned_utterances == [stale_candidate_turn],
+            "controller did not discard the pre-mute VAD candidate",
+        )
+        await asyncio.sleep(0.2)
+        muted_infer_calls = vad_model.infer_calls
         await asyncio.sleep(0.5)
-        if microphone_signal_frame_count != muted_frame_count:
-            raise AssertionError("browser microphone signal continued after track_muted")
-        if len(event_sink.events) != microphone_events_before_off:
-            raise AssertionError("microphone off invented a server user turn")
+        if vad_model.infer_calls != muted_infer_calls:
+            raise AssertionError("browser microphone frames continued through VAD after track_muted")
+        if session.finished_utterances or len(event_sink.events) != microphone_events_before_off:
+            raise AssertionError("microphone off completed or published the stale user turn")
         muted_publications = microphone_publications()
         if (
             len(muted_publications) != 1
@@ -410,9 +469,20 @@ async def main() -> int:
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
         await wait_for(
-            lambda: microphone_signal_frame_count > muted_frame_count,
-            "browser microphone signal did not resume after track_unmuted",
+            lambda: len(session.started_utterances) == 2,
+            "fresh unmuted microphone frames did not reach a new VAD generation",
         )
+        vad_model.speech = False
+        await wait_for(
+            lambda: len(session.finished_utterances) == 1,
+            "fresh post-unmute speech did not produce its intended turn",
+        )
+        resumed_turn = session.finished_utterances[0]
+        resumed_context = session._active
+        assert resumed_context is not None and resumed_context.task is not None
+        await asyncio.wait_for(resumed_context.task, 15)
+        if resumed_turn == stale_candidate_turn:
+            raise AssertionError("post-unmute speech reused the stale VAD candidate")
         resumed_publications = microphone_publications()
         if (
             len(resumed_publications) != 1
@@ -427,8 +497,12 @@ async def main() -> int:
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_muted.wait(), 15)
-        await asyncio.sleep(0.3)
-        reconnect_muted_frame_count = microphone_signal_frame_count
+        await asyncio.sleep(0.2)
+        reconnect_muted_infer_calls = vad_model.infer_calls
+        reconnect_vad_counts = (
+            len(session.started_utterances),
+            len(session.finished_utterances),
+        )
         livekit.send_signal(signal.SIGSTOP)
         try:
             await asyncio.wait_for(agent_reconnecting.wait(), 30)
@@ -438,13 +512,18 @@ async def main() -> int:
         await asyncio.sleep(0.5)
         reconnect_publications = microphone_publications()
         if (
-            microphone_signal_frame_count != reconnect_muted_frame_count
+            vad_model.infer_calls != reconnect_muted_infer_calls
             or len(reconnect_publications) != 1
             or reconnect_publications[0].sid != browser_microphone_publication_id
             or not reconnect_publications[0].muted
             or "Микрофон: выключен" not in driver.find_element("tag name", "body").text
         ):
             raise AssertionError("transient LiveKit reconnect did not preserve microphone off")
+        if reconnect_vad_counts != (
+            len(session.started_utterances),
+            len(session.finished_utterances),
+        ):
+            raise AssertionError("muted reconnect invented a microphone turn")
         if microphone_publication_ids != {browser_microphone_publication_id}:
             raise AssertionError("microphone toggle or reconnect rotated the browser publication")
 
@@ -455,7 +534,7 @@ async def main() -> int:
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
         await wait_for(
-            lambda: microphone_signal_frame_count > reconnect_muted_frame_count,
+            lambda: vad_model.infer_calls > reconnect_muted_infer_calls,
             "browser microphone did not cleanly resume after muted reconnect",
         )
 
@@ -559,6 +638,9 @@ async def main() -> int:
             "browser_microphone_publication_id": browser_microphone_publication_id,
             "browser_microphone_publication_count": len(reconnect_publications),
             "microphone_frames_stopped_while_muted": True,
+            "stale_vad_candidate_discarded": session.abandoned_utterances == [stale_candidate_turn],
+            "fresh_vad_turn_after_unmute": resumed_turn,
+            "resident_vad_reset_count": vad_model.reset_calls,
             "microphone_off_preserved_across_reconnect": True,
             "browser_storage": storage_state,
             "downloaded_diagnostic": str(diagnostic_path),
@@ -569,6 +651,20 @@ async def main() -> int:
         print(f"Result: {result_path}")
         print("Evidence: fake inference data, publication lifecycle, and downloadable normalized error; audibility not claimed")
     finally:
+        controller_tasks: list[asyncio.Task[None]] = []
+        if controller is not None:
+            controller._closed = True
+            controller._microphone_generation += 1
+            for task in (
+                controller._microphone_resume_task,
+                controller._audio_task,
+                controller._control_task,
+            ):
+                if task is not None and not task.done():
+                    task.cancel()
+                    controller_tasks.append(task)
+        if controller_tasks:
+            await asyncio.gather(*controller_tasks, return_exceptions=True)
         if driver is not None:
             await asyncio.to_thread(driver.quit)
         if session is not None:
@@ -576,10 +672,6 @@ async def main() -> int:
                 await session.disconnect(notify_client=False)
             except Exception:
                 pass
-        for task in tuple(microphone_stream_tasks):
-            task.cancel()
-        if microphone_stream_tasks:
-            await asyncio.gather(*microphone_stream_tasks, return_exceptions=True)
         if audio_sink is not None:
             try:
                 await audio_sink.close()
