@@ -1,0 +1,211 @@
+{
+  "schema_version": "voice-agent.parakeet-stt-evaluation.v1",
+  "corpus": {
+    "dataset": "istupakov/russian_librispeech",
+    "revision": "a519c986bb3342cc8136d3d14e5ad8a4f1e1a2bd",
+    "split": "test",
+    "license": "CC-BY-4.0 dataset card; upstream OpenSLR SLR96 states public domain in the USA",
+    "origin": "Russian LibriSpeech derived from public-domain LibriVox audiobooks",
+    "attribution": "OpenSLR SLR96 Russian LibriSpeech and Hugging Face conversion by istupakov"
+  },
+  "selection": "Twenty-four row indexes were chosen by evenly spacing endpoints 0 through 1351 before any candidate output was viewed. This prevents result-driven sample selection and covers seven source-reader path prefixes.",
+  "scoring": {
+    "metric": "word-error-rate",
+    "normalization": "Unicode lowercase, Russian ё mapped to е, all characters except Cyrillic а-я and digits mapped to spaces, whitespace collapsed, then word tokenization.",
+    "aggregation": "Micro-average Levenshtein word errors divided by total reference words over all 24 fixed samples; no cherry-picking or per-speaker exclusion."
+  },
+  "samples": [
+    {
+      "id": "stt-01",
+      "row_index": 0,
+      "duration_seconds": 11.35,
+      "filename": "ruls-test-0000.wav",
+      "bytes": 363244,
+      "sha256": "8f3c840638f5ec0ea3f63fe157d49484c301846371f14bdb903427c366a16058"
+    },
+    {
+      "id": "stt-02",
+      "row_index": 59,
+      "duration_seconds": 7.61,
+      "filename": "ruls-test-0059.wav",
+      "bytes": 243564,
+      "sha256": "91099653caeb9cb5fcbc83e325544e9e63a019e18132e10a16c0b69dab056565"
+    },
+    {
+      "id": "stt-03",
+      "row_index": 117,
+      "duration_seconds": 6.92,
+      "filename": "ruls-test-0117.wav",
+      "bytes": 221484,
+      "sha256": "0cce3a741781c52fc1a004bb66fb5ae84ce3afe4aa50521327919d21d9c3b418"
+    },
+    {
+      "id": "stt-04",
+      "row_index": 176,
+      "duration_seconds": 9.64,
+      "filename": "ruls-test-0176.wav",
+      "bytes": 308524,
+      "sha256": "1d98ae98c2ff0d5304fe8cc79d83b52ddf115c38b43b4b4af83ae5e72cf87e24"
+    },
+    {
+      "id": "stt-05",
+      "row_index": 235,
+      "duration_seconds": 9.38,
+      "filename": "ruls-test-0235.wav",
+      "bytes": 300204,
+      "sha256": "d3f234f6b5b33053705792db5441db176b2f96532fc17ac7431c81de3e4c114e"
+    },
+    {
+      "id": "stt-06",
+      "row_index": 294,
+      "duration_seconds": 6.48,
+      "filename": "ruls-test-0294.wav",
+      "bytes": 207404,
+      "sha256": "35a3c8e8655278c321978ce2949ca4f2229c18049d10a1c98a9730dd6c5df17b"
+    },
+    {
+      "id": "stt-07",
+      "row_index": 352,
+      "duration_seconds": 9.64,
+      "filename": "ruls-test-0352.wav",
+      "bytes": 308524,
+      "sha256": "628e8628ec019f2ed0dfb3475eb014ba2958fadf81830f76dc61e7bb952be692"
+    },
+    {
+      "id": "stt-08",
+      "row_index": 411,
+      "duration_seconds": 8.55,
+      "filename": "ruls-test-0411.wav",
+      "bytes": 273644,
+      "sha256": "cfcab39984059cbeeb4db2b511186841b08e7b404e28119159d55650dd1e4903"
+    },
+    {
+      "id": "stt-09",
+      "row_index": 470,
+      "duration_seconds": 2.94,
+      "filename": "ruls-test-0470.wav",
+      "bytes": 94124,
+      "sha256": "bba231754509d778f34b99286bdde759dc8a8a9c351768ab1a12e7c5bde0494b"
+    },
+    {
+      "id": "stt-10",
+      "row_index": 529,
+      "duration_seconds": 4.58,
+      "filename": "ruls-test-0529.wav",
+      "bytes": 146604,
+      "sha256": "15b462ec18a17029525761ecb1733e5e83fa7aa425217211f0ed6bdfbc271cd2"
+    },
+    {
+      "id": "stt-11",
+      "row_index": 587,
+      "duration_seconds": 4.2,
+      "filename": "ruls-test-0587.wav",
+      "bytes": 134444,
+      "sha256": "1cfbb38569a94fa37e55a5e7d2dc0492a5d3d6f1e60373b004f22c31ba933926"
+    },
+    {
+      "id": "stt-12",
+      "row_index": 646,
+      "duration_seconds": 14.46,
+      "filename": "ruls-test-0646.wav",
+      "bytes": 462764,
+      "sha256": "a126e9c38615e8da4d742ab1d7907811cb36a3537c43324a83b9f5eefc0772a1"
+    },
+    {
+      "id": "stt-13",
+      "row_index": 705,
+      "duration_seconds": 8.76,
+      "filename": "ruls-test-0705.wav",
+      "bytes": 280364,
+      "sha256": "d33874b7516ca5d565d51818ca9d9fe711ccd3f1f3e12956e4b89148cf321954"
+    },
+    {
+      "id": "stt-14",
+      "row_index": 764,
+      "duration_seconds": 13.14,
+      "filename": "ruls-test-0764.wav",
+      "bytes": 420524,
+      "sha256": "8faa3c837c3a8d195a4cfffb9fffc9fb406d1ffb510f7b61e435444d46bb6908"
+    },
+    {
+      "id": "stt-15",
+      "row_index": 822,
+      "duration_seconds": 4.4,
+      "filename": "ruls-test-0822.wav",
+      "bytes": 140844,
+      "sha256": "e33e26ac4ddb0e130e60c9e13390a7b60ec1066e790bde83fbc3c7fbd8dfe585"
+    },
+    {
+      "id": "stt-16",
+      "row_index": 881,
+      "duration_seconds": 4.2,
+      "filename": "ruls-test-0881.wav",
+      "bytes": 134444,
+      "sha256": "9c51d630018e6f66396700605997bfeac938e6ccc524aa61a385052621fd4bbd"
+    },
+    {
+      "id": "stt-17",
+      "row_index": 940,
+      "duration_seconds": 4.44,
+      "filename": "ruls-test-0940.wav",
+      "bytes": 142124,
+      "sha256": "8390d30480499478172794d7a15380304998b6078e53a64d0b16683a023d9a33"
+    },
+    {
+      "id": "stt-18",
+      "row_index": 999,
+      "duration_seconds": 4.74,
+      "filename": "ruls-test-0999.wav",
+      "bytes": 151724,
+      "sha256": "5850bd7eed576530d4f89cf25a9d793f573e86546c3a9c0a67448ba10144121c"
+    },
+    {
+      "id": "stt-19",
+      "row_index": 1057,
+      "duration_seconds": 11.24,
+      "filename": "ruls-test-1057.wav",
+      "bytes": 359724,
+      "sha256": "d76ef36276094b9f51b0d32c9ba0044eccdac660e66938a9683bc176c48c5be6"
+    },
+    {
+      "id": "stt-20",
+      "row_index": 1116,
+      "duration_seconds": 3.8,
+      "filename": "ruls-test-1116.wav",
+      "bytes": 121644,
+      "sha256": "a28a37808100551a247ca65ea790bbb3268ba62b1d1d93259e883a086833270f"
+    },
+    {
+      "id": "stt-21",
+      "row_index": 1175,
+      "duration_seconds": 4.06,
+      "filename": "ruls-test-1175.wav",
+      "bytes": 129964,
+      "sha256": "474eb3c75423622e0ac441c8ffef4f28d1e5ffc890f4e6e255db39071940ef96"
+    },
+    {
+      "id": "stt-22",
+      "row_index": 1234,
+      "duration_seconds": 5.54,
+      "filename": "ruls-test-1234.wav",
+      "bytes": 177324,
+      "sha256": "63a4e74b53ce2fed4df0b9db5bdfbf271de8141743a71a283ad91a4e17f443aa"
+    },
+    {
+      "id": "stt-23",
+      "row_index": 1292,
+      "duration_seconds": 3.12,
+      "filename": "ruls-test-1292.wav",
+      "bytes": 99884,
+      "sha256": "3f0830b6bc5e22faa3aa6ac0ca86543e1841cb8d4940c4de4e10f56afa860ed4"
+    },
+    {
+      "id": "stt-24",
+      "row_index": 1351,
+      "duration_seconds": 5.71,
+      "filename": "ruls-test-1351.wav",
+      "bytes": 182764,
+      "sha256": "3d64a12448082723bf27b2acb5d0752b6d9901dcd852bb8a528c4ede18c34fc2"
+    }
+  ]
+}

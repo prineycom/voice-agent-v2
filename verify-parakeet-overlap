@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+LOCK=/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock
+PYTHON=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6/runtime/venv/bin/python
+[ -x "$PYTHON" ] || {
+  echo "Existing Slice 6 runtime is required" >&2
+  exit 2
+}
+command -v flock >/dev/null || {
+  echo "flock is required for the whole GPU process lifetime" >&2
+  exit 2
+}
+mkdir -p "$(dirname "$LOCK")"
+exec flock --exclusive --nonblock "$LOCK" \
+  env VOICE_AGENT_GPU_BAKEOFF_LOCK_HELD=1 PYTHONPATH="$ROOT/src:$ROOT" \
+  "$PYTHON" -B "$ROOT/scripts/verify_parakeet_overlap.py"

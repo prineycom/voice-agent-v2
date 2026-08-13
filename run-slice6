@@ -12,6 +12,11 @@ set -a
 # This file is explicit operator-owned server configuration and must remain untracked.
 . "$CONFIG"
 set +a
+if [ "${VOICE_AGENT_FORCE_PARAKEET_CANDIDATE:-0}" = 1 ]; then
+  VOICE_AGENT_STT_BACKEND=parakeet
+  export VOICE_AGENT_STT_BACKEND
+  unset VOICE_AGENT_FORCE_PARAKEET_CANDIDATE
+fi
 
 CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
 PYTHON=$CACHE/runtime/venv/bin/python

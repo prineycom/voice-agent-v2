@@ -1,0 +1,150 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CACHE=/home/priney/.cache/voice-agent-v2/experiments/parakeet-stt
+MODEL=$CACHE/model/parakeet-tdt-0.6b-v3.q8_0.gguf
+MODEL_URL='https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf?download=true'
+MODEL_SHA256=e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e
+MODEL_SIZE=713975456
+RUNTIME_REVISION=9bc876635af36df537d9bc6d3f57ad1b76e4f74a
+GGML_REVISION=c03b4e2bcece5134827881af90242086daf75be5
+SOURCE=$CACHE/sources/nemo-speech-cpp
+RUNTIME=$CACHE/runtime/nemo-speech-cpp-$RUNTIME_REVISION-cpu
+CMAKE_VERSION=4.4.2
+CMAKE_ARCHIVE=cmake-4.4.2-linux-x86_64.tar.gz
+CMAKE_SHA256=3ada9a3f5d8a85413579bdd0ea6aa8e8da86efdd6d15c91a1afa517f2021956c
+CMAKE_URL=https://github.com/Kitware/CMake/releases/download/v4.4.2/$CMAKE_ARCHIVE
+CMAKE_ROOT=$CACHE/tooling/cmake-4.4.2-linux-x86_64
+NINJA_ARCHIVE=$CACHE/tooling/ninja-linux-v1.13.2.zip
+NINJA_SHA256=5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6
+NINJA_URL=https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip
+SENTENCEPIECE_REVISION=17d7580d6407802f85855d2cc9190634e2c95624
+SENTENCEPIECE_SOURCE=$CACHE/sources/sentencepiece
+SENTENCEPIECE_BUILD=$CACHE/sources/sentencepiece-build
+SENTENCEPIECE=$CACHE/tooling/sentencepiece-$SENTENCEPIECE_REVISION
+
+[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
+  echo "Parakeet setup supports only the measured Linux x86_64 host" >&2
+  exit 2
+}
+[ "$(gcc -dumpfullversion)" = 16.1.1 ] || {
+  echo "Parakeet runtime artifact is pinned to the measured GCC 16.1.1 host" >&2
+  exit 2
+}
+command -v curl >/dev/null && command -v git >/dev/null \
+  && command -v sha256sum >/dev/null && command -v python3 >/dev/null || {
+  echo "curl, git, sha256sum, and Python 3 are required" >&2
+  exit 2
+}
+mkdir -p "$CACHE/model" "$CACHE/runtime" "$CACHE/sources" "$CACHE/tooling" "$CACHE/logs"
+
+if [ ! -x "$CMAKE_ROOT/bin/cmake" ]; then
+  curl --fail --location --retry 3 --continue-at - --proto '=https' --tlsv1.2 \
+    "$CMAKE_URL" -o "$CACHE/tooling/$CMAKE_ARCHIVE"
+  printf '%s  %s\n' "$CMAKE_SHA256" "$CACHE/tooling/$CMAKE_ARCHIVE" | sha256sum --check --status || {
+    echo "pinned CMake archive checksum mismatch" >&2
+    exit 2
+  }
+  tar -xzf "$CACHE/tooling/$CMAKE_ARCHIVE" -C "$CACHE/tooling"
+fi
+"$CMAKE_ROOT/bin/cmake" --version | grep -F "cmake version $CMAKE_VERSION" >/dev/null || {
+  echo "pinned CMake runtime mismatch" >&2
+  exit 2
+}
+
+if [ ! -x "$CACHE/tooling/ninja" ]; then
+  curl --fail --location --retry 3 --continue-at - --proto '=https' --tlsv1.2 \
+    "$NINJA_URL" -o "$NINJA_ARCHIVE"
+  printf '%s  %s\n' "$NINJA_SHA256" "$NINJA_ARCHIVE" | sha256sum --check --status || {
+    echo "pinned Ninja archive checksum mismatch" >&2
+    exit 2
+  }
+  python3 - "$NINJA_ARCHIVE" "$CACHE/tooling" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    archive.extract("ninja", sys.argv[2])
+PY
+  chmod 0755 "$CACHE/tooling/ninja"
+fi
+[ "$("$CACHE/tooling/ninja" --version)" = 1.13.2 ] || {
+  echo "pinned Ninja runtime mismatch" >&2
+  exit 2
+}
+export PATH="$CMAKE_ROOT/bin:$CACHE/tooling:$PATH"
+
+if [ ! -f "$MODEL" ]; then
+  curl --fail --location --retry 5 --continue-at - --proto '=https' --tlsv1.2 \
+    "$MODEL_URL" -o "$MODEL"
+fi
+[ "$(stat -c '%s' "$MODEL")" = "$MODEL_SIZE" ] \
+  && printf '%s  %s\n' "$MODEL_SHA256" "$MODEL" | sha256sum --check --status || {
+  echo "pinned Parakeet GGUF size/checksum mismatch" >&2
+  exit 2
+}
+
+if [ ! -d "$SOURCE/.git" ]; then
+  git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/NeMo-Speech.cpp.git "$SOURCE"
+fi
+git -C "$SOURCE" fetch --depth 1 origin "$RUNTIME_REVISION"
+git -C "$SOURCE" checkout --detach --force "$RUNTIME_REVISION"
+git -C "$SOURCE" submodule update --init --depth 1 ggml
+[ "$(git -C "$SOURCE" rev-parse HEAD)" = "$RUNTIME_REVISION" ] \
+  && [ "$(git -C "$SOURCE/ggml" rev-parse HEAD)" = "$GGML_REVISION" ] || {
+  echo "pinned NeMo-Speech.cpp source identity mismatch" >&2
+  exit 2
+}
+
+if [ ! -f "$SENTENCEPIECE/lib/libsentencepiece.a" ]; then
+  if [ ! -d "$SENTENCEPIECE_SOURCE/.git" ]; then
+    git clone --filter=blob:none --no-checkout https://github.com/google/sentencepiece.git "$SENTENCEPIECE_SOURCE"
+  fi
+  git -C "$SENTENCEPIECE_SOURCE" fetch --depth 1 origin "$SENTENCEPIECE_REVISION"
+  git -C "$SENTENCEPIECE_SOURCE" checkout --detach --force "$SENTENCEPIECE_REVISION"
+  rm -rf "$SENTENCEPIECE_BUILD" "$SENTENCEPIECE"
+  cmake -G Ninja -S "$SENTENCEPIECE_SOURCE" -B "$SENTENCEPIECE_BUILD" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    '-DCMAKE_CXX_FLAGS=-include cstdint' -DSPM_BUILD_TEST=OFF \
+    -DSPM_ENABLE_SHARED=OFF -DSPM_ENABLE_TCMALLOC=OFF
+  cmake --build "$SENTENCEPIECE_BUILD" --target sentencepiece-static -j 4
+  install -d "$SENTENCEPIECE/lib" "$SENTENCEPIECE/include" \
+    "$SENTENCEPIECE/share/licenses/sentencepiece"
+  install -m 0644 "$SENTENCEPIECE_BUILD/src/libsentencepiece.a" \
+    "$SENTENCEPIECE/lib/libsentencepiece.a"
+  install -m 0644 "$SENTENCEPIECE_SOURCE/src/sentencepiece_processor.h" \
+    "$SENTENCEPIECE/include/sentencepiece_processor.h"
+  install -m 0644 "$SENTENCEPIECE_SOURCE/LICENSE" \
+    "$SENTENCEPIECE/share/licenses/sentencepiece/LICENSE"
+fi
+
+if [ ! -x "$RUNTIME/bin/nemo-speech" ]; then
+  (cd "$SOURCE" && scripts/configure.sh cpu-asr \
+    -DSENTENCEPIECE_LIB="$SENTENCEPIECE/lib/libsentencepiece.a" \
+    -DSENTENCEPIECE_INCLUDE_DIR="$SENTENCEPIECE/include")
+  (cd "$SOURCE" && cmake --build --preset cpu-asr -j 6)
+  rm -rf "$RUNTIME"
+  cmake --install "$SOURCE/build/cpu-asr" --prefix "$RUNTIME"
+fi
+
+check_artifact() {
+  relative=$1 expected=$2
+  artifact=$RUNTIME/$relative
+  [ -f "$artifact" ] \
+    && printf '%s  %s\n' "$expected" "$artifact" | sha256sum --check --status || {
+    echo "pinned Parakeet runtime artifact mismatch: $relative" >&2
+    exit 2
+  }
+}
+check_artifact bin/nemo-speech b8a48d5452fe4cf98a7e111cb6c5b814b1a22b5293c4aad6af0013d1242759b2
+check_artifact lib/libggml-base.so.0.12.0 d1ba07aa27499f7bf5d85198415687da64cefadf57afb40f8647c5e5644f55a5
+check_artifact lib/libggml-cpu.so.0.12.0 ef06c5f3268627a6e5e655c3c46f7f8ba04eb0f3ac109f9b213ab6f571600b09
+check_artifact lib/libggml.so.0.12.0 a5c1a8de5f660e68c5d28c739d302a36192d282ef516ebcc4bc84371eea5a204
+check_artifact lib/libnemo_speech_asr.so 588b2ed54aa2f7146bbcaaaa816c370be03d61cb74785f96be456fb80747d018
+check_artifact lib/libnemo_speech_asr_c.so.1 60e18393f020760b545e99d6f146a61d754b65676a740519272765f6c71a74d4
+
+PYTHONPATH="$ROOT/src:$ROOT" python3 - <<'PY'
+from voice_agent_v2.parakeet_stt import verify_parakeet_artifacts
+verify_parakeet_artifacts()
+PY
+printf '%s\n' "Pinned local Parakeet STT assets ready: $CACHE"
+printf '%s\n' "Whisper remains the default; Parakeet requires VOICE_AGENT_STT_BACKEND=parakeet."

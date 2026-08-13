@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SLICE6_PYTHON=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6/runtime/venv/bin/python
+[ -x "$SLICE6_PYTHON" ] || {
+  echo "Existing Slice 6 runtime is required for the exact repository VAD path" >&2
+  exit 2
+}
+"$ROOT/setup-parakeet-stt"
+python3 "$ROOT/scripts/acquire_parakeet_fixtures.py"
+PYTHONPATH="$ROOT/src:$ROOT" "$SLICE6_PYTHON" -B -m unittest tests.test_parakeet_stt
+VOICE_AGENT_VERIFY_PARAKEET=1 PYTHONPATH="$ROOT/src:$ROOT" \
+  "$SLICE6_PYTHON" -B -m unittest \
+  tests.test_parakeet_stt.ParakeetContractTests.test_real_model_warmup_and_public_russian_fixture_are_resident
+PYTHONPATH="$ROOT/src:$ROOT" "$SLICE6_PYTHON" -B "$ROOT/scripts/verify_parakeet_stt.py"
+printf '%s\n' 'Parakeet STT real public-corpus and lifecycle verification: PASS'
+printf '%s\n' 'Physical Russian microphone recognition: REQUIRED, not claimed'

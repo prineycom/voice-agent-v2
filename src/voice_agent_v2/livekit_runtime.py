@@ -16,7 +16,6 @@ from livekit import api, rtc
 from .audio import OUTPUT_MEDIA_MAX_BYTES
 from .diagnostics import PrivacySafeTrace, TraceIdentity
 from .local_lfm import LocalLFMProvider
-from .local_stt import WhisperSTT
 from .local_tts import Qwen3TTS
 from .real_turn import RealTurnController
 from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
@@ -29,6 +28,7 @@ from .realtime import (
     RealtimeSession,
 )
 from .slice6_config import Slice6Settings
+from .stt_backend import create_stt_backend
 from .tracer import CancellationToken, TraceResult
 
 AUDIO_FRAME_MS = 20
@@ -47,8 +47,7 @@ class LiveTurnRunner:
     """Reuse the cumulative real controller and warm every resident adapter."""
 
     def __init__(self, settings: Slice6Settings) -> None:
-        self.stt = WhisperSTT()
-        del settings
+        self.stt = create_stt_backend(settings.stt_backend)
         self.llm = LocalLFMProvider()
         self.tts = Qwen3TTS()
         self.controller = RealTurnController(self.stt, self.llm, self.tts)

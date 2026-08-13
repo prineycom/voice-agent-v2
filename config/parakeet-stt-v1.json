@@ -1,0 +1,50 @@
+{
+  "schema_version": "voice-agent.parakeet-stt.v1",
+  "backend_name": "parakeet",
+  "model": {
+    "repository": "nvidia/parakeet-tdt-0.6b-v3",
+    "revision": "541d1f99c6b0c3cd0b11a95167540bb8edefd82b",
+    "filename": "parakeet-tdt-0.6b-v3.q8_0.gguf",
+    "bytes": 713975456,
+    "sha256": "e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e",
+    "quantization": "Q8_0",
+    "license": "CC-BY-4.0",
+    "language": "ru",
+    "input": "16 kHz mono PCM",
+    "full_utterance_only": true
+  },
+  "runtime": {
+    "repository": "NVIDIA/NeMo-Speech.cpp",
+    "revision": "9bc876635af36df537d9bc6d3f57ad1b76e4f74a",
+    "ggml_revision": "c03b4e2bcece5134827881af90242086daf75be5",
+    "version": "1.0.0",
+    "backend": "cpu",
+    "reason": "The one authorized pinned-SDK Vulkan retry reached a further SentencePiece build dependency, so the mandated fallback was the CPU build. The CPU C ABI is stable, local, resident, and preserves the 1.5 GiB VRAM reserve; native NeMo/PyTorch was rejected as the heavier practical path.",
+    "network_at_runtime": false,
+    "automatic_fallback": false,
+    "artifacts": [
+      {"path": "bin/nemo-speech", "sha256": "b8a48d5452fe4cf98a7e111cb6c5b814b1a22b5293c4aad6af0013d1242759b2"},
+      {"path": "lib/libggml-base.so.0.12.0", "sha256": "d1ba07aa27499f7bf5d85198415687da64cefadf57afb40f8647c5e5644f55a5"},
+      {"path": "lib/libggml-cpu.so.0.12.0", "sha256": "ef06c5f3268627a6e5e655c3c46f7f8ba04eb0f3ac109f9b213ab6f571600b09"},
+      {"path": "lib/libggml.so.0.12.0", "sha256": "a5c1a8de5f660e68c5d28c739d302a36192d282ef516ebcc4bc84371eea5a204"},
+      {"path": "lib/libnemo_speech_asr.so", "sha256": "588b2ed54aa2f7146bbcaaaa816c370be03d61cb74785f96be456fb80747d018"},
+      {"path": "lib/libnemo_speech_asr_c.so.1", "sha256": "60e18393f020760b545e99d6f146a61d754b65676a740519272765f6c71a74d4"}
+    ]
+  },
+  "build": {
+    "cmake_version": "4.4.2",
+    "cmake_archive_sha256": "3ada9a3f5d8a85413579bdd0ea6aa8e8da86efdd6d15c91a1afa517f2021956c",
+    "ninja_version": "1.13.2",
+    "ninja_archive_sha256": "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6",
+    "sentencepiece_revision": "17d7580d6407802f85855d2cc9190634e2c95624",
+    "compiler": "GCC 16.1.1",
+    "preset": "cpu-asr"
+  },
+  "cache_root": "/home/priney/.cache/voice-agent-v2/experiments/parakeet-stt",
+  "selection": {
+    "default_backend": "whisper",
+    "explicit_environment": "VOICE_AGENT_STT_BACKEND=parakeet",
+    "rollback_environment": "unset VOICE_AGENT_STT_BACKEND",
+    "manual_physical_acceptance": "required"
+  }
+}

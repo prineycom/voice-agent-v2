@@ -89,6 +89,7 @@ class Slice6Settings:
     livekit_public_url: str
     app_public_url: str
     web_dist: Path
+    stt_backend: str = "whisper"
     room_token_ttl_seconds: int = 300
     browser_join_timeout_seconds: int = 30
     max_sessions: int = 1
@@ -129,6 +130,11 @@ class Slice6Settings:
             raise Slice6ConfigurationError(
                 "LiteLLM configuration is forbidden in the local-LFM Slice 6 runtime"
             )
+        stt_backend = values.get("VOICE_AGENT_STT_BACKEND", "whisper")
+        if stt_backend not in {"whisper", "parakeet"}:
+            raise Slice6ConfigurationError(
+                "VOICE_AGENT_STT_BACKEND must be exactly whisper or parakeet"
+            )
         root = (project_root or Path(__file__).resolve().parents[2]).resolve()
         web_dist = Path(values.get("SLICE6_WEB_DIST", str(root / "web" / "dist"))).resolve()
         return cls(
@@ -138,4 +144,5 @@ class Slice6Settings:
             livekit_public_url=public_url,
             app_public_url=app_public_url,
             web_dist=web_dist,
+            stt_backend=stt_backend,
         )
