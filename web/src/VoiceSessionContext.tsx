@@ -17,6 +17,7 @@ interface VoiceSessionValue {
   connect(): Promise<void>
   disconnect(): Promise<void>
   resumeAudio(): Promise<void>
+  toggleMicrophone(): Promise<void>
   downloadDiagnostics(): void
 }
 
@@ -47,6 +48,9 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
       onControl: (event) => dispatch({ type: 'control', event }),
       onDrop: () => dispatch({ type: 'drop' }),
       onAudioBlocked: (blocked) => dispatch({ type: 'audio-blocked', blocked }),
+      onMicrophoneState: (enabled, transitioning, error) => {
+        dispatch({ type: 'microphone', enabled, transitioning, error })
+      },
     })
     clientRef.current = client
     try {
@@ -78,6 +82,10 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const toggleMicrophone = useCallback(async () => {
+    await clientRef.current?.toggleMicrophone()
+  }, [])
+
   useEffect(() => () => {
     void clientRef.current?.stop()
     clientRef.current = null
@@ -89,8 +97,9 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     connect,
     disconnect,
     resumeAudio,
+    toggleMicrophone,
     downloadDiagnostics,
-  }), [state, connect, disconnect, resumeAudio, downloadDiagnostics])
+  }), [state, connect, disconnect, resumeAudio, toggleMicrophone, downloadDiagnostics])
 
   return <VoiceSessionContext.Provider value={value}>{children}</VoiceSessionContext.Provider>
 }

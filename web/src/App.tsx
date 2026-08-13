@@ -92,14 +92,52 @@ function ConversationHistory() {
   )
 }
 
+export function MicrophoneControl({
+  enabled,
+  transitioning,
+  onToggle,
+}: {
+  enabled: boolean
+  transitioning: boolean
+  onToggle(): void
+}) {
+  return (
+    <button
+      type="button"
+      className={`microphone-toggle ${enabled ? 'microphone-on' : 'microphone-off'}`}
+      aria-pressed={enabled}
+      aria-busy={transitioning}
+      onClick={onToggle}
+    >
+      Микрофон: {enabled ? 'включён' : 'выключен'}
+      {transitioning ? '…' : ''}
+    </button>
+  )
+}
+
 function Controls() {
-  const { state, audioContainerRef, connect, disconnect, resumeAudio, downloadDiagnostics } = useVoiceSession()
+  const {
+    state,
+    audioContainerRef,
+    connect,
+    disconnect,
+    resumeAudio,
+    toggleMicrophone,
+    downloadDiagnostics,
+  } = useVoiceSession()
   const active = ['connecting', 'ready', 'reconnecting'].includes(state.connection)
   return (
     <section className="controls" aria-label="Управление голосовой сессией">
       <button type="button" className="primary" onClick={() => void connect()} disabled={active}>
         Подключить микрофон
       </button>
+      {active && state.microphoneAvailable && (
+        <MicrophoneControl
+          enabled={state.microphoneEnabled}
+          transitioning={state.microphoneTransitioning}
+          onToggle={() => void toggleMicrophone()}
+        />
+      )}
       <button type="button" onClick={() => void disconnect()} disabled={!active}>
         Отключиться
       </button>
@@ -111,6 +149,9 @@ function Controls() {
       <button type="button" onClick={downloadDiagnostics}>
         Скачать диагностику
       </button>
+      {active && state.microphoneAvailable && state.microphoneError && (
+        <p className="microphone-error" role="alert">{state.microphoneError}</p>
+      )}
       <div ref={audioContainerRef} className="audio-mount" aria-hidden="true" />
     </section>
   )

@@ -420,11 +420,18 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         events = MemoryEvents()
         audio = MemoryAudio()
         runner = ReconnectRunner()
+        input_resets = 0
+
+        async def reset_input() -> None:
+            nonlocal input_resets
+            input_resets += 1
+
         session = RealtimeSession(
             session_id="session-test",
             runner=runner,
             event_sink=events,
             audio_sink=audio,
+            reconnect_reset_handler=reset_input,
         )
         previous = realtime_module.TurnContext(
             turn_id="turn-00000001",
@@ -443,6 +450,7 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await asyncio.wait_for(session.handle_client_control(request), 0.5))
         self.assertEqual(runner.resets, 1)
         self.assertEqual(runner.cancellations, 1)
+        self.assertEqual(input_resets, 1)
         self.assertEqual(session.stream_epoch, 2)
         self.assertEqual(audio.cleared, ["turn-00000001"])
         self.assertEqual(
@@ -455,6 +463,7 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runner.resets, 1)
         self.assertEqual(runner.cancellations, 1)
+        self.assertEqual(input_resets, 1)
         self.assertEqual(session.stream_epoch, 2)
         self.assertEqual(audio.cleared, ["turn-00000001"])
         self.assertEqual(

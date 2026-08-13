@@ -389,8 +389,12 @@ class LiveKitRoomController:
                 turn_id=str(fields.get("turn_id", "session")),
                 stream_epoch=self.session.stream_epoch if hasattr(self, "session") else 1,
             ),
+            reconnect_reset_handler=self._invalidate_microphone_for_reconnect,
         )
         self._audio_task: asyncio.Task[None] | None = None
+        self._microphone_track = None
+        self._microphone_generation = 0
+        self._capture_invalidated = False
         self._browser_join_task: asyncio.Task[None] | None = None
         self._runner_start_task: asyncio.Task[None] | None = None
         self._control_queue: asyncio.Queue[bytes] = asyncio.Queue(
@@ -514,11 +518,10 @@ class LiveKitRoomController:
                 if self._browser_join_task is not None:
                     self._browser_join_task.cancel()
                 asyncio.create_task(self.session.ready())
-            if self._audio_task is not None and not self._audio_task.done():
-                self._audio_task.cancel()
-            self._audio_task = asyncio.create_task(
-                self._consume_microphone(track), name=f"microphone-{self.session_id}"
-            )
+            self._microphone_track = track
+            if self._capture_invalidated:
+                return
+            self._start_microphone_consumer(track)
 
         @self.room.on("data_received")
         def data_received(packet) -> None:
@@ -547,6 +550,7 @@ class LiveKitRoomController:
             payload = await self._control_queue.get()
             try:
                 accepted = await self.session.handle_client_control(payload)
+                self._resume_microphone_after_reconnect()
                 trace = getattr(self, "trace", None)
                 if trace is not None:
                     trace.emit(
@@ -569,7 +573,38 @@ class LiveKitRoomController:
             finally:
                 self._control_queue.task_done()
 
-    async def _consume_microphone(self, track) -> None:
+    def _start_microphone_consumer(self, track) -> None:
+        self._microphone_generation += 1
+        generation = self._microphone_generation
+        if self._audio_task is not None and not self._audio_task.done():
+            self._audio_task.cancel()
+        self._audio_task = asyncio.create_task(
+            self._consume_microphone(track, generation),
+            name=f"microphone-{self.session_id}-{generation}",
+        )
+
+    async def _invalidate_microphone_for_reconnect(self) -> None:
+        self._capture_invalidated = True
+        self._microphone_generation += 1
+        task = self._audio_task
+        self._audio_task = None
+        if task is None or task is asyncio.current_task() or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _resume_microphone_after_reconnect(self) -> None:
+        if not self._capture_invalidated:
+            return
+        self._capture_invalidated = False
+        if self._closed or self._microphone_track is None:
+            return
+        self._start_microphone_consumer(self._microphone_track)
+
+    async def _consume_microphone(self, track, generation: int) -> None:
         trace = getattr(self, "trace", None)
         terminal_silence_ms = 0
         audio_clock_samples = 0
@@ -635,23 +670,29 @@ class LiveKitRoomController:
                     stream_epoch=getattr(self.session, "stream_epoch", 1),
                 )
         finally:
+            current_generation = (
+                generation == self._microphone_generation
+                and not self._capture_invalidated
+                and not self._closed
+            )
             try:
-                for decision in endpoint.flush():
-                    signal, payload = decision.kind, decision.payload
-                    if signal == "utterance" and payload is not None:
-                        try:
-                            await self.session.finish_utterance(payload)
-                        except (RuntimeError, ValueError):
-                            pass
-                    elif signal == "speech_discarded":
-                        await self.session.discard_utterance()
+                if current_generation:
+                    for decision in endpoint.flush():
+                        signal, payload = decision.kind, decision.payload
+                        if signal == "utterance" and payload is not None:
+                            try:
+                                await self.session.finish_utterance(payload)
+                            except (RuntimeError, ValueError):
+                                pass
+                        elif signal == "speech_discarded":
+                            await self.session.discard_utterance()
             finally:
                 try:
                     await stream.aclose()
                 except Exception:
                     failure_code = "microphone_stream_failed"
                 if (
-                    not self._closed
+                    current_generation
                     and self._audio_task is asyncio.current_task()
                 ):
                     await self.session.fail("input", failure_code)

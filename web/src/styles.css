@@ -49,7 +49,11 @@ h2, h3, p { margin-top: 0; }
 button { border: 1px solid #34405d; border-radius: 12px; background: #161d2d; color: #eef2ff; padding: 11px 16px; cursor: pointer; }
 button:hover:not(:disabled) { border-color: #668cff; }
 button.primary { border-color: #5277e7; background: #5277e7; }
+button.microphone-toggle { min-width: 190px; font-weight: 700; }
+button.microphone-on { border-color: #49d79c; background: #123b31; color: #b8f7dc; }
+button.microphone-off { border-color: #ff8290; background: #3b1820; color: #ffc0c7; }
 button:disabled { opacity: .45; cursor: not-allowed; }
+.microphone-error { flex-basis: 100%; margin: 2px 0 0; color: #ff9ba5; line-height: 1.4; }
 .audio-mount { width: 0; height: 0; overflow: hidden; }
 footer { margin-top: 28px; color: #6f7b95; font-size: .8rem; }
 

@@ -81,6 +81,7 @@ function callbacks(): VoiceClientCallbacks {
     onControl: vi.fn(),
     onDrop: vi.fn(),
     onAudioBlocked: vi.fn(),
+    onMicrophoneState: vi.fn(),
     onDiagnostic: vi.fn(),
   }
 }
@@ -115,7 +116,12 @@ beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(capabilityResponse()))
-  livekit.createLocalAudioTrack.mockResolvedValue({ stop: vi.fn() })
+  livekit.createLocalAudioTrack.mockResolvedValue({
+    isMuted: false,
+    mute: vi.fn().mockResolvedValue(undefined),
+    unmute: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn(),
+  })
   vi.spyOn(AudioPlaybackBoundary.prototype, 'setTrack').mockImplementation(() => undefined)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'reset').mockImplementation(() => undefined)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'suspend').mockImplementation(() => undefined)
@@ -345,5 +351,106 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     expect(room.localParticipant.publishData).not.toHaveBeenCalled()
     expect(AudioPlaybackBoundary.prototype.reset).not.toHaveBeenCalled()
     expect(observed.onConnection).not.toHaveBeenCalledWith('reconnecting')
+  })
+
+  it('mutes and unmutes the existing published microphone without control messages', async () => {
+    const track = {
+      isMuted: false,
+      mute: vi.fn(async function (this: { isMuted: boolean }) { this.isMuted = true }),
+      unmute: vi.fn(async function (this: { isMuted: boolean }) { this.isMuted = false }),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(true, false)
+    await client.setMicrophoneEnabled(false)
+    expect(track.mute).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false, undefined)
+
+    await client.setMicrophoneEnabled(true)
+    expect(track.unmute).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(true, false, undefined)
+    expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1)
+    expect(room.localParticipant.publishData).not.toHaveBeenCalled()
+  })
+
+  it('coalesces rapid microphone toggles to the final requested state', async () => {
+    let releaseMute: (() => void) | undefined
+    const muteBlocked = new Promise<void>((resolve) => { releaseMute = resolve })
+    const track = {
+      isMuted: false,
+      mute: vi.fn(async function (this: { isMuted: boolean }) {
+        await muteBlocked
+        this.isMuted = true
+      }),
+      unmute: vi.fn(async function (this: { isMuted: boolean }) { this.isMuted = false }),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+
+    const off = client.toggleMicrophone()
+    await vi.waitFor(() => expect(track.mute).toHaveBeenCalledTimes(1))
+    const on = client.toggleMicrophone()
+    releaseMute?.()
+    await Promise.all([off, on])
+
+    expect(track.unmute).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(true, false, undefined)
+    expect(livekit.rooms[0].localParticipant.publishTrack).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves muted capture across a transient reconnect', async () => {
+    const track = {
+      isMuted: false,
+      mute: vi.fn(async function (this: { isMuted: boolean }) { this.isMuted = true }),
+      unmute: vi.fn(async function (this: { isMuted: boolean }) { this.isMuted = false }),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    await client.setMicrophoneEnabled(false)
+
+    room.emit('reconnecting')
+    room.emit('reconnected')
+    emitControl(room, 'session.reconnected', 2, { state: 'ready' }, false, 2)
+    emitControl(room, 'session.ready', 3, { state: 'ready' }, false, 2)
+
+    expect(track.isMuted).toBe(true)
+    expect(track.unmute).not.toHaveBeenCalled()
+    expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false, undefined)
+  })
+
+  it('retains effective microphone truth and reports a bounded transition failure', async () => {
+    const track = {
+      isMuted: false,
+      mute: vi.fn().mockRejectedValue(new Error('device transition failed')),
+      unmute: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+
+    await client.setMicrophoneEnabled(false)
+
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(
+      true,
+      false,
+      'Не удалось выключить микрофон. Повторите попытку.',
+    )
+    expect(livekit.rooms[0].localParticipant.publishData).not.toHaveBeenCalled()
   })
 })

@@ -85,6 +85,10 @@ export interface VoiceState {
   error: string | null
   droppedEvents: number
   audioBlocked: boolean
+  microphoneAvailable: boolean
+  microphoneEnabled: boolean
+  microphoneTransitioning: boolean
+  microphoneError: string | null
 }
 
 export const initialVoiceState: VoiceState = {
@@ -102,6 +106,10 @@ export const initialVoiceState: VoiceState = {
   error: null,
   droppedEvents: 0,
   audioBlocked: false,
+  microphoneAvailable: false,
+  microphoneEnabled: false,
+  microphoneTransitioning: false,
+  microphoneError: null,
 }
 
 export type VoiceAction =
@@ -110,6 +118,7 @@ export type VoiceAction =
   | { type: 'control'; event: ControlEvent }
   | { type: 'drop' }
   | { type: 'audio-blocked'; blocked: boolean }
+  | { type: 'microphone'; enabled: boolean; transitioning: boolean; error?: string }
   | { type: 'reset' }
 
 function ownObject(value: unknown): value is Record<string, unknown> {
@@ -285,6 +294,15 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   if (action.type === 'reset') return initialVoiceState
   if (action.type === 'drop') return drop(state)
   if (action.type === 'audio-blocked') return { ...state, audioBlocked: action.blocked }
+  if (action.type === 'microphone') {
+    return {
+      ...state,
+      microphoneAvailable: true,
+      microphoneEnabled: action.enabled,
+      microphoneTransitioning: action.transitioning,
+      microphoneError: action.error ?? null,
+    }
+  }
   if (action.type === 'session-created') {
     return {
       ...initialVoiceState,

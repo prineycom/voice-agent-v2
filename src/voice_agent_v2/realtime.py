@@ -12,7 +12,7 @@ import math
 import sys
 import threading
 import time
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 
 from .audio import OUTPUT_MEDIA_MAX_BYTES
 from .contracts import StageFailure, valid_correlation_id
@@ -225,6 +225,7 @@ class RealtimeSession:
         audio_sink: AudioSink,
         failure_handler: Callable[[str, str], None] | None = None,
         trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
+        reconnect_reset_handler: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if not valid_correlation_id(session_id):
             raise ValueError("invalid realtime session ID")
@@ -234,6 +235,7 @@ class RealtimeSession:
         self.audio_sink = audio_sink
         self.failure_handler = failure_handler
         self.trace_observer = trace_observer
+        self.reconnect_reset_handler = reconnect_reset_handler
         self.stream_epoch = 1
         self._event_sequence = 0
         self._turn_sequence = 0
@@ -1056,17 +1058,27 @@ class RealtimeSession:
                 self._client_sequence = sequence
                 if self._closed:
                     return False
+            reset_error: str | None = None
+            if self.reconnect_reset_handler is not None:
+                try:
+                    await self.reconnect_reset_handler()
+                except Exception:
+                    reset_error = "reconnect_input_reset_failed"
+            async with self._lock:
+                if self._closed:
+                    return False
                 context = self._active
                 interrupted_turn_id = self.active_turn_id
                 if context is not None and not context.terminal:
-                    cleanup, reset_error, _publication_id = await self._interrupt_locked(
+                    cleanup, media_reset_error, _publication_id = await self._interrupt_locked(
                         "client_reconnected", notify_client=False
                     )
                 else:
                     cleanup = None
-                    reset_error, _publication_id = await self._clear_audio(
+                    media_reset_error, _publication_id = await self._clear_audio(
                         context.turn_id if context is not None else SESSION_TURN_ID
                     )
+                reset_error = reset_error or media_reset_error
             if cleanup is not None:
                 reset_error = reset_error or await self._await_cleanup_barrier(
                     CANCELLATION_CLEANUP_BOUND_MS

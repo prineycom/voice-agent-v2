@@ -42,6 +42,7 @@ export interface VoiceClientCallbacks {
   onControl(event: ControlEvent): void
   onDrop(): void
   onAudioBlocked(blocked: boolean): void
+  onMicrophoneState(enabled: boolean, transitioning: boolean, error?: string): void
   onDiagnostic?(record: VoiceDiagnosticRecord): void
 }
 
@@ -65,6 +66,9 @@ export class VoiceClient {
   } | null = null
   private activeRemoteTrack: RemoteAudioTrack | null = null
   private streamEpoch = 0
+  private microphoneEnabled = false
+  private microphoneRequested = true
+  private microphoneTransition: Promise<void> | null = null
   private readonly diagnostics: VoiceDiagnosticRecord[] = []
 
   constructor(
@@ -124,6 +128,9 @@ export class VoiceClient {
         red: true,
       })
       await this.ensureRoomStarting(room, microphone)
+      this.microphoneEnabled = !microphone.isMuted
+      this.microphoneRequested = this.microphoneEnabled
+      this.callbacks.onMicrophoneState(this.microphoneEnabled, false)
     } catch (error) {
       this.recordDiagnostic(
         startupStage,
@@ -153,6 +160,24 @@ export class VoiceClient {
     if (this.room === null) return
     await this.room.startAudio()
     await this.playback.resume()
+  }
+
+  async setMicrophoneEnabled(enabled: boolean): Promise<void> {
+    if (this.microphone === null || this.stopping) return
+    this.microphoneRequested = enabled
+    this.callbacks.onMicrophoneState(this.microphoneEnabled, true)
+    if (this.microphoneTransition !== null) return this.microphoneTransition
+    const transition = this.runMicrophoneTransitions()
+    this.microphoneTransition = transition
+    try {
+      await transition
+    } finally {
+      if (this.microphoneTransition === transition) this.microphoneTransition = null
+    }
+  }
+
+  async toggleMicrophone(): Promise<void> {
+    return this.setMicrophoneEnabled(!this.microphoneRequested)
   }
 
   resetPlayback(): void {
@@ -188,8 +213,10 @@ export class VoiceClient {
     const microphone = this.microphone
     if (microphone !== null) {
       try {
-        microphone.stop()
         if (this.microphone === microphone) this.microphone = null
+        microphone.stop()
+        this.microphoneEnabled = false
+        this.microphoneRequested = true
       } catch (error) {
         errors.push(error)
       }
@@ -224,6 +251,60 @@ export class VoiceClient {
 
   private ensureStarting(): void {
     if (this.stopping) throw new Error('voice session start was cancelled')
+  }
+
+  private async runMicrophoneTransitions(): Promise<void> {
+    let transitionError: string | undefined
+    while (
+      !this.stopping
+      && this.microphone !== null
+      && this.microphoneRequested !== this.microphoneEnabled
+    ) {
+      const microphone = this.microphone
+      const target = this.microphoneRequested
+      let failure: unknown
+      try {
+        if (target) await microphone.unmute()
+        else await microphone.mute()
+      } catch (error) {
+        failure = error
+      }
+      if (this.stopping || this.microphone !== microphone) return
+      this.microphoneEnabled = !microphone.isMuted
+      if (failure !== undefined) {
+        if (this.microphoneRequested !== target) {
+          this.callbacks.onMicrophoneState(
+            this.microphoneEnabled,
+            this.microphoneRequested !== this.microphoneEnabled,
+          )
+          continue
+        }
+        this.microphoneRequested = this.microphoneEnabled
+        transitionError = target
+          ? 'Не удалось включить микрофон. Проверьте доступ к устройству и повторите.'
+          : 'Не удалось выключить микрофон. Повторите попытку.'
+        this.recordDiagnostic(
+          'microphone', 'transition_failed', undefined, 'microphone_transition_failed', failure,
+        )
+        break
+      }
+      if (this.microphoneEnabled !== target) {
+        if (this.microphoneRequested === this.microphoneEnabled) continue
+        this.microphoneRequested = this.microphoneEnabled
+        transitionError = 'Состояние микрофона не изменилось. Проверьте устройство и повторите.'
+        this.recordDiagnostic(
+          'microphone', 'transition_failed', undefined, 'microphone_state_unchanged', target,
+        )
+        break
+      }
+      this.callbacks.onMicrophoneState(
+        this.microphoneEnabled,
+        this.microphoneRequested !== this.microphoneEnabled,
+      )
+    }
+    if (!this.stopping && this.microphone !== null) {
+      this.callbacks.onMicrophoneState(this.microphoneEnabled, false, transitionError)
+    }
   }
 
   private async ensureRoomStarting(room: Room, microphone?: LocalAudioTrack): Promise<void> {

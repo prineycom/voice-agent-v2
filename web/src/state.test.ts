@@ -160,6 +160,24 @@ describe('checkpoint A browser state', () => {
     expect(gate.accept(event(3, 'turn.thinking'))).toBe(false)
   })
 
+  it('keeps effective microphone truth and bounded transition errors in UI state', () => {
+    let state = configured()
+    state = voiceReducer(state, {
+      type: 'microphone', enabled: true, transitioning: false,
+    })
+    state = voiceReducer(state, {
+      type: 'microphone',
+      enabled: true,
+      transitioning: false,
+      error: 'Не удалось выключить микрофон. Повторите попытку.',
+    })
+
+    expect(state.microphoneAvailable).toBe(true)
+    expect(state.microphoneEnabled).toBe(true)
+    expect(state.microphoneTransitioning).toBe(false)
+    expect(state.microphoneError).toBe('Не удалось выключить микрофон. Повторите попытку.')
+  })
+
   it('preserves history while a reconnect interrupts the active item', () => {
     let state = apply([
       event(1, 'session.ready'),
@@ -168,6 +186,9 @@ describe('checkpoint A browser state', () => {
       event(9, 'stt.final', 'turn-00000002', { transcript: 'Новый вопрос.' }),
       event(10, 'turn.thinking', 'turn-00000002'),
     ])
+    state = voiceReducer(state, {
+      type: 'microphone', enabled: false, transitioning: false,
+    })
     state = voiceReducer(state, { type: 'connection', connection: 'reconnecting' })
     state = voiceReducer(state, {
       type: 'control',
@@ -182,5 +203,6 @@ describe('checkpoint A browser state', () => {
     expect(state.history).toHaveLength(2)
     expect(state.history[0].outcome).toBe('completed')
     expect(state.history[1].outcome).toBe('interrupted')
+    expect(state.microphoneEnabled).toBe(false)
   })
 })
