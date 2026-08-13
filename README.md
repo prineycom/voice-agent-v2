@@ -55,6 +55,19 @@ Run the complete deterministic/installed-runtime/browser check with:
 
 The command also runs a real headless Firefox against official local LiveKit with deterministic fake inference; this proves data-channel/track/publication/error lifecycle only. It reports the physical-browser gates as required rather than claiming them. `./verify-local-lfm` is a separate real-model host check and remains outside dependency-free CI. Privacy-safe server JSONL diagnostics are retained outside Git under `~/.cache/voice-agent-v2/slice-6/diagnostics/`; the browser exposes **Скачать диагностику** for a redacted lifecycle timeline. Neither contains audio or conversation text. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
 
+### Optional Parakeet STT experiment
+
+Whisper remains the default. This branch can explicitly run the pinned local Parakeet challenger without changing the default deployment:
+
+```sh
+./setup-parakeet-stt
+./verify-parakeet-stt
+./verify-parakeet-overlap
+./run-parakeet-candidate
+```
+
+Automated public-corpus evidence is a **no-go for replacing Whisper**: Parakeet Q8 scored 12.384% clean WER versus Whisper's 11.455%, and its clean final p95 was 1551 ms versus 294 ms. The isolated full resident stack preserved 4483 MiB VRAM reserve. No physical Russian recognition is claimed. See [`docs/experiments/parakeet-stt.md`](docs/experiments/parakeet-stt.md) for selection, evidence bounds, rollback, and manual-test procedure.
+
 ## Final Slice 5 human acceptance
 
 Pasha ran this canonical-host command against PR 14 head `f1a3de997296e6dac87203cf5c2e157945a865b8` on 2026-08-11:
