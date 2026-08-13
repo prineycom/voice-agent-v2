@@ -4,6 +4,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 CACHE=/home/priney/.cache/voice-agent-v2/experiments/parakeet-stt
 MODEL=$CACHE/model/parakeet-tdt-0.6b-v3.q8_0.gguf
+MODEL_PART=$MODEL.partial
 MODEL_URL='https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf?download=true'
 MODEL_SHA256=e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e
 MODEL_SIZE=713975456
@@ -73,15 +74,27 @@ fi
 }
 export PATH="$CMAKE_ROOT/bin:$CACHE/tooling:$PATH"
 
-if [ ! -f "$MODEL" ]; then
-  curl --fail --location --retry 5 --continue-at - --proto '=https' --tlsv1.2 \
-    "$MODEL_URL" -o "$MODEL"
-fi
-[ "$(stat -c '%s' "$MODEL")" = "$MODEL_SIZE" ] \
-  && printf '%s  %s\n' "$MODEL_SHA256" "$MODEL" | sha256sum --check --status || {
-  echo "pinned Parakeet GGUF size/checksum mismatch" >&2
-  exit 2
+model_valid() {
+  [ -f "$1" ] \
+    && [ "$(stat -c '%s' "$1")" = "$MODEL_SIZE" ] \
+    && printf '%s  %s\n' "$MODEL_SHA256" "$1" | sha256sum --check --status
 }
+if model_valid "$MODEL"; then
+  rm -f "$MODEL_PART"
+else
+  rm -f "$MODEL"
+  if [ -f "$MODEL_PART" ] && [ "$(stat -c '%s' "$MODEL_PART")" -gt "$MODEL_SIZE" ]; then
+    rm -f "$MODEL_PART"
+  fi
+  curl --fail --location --retry 5 --continue-at - --proto '=https' --tlsv1.2 \
+    "$MODEL_URL" -o "$MODEL_PART"
+  model_valid "$MODEL_PART" || {
+    rm -f "$MODEL_PART"
+    echo "pinned Parakeet GGUF size/checksum mismatch" >&2
+    exit 2
+  }
+  mv -f "$MODEL_PART" "$MODEL"
+fi
 
 if [ ! -d "$SOURCE/.git" ]; then
   git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/NeMo-Speech.cpp.git "$SOURCE"

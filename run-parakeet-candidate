@@ -2,13 +2,6 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-LOCK=/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock
-command -v flock >/dev/null || {
-  echo "flock is required to serialize the candidate GPU lifetime" >&2
-  exit 2
-}
 "$ROOT/setup-parakeet-stt"
-mkdir -p "$(dirname "$LOCK")"
 printf '%s\n' 'Starting isolated Parakeet candidate; Whisper remains the default in ./run-slice6.'
-exec flock --exclusive --nonblock "$LOCK" \
-  env VOICE_AGENT_FORCE_PARAKEET_CANDIDATE=1 "$ROOT/run-slice6"
+exec env VOICE_AGENT_FORCE_PARAKEET_CANDIDATE=1 "$ROOT/run-slice6"

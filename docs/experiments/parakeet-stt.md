@@ -25,7 +25,7 @@ NeMo-Speech.cpp's stable C ABI was selected. The one authorized Vulkan build ret
 ./run-parakeet-candidate
 ```
 
-`./run-parakeet-candidate` acquires `/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock` for the complete product/GPU process lifetime. It selects Parakeet only for that foreground run. It never changes the default deployment.
+`./run-parakeet-candidate` selects Parakeet only for that foreground run. The shared `./run-slice6` launch boundary acquires `/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock` for the complete product/GPU process lifetime whenever Parakeet is selected, including direct configuration. The candidate never changes the default deployment.
 
 Direct configuration is closed:
 

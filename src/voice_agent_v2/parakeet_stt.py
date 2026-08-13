@@ -277,6 +277,17 @@ class ParakeetSTT:
             "resident": True,
         }
 
+    def _ensure_warmed(
+        self, cancellation: CancellationToken | None = None
+    ) -> None:
+        metadata = self.ready_metadata
+        if self._process is None or metadata is None or metadata.get("warmed") is not True:
+            self.warmup(cancellation)
+        if self._process is None or self.ready_metadata is None:
+            raise StageFailure("stt", "selected_stt_unavailable")
+        if self.ready_metadata.get("warmed") is not True:
+            raise StageFailure("stt", "selected_stt_unavailable")
+
     def transcribe(
         self,
         *,
@@ -302,7 +313,7 @@ class ParakeetSTT:
         path = TEMP / f"{session_id}-{turn_id}-{time.monotonic_ns()}.wav"
         if cancellation is not None and cancellation.cancelled:
             raise StageFailure("stt", "selected_stt_cancelled")
-        self.start(cancellation)
+        self._ensure_warmed(cancellation)
         process = self._process
         if process is None:
             raise StageFailure("stt", "selected_stt_unavailable")

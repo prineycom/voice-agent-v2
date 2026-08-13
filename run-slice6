@@ -24,4 +24,14 @@ PYTHON=$CACHE/runtime/venv/bin/python
   echo "Slice 6 runtime is missing; run ./setup-slice6" >&2
   exit 2
 }
+if [ "${VOICE_AGENT_STT_BACKEND:-whisper}" = parakeet ]; then
+  LOCK=/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock
+  command -v flock >/dev/null || {
+    echo "flock is required to serialize the candidate GPU lifetime" >&2
+    exit 2
+  }
+  mkdir -p "$(dirname "$LOCK")"
+  exec flock --exclusive --nonblock "$LOCK" \
+    "$PYTHON" "$ROOT/scripts/run_slice6.py"
+fi
 exec "$PYTHON" "$ROOT/scripts/run_slice6.py"

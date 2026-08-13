@@ -259,29 +259,44 @@ def cancellation_probe(pcm: bytes) -> dict[str, object]:
     token.cancel()
     worker.join(1)
     latency_ms = (time.monotonic() - started) * 1_000
+    worker_stopped = not worker.is_alive()
     stopped = stt.process_id is None
-    stt.close()
-
-    recovered = ParakeetSTT()
-    recovered.start()
-    recovered.warmup()
     recovery_started = time.monotonic()
-    recovered.transcribe(
-        session_id="session-recovery", turn_id="turn-recovery",
-        pcm=pcm, audio_format=AudioFormat(),
-    )
+    recovery_pid = None
+    recovery_failure_code = None
+    recovery_warmed = False
+    if worker_stopped and stopped:
+        try:
+            stt.transcribe(
+                session_id="session-recovery", turn_id="turn-recovery",
+                pcm=pcm, audio_format=AudioFormat(),
+            )
+            recovery_pid = stt.process_id
+            recovery_warmed = bool(
+                stt.ready_metadata is not None
+                and stt.ready_metadata.get("warmed") is True
+            )
+        except StageFailure as error:
+            recovery_failure_code = error.code
     recovery_ms = (time.monotonic() - recovery_started) * 1_000
-    recovery_pid = recovered.process_id
-    recovered.close()
+    stt.close()
     return {
         "cancel_latency_ms": latency_ms,
         "failure_code": failures[0] if failures else None,
-        "worker_stopped": not worker.is_alive(),
+        "worker_stopped": worker_stopped,
         "cancelled_process_stopped": stopped,
         "original_process_id": original_pid,
         "recovery_process_id": recovery_pid,
         "recovery_final_latency_ms": recovery_ms,
-        "recovery_passed": recovery_pid is not None and recovery_pid != original_pid,
+        "recovery_failure_code": recovery_failure_code,
+        "recovery_warmed": recovery_warmed,
+        "same_adapter_instance": True,
+        "recovery_passed": (
+            recovery_pid is not None
+            and recovery_pid != original_pid
+            and recovery_warmed
+            and recovery_failure_code is None
+        ),
     }
 
 
@@ -415,8 +430,29 @@ def main() -> int:
         "attributable_vram_mib": attributable_vram,
         "cancellation_ms": cancellation["cancel_latency_ms"],
     }, indent=2))
-    if retained_temp_files or not result["runtime"]["resident_across_all_successful_turns"]:
-        raise AssertionError("Parakeet lifecycle/privacy gate failed")
+    required_failures = []
+    if retained_temp_files:
+        required_failures.append("temporary_audio_retained")
+    if not result["runtime"]["resident_across_all_successful_turns"]:
+        required_failures.append("residency_changed")
+    if not clean["one_resident_process"] or not repository["one_resident_process"]:
+        required_failures.append("turn_residency_changed")
+    if silence["exact_silence_nonempty"] or silence["near_silence_nonempty"]:
+        required_failures.append("silence_transcript")
+    if cancellation["cancel_latency_ms"] > 300:
+        required_failures.append("cancellation_unbounded")
+    if cancellation["failure_code"] != "selected_stt_cancelled":
+        required_failures.append("cancellation_outcome_invalid")
+    if not cancellation["worker_stopped"]:
+        required_failures.append("cancellation_worker_alive")
+    if not cancellation["cancelled_process_stopped"]:
+        required_failures.append("cancelled_process_alive")
+    if not cancellation["recovery_passed"]:
+        required_failures.append("recovery_failed")
+    if required_failures:
+        raise AssertionError(
+            "Parakeet required contract gate failed: " + ",".join(required_failures)
+        )
     return 0
 
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -17,7 +20,8 @@ from voice_agent_v2.tracer import CancellationToken
 
 
 class Child:
-    pid = 7301
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
 
     @staticmethod
     def poll():
@@ -25,11 +29,12 @@ class Child:
 
 
 class StubProcess:
-    def __init__(self) -> None:
-        self.process = Child()
+    def __init__(self, pid: int = 7301) -> None:
+        self.process = Child(pid)
         self.cancelled = threading.Event()
         self.last_path: Path | None = None
         self.closed = False
+        self.operations: list[str] = []
 
     def start(self, _timeout: float) -> dict[str, object]:
         return {
@@ -46,6 +51,7 @@ class StubProcess:
         }
 
     def request(self, value: dict[str, object], _timeout: float) -> dict[str, object]:
+        self.operations.append(str(value["operation"]))
         if value["operation"] == "warmup":
             return {
                 "event": "final", "request_id": value["request_id"],
@@ -74,7 +80,7 @@ class StubProcess:
 
 class BlockingProcess(StubProcess):
     def request(self, value: dict[str, object], _timeout: float) -> dict[str, object]:
-        del value
+        self.operations.append(str(value["operation"]))
         self.cancelled.wait(1)
         raise OSError("injected cancellation")
 
@@ -155,9 +161,10 @@ class ParakeetContractTests(unittest.TestCase):
         self.assertTrue(metadata["discarded"])
         self.assertEqual(stt.process_id, 7301)
 
-    def test_active_cancellation_is_bounded_and_destroys_only_that_residency(self) -> None:
+    def test_active_cancellation_recovers_same_adapter_with_warm_residency(self) -> None:
         stt = ParakeetSTT()
         process = BlockingProcess()
+        recovered = StubProcess(pid=7302)
         stt._process = process
         stt.ready_metadata = {"event": "ready", "warmed": True}
         token = CancellationToken()
@@ -189,6 +196,58 @@ class ParakeetContractTests(unittest.TestCase):
         self.assertEqual(failures[0].code, "selected_stt_cancelled")
         self.assertTrue(process.cancelled.is_set())
         self.assertIsNone(stt.process_id)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("voice_agent_v2.parakeet_stt.TEMP", Path(directory)),
+            patch("voice_agent_v2.parakeet_stt.verify_parakeet_artifacts", return_value={}),
+            patch("voice_agent_v2.parakeet_stt.AdapterProcess", return_value=recovered),
+        ):
+            transcript = stt.transcribe(
+                session_id="session-test-0001", turn_id="turn-test-0002",
+                pcm=b"\xe8\x03" * 1_600, audio_format=AudioFormat(),
+            )
+        self.assertEqual(transcript, "Публичный тест.")
+        self.assertEqual(recovered.operations, ["warmup", "transcribe"])
+        self.assertTrue(stt.ready_metadata["warmed"])
+        self.assertEqual(stt.process_id, 7302)
+
+    def test_parakeet_launch_requires_the_shared_lock_after_configuration(self) -> None:
+        lock_path = Path(
+            "/home/priney/.cache/voice-agent-v2/experiments/gpu-bakeoff.lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy2(Path(__file__).parents[1] / "run-slice6", root / "run-slice6")
+            cache = root / "cache"
+            python = cache / "voice-agent-v2/slice-6/runtime/venv/bin/python"
+            python.parent.mkdir(parents=True)
+            marker = root / "started"
+            python.write_text("#!/bin/sh\nprintf started > \"$MARKER\"\n", encoding="utf-8")
+            python.chmod(0o755)
+            (root / ".env.slice6").write_text(
+                "VOICE_AGENT_STT_BACKEND=parakeet\n", encoding="utf-8"
+            )
+            environment = {
+                **os.environ,
+                "HOME": str(root),
+                "XDG_CACHE_HOME": str(cache),
+                "MARKER": str(marker),
+            }
+            with lock_path.open("a+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                completed = subprocess.run(
+                    [str(root / "run-slice6")],
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                launched = marker.exists()
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(launched)
 
     @unittest.skipUnless(
         os.environ.get("VOICE_AGENT_VERIFY_PARAKEET") == "1",
