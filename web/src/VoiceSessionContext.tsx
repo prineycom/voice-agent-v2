@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import { initialVoiceState, voiceReducer, type VoiceState } from './state'
+import type { SpeechEnvelopeObservation } from './playback'
 import { VoiceClient } from './voiceClient'
 
 interface VoiceSessionValue {
@@ -18,6 +19,7 @@ interface VoiceSessionValue {
   disconnect(): Promise<void>
   resumeAudio(): Promise<void>
   toggleMicrophone(): Promise<void>
+  subscribeSpeechEnvelope(listener: (observation: SpeechEnvelopeObservation) => void): () => void
   downloadDiagnostics(): void
 }
 
@@ -27,6 +29,7 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(voiceReducer, initialVoiceState)
   const audioContainerRef = useRef<HTMLDivElement>(null)
   const clientRef = useRef<VoiceClient | null>(null)
+  const envelopeListenersRef = useRef(new Set<(observation: SpeechEnvelopeObservation) => void>())
 
   const disconnect = useCallback(async () => {
     const client = clientRef.current
@@ -48,6 +51,9 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
       onControl: (event) => dispatch({ type: 'control', event }),
       onDrop: () => dispatch({ type: 'drop' }),
       onAudioBlocked: (blocked) => dispatch({ type: 'audio-blocked', blocked }),
+      onSpeechEnvelope: (observation) => {
+        for (const listener of envelopeListenersRef.current) listener(observation)
+      },
       onMicrophoneState: (enabled, transitioning, error) => {
         dispatch({ type: 'microphone', enabled, transitioning, error })
       },
@@ -73,6 +79,13 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     clientRef.current?.downloadDiagnostics()
   }, [])
 
+  const subscribeSpeechEnvelope = useCallback((
+    listener: (observation: SpeechEnvelopeObservation) => void,
+  ) => {
+    envelopeListenersRef.current.add(listener)
+    return () => envelopeListenersRef.current.delete(listener)
+  }, [])
+
   const resumeAudio = useCallback(async () => {
     try {
       await clientRef.current?.resumeAudio()
@@ -89,6 +102,7 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => {
     void clientRef.current?.stop()
     clientRef.current = null
+    envelopeListenersRef.current.clear()
   }, [])
 
   const value = useMemo(() => ({
@@ -98,8 +112,12 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     disconnect,
     resumeAudio,
     toggleMicrophone,
+    subscribeSpeechEnvelope,
     downloadDiagnostics,
-  }), [state, connect, disconnect, resumeAudio, toggleMicrophone, downloadDiagnostics])
+  }), [
+    state, connect, disconnect, resumeAudio, toggleMicrophone,
+    subscribeSpeechEnvelope, downloadDiagnostics,
+  ])
 
   return <VoiceSessionContext.Provider value={value}>{children}</VoiceSessionContext.Provider>
 }

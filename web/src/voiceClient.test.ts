@@ -100,6 +100,7 @@ function callbacks(): VoiceClientCallbacks {
     onControl: vi.fn(),
     onDrop: vi.fn(),
     onAudioBlocked: vi.fn(),
+    onSpeechEnvelope: vi.fn(),
     onMicrophoneState: vi.fn(),
     onDiagnostic: vi.fn(),
   }
@@ -517,5 +518,6 @@ describe('VoiceClient checkpoint A+B protocol', () => {
       'Не удалось выключить микрофон. Повторите попытку.',
     )
     expect(livekit.rooms[0].localParticipant.publishData).not.toHaveBeenCalled()
+    expect(AudioPlaybackBoundary.prototype.suspend).not.toHaveBeenCalled()
   })
 })

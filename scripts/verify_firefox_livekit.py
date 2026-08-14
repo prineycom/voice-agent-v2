@@ -419,9 +419,16 @@ async def main() -> int:
         driver = webdriver.Firefox(options=options, service=service)
         await asyncio.to_thread(driver.set_window_size, 1440, 1000)
         await asyncio.to_thread(driver.get, f"http://127.0.0.1:{web_port}/")
-        connect = driver.find_element("xpath", "//button[contains(., 'Подключить микрофон')]")
-        await asyncio.to_thread(connect.click)
+        # Slice 7 starts the private session from its minimal startup overlay.
         await asyncio.wait_for(microphone_subscribed.wait(), 15)
+        await wait_for(
+            lambda: driver.find_elements("css selector", ".connection-overlay--ready"),
+            "Slice 7 startup overlay did not report READY",
+        )
+        await wait_for(
+            lambda: not driver.find_elements("css selector", ".connection-overlay"),
+            "Slice 7 READY startup overlay did not clear",
+        )
         await wait_for(
             lambda: len(session.started_utterances) == 1,
             "official LiveKit microphone track did not reach the controller VAD boundary",
@@ -446,12 +453,14 @@ async def main() -> int:
         stale_candidate_turn = session.started_utterances[0]
         microphone_events_before_off = len(event_sink.events)
         microphone_toggle = driver.find_element(
-            "xpath", "//button[contains(., 'Микрофон: включён')]"
+            "xpath", "//button[@aria-label='Mute microphone']"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_muted.wait(), 15)
         await wait_for(
-            lambda: "Микрофон: выключен" in driver.find_element("tag name", "body").text,
+            lambda: driver.find_element(
+                "xpath", "//button[@aria-label='Unmute microphone']"
+            ).get_attribute("aria-pressed") == "false",
             "React microphone control did not report effective muted state",
         )
         await wait_for(
@@ -475,7 +484,7 @@ async def main() -> int:
 
         microphone_unmuted.clear()
         microphone_toggle = driver.find_element(
-            "xpath", "//button[contains(., 'Микрофон: выключен')]"
+            "xpath", "//button[@aria-label='Unmute microphone']"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
@@ -504,7 +513,7 @@ async def main() -> int:
 
         microphone_muted.clear()
         microphone_toggle = driver.find_element(
-            "xpath", "//button[contains(., 'Микрофон: включён')]"
+            "xpath", "//button[@aria-label='Mute microphone']"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_muted.wait(), 15)
@@ -527,7 +536,9 @@ async def main() -> int:
             or len(reconnect_publications) != 1
             or reconnect_publications[0].sid != browser_microphone_publication_id
             or not reconnect_publications[0].muted
-            or "Микрофон: выключен" not in driver.find_element("tag name", "body").text
+            or driver.find_element(
+                "xpath", "//button[@aria-label='Unmute microphone']"
+            ).get_attribute("aria-pressed") != "false"
         ):
             raise AssertionError("transient LiveKit reconnect did not preserve microphone off")
         if reconnect_vad_counts != (
@@ -540,7 +551,7 @@ async def main() -> int:
 
         microphone_unmuted.clear()
         microphone_toggle = driver.find_element(
-            "xpath", "//button[contains(., 'Микрофон: выключен')]"
+            "xpath", "//button[@aria-label='Unmute microphone']"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
@@ -568,12 +579,16 @@ async def main() -> int:
         assert second_context is not None and second_context.task is not None
         await asyncio.wait_for(second_context.task, 15)
 
+        menu = driver.find_element("xpath", "//button[@aria-label='Open menu']")
+        await asyncio.to_thread(menu.click)
+        history = driver.find_element("xpath", "//button[contains(., 'HISTORY')]")
+        await asyncio.to_thread(history.click)
         await wait_for(
             lambda: (
                 "Видимый префикс перед ошибкой." in driver.find_element("tag name", "body").text
-                and "Ошибка" in driver.find_element("tag name", "body").text
+                and "FAILED" in driver.find_element("tag name", "body").text
             ),
-            "React app did not retain and label the deterministic failed answer",
+            "React history panel did not retain and label the deterministic failed answer",
         )
         body = await asyncio.to_thread(lambda: driver.find_element("tag name", "body").text)
         storage_state = await asyncio.to_thread(
@@ -585,11 +600,10 @@ async def main() -> int:
         for visible_text in (
             "Детерминированный видимый ответ.",
             "Видимый префикс перед ошибкой.",
-            "Завершено",
-            "Ошибка",
-            "Endpoint → текст",
-            "Endpoint → server PCM",
-            "Silero v5_5_ru · kseniya · native mono PCM16 48 kHz · private noncommercial · CC BY-NC-SA 4.0",
+            "COMPLETED",
+            "FAILED",
+            "USER",
+            "AGENT",
         ):
             if visible_text not in body:
                 raise AssertionError(f"React history omitted {visible_text!r}")
@@ -597,7 +611,21 @@ async def main() -> int:
             raise AssertionError("LiveKit publication rotated between turns")
         if any(control.get("type") != "client.reconnected" for control in browser_controls):
             raise AssertionError(f"browser sent unexpected microphone controls: {browser_controls}")
-        download = driver.find_element("xpath", "//button[contains(., 'Скачать диагностику')]")
+        menu = driver.find_element("xpath", "//button[@aria-label='Open menu']")
+        await asyncio.to_thread(menu.click)
+        status = driver.find_element("xpath", "//button[contains(., 'STATUS')]")
+        await asyncio.to_thread(status.click)
+        await wait_for(
+            lambda: "SILERO / kseniya / 48 KHZ" in driver.find_element("tag name", "body").text,
+            "React status system tab omitted the active TTS configuration",
+        )
+        timeline = driver.find_element("xpath", "//button[normalize-space()='TIMELINE']")
+        await asyncio.to_thread(timeline.click)
+        await wait_for(
+            lambda: "LLM FIRST TOKEN" in driver.find_element("tag name", "body").text,
+            "React status timeline tab did not render",
+        )
+        download = driver.find_element("xpath", "//button[contains(., 'DOWNLOAD DIAGNOSTICS')]")
         await asyncio.to_thread(download.click)
         await wait_for(
             lambda: any(download_root.glob("voice-agent-diagnostic-*.jsonl")),

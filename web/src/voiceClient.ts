@@ -6,7 +6,7 @@ import {
   type LocalAudioTrack,
   type RemoteAudioTrack,
 } from 'livekit-client'
-import { AudioPlaybackBoundary } from './playback'
+import { AudioPlaybackBoundary, type SpeechEnvelopeObservation } from './playback'
 import {
   CLIENT_CONTROL_TOPIC,
   CLIENT_CONTROL_VERSION,
@@ -42,6 +42,7 @@ export interface VoiceClientCallbacks {
   onControl(event: ControlEvent): void
   onDrop(): void
   onAudioBlocked(blocked: boolean): void
+  onSpeechEnvelope(observation: SpeechEnvelopeObservation): void
   onMicrophoneState(enabled: boolean, transitioning: boolean, error?: string): void
   onDiagnostic?(record: VoiceDiagnosticRecord): void
 }
@@ -82,7 +83,11 @@ export class VoiceClient {
     audioContainer: HTMLElement,
     private readonly callbacks: VoiceClientCallbacks,
   ) {
-    this.playback = new AudioPlaybackBoundary(audioContainer, callbacks.onAudioBlocked)
+    this.playback = new AudioPlaybackBoundary(
+      audioContainer,
+      callbacks.onAudioBlocked,
+      callbacks.onSpeechEnvelope,
+    )
   }
 
   async start(): Promise<void> {

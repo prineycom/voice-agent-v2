@@ -4,6 +4,24 @@ export interface AttachableAudioTrack {
   readonly mediaStreamTrack?: MediaStreamTrack
 }
 
+export interface SpeechEnvelopeObservation {
+  level: number
+  observedAtMs: number
+}
+
+/** Converts decoded signed-around-128 time-domain samples into a bounded RMS envelope. */
+export function speechEnvelopeFromTimeDomain(samples: Uint8Array): number {
+  if (samples.length === 0) return 0
+  let squared = 0
+  for (const sample of samples) {
+    const normalized = (sample - 128) / 128
+    squared += normalized * normalized
+  }
+  return Math.min(1, Math.sqrt(squared / samples.length) * 3.2)
+}
+
+const ENVELOPE_INTERVAL_MS = 33
+
 export class AudioPlaybackBoundary {
   private track: AttachableAudioTrack | null = null
   private element: HTMLMediaElement | null = null
@@ -11,10 +29,18 @@ export class AudioPlaybackBoundary {
   private attachmentGeneration = 0
   private publicationGeneration = 0
   private elementBlocked = false
+  private audioContext: AudioContext | null = null
+  private analyserSource: MediaStreamAudioSourceNode | null = null
+  private analyser: AnalyserNode | null = null
+  private silentAnalyserSink: GainNode | null = null
+  private analyserSamples: Uint8Array<ArrayBuffer> | null = null
+  private envelopeFrame: number | null = null
+  private lastEnvelopeAtMs = -Infinity
 
   constructor(
     private readonly container: HTMLElement,
     private readonly onBlocked: (blocked: boolean) => void,
+    private readonly onSpeechEnvelope: (observation: SpeechEnvelopeObservation) => void = () => undefined,
   ) {}
 
   setTrack(track: AttachableAudioTrack, publicationGeneration = this.publicationGeneration + 1): void {
@@ -36,6 +62,7 @@ export class AudioPlaybackBoundary {
     try {
       await element.play()
       this.elementBlocked = false
+      this.startEnvelopeObservation()
     } catch (error) {
       this.elementBlocked = true
       this.reportBlocked()
@@ -70,6 +97,7 @@ export class AudioPlaybackBoundary {
     }
     this.element = null
     this.elementBlocked = false
+    this.stopEnvelopeObservation()
     this.reportBlocked()
     if (errors.length === 0) {
       this.track = null
@@ -96,6 +124,7 @@ export class AudioPlaybackBoundary {
       () => {
         if (generation === this.attachmentGeneration) {
           this.elementBlocked = false
+          this.startEnvelopeObservation()
           this.reportBlocked()
         }
       },
@@ -114,6 +143,7 @@ export class AudioPlaybackBoundary {
 
   private detachElement(): void {
     this.attachmentGeneration += 1
+    this.stopEnvelopeObservation()
     const pending = this.pendingDetach
     const track = pending?.track ?? this.track
     const element = pending?.element ?? this.element
@@ -141,5 +171,72 @@ export class AudioPlaybackBoundary {
       this.pendingDetach = errors.length === 0 ? null : { track, element }
     }
     if (errors.length > 0) throw new AggregateError(errors, 'audio playback cleanup failed')
+  }
+
+  private startEnvelopeObservation(): void {
+    if (this.envelopeFrame !== null || this.track?.mediaStreamTrack === undefined) return
+    if (typeof AudioContext === 'undefined' || typeof MediaStream === 'undefined') return
+    try {
+      const context = new AudioContext()
+      const analyser = context.createAnalyser()
+      analyser.fftSize = 256
+      analyser.smoothingTimeConstant = 0.45
+      const source = context.createMediaStreamSource(new MediaStream([this.track.mediaStreamTrack]))
+      const silentSink = context.createGain()
+      silentSink.gain.value = 0
+      source.connect(analyser)
+      analyser.connect(silentSink)
+      silentSink.connect(context.destination)
+      this.audioContext = context
+      this.analyserSource = source
+      this.analyser = analyser
+      this.silentAnalyserSink = silentSink
+      this.analyserSamples = new Uint8Array(analyser.fftSize)
+      void context.resume().catch(() => undefined)
+      this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
+    } catch {
+      this.stopEnvelopeObservation()
+    }
+  }
+
+  private readonly observeSpeechEnvelope = (timeMs: number): void => {
+    const analyser = this.analyser
+    const samples = this.analyserSamples
+    if (analyser === null || samples === null || this.element === null || this.elementBlocked) {
+      this.envelopeFrame = null
+      return
+    }
+    if (timeMs - this.lastEnvelopeAtMs >= ENVELOPE_INTERVAL_MS) {
+      analyser.getByteTimeDomainData(samples)
+      this.lastEnvelopeAtMs = timeMs
+      this.onSpeechEnvelope({
+        level: speechEnvelopeFromTimeDomain(samples),
+        observedAtMs: timeMs,
+      })
+    }
+    this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
+  }
+
+  private stopEnvelopeObservation(): void {
+    if (this.envelopeFrame !== null) cancelAnimationFrame(this.envelopeFrame)
+    this.envelopeFrame = null
+    this.lastEnvelopeAtMs = -Infinity
+    try {
+      this.analyserSource?.disconnect()
+    } catch {}
+    try {
+      this.analyser?.disconnect()
+    } catch {}
+    try {
+      this.silentAnalyserSink?.disconnect()
+    } catch {}
+    this.analyserSource = null
+    this.analyser = null
+    this.silentAnalyserSink = null
+    this.analyserSamples = null
+    const context = this.audioContext
+    this.audioContext = null
+    if (context !== null) void context.close().catch(() => undefined)
+    this.onSpeechEnvelope({ level: 0, observedAtMs: performance.now() })
   }
 }
