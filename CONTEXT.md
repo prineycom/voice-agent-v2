@@ -22,6 +22,9 @@
 - **Speech envelope** — A bounded timing/amplitude signal derived from actual audio playout for deterministic speech-synchronous visual behavior.
 - **Tailnet** — The private network formed by devices that are members of the project's Tailscale network.
 - **Tracer** — The smallest end-to-end path that crosses the intended boundaries with deterministic substitutes and produces inspectable evidence.
+- **Output media generation** — A monotonically increasing session-local identity that binds one current turn/request to the persistent agent audio publication; the browser may attach only the matching generation.
+- **TTS segment** — A bounded plain-text synthesis unit derived from original visible LLM text without changing that visible/history text.
+- **TTS v2 adapter** — A model-neutral, request-correlated local synthesis boundary with explicit capabilities, audio format, lifecycle, ordered result chunks, invalidation, and one terminal outcome. The current composition contains only Silero/Kseniya.
 - **Turn correlation ID** — An opaque identifier used to associate all media, events, inference work, and observations belonging to one voice turn.
 - **Voice turn** — One user utterance and the resulting agent response, ending in completion, interruption, or failure.
 - **Utterance** — A bounded span of user speech treated as input to a voice turn.

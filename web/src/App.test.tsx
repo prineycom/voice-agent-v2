@@ -25,6 +25,7 @@ describe('Slice 6 React shell', () => {
     )
     expect(screen.getByRole('heading', { name: 'Приватный голосовой диалог' })).toBeTruthy()
     expect(screen.getByText('История появится после речи.')).toBeTruthy()
+    expect(screen.getByText('Микрофон остаётся mono 16 kHz; agent PCM идёт mono 48 kHz', { exact: false })).toBeTruthy()
     expect(screen.getByText('Метрики не подтверждают физическую слышимость.', { exact: false })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Подключить микрофон' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Микрофон:/ })).toBeNull()

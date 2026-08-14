@@ -33,6 +33,17 @@ export function historyUserText(item: TurnHistoryItem): string {
   return item.outcome === 'failed' ? 'Речь не распознана' : 'Распознаю речь…'
 }
 
+function VoiceBadge() {
+  const { state } = useVoiceSession()
+  const profile = state.ttsProfile
+  if (profile === null) return null
+  return (
+    <p className="voice-badge" role="status">
+      Silero v5_5_ru · kseniya · native mono PCM16 48 kHz · private noncommercial · CC BY-NC-SA 4.0
+    </p>
+  )
+}
+
 function ConnectionCard() {
   const { state } = useVoiceSession()
   return (
@@ -164,13 +175,14 @@ export default function App() {
         <p className="eyebrow">Voice Agent v2 · Slice 6</p>
         <h1>Приватный голосовой диалог</h1>
         <p className="lede">Говорите естественно. Начните говорить во время ответа, чтобы прервать его.</p>
+        <VoiceBadge />
       </header>
       <div className="layout">
         <ConnectionCard />
         <ConversationHistory />
       </div>
       <Controls />
-      <footer>Микрофон и server PCM идут через локальный LiveKit. Метрики не подтверждают физическую слышимость.</footer>
+      <footer>Микрофон остаётся mono 16 kHz; agent PCM идёт mono 48 kHz через локальный LiveKit. Метрики не подтверждают физическую слышимость. Silero-профиль разрешён только для приватной некоммерческой оценки до отдельной лицензии и юридической проверки.</footer>
     </main>
   )
 }

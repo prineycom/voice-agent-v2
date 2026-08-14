@@ -3,20 +3,31 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import threading
 import time
 import wave
 
 from .contracts import AudioFormat, STT_VERSION, StageFailure, valid_correlation_id
+from .v2_audio import INPUT_AUDIO_FORMAT
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 
 CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
 MODEL = CACHE / "artifacts" / "stt-whisper-large-v3-turbo"
 VENV = CACHE / "runtime" / "stt-tts-venv"
-TEMP = CACHE / "runtime" / "turn-temp"
-LOGS = CACHE / "raw" / "service-logs"
-EXPECTED_FORMAT = AudioFormat()
+_TASK_RUNTIME_ROOT = os.environ.get("VOICE_AGENT_TASK_RUNTIME_ROOT")
+TEMP = (
+    Path(_TASK_RUNTIME_ROOT) / "stt-temp"
+    if _TASK_RUNTIME_ROOT
+    else CACHE / "runtime" / "turn-temp"
+)
+LOGS = (
+    Path(_TASK_RUNTIME_ROOT) / "stt-logs"
+    if _TASK_RUNTIME_ROOT
+    else CACHE / "raw" / "service-logs"
+)
+EXPECTED_FORMAT = INPUT_AUDIO_FORMAT
 
 
 class TemporaryAudioFailure(StageFailure):
@@ -51,7 +62,8 @@ def _environment() -> dict[str, str]:
     packages = VENV / "lib" / "python3.14" / "site-packages"
     libraries = [packages / "nvidia" / name / "lib" for name in ("cublas", "cudnn", "cuda_nvrtc")]
     return {
-        "HOME": str(CACHE / "home"), "XDG_CACHE_HOME": str(CACHE / "xdg"),
+        "HOME": str(Path(_TASK_RUNTIME_ROOT) / "stt-home") if _TASK_RUNTIME_ROOT else str(CACHE / "home"),
+        "XDG_CACHE_HOME": str(Path(_TASK_RUNTIME_ROOT) / "stt-xdg") if _TASK_RUNTIME_ROOT else str(CACHE / "xdg"),
         "HF_HOME": str(CACHE / "huggingface"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),

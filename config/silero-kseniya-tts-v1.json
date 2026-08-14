@@ -1,0 +1,66 @@
+{
+  "schema_version": "voice-agent.silero-tts-runtime.v1",
+  "status": "private-local-noncommercial-evaluation-only",
+  "backend": "silero",
+  "model_identity": "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru",
+  "model": {
+    "repository": "snakers4/silero-models",
+    "revision": "d9355348e2781dc8fa25a135d1602c530afae24c",
+    "official_url": "https://models.silero.ai/models/tts/ru/v5_5_ru.pt",
+    "cache_root": "~/.cache/voice-agent-v2/experiments/silero-baya-tts",
+    "relative_path": "downloads/v5_5_ru.pt",
+    "size_bytes": 145420684,
+    "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437",
+    "speaker": "kseniya",
+    "native_sample_rates_hz": [8000, 24000, 48000]
+  },
+  "runtime": {
+    "state_root": "~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship",
+    "python": "CPython 3.12.13",
+    "python_relative_path": "venv/bin/python",
+    "python_executable_sha256": "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0acec7",
+    "torch": "2.8.0+cpu",
+    "torch_c_sha256": "5dc8a93ddc69041dbd3f796794e0c2b3f72b47e0dc24ae2b46d9e7d0dc78953b",
+    "libtorch_cpu_sha256": "629d28a5fb24e2c33df077e2d98d5da0c73d0b53e628bb826fd4ba36616b482b",
+    "worker_protocol": "voice-agent.silero-worker.v1",
+    "workers": 2,
+    "intraop_threads_per_worker": 2,
+    "interop_threads_per_worker": 1,
+    "complete_waveform": true,
+    "cooperative_cancel": false,
+    "capacity_wait_ms": 750,
+    "automatic_retry": false,
+    "automatic_fallback": false,
+    "download_allowed": false
+  },
+  "input_audio": {
+    "encoding": "pcm_s16le",
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "sample_width_bytes": 2
+  },
+  "output_audio": {
+    "encoding": "pcm_s16le",
+    "sample_rate_hz": 48000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "native": true
+  },
+  "text": {
+    "format": "plain",
+    "ssml": false,
+    "segmentation_version": "voice-agent.silero-ru-segmentation.v1",
+    "normalization_version": "voice-agent.silero-ru-shaping.v1",
+    "target_min_chars": 40,
+    "target_max_chars": 100,
+    "hard_max_chars": 240
+  },
+  "license": {
+    "spdx_expression": "CC-BY-NC-SA-4.0",
+    "name": "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International",
+    "url": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+    "attribution": "Silero Models by Silero Team / snakers4",
+    "commercial_use_authorized": false,
+    "legal_review_required_before_production_or_commercial_use": true
+  }
+}

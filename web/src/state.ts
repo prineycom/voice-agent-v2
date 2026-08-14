@@ -1,6 +1,6 @@
-export const CONTROL_VERSION = 'voice-agent.realtime-control.v1'
+export const CONTROL_VERSION = 'voice-agent.realtime-control.v2'
 export const CLIENT_CONTROL_VERSION = 'voice-agent.client-control.v1'
-export const CONTROL_TOPIC = 'voice-agent.control.v1'
+export const CONTROL_TOPIC = 'voice-agent.control.v2'
 export const CLIENT_CONTROL_TOPIC = 'voice-agent.client-control.v1'
 
 const MAX_CONTROL_BYTES = 65_536
@@ -15,6 +15,7 @@ export type ControlEventType =
   | 'session.reconnected'
   | 'session.degraded'
   | 'turn.listening'
+  | 'turn.media-ready'
   | 'stt.final'
   | 'turn.thinking'
   | 'llm.visible'
@@ -25,14 +26,15 @@ export type ControlEventType =
 
 const EVENT_TYPES = new Set<ControlEventType>([
   'session.ready', 'session.reconnected', 'session.degraded',
-  'turn.listening', 'stt.final', 'turn.thinking', 'llm.visible',
+  'turn.listening', 'turn.media-ready', 'stt.final', 'turn.thinking', 'llm.visible',
   'turn.speaking', 'turn.completed', 'turn.interrupted', 'turn.failed',
 ])
 const TERMINAL_TYPES = new Set<ControlEventType>([
   'turn.completed', 'turn.interrupted', 'turn.failed',
 ])
 const TURN_PREDECESSOR = new Map<ControlEventType, ControlEventType | ControlEventType[]>([
-  ['stt.final', 'turn.listening'],
+  ['turn.media-ready', 'turn.listening'],
+  ['stt.final', 'turn.media-ready'],
   ['turn.thinking', 'stt.final'],
   ['llm.visible', ['turn.thinking', 'llm.visible', 'turn.speaking']],
   ['turn.speaking', ['turn.thinking', 'llm.visible']],
@@ -44,10 +46,23 @@ export interface ControlEvent {
   session_id: string
   turn_id: string
   stream_epoch: number
+  turn_generation: number
+  request_id: string
+  media_generation: number
   sequence: number
   type: ControlEventType
   terminal: boolean
   payload: Record<string, unknown>
+}
+
+export interface TTSProfile {
+  profile: 'silero-kseniya'
+  backend: 'silero'
+  speaker: 'kseniya'
+  output_sample_rate_hz: 48000
+  native_sample_rate_hz: 48000
+  license: 'CC-BY-NC-SA-4.0'
+  private_noncommercial_only: boolean
 }
 
 export interface SessionCapability {
@@ -58,6 +73,7 @@ export interface SessionCapability {
   expires_in_seconds: number
   admission_timeout_ms: number
   control_version: typeof CONTROL_VERSION
+  tts_profile: TTSProfile
 }
 
 export interface TurnHistoryItem {
@@ -76,6 +92,9 @@ export interface VoiceState {
   streamEpoch: number
   lastSequence: number
   currentTurnId: string | null
+  currentTurnGeneration: number
+  currentRequestId: string | null
+  currentMediaGeneration: number
   currentTurnTerminal: boolean
   lastTurnEvent: ControlEventType | null
   phase: TurnPhase
@@ -89,6 +108,7 @@ export interface VoiceState {
   microphoneEnabled: boolean
   microphoneTransitioning: boolean
   microphoneError: string | null
+  ttsProfile: TTSProfile | null
 }
 
 export const initialVoiceState: VoiceState = {
@@ -97,6 +117,9 @@ export const initialVoiceState: VoiceState = {
   streamEpoch: 0,
   lastSequence: 0,
   currentTurnId: null,
+  currentTurnGeneration: 0,
+  currentRequestId: null,
+  currentMediaGeneration: 0,
   currentTurnTerminal: true,
   lastTurnEvent: null,
   phase: 'idle',
@@ -110,6 +133,7 @@ export const initialVoiceState: VoiceState = {
   microphoneEnabled: false,
   microphoneTransitioning: false,
   microphoneError: null,
+  ttsProfile: null,
 }
 
 export type VoiceAction =
@@ -154,7 +178,7 @@ export function parseControlEvent(payload: Uint8Array | string): ControlEvent | 
   }
   if (!ownObject(value)) return null
   const keys = Object.keys(value).sort()
-  const expected = ['payload', 'schema_version', 'sequence', 'session_id', 'stream_epoch', 'terminal', 'turn_id', 'type']
+  const expected = ['media_generation', 'payload', 'request_id', 'schema_version', 'sequence', 'session_id', 'stream_epoch', 'terminal', 'turn_generation', 'turn_id', 'type']
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
   const eventType = value.type
   if (
@@ -162,6 +186,9 @@ export function parseControlEvent(payload: Uint8Array | string): ControlEvent | 
     || typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id)
     || typeof value.turn_id !== 'string' || !CORRELATION_ID.test(value.turn_id)
     || !Number.isSafeInteger(value.stream_epoch) || (value.stream_epoch as number) < 1 || (value.stream_epoch as number) > MAX_SEQUENCE
+    || !Number.isSafeInteger(value.turn_generation) || (value.turn_generation as number) < 0 || (value.turn_generation as number) > MAX_SEQUENCE
+    || typeof value.request_id !== 'string' || !CORRELATION_ID.test(value.request_id)
+    || !Number.isSafeInteger(value.media_generation) || (value.media_generation as number) < 0 || (value.media_generation as number) > MAX_SEQUENCE
     || !Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1 || (value.sequence as number) > MAX_SEQUENCE
     || typeof eventType !== 'string' || !EVENT_TYPES.has(eventType as ControlEventType)
     || typeof value.terminal !== 'boolean' || value.terminal !== TERMINAL_TYPES.has(eventType as ControlEventType)
@@ -175,6 +202,9 @@ export class RealtimeControlGate {
   private lastSequence = 0
   private currentTurnId: string | null = null
   private currentTurnTerminal = true
+  private currentTurnGeneration = 0
+  private currentRequestId = 'session'
+  private currentMediaGeneration = 0
   private lastTurnEvent: ControlEventType | null = null
   private reconnecting = false
 
@@ -186,13 +216,22 @@ export class RealtimeControlGate {
     this.reconnecting = true
     this.currentTurnId = null
     this.currentTurnTerminal = true
+    this.currentTurnGeneration = 0
+    this.currentRequestId = 'session'
+    this.currentMediaGeneration = 0
     this.lastTurnEvent = null
   }
 
   accept(event: ControlEvent): boolean {
     if (event.session_id !== this.sessionId || event.sequence <= this.lastSequence) return false
     if (this.reconnecting && (event.type === 'session.reconnected' || event.type === 'session.degraded')) {
-      if (event.turn_id !== 'session' || event.stream_epoch !== this.streamEpoch + 1) return false
+      if (
+        event.turn_id !== 'session'
+        || event.stream_epoch !== this.streamEpoch + 1
+        || event.turn_generation !== 0
+        || event.request_id !== 'session'
+        || event.media_generation !== 0
+      ) return false
       this.streamEpoch = event.stream_epoch
       this.lastSequence = event.sequence
       this.reconnecting = false
@@ -200,18 +239,36 @@ export class RealtimeControlGate {
     }
     if (this.reconnecting || event.stream_epoch !== this.streamEpoch) return false
     if (event.type.startsWith('session.')) {
-      if (event.turn_id !== 'session') return false
+      if (
+        event.turn_id !== 'session'
+        || event.turn_generation !== 0
+        || event.request_id !== 'session'
+        || event.media_generation !== 0
+      ) return false
       this.lastSequence = event.sequence
       return true
     }
     if (event.type === 'turn.listening') {
-      if (!this.currentTurnTerminal || this.currentTurnId === event.turn_id) return false
+      if (
+        !this.currentTurnTerminal
+        || this.currentTurnId === event.turn_id
+        || event.turn_generation < 1
+        || event.request_id === 'session'
+        || event.media_generation < 1
+      ) return false
       this.currentTurnId = event.turn_id
+      this.currentTurnGeneration = event.turn_generation
+      this.currentRequestId = event.request_id
+      this.currentMediaGeneration = event.media_generation
       this.currentTurnTerminal = false
       this.lastTurnEvent = event.type
     } else {
       if (
-        event.turn_id !== this.currentTurnId || this.currentTurnTerminal
+        event.turn_id !== this.currentTurnId
+        || event.turn_generation !== this.currentTurnGeneration
+        || event.request_id !== this.currentRequestId
+        || event.media_generation !== this.currentMediaGeneration
+        || this.currentTurnTerminal
         || !validTurnTransition(this.lastTurnEvent, event.type)
       ) return false
       this.lastTurnEvent = event.type
@@ -235,10 +292,27 @@ function validLiveKitUrl(value: unknown): value is string {
   }
 }
 
+function parseTTSProfile(value: unknown): TTSProfile | null {
+  if (!ownObject(value)) return null
+  const keys = Object.keys(value).sort()
+  const expected = ['backend', 'license', 'native_sample_rate_hz', 'output_sample_rate_hz', 'private_noncommercial_only', 'profile', 'speaker']
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
+  const silero = (
+    value.profile === 'silero-kseniya'
+    && value.backend === 'silero'
+    && value.speaker === 'kseniya'
+    && value.native_sample_rate_hz === 48_000
+    && value.license === 'CC-BY-NC-SA-4.0'
+    && value.private_noncommercial_only === true
+  )
+  if (value.output_sample_rate_hz !== 48_000 || !silero) return null
+  return value as unknown as TTSProfile
+}
+
 export function parseCapability(value: unknown): SessionCapability | null {
   if (!ownObject(value)) return null
   const keys = Object.keys(value).sort()
-  const expected = ['admission_timeout_ms', 'control_version', 'expires_in_seconds', 'livekit_url', 'session_id', 'stream_epoch', 'token']
+  const expected = ['admission_timeout_ms', 'control_version', 'expires_in_seconds', 'livekit_url', 'session_id', 'stream_epoch', 'token', 'tts_profile']
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
   if (
     typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id)
@@ -249,6 +323,7 @@ export function parseCapability(value: unknown): SessionCapability | null {
     || !Number.isSafeInteger(value.admission_timeout_ms) || (value.admission_timeout_ms as number) < 1_000 || (value.admission_timeout_ms as number) > 60_000
     || (value.admission_timeout_ms as number) > (value.expires_in_seconds as number) * 1_000
     || value.control_version !== CONTROL_VERSION
+    || parseTTSProfile(value.tts_profile) === null
   ) return null
   return value as unknown as SessionCapability
 }
@@ -309,6 +384,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       connection: 'connecting',
       sessionId: action.capability.session_id,
       streamEpoch: action.capability.stream_epoch,
+      ttsProfile: action.capability.tts_profile,
     }
   }
   if (action.type === 'connection') {
@@ -317,6 +393,9 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
         ...state,
         connection: 'reconnecting',
         currentTurnTerminal: true,
+        currentTurnGeneration: 0,
+        currentRequestId: null,
+        currentMediaGeneration: 0,
         lastTurnEvent: null,
         phase: 'idle',
         history: interruptCurrentHistory(state),
@@ -336,7 +415,13 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     state.connection === 'reconnecting'
     && (event.type === 'session.reconnected' || event.type === 'session.degraded')
   ) {
-    if (event.turn_id !== 'session' || event.stream_epoch !== state.streamEpoch + 1) return drop(state)
+    if (
+      event.turn_id !== 'session'
+      || event.stream_epoch !== state.streamEpoch + 1
+      || event.turn_generation !== 0
+      || event.request_id !== 'session'
+      || event.media_generation !== 0
+    ) return drop(state)
     const degraded = event.type === 'session.degraded'
     return {
       ...state,
@@ -344,6 +429,9 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       streamEpoch: event.stream_epoch,
       lastSequence: event.sequence,
       currentTurnId: null,
+      currentTurnGeneration: 0,
+      currentRequestId: null,
+      currentMediaGeneration: 0,
       currentTurnTerminal: true,
       lastTurnEvent: null,
       phase: 'idle',
@@ -351,12 +439,23 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     }
   }
   if (state.connection === 'reconnecting' && event.type === 'session.ready') {
-    if (event.turn_id !== 'session' || event.stream_epoch !== state.streamEpoch) return drop(state)
+    if (
+      event.turn_id !== 'session'
+      || event.stream_epoch !== state.streamEpoch
+      || event.turn_generation !== 0
+      || event.request_id !== 'session'
+      || event.media_generation !== 0
+    ) return drop(state)
     return { ...state, connection: 'ready', lastSequence: event.sequence, error: null }
   }
   if (state.connection === 'reconnecting' || event.stream_epoch !== state.streamEpoch) return drop(state)
   if (event.type.startsWith('session.')) {
-    if (event.turn_id !== 'session') return drop(state)
+    if (
+      event.turn_id !== 'session'
+      || event.turn_generation !== 0
+      || event.request_id !== 'session'
+      || event.media_generation !== 0
+    ) return drop(state)
     return {
       ...state,
       connection: event.type === 'session.degraded' ? 'failed' : 'ready',
@@ -380,6 +479,9 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     next = {
       ...state,
       currentTurnId: event.turn_id,
+      currentTurnGeneration: event.turn_generation,
+      currentRequestId: event.request_id,
+      currentMediaGeneration: event.media_generation,
       currentTurnTerminal: false,
       lastTurnEvent: event.type,
       phase: 'listening',
@@ -392,12 +494,17 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     return next
   }
   if (
-    event.turn_id !== state.currentTurnId || state.currentTurnTerminal
+    event.turn_id !== state.currentTurnId
+    || event.turn_generation !== state.currentTurnGeneration
+    || event.request_id !== state.currentRequestId
+    || event.media_generation !== state.currentMediaGeneration
+    || state.currentTurnTerminal
     || !validTurnTransition(state.lastTurnEvent, event.type)
   ) return drop(state)
 
   let phase: TurnPhase = state.phase
-  if (event.type === 'stt.final' || event.type === 'turn.thinking' || event.type === 'llm.visible') phase = 'thinking'
+  if (event.type === 'stt.final' || event.type === 'turn.thinking') phase = 'thinking'
+  if (event.type === 'llm.visible' && state.phase !== 'speaking') phase = 'thinking'
   if (event.type === 'turn.speaking') phase = 'speaking'
   if (event.terminal) phase = 'idle'
   const transcript = event.type === 'stt.final' && typeof event.payload.transcript === 'string'

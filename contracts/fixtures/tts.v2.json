@@ -1,0 +1,46 @@
+{
+  "schema_version": "voice-agent.tts.v2",
+  "session_id": "session-synthetic-0001",
+  "stream_epoch": 1,
+  "turn_id": "turn-synthetic-0001",
+  "turn_generation": 1,
+  "request_id": "request-synthetic-0001",
+  "segment_index": 0,
+  "adapter": {
+    "backend": "silero",
+    "model_identity": "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru",
+    "speaker": "kseniya",
+    "complete_waveform": true,
+    "cooperative_cancel": false,
+    "max_parallel_requests": 2
+  },
+  "request": {
+    "text": "Здравствуйте! Детерминированный голосовой ответ готов.",
+    "text_format": "plain",
+    "normalization_version": "voice-agent.silero-ru-shaping.v1",
+    "audio": {
+      "encoding": "pcm_s16le",
+      "sample_rate_hz": 48000,
+      "channels": 1,
+      "sample_width_bytes": 2
+    }
+  },
+  "result": {
+    "status": "success",
+    "audio": {
+      "encoding": "pcm_s16le",
+      "sample_rate_hz": 48000,
+      "channels": 1,
+      "sample_width_bytes": 2
+    },
+    "chunks": [
+      {"sequence": 0, "byte_count": 65536},
+      {"sequence": 1, "byte_count": 30464}
+    ],
+    "chunk_count": 2,
+    "audio_bytes": 96000,
+    "samples": 48000,
+    "duration_ms": 1000,
+    "terminal_count": 1
+  }
+}

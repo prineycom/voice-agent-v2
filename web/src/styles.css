@@ -20,6 +20,7 @@ header { margin-bottom: 28px; }
 h1 { margin: 6px 0 12px; font-size: clamp(2rem, 6vw, 3.7rem); line-height: 1; letter-spacing: -0.04em; }
 h2, h3, p { margin-top: 0; }
 .lede { max-width: 620px; color: #aeb9d5; font-size: 1.05rem; line-height: 1.6; }
+.voice-badge { display: inline-block; max-width: 72ch; margin: .7rem 0 0; padding: .45rem .7rem; border: 1px solid #8b6f34; border-radius: .6rem; color: #ffe1a0; background: #2b2417; font-size: .82rem; font-weight: 700; }
 .eyebrow { margin-bottom: 6px; color: #84a7ff; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .layout { display: grid; grid-template-columns: minmax(220px, .7fr) minmax(0, 1.5fr); gap: 16px; }
 .card { border: 1px solid #252d43; border-radius: 18px; background: #101521; padding: 22px; }

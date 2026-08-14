@@ -8,7 +8,8 @@ export class AudioPlaybackBoundary {
   private track: AttachableAudioTrack | null = null
   private element: HTMLMediaElement | null = null
   private pendingDetach: { track: AttachableAudioTrack | null; element: HTMLMediaElement } | null = null
-  private generation = 0
+  private attachmentGeneration = 0
+  private publicationGeneration = 0
   private elementBlocked = false
 
   constructor(
@@ -16,8 +17,15 @@ export class AudioPlaybackBoundary {
     private readonly onBlocked: (blocked: boolean) => void,
   ) {}
 
-  setTrack(track: AttachableAudioTrack): void {
+  setTrack(track: AttachableAudioTrack, publicationGeneration = this.publicationGeneration + 1): void {
+    if (publicationGeneration < this.publicationGeneration) return
+    if (
+      publicationGeneration === this.publicationGeneration
+      && this.track === track
+      && this.element !== null
+    ) return
     this.clear()
+    this.publicationGeneration = publicationGeneration
     this.track = track
     this.attachFresh()
   }
@@ -42,10 +50,15 @@ export class AudioPlaybackBoundary {
     this.attachFresh()
   }
 
-  suspend(): void {
+  suspend(publicationGeneration?: number): boolean {
+    if (
+      publicationGeneration !== undefined
+      && publicationGeneration !== this.publicationGeneration
+    ) return false
     this.detachElement()
     this.elementBlocked = false
     this.reportBlocked()
+    return true
   }
 
   clear(): void {
@@ -61,6 +74,7 @@ export class AudioPlaybackBoundary {
     if (errors.length === 0) {
       this.track = null
       this.pendingDetach = null
+      this.publicationGeneration = 0
     }
     if (errors.length > 0) throw new AggregateError(errors, 'audio playback cleanup failed')
   }
@@ -71,7 +85,7 @@ export class AudioPlaybackBoundary {
 
   private attachFresh(): void {
     if (this.track === null) return
-    const generation = ++this.generation
+    const generation = ++this.attachmentGeneration
     const element = this.track.attach()
     element.autoplay = true
     element.controls = false
@@ -80,13 +94,13 @@ export class AudioPlaybackBoundary {
     this.element = element
     void element.play().then(
       () => {
-        if (generation === this.generation) {
+        if (generation === this.attachmentGeneration) {
           this.elementBlocked = false
           this.reportBlocked()
         }
       },
       () => {
-        if (generation === this.generation) {
+        if (generation === this.attachmentGeneration) {
           this.elementBlocked = true
           this.reportBlocked()
         }
@@ -99,7 +113,7 @@ export class AudioPlaybackBoundary {
   }
 
   private detachElement(): void {
-    this.generation += 1
+    this.attachmentGeneration += 1
     const pending = this.pendingDetach
     const track = pending?.track ?? this.track
     const element = pending?.element ?? this.element

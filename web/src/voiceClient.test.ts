@@ -69,9 +69,28 @@ function capabilityResponse(): Response {
       token: 'room-token-long-enough',
       expires_in_seconds: 30,
       admission_timeout_ms: 30_000,
-      control_version: 'voice-agent.realtime-control.v1',
+      control_version: 'voice-agent.realtime-control.v2',
+      tts_profile: {
+        profile: 'silero-kseniya', backend: 'silero', speaker: 'kseniya',
+        output_sample_rate_hz: 48_000, native_sample_rate_hz: 48_000,
+        license: 'CC-BY-NC-SA-4.0', private_noncommercial_only: true,
+      },
     }),
   } as unknown as Response
+}
+
+function mediaReadyPayload() {
+  return {
+    server_media_publication_id: 'publication-test',
+    audio: {
+      encoding: 'pcm_s16le', sample_rate_hz: 48_000, channels: 1, sample_width_bytes: 2,
+    },
+    tts: {
+      profile: 'silero-kseniya', backend: 'silero', speaker: 'kseniya',
+      output_sample_rate_hz: 48_000, native_sample_rate_hz: 48_000,
+      license: 'CC-BY-NC-SA-4.0', private_noncommercial_only: true,
+    },
+  }
 }
 
 function callbacks(): VoiceClientCallbacks {
@@ -93,14 +112,20 @@ function emitControl(
   payload: Record<string, unknown> = {},
   terminal = false,
   streamEpoch = 1,
+  turnGeneration = 1,
+  mediaGeneration = turnGeneration,
+  turnId = 'turn-00000001',
 ): void {
   room.emit(
     'dataReceived',
     new TextEncoder().encode(JSON.stringify({
-      schema_version: 'voice-agent.realtime-control.v1',
+      schema_version: 'voice-agent.realtime-control.v2',
       session_id: 'session-test-0001',
-      turn_id: type.startsWith('session.') ? 'session' : 'turn-00000001',
+      turn_id: type.startsWith('session.') ? 'session' : turnId,
       stream_epoch: streamEpoch,
+      turn_generation: type.startsWith('session.') ? 0 : turnGeneration,
+      request_id: type.startsWith('session.') ? 'session' : `request-${turnGeneration.toString().padStart(8, '0')}`,
+      media_generation: type.startsWith('session.') ? 0 : mediaGeneration,
       sequence,
       type,
       terminal,
@@ -108,7 +133,7 @@ function emitControl(
     })),
     { identity: 'agent-session-test-0001' },
     undefined,
-    'voice-agent.control.v1',
+    'voice-agent.control.v2',
   )
 }
 
@@ -124,7 +149,7 @@ beforeEach(() => {
   })
   vi.spyOn(AudioPlaybackBoundary.prototype, 'setTrack').mockImplementation(() => undefined)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'reset').mockImplementation(() => undefined)
-  vi.spyOn(AudioPlaybackBoundary.prototype, 'suspend').mockImplementation(() => undefined)
+  vi.spyOn(AudioPlaybackBoundary.prototype, 'suspend').mockImplementation(() => true)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'dispose').mockResolvedValue(undefined)
 })
 
@@ -137,30 +162,32 @@ afterEach(() => {
 })
 
 describe('VoiceClient checkpoint A+B protocol', () => {
-  it('attaches one persistent track and completes with zero browser media controls', async () => {
+  it('attaches only the current announced publication generation and sends no media ACK', async () => {
     const observed = callbacks()
     const client = new VoiceClient(document.createElement('div'), observed)
     await client.start()
     const room = livekit.rooms[0]
     const track = { kind: 'audio' }
-    room.emit('trackSubscribed', track, {}, { identity: 'agent-session-test-0001' })
+    room.emit('trackSubscribed', track, { trackSid: 'publication-test' }, { identity: 'agent-session-test-0001' })
+    expect(AudioPlaybackBoundary.prototype.setTrack).not.toHaveBeenCalled()
 
     emitControl(room, 'session.ready', 1, { state: 'ready' })
     emitControl(room, 'turn.listening', 2)
-    emitControl(room, 'stt.final', 3, { transcript: 'Вопрос.' })
-    emitControl(room, 'turn.thinking', 4)
-    emitControl(room, 'llm.visible', 5, {
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    emitControl(room, 'stt.final', 4, { transcript: 'Вопрос.' })
+    emitControl(room, 'turn.thinking', 5)
+    emitControl(room, 'llm.visible', 6, {
       response: 'Ответ.', endpoint_to_first_visible_ms: 41,
     })
-    emitControl(room, 'turn.speaking', 6, {
+    emitControl(room, 'turn.speaking', 7, {
       server_streamed_output: true,
       endpoint_to_first_accepted_pcm_ms: 73,
     })
-    emitControl(room, 'turn.completed', 7, { outcome: 'completed' }, true)
+    emitControl(room, 'turn.completed', 8, { outcome: 'completed' }, true)
 
     expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(1)
     expect(room.localParticipant.publishData).not.toHaveBeenCalled()
-    expect(observed.onControl).toHaveBeenCalledTimes(7)
+    expect(observed.onControl).toHaveBeenCalledTimes(8)
     expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
   })
 
@@ -173,10 +200,11 @@ describe('VoiceClient checkpoint A+B protocol', () => {
 
     emitControl(room, 'session.ready', 1, { state: 'ready' })
     emitControl(room, 'turn.listening', 2)
-    emitControl(room, 'stt.final', 3, { transcript: 'Секретный вопрос.' })
-    emitControl(room, 'turn.thinking', 4)
-    emitControl(room, 'llm.visible', 5, { response: 'Приватный ответ.' })
-    emitControl(room, 'turn.completed', 6, { outcome: 'completed' }, true)
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    emitControl(room, 'stt.final', 4, { transcript: 'Секретный вопрос.' })
+    emitControl(room, 'turn.thinking', 5)
+    emitControl(room, 'llm.visible', 6, { response: 'Приватный ответ.' })
+    emitControl(room, 'turn.completed', 7, { outcome: 'completed' }, true)
 
     expect(storageWrite).not.toHaveBeenCalled()
     expect(localStorage.length).toBe(0)
@@ -197,7 +225,8 @@ describe('VoiceClient checkpoint A+B protocol', () => {
 
     emitControl(room, 'session.ready', 1, { state: 'ready' })
     emitControl(room, 'turn.listening', 2)
-    emitControl(room, 'turn.failed', 3, {
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    emitControl(room, 'turn.failed', 4, {
       outcome: 'failed', stage: 'stt', code: 'selected_stt_unavailable',
     }, true)
 
@@ -219,10 +248,11 @@ describe('VoiceClient checkpoint A+B protocol', () => {
 
     emitControl(room, 'session.ready', 1, { state: 'ready' })
     emitControl(room, 'turn.listening', 2)
-    emitControl(room, 'stt.final', 3, { transcript: 'Вопрос.' })
-    emitControl(room, 'turn.thinking', 4)
-    emitControl(room, 'llm.visible', 5, { response: 'Сохранённый текст.' })
-    emitControl(room, 'turn.failed', 6, {
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    emitControl(room, 'stt.final', 4, { transcript: 'Вопрос.' })
+    emitControl(room, 'turn.thinking', 5)
+    emitControl(room, 'llm.visible', 6, { response: 'Сохранённый текст.' })
+    emitControl(room, 'turn.failed', 7, {
       outcome: 'failed', stage: 'tts', code: 'selected_tts_unavailable',
     }, true)
 
@@ -238,6 +268,39 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     }))
   })
 
+  it('stops only matching current generations across rapid valid and invalid interrupts', async () => {
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    const track = { kind: 'audio' }
+    room.emit(
+      'trackSubscribed', track, { trackSid: 'publication-test' },
+      { identity: 'agent-session-test-0001' },
+    )
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenLastCalledWith(track, 1)
+
+    const beforeInvalid = vi.mocked(AudioPlaybackBoundary.prototype.suspend).mock.calls.length
+    emitControl(room, 'turn.interrupted', 4, {}, true, 1, 1, 99)
+    expect(AudioPlaybackBoundary.prototype.suspend).toHaveBeenCalledTimes(beforeInvalid)
+    expect(observed.onDrop).toHaveBeenCalledTimes(1)
+
+    emitControl(room, 'turn.interrupted', 5, {}, true)
+    expect(AudioPlaybackBoundary.prototype.suspend).toHaveBeenCalledTimes(beforeInvalid + 1)
+    emitControl(room, 'turn.listening', 6, {}, false, 1, 2, 2, 'turn-00000002')
+    emitControl(room, 'turn.media-ready', 7, mediaReadyPayload(), false, 1, 2, 2, 'turn-00000002')
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenLastCalledWith(track, 2)
+
+    const beforeOld = vi.mocked(AudioPlaybackBoundary.prototype.suspend).mock.calls.length
+    emitControl(room, 'turn.interrupted', 8, {}, true, 1, 1, 1)
+    expect(AudioPlaybackBoundary.prototype.suspend).toHaveBeenCalledTimes(beforeOld)
+    emitControl(room, 'turn.interrupted', 9, {}, true, 1, 2, 2, 'turn-00000002')
+    expect(AudioPlaybackBoundary.prototype.suspend).toHaveBeenCalledTimes(beforeOld + 1)
+  })
+
   it('retries one logical reset when delivery resolves without an observed ACK', async () => {
     vi.useFakeTimers()
     const observed = callbacks()
@@ -248,17 +311,19 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     const initialTrack = { kind: 'audio' }
     const recoveredTrack = { kind: 'audio' }
     room.emit(
-      'trackSubscribed', initialTrack, {}, { identity: 'agent-session-test-0001' },
+      'trackSubscribed', initialTrack, { trackSid: 'publication-test' }, { identity: 'agent-session-test-0001' },
     )
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
 
     room.emit('reconnecting')
     room.emit('reconnected')
     room.emit(
-      'trackSubscribed', recoveredTrack, {}, { identity: 'agent-session-test-0001' },
+      'trackSubscribed', recoveredTrack, { trackSid: 'publication-test' }, { identity: 'agent-session-test-0001' },
     )
     await vi.advanceTimersByTimeAsync(600)
 
-    expect(AudioPlaybackBoundary.prototype.suspend).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.suspend).toHaveBeenCalledTimes(2)
     expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(1)
     expect(AudioPlaybackBoundary.prototype.reset).not.toHaveBeenCalled()
 
@@ -278,8 +343,8 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     emitControl(room, 'session.ready', 11, { state: 'ready' }, false, 2)
     await vi.advanceTimersByTimeAsync(1_000)
 
-    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(2)
-    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenLastCalledWith(recoveredTrack)
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenLastCalledWith(initialTrack, 1)
     expect(room.localParticipant.publishData).toHaveBeenCalledTimes(2)
     expect(observed.onConnection).toHaveBeenCalledWith('reconnecting')
     expect(observed.onControl).toHaveBeenCalledWith(expect.objectContaining({

@@ -1,14 +1,232 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import types
 import unittest
 
 from tests.test_checkpoint_ab import (
     CheckpointBLiveKitTests,
     CheckpointBWarmupTests,
+    MemoryAudio,
+    MemoryEvents,
     load_runtime,
 )
+from tests.test_silero_tts import FakeSTT, FakeVisibleLLM, ProcessCoordinator
+from voice_agent_v2.silero_tts import SileroKseniyaTTS, SileroWorkerPool
+from voice_agent_v2.tracer import CancellationToken
+
+
+class LiveTurnObservationTests(unittest.TestCase):
+    def test_segment_reservations_reach_the_real_controller_before_synthesis(self) -> None:
+        runtime = load_runtime()
+
+        class STT(FakeSTT):
+            def __init__(self) -> None:
+                self.observations: list[dict[str, object]] = []
+
+        class LLM(FakeVisibleLLM):
+            def __init__(self) -> None:
+                super().__init__((
+                    "Первое достаточно длинное русское предложение уже полностью готово. ",
+                    "Второе достаточно длинное русское предложение тоже полностью готово.",
+                ))
+                self.observations: list[dict[str, object]] = []
+
+            def snapshot_session(self, _session_id: str):
+                return ()
+
+        class TTS:
+            version = "voice-agent.tts.v2"
+            output_format = runtime.TTS_OUTPUT_AUDIO_FORMAT
+            capabilities = {"cooperative_cancel": False}
+
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+                self.observations: list[dict[str, object]] = []
+
+            def stream_synthesize(self, **arguments):
+                self.calls.append(arguments["segment_index"])
+                yield b"\0\0" * 2_880
+
+            def invalidate_turn(self, *_arguments) -> None:
+                return None
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.stt = STT()
+        runner.llm = LLM()
+        runner.tts = TTS()
+        runner.controller = runtime.RealTurnController(runner.stt, runner.llm, runner.tts)
+        runner._snapshots = {}
+        runner._turn_correlations = {}
+        starts: list[tuple[int, int]] = []
+        completions: list[tuple[int, bytes | None]] = []
+
+        result = runner.run_turn(
+            session_id="session-test",
+            turn_id="turn-test",
+            input_pcm=b"\0\0" * 320,
+            cancellation=CancellationToken(),
+            event_observer=lambda _event: None,
+            segment_started_observer=lambda index: starts.append(
+                (index, len(runner.tts.calls))
+            ),
+            segment_audio_observer=lambda index, pcm: completions.append((index, pcm)),
+            request_id="request-test",
+        )
+
+        self.assertEqual(result.terminal_event["type"], "turn.completed")
+        self.assertEqual(starts, [(0, 0), (1, 1)])
+        self.assertEqual(runner.tts.calls, [0, 1])
+        self.assertEqual([index for index, _pcm in completions], [0, 1])
+        self.assertTrue(all(pcm == b"\0\0" * 2_880 for _index, pcm in completions))
+
+    def test_overlapping_turns_trace_only_their_own_tts_observations(self) -> None:
+        runtime = load_runtime()
+        coordinator = ProcessCoordinator()
+        pool = SileroWorkerPool(
+            process_factory=coordinator.factory,
+            verify_runtime=lambda: {"verified": True},
+        )
+        pool.start()
+        old_release = threading.Event()
+        coordinator.gates["request-old"] = old_release
+
+        class STT(FakeSTT):
+            def __init__(self) -> None:
+                self.observations: list[dict[str, object]] = []
+
+        class LLM(FakeVisibleLLM):
+            def __init__(self) -> None:
+                super().__init__(("Готовый ответ.",))
+                self.observations: list[dict[str, object]] = []
+
+            def snapshot_session(self, _session_id: str):
+                return ()
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.stt = STT()
+        runner.llm = LLM()
+        runner.tts = SileroKseniyaTTS(pool)
+        runner.controller = runtime.RealTurnController(runner.stt, runner.llm, runner.tts)
+        runner._snapshots = {}
+        runner._turn_correlations = {}
+        traces: dict[str, list[dict[str, object]]] = {"old": [], "current": []}
+        failures: list[BaseException] = []
+
+        def run_old() -> None:
+            try:
+                runner.run_turn(
+                    session_id="session-test",
+                    turn_id="turn-old",
+                    input_pcm=b"\0\0" * 320,
+                    cancellation=CancellationToken(),
+                    event_observer=lambda _event: None,
+                    trace_observer=lambda stage, event, fields: (
+                        traces["old"].append(fields)
+                        if (stage, event) == ("tts", "segment_observation")
+                        else None
+                    ),
+                    request_id="request-old",
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        old_thread = threading.Thread(target=run_old)
+        try:
+            old_thread.start()
+            coordinator.entered.get(timeout=1)
+            result = runner.run_turn(
+                session_id="session-test",
+                turn_id="turn-current",
+                input_pcm=b"\0\0" * 320,
+                cancellation=CancellationToken(),
+                event_observer=lambda _event: None,
+                trace_observer=lambda stage, event, fields: (
+                    traces["current"].append(fields)
+                    if (stage, event) == ("tts", "segment_observation")
+                    else None
+                ),
+                request_id="request-current",
+                turn_generation=2,
+            )
+            self.assertEqual(result.terminal_event["type"], "turn.completed")
+            old_release.set()
+            old_thread.join(1)
+            self.assertFalse(old_thread.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(len(traces["old"]), 1)
+            self.assertEqual(len(traces["current"]), 1)
+            self.assertNotEqual(
+                traces["old"][0]["worker_id"],
+                traces["current"][0]["worker_id"],
+            )
+        finally:
+            old_release.set()
+            old_thread.join(1)
+            runner.tts.close()
+
+
+class TurnCorrelationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_immediate_discard_releases_invalidated_turns(self) -> None:
+        runtime = load_runtime()
+
+        class TrackingTTS:
+            def __init__(self) -> None:
+                self.invalid_turns: set[tuple[str, int, str, int]] = set()
+                self.released_turns: list[tuple[str, int, str, int]] = []
+
+            def invalidate_turn(
+                self,
+                session_id: str,
+                stream_epoch: int,
+                turn_id: str,
+                turn_generation: int,
+            ) -> None:
+                self.invalid_turns.add(
+                    (session_id, stream_epoch, turn_id, turn_generation)
+                )
+
+            def release_turn(
+                self,
+                session_id: str,
+                stream_epoch: int,
+                turn_id: str,
+                turn_generation: int,
+            ) -> None:
+                key = (session_id, stream_epoch, turn_id, turn_generation)
+                self.assert_invalidated(key)
+                self.invalid_turns.remove(key)
+                self.released_turns.append(key)
+
+            def assert_invalidated(self, key: tuple[str, int, str, int]) -> None:
+                if key not in self.invalid_turns:
+                    raise AssertionError("turn was released without prior invalidation")
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.tts = TrackingTTS()
+        runner.llm = types.SimpleNamespace()
+        runner._snapshots = {}
+        runner._turn_correlations = {}
+        runner._turn_correlations_lock = threading.Lock()
+        runner._started = True
+        runner.complete_segment_capacity = asyncio.BoundedSemaphore(2)
+        session = runtime.RealtimeSession(
+            session_id="session-immediate-discard",
+            runner=runner,
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+        )
+
+        for _ in range(32):
+            await session.start_utterance(announce=False)
+            await session.discard_utterance()
+            await session.wait_for_cleanup()
+            self.assertEqual(runner.tts.invalid_turns, set())
+            self.assertEqual(runner._turn_correlations, {})
+
+        self.assertEqual(len(runner.tts.released_turns), 32)
+        self.assertEqual(len(set(runner.tts.released_turns)), 32)
 
 
 class PersistentLiveKitTrackTests(CheckpointBLiveKitTests):
@@ -17,6 +235,37 @@ class PersistentLiveKitTrackTests(CheckpointBLiveKitTests):
 
 class ResidentQwenWarmupTests(CheckpointBWarmupTests):
     """Checkpoint B discard-only resident Qwen warm-up behavior."""
+
+
+class CloseRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_repeats_when_nested_close_remains_incomplete(self) -> None:
+        runtime = load_runtime()
+
+        class CleanupBoundary:
+            async def wait_for_cleanup(self) -> None:
+                return None
+
+        controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
+        controller.session_id = "session-test"
+        controller.session = CleanupBoundary()
+        controller.audio_sink = CleanupBoundary()
+        controller._close_retry_task = None
+        controller._cleanup_complete = False
+        attempts = 0
+
+        async def close(*, notify: bool = True) -> None:
+            nonlocal attempts
+            self.assertTrue(notify)
+            attempts += 1
+            if attempts == 2:
+                controller._cleanup_complete = True
+
+        controller.close = close
+        controller._schedule_close_retry(True)
+        await asyncio.wait_for(controller._close_retry_task, 0.5)
+
+        self.assertEqual(attempts, 2)
+        self.assertTrue(controller._cleanup_complete)
 
 
 class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):

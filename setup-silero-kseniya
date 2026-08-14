@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+MODE=${1:-}
+[ "$MODE" = "" ] || [ "$MODE" = "--allow-absent" ] || {
+  echo 'usage: ./setup-silero-kseniya [--allow-absent]' >&2
+  exit 2
+}
+MODEL=${HOME}/.cache/voice-agent-v2/experiments/silero-baya-tts/downloads/v5_5_ru.pt
+if [ ! -f "$MODEL" ] && [ "$MODE" = "--allow-absent" ]; then
+  echo 'Pinned Silero/Kseniya cache absent; setup will not download, replace, or relocate it.'
+  exit 0
+fi
+PYTHONPATH="$ROOT/src" python3 -B - <<'PY'
+from voice_agent_v2.contracts import StageFailure
+from voice_agent_v2.silero_tts import verify_silero_runtime
+
+try:
+    metadata = verify_silero_runtime()
+except (OSError, ValueError, StageFailure) as error:
+    code = error.code if isinstance(error, StageFailure) else type(error).__name__
+    print(f"Silero/Kseniya verify-only setup failed: {code}", file=__import__('sys').stderr)
+    raise SystemExit(2)
+print(
+    "Pinned Silero/Kseniya cache verified: "
+    f"{metadata['model_identity']}, speaker={metadata['speaker']}, "
+    f"native={metadata['sample_rate_hz']}Hz, workers={metadata['workers']}"
+)
+print("No model/runtime asset was downloaded, replaced, modified, or relocated.")
+PY

@@ -10,7 +10,7 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Iterator
+from typing import Callable, Iterator
 
 
 MAX_PROTOCOL_LINE_BYTES = 1_048_576
@@ -149,7 +149,13 @@ class AdapterProcess:
                 pass
             raise
 
-    def stream(self, value: dict, timeout_seconds: float) -> Iterator[dict]:
+    def stream(
+        self,
+        value: dict,
+        timeout_seconds: float,
+        *,
+        error_validator: Callable[[dict], None] | None = None,
+    ) -> Iterator[dict]:
         deadline = time.monotonic() + timeout_seconds
         self.send(value)
         while True:
@@ -157,9 +163,17 @@ class AdapterProcess:
             if remaining <= 0:
                 raise AdapterProcessError("adapter timed out")
             response = self.receive(remaining)
+            protocol_version = value.get("protocol_version")
+            if (
+                protocol_version is not None
+                and response.get("protocol_version") != protocol_version
+            ):
+                raise AdapterProcessError("adapter protocol mismatch")
             if response.get("request_id") != value.get("request_id"):
                 raise AdapterProcessError("adapter correlation mismatch")
             if response.get("event") == "error":
+                if error_validator is not None:
+                    error_validator(response)
                 raise AdapterRequestError(str(response.get("error_class", "adapter_error")))
             yield response
             if response.get("event") == "final":

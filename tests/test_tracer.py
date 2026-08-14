@@ -9,6 +9,7 @@ import unittest
 from voice_agent_v2.audio import DEFAULT_AUDIO_FORMAT, generated_input_pcm, generated_output_pcm
 from voice_agent_v2.contracts import CONTRACT_VERSIONS, EVENT_ENVELOPE_VERSION, TERMINAL_TYPES
 from voice_agent_v2.schema import SchemaViolation, validate
+from voice_agent_v2.v2_contracts import validate_tts_v2_document
 from voice_agent_v2.tracer import (
     AUDIO_CHUNK_BYTES,
     FIXED_RESPONSE,
@@ -135,6 +136,109 @@ class ContractFixtureTests(unittest.TestCase):
                 schema = json.loads((ROOT / "contracts" / f"{name}.v1.schema.json").read_text())
                 fixture = json.loads((FIXTURES / f"{name}.v1.json").read_text())
                 validate(fixture, schema)
+
+    def test_v2_contract_examples_are_strict_and_v1_remains_unchanged(self) -> None:
+        for name in ("tts", "event-envelope", "realtime-control"):
+            with self.subTest(contract=name):
+                schema = json.loads((ROOT / "contracts" / f"{name}.v2.schema.json").read_text())
+                fixture = json.loads((FIXTURES / f"{name}.v2.json").read_text())
+                validate(fixture, schema)
+
+        tts_v2 = json.loads((FIXTURES / "tts.v2.json").read_text())
+        tts_v2_schema = json.loads((ROOT / "contracts" / "tts.v2.schema.json").read_text())
+        self.assertEqual(
+            [chunk["sequence"] for chunk in tts_v2["result"]["chunks"]],
+            list(range(tts_v2["result"]["chunk_count"])),
+        )
+        self.assertEqual(
+            sum(chunk["byte_count"] for chunk in tts_v2["result"]["chunks"]),
+            tts_v2["result"]["audio_bytes"],
+        )
+        validate_tts_v2_document(tts_v2)
+        invalid_documents = {}
+        invalid_documents["noncontiguous sequence"] = deepcopy(tts_v2)
+        invalid_documents["noncontiguous sequence"]["result"]["chunks"][1]["sequence"] = 0
+        invalid_documents["odd PCM16 chunk"] = deepcopy(tts_v2)
+        invalid_documents["odd PCM16 chunk"]["result"]["chunks"][0]["byte_count"] -= 1
+        invalid_documents["chunk count"] = deepcopy(tts_v2)
+        invalid_documents["chunk count"]["result"]["chunk_count"] = 1
+        invalid_documents["audio bytes"] = deepcopy(tts_v2)
+        invalid_documents["audio bytes"]["result"]["audio_bytes"] -= 2
+        invalid_documents["samples"] = deepcopy(tts_v2)
+        invalid_documents["samples"]["result"]["samples"] -= 1
+        invalid_documents["duration"] = deepcopy(tts_v2)
+        invalid_documents["duration"]["result"]["duration_ms"] = 999
+        invalid_documents["boolean terminal"] = deepcopy(tts_v2)
+        invalid_documents["boolean terminal"]["result"]["terminal_count"] = True
+        invalid_documents["boolean request channel"] = deepcopy(tts_v2)
+        invalid_documents["boolean request channel"]["request"]["audio"]["channels"] = True
+        invalid_documents["boolean result sample width"] = deepcopy(tts_v2)
+        invalid_documents["boolean result sample width"]["result"]["audio"][
+            "sample_width_bytes"
+        ] = True
+        for case, invalid_document in invalid_documents.items():
+            with self.subTest(semantic_case=case):
+                with self.assertRaises(ValueError):
+                    validate_tts_v2_document(invalid_document)
+        for field_path in (
+            ("request", "audio", "channels"),
+            ("result", "audio", "sample_width_bytes"),
+            ("result", "terminal_count"),
+        ):
+            boolean_constant = deepcopy(tts_v2)
+            target = boolean_constant
+            for field in field_path[:-1]:
+                target = target[field]
+            target[field_path[-1]] = True
+            with self.subTest(boolean_constant=field_path), self.assertRaises(
+                SchemaViolation
+            ):
+                validate(boolean_constant, tts_v2_schema)
+
+        fractional_duration = deepcopy(tts_v2)
+        fractional_duration["result"]["duration_ms"] = 120.5
+        validate(fractional_duration, tts_v2_schema)
+        half_step_duration = deepcopy(tts_v2)
+        half_step_duration["result"]["chunks"] = [{"sequence": 0, "byte_count": 6}]
+        half_step_duration["result"]["chunk_count"] = 1
+        half_step_duration["result"]["audio_bytes"] = 6
+        half_step_duration["result"]["samples"] = 3
+        half_step_duration["result"]["duration_ms"] = 0.062
+        validate_tts_v2_document(half_step_duration)
+        half_step_duration["result"]["duration_ms"] = 0.063
+        with self.assertRaises(ValueError):
+            validate_tts_v2_document(half_step_duration)
+
+        zero_duration = deepcopy(tts_v2)
+        zero_duration["result"]["duration_ms"] = 0
+        with self.assertRaises(SchemaViolation):
+            validate(zero_duration, tts_v2_schema)
+        rejected_chunk = deepcopy(tts_v2)
+        rejected_chunk["result"]["chunks"][0]["byte_count"] = 65_537
+        with self.assertRaises(SchemaViolation):
+            validate(rejected_chunk, tts_v2_schema)
+        odd_chunk = deepcopy(tts_v2)
+        odd_chunk["result"]["chunks"][0]["byte_count"] = 65_535
+        with self.assertRaises(SchemaViolation):
+            validate(odd_chunk, tts_v2_schema)
+
+        rejected_output = deepcopy(tts_v2)
+        rejected_output["request"]["audio"]["sample_rate_hz"] = 16_000
+        with self.assertRaises(SchemaViolation):
+            validate(rejected_output, tts_v2_schema)
+
+        stt_v1 = json.loads((FIXTURES / "stt.v1.json").read_text())
+        stt_v1_schema = json.loads((ROOT / "contracts" / "stt.v1.schema.json").read_text())
+        rejected_input = deepcopy(stt_v1)
+        rejected_input["audio"]["sample_rate_hz"] = 48_000
+        with self.assertRaises(SchemaViolation):
+            validate(rejected_input, stt_v1_schema)
+
+        # Historical TTS v1 remains exactly 16 kHz and independently valid.
+        validate(
+            json.loads((FIXTURES / "tts.v1.json").read_text()),
+            json.loads((ROOT / "contracts" / "tts.v1.schema.json").read_text()),
+        )
 
     def test_all_public_events_satisfy_event_schema(self) -> None:
         schema = json.loads((ROOT / "contracts" / "event-envelope.v1.schema.json").read_text())

@@ -86,6 +86,10 @@ printf '%s  %s\n' "$VAD_SHA256" "$VAD_MODEL" | sha256sum --check --status || {
 }
 python3 "$ROOT/scripts/acquire_vad_speech_fixture.py" "$VAD_SPEECH_FIXTURE"
 
+# TTS setup is verify-only: the exact existing cache is accepted or reported
+# absent, and no Silero artifact is downloaded, copied, or substituted.
+"$ROOT/setup-silero-kseniya" --allow-absent
+
 if [ -x "$LLAMA" ] && [ -f "$MODEL" ]; then
   printf '%s  %s\n' "$LLAMA_SHA256" "$LLAMA" | sha256sum --check --status || {
     echo "pinned llama.cpp server checksum mismatch" >&2

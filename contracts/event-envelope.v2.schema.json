@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.invalid/contracts/event-envelope.v2.schema.json",
+  "title": "Voice Agent v2 request-correlated event envelope v2",
+  "type": "object",
+  "required": ["schema_version", "contract_versions", "session_id", "turn_id", "stream_epoch", "turn_generation", "request_id", "sequence", "type", "terminal", "payload"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.event-envelope.v2"},
+    "contract_versions": {
+      "type": "object",
+      "required": ["turn_lifecycle", "stt", "llm_provider", "tts"],
+      "properties": {
+        "turn_lifecycle": {"const": "voice-agent.turn-lifecycle.v1"},
+        "stt": {"const": "voice-agent.stt.v1"},
+        "llm_provider": {"const": "voice-agent.llm-provider.v1"},
+        "tts": {"const": "voice-agent.tts.v2"}
+      },
+      "additionalProperties": false
+    },
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "turn_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "stream_epoch": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+    "turn_generation": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$(?![\\s\\S])"},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+    "type": {"enum": ["turn.listening", "turn.transcribing", "stt.final", "turn.thinking", "llm.visible", "llm.final", "turn.speaking", "tts.audio", "turn.completed", "turn.interrupted", "turn.failed"]},
+    "terminal": {"type": "boolean"},
+    "payload": {"type": "object"},
+    "diagnostic_timestamp": {"type": "string", "minLength": 1, "maxLength": 64}
+  },
+  "additionalProperties": false
+}

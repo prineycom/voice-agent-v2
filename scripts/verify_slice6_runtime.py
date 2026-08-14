@@ -40,6 +40,14 @@ from voice_agent_v2.livekit_runtime import (
     SessionRegistry,
 )
 from voice_agent_v2.local_lfm import LLAMA_ENDPOINT, MODEL_ALIAS, PROVIDER_IDENTITY
+from voice_agent_v2.silero_tts import (
+    MANIFEST_PATH as SILERO_MANIFEST,
+    MODEL_PATH as SILERO_MODEL,
+    MODEL_IDENTITY as SILERO_IDENTITY,
+    MODEL_SHA256 as SILERO_SHA256,
+    MODEL_SIZE as SILERO_SIZE,
+    SileroKseniyaTTS,
+)
 from voice_agent_v2.local_vad import (
     DEFAULT_MODEL_PATH as VAD_MODEL,
     SILERO_MODEL_SHA256,
@@ -298,7 +306,44 @@ def verify_local_lfm_contract(settings: Slice6Settings) -> bool:
     runner = LiveTurnRunner(settings)
     if runner.llm.provider_mode != "local" or runner.llm.provider_identity != PROVIDER_IDENTITY:
         raise AssertionError("Slice 6 runner is not wired to the fixed local LFM provider")
+    if not isinstance(runner.tts, SileroKseniyaTTS):
+        raise AssertionError("Slice 6 composition root is not fixed directly to Silero/Kseniya")
     return artifact_present
+
+
+def verify_silero_tts_contract() -> bool:
+    manifest = json.loads(SILERO_MANIFEST.read_text())
+    if not (
+        manifest["backend"] == "silero"
+        and manifest["model_identity"] == SILERO_IDENTITY
+        and manifest["model"]["speaker"] == "kseniya"
+        and manifest["model"]["sha256"] == SILERO_SHA256
+        and manifest["model"]["size_bytes"] == SILERO_SIZE
+        and manifest["model"]["native_sample_rates_hz"] == [8_000, 24_000, 48_000]
+        and manifest["runtime"]["workers"] == 2
+        and manifest["runtime"]["automatic_retry"] is False
+        and manifest["runtime"]["automatic_fallback"] is False
+        and manifest["runtime"]["download_allowed"] is False
+        and manifest["output_audio"]["sample_rate_hz"] == 48_000
+        and manifest["input_audio"]["sample_rate_hz"] == 16_000
+        and manifest["license"]["spdx_expression"] == "CC-BY-NC-SA-4.0"
+        and manifest["license"]["commercial_use_authorized"] is False
+    ):
+        raise AssertionError("tracked Silero/Kseniya runtime manifest differs")
+    adapter = SileroKseniyaTTS()
+    if (
+        adapter.version != "voice-agent.tts.v2"
+        or adapter.speaker != "kseniya"
+        or adapter.output_format.sample_rate_hz != 48_000
+        or adapter.capabilities["max_parallel_requests"] != 2
+        or adapter.capabilities["cooperative_cancel"] is not False
+    ):
+        raise AssertionError("composition-root Silero adapter contract differs")
+    if not SILERO_MODEL.is_file():
+        return False
+    if SILERO_MODEL.stat().st_size != SILERO_SIZE or sha256_file(SILERO_MODEL) != SILERO_SHA256:
+        raise AssertionError("pinned Silero/Kseniya artifact identity differs")
+    return True
 
 
 def main() -> int:
@@ -340,12 +385,18 @@ def main() -> int:
         raise AssertionError("browser capability contains a management grant")
     vad_present = verify_vad_contract()
     artifact_present = verify_local_lfm_contract(settings)
+    silero_present = verify_silero_tts_contract()
     asyncio.run(verify_room_lifecycle_bounds(settings))
     print("Slice 6 installed-runtime contract: PASS")
     print("SDK pins: " + ", ".join(f"{name}={value}" for name, value in observed.items()))
     print("capability: one room, microphone publish, agent subscribe/data; no management grants")
     print("room lifecycle: startup cancellation drains; incomplete cleanup retains capacity")
     print("local VAD: pinned Silero v6 CPU artifact hashes=" + ("verified" if vad_present else "not-present"))
+    print(
+        "Silero TTS: v2 manifest/composition fixed to kseniya/native48/two workers; exact cache hash="
+        + ("verified" if silero_present else "not-present (real integration check skipped)")
+        + "; CC-BY-NC-SA-4.0 private noncommercial evaluation only; no fallback"
+    )
     print(
         "local LFM: manifest/provider wiring verified; exact cache hashes="
         + ("verified" if artifact_present else "not-present (real integration check skipped)")

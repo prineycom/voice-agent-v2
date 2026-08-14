@@ -1,0 +1,18 @@
+{
+  "schema_version": "voice-agent.event-envelope.v2",
+  "contract_versions": {
+    "turn_lifecycle": "voice-agent.turn-lifecycle.v1",
+    "stt": "voice-agent.stt.v1",
+    "llm_provider": "voice-agent.llm-provider.v1",
+    "tts": "voice-agent.tts.v2"
+  },
+  "session_id": "session-synthetic-0001",
+  "turn_id": "turn-synthetic-0001",
+  "stream_epoch": 1,
+  "turn_generation": 1,
+  "request_id": "request-synthetic-0001",
+  "sequence": 1,
+  "type": "turn.listening",
+  "terminal": false,
+  "payload": {"state": "listening"}
+}

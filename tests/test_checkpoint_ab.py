@@ -8,8 +8,16 @@ import threading
 import types
 import unittest
 
-from voice_agent_v2.contracts import EventEnvelope, valid_correlation_id
+from voice_agent_v2.contracts import (
+    EventEnvelope,
+    LLM_VERSION,
+    STT_VERSION,
+    valid_correlation_id,
+)
+from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES, TTS_OUTPUT_AUDIO_FORMAT
+from voice_agent_v2.v2_contracts import TTS_V2_VERSION
 from voice_agent_v2.local_tts import Qwen3TTS
+from voice_agent_v2.real_turn import RealTurnController
 import voice_agent_v2.realtime as realtime_module
 from voice_agent_v2.realtime import RealtimeSession
 from voice_agent_v2.tracer import TraceResult
@@ -110,6 +118,72 @@ class MemoryAudio:
         return "persistent-publication"
 
 
+class FailingPrepareAudio(MemoryAudio):
+    async def prepare(self, _turn_id: str, _media_generation: int) -> str:
+        raise RuntimeError("publication unavailable")
+
+
+class CapacitySTT:
+    version = STT_VERSION
+
+    def transcribe(self, **_arguments) -> str:
+        return "Проверочный вопрос."
+
+
+class CapacityLLM:
+    version = LLM_VERSION
+    provider_mode = "local"
+    provider_identity = "deterministic-local"
+    supports_visible_handoff = True
+    visible_handoff_is_cumulative = True
+
+    def respond_with_handoff(self, *, on_sentence, on_visible_sentence, **_arguments) -> str:
+        pieces = (
+            "Первое достаточно длинное предложение полностью готово для синтеза. ",
+            "Второе достаточно длинное предложение полностью готово для синтеза. ",
+            "Третье достаточно длинное предложение полностью готово для синтеза.",
+        )
+        cumulative = ""
+        for piece in pieces:
+            cumulative += piece
+            on_visible_sentence(cumulative)
+            on_sentence(piece)
+        return cumulative
+
+
+class CapacityTTS:
+    version = TTS_V2_VERSION
+    output_format = TTS_OUTPUT_AUDIO_FORMAT
+    capabilities = {"cooperative_cancel": True}
+
+    def __init__(self) -> None:
+        self.started = [threading.Event() for _ in range(3)]
+
+    def stream_synthesize(self, *, segment_index: int, **_arguments):
+        self.started[segment_index].set()
+        yield bytes([segment_index, 0]) * (
+            OUTPUT_DELIVERY_BLOCK_BYTES * 4 // 2
+        )
+
+
+class CapacityAudio(MemoryAudio):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = [threading.Event() for _ in range(12)]
+        self.release = [asyncio.Event() for _ in range(12)]
+        self.write_index = 0
+
+    async def write(self, _turn_id: str, pcm: bytes, cancelled) -> bool:
+        index = self.write_index
+        self.write_index += 1
+        self.started[index].set()
+        await self.release[index].wait()
+        if cancelled():
+            return False
+        self.chunks.append(pcm)
+        return True
+
+
 class BurstStreamingRunner(StreamingRunner):
     def __init__(self, operations: list[str]) -> None:
         super().__init__()
@@ -140,11 +214,11 @@ class BurstStreamingRunner(StreamingRunner):
         emit("llm.visible", {"response": "Потоковый ответ."})
         emit("turn.speaking", {"stage": "tts"})
         for index in range(5):
-            audio_observer(index, bytes([index, 0]) * 320)
-            emit("tts.audio", {"chunk_index": index, "byte_count": 640})
+            audio_observer(index, bytes([index, 0]) * 2_880)
+            emit("tts.audio", {"chunk_index": index, "byte_count": 5_760})
         self.operations.append("synthesis-final")
         emit("llm.final", {"response": "Потоковый ответ."})
-        emit("turn.completed", {"outcome": "completed", "output_bytes": 3_200}, True)
+        emit("turn.completed", {"outcome": "completed", "output_bytes": 28_800}, True)
         return TraceResult(tuple(events), b"", b"")
 
 
@@ -181,20 +255,20 @@ class BoundedPumpRunner(StreamingRunner):
         emit("turn.speaking", {"stage": "tts"})
         for index in range(3):
             self.chunk_started[index].set()
-            audio_observer(index, bytes([index, 0]) * 320)
+            audio_observer(index, bytes([index, 0]) * 8_640)
             self.chunk_returned[index].set()
-            emit("tts.audio", {"chunk_index": index, "byte_count": 640})
+            emit("tts.audio", {"chunk_index": index, "byte_count": 17_280})
         self.producer_final.set()
         emit("llm.final", {"response": "Потоковый ответ."})
-        emit("turn.completed", {"outcome": "completed", "output_bytes": 1_920}, True)
+        emit("turn.completed", {"outcome": "completed", "output_bytes": 51_840}, True)
         return TraceResult(tuple(events), b"", b"")
 
 
 class ControlledAudio(MemoryAudio):
     def __init__(self) -> None:
         super().__init__()
-        self.started = [threading.Event() for _ in range(3)]
-        self.release = [asyncio.Event() for _ in range(3)]
+        self.started = [threading.Event() for _ in range(9)]
+        self.release = [asyncio.Event() for _ in range(9)]
         self.write_index = 0
 
     async def write(self, _turn_id: str, pcm: bytes, cancelled) -> bool:
@@ -272,6 +346,23 @@ class VisibleTTSFailureRunner(StreamingRunner):
 
 
 class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_publication_is_prepared_before_a_turn_is_announced(self) -> None:
+        events = MemoryEvents()
+        audio = FailingPrepareAudio()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=audio,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "publication unavailable"):
+            await session.submit_utterance(b"\0\0" * 320)
+
+        self.assertEqual(events.events, [])
+        self.assertIsNone(session.active_turn_id)
+        self.assertEqual(audio.abandoned, ["turn-00000001"])
+
     async def test_streamed_turn_completes_without_browser_media_controls(self) -> None:
         events = MemoryEvents()
         audio = MemoryAudio()
@@ -344,9 +435,44 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
             await asyncio.wait_for(session.wait_for_cleanup(), 1)
 
-        self.assertEqual(len(audio.chunks), 3)
+        self.assertEqual(len(audio.chunks), 9)
         self.assertEqual(events.events[-1]["type"], "turn.completed")
         self.assertEqual(events.events[-1]["payload"]["server_pcm_queue_max_blocks"], 2)
+        self.assertLessEqual(
+            events.events[-1]["payload"]["server_segment_queue_max_segments"], 2
+        )
+
+    async def test_segment_capacity_is_reserved_before_synthesis(self) -> None:
+        events = MemoryEvents()
+        audio = CapacityAudio()
+        tts = CapacityTTS()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=RealTurnController(CapacitySTT(), CapacityLLM(), tts),
+            event_sink=events,
+            audio_sink=audio,
+        )
+
+        await session.submit_utterance(b"\0\0" * 320)
+        try:
+            self.assertTrue(await asyncio.to_thread(audio.started[0].wait, 0.5))
+            self.assertTrue(await asyncio.to_thread(tts.started[1].wait, 0.5))
+            await asyncio.sleep(0.05)
+            self.assertFalse(tts.started[2].is_set())
+
+            audio.release[0].set()
+            self.assertTrue(await asyncio.to_thread(audio.started[1].wait, 0.5))
+            audio.release[1].set()
+            self.assertTrue(await asyncio.to_thread(tts.started[2].wait, 0.5))
+        finally:
+            for release in audio.release:
+                release.set()
+            await asyncio.wait_for(session.wait_for_cleanup(), 1)
+
+        self.assertEqual(events.events[-1]["type"], "turn.completed")
+        self.assertEqual(
+            events.events[-1]["payload"]["server_segment_queue_max_segments"], 2
+        )
 
     async def test_stale_request_tagged_pcm_is_dropped_before_sink_write(self) -> None:
         events = MemoryEvents()
@@ -390,7 +516,7 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [event["type"] for event in events.events],
-            ["turn.listening", "stt.final", "turn.thinking", "llm.visible", "turn.failed"],
+            ["turn.listening", "turn.media-ready", "stt.final", "turn.thinking", "llm.visible", "turn.failed"],
         )
         self.assertEqual(events.events[-2]["payload"]["response"], "Сохранённый ответ.")
         self.assertEqual(events.events[-1]["payload"]["stage"], "tts")
@@ -557,6 +683,53 @@ class CheckpointBWarmupTests(unittest.TestCase):
 
 
 class CheckpointBLiveKitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sink_rechecks_freshness_before_every_48khz_frame(self) -> None:
+        runtime = load_runtime()
+        captured: list[dict[str, object]] = []
+        stale = False
+
+        class Source:
+            async def capture_frame(self, frame) -> None:
+                nonlocal stale
+                captured.append(frame)
+                stale = True
+
+            def clear_queue(self) -> None:
+                return None
+
+            async def aclose(self) -> None:
+                return None
+
+        class Participant:
+            async def publish_track(self, _track, _options):
+                return types.SimpleNamespace(sid="publication-session")
+
+            async def unpublish_track(self, _publication_id: str) -> None:
+                return None
+
+        runtime.rtc.AudioFrame = lambda **kwargs: kwargs
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()),
+            Source(),
+            lambda _source: None,
+        )
+        await sink.start()
+        await sink.prepare("turn-one", 1)
+
+        accepted = await sink.write(
+            "turn-one", b"\0\0" * 2_880, lambda: stale, media_generation=1
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(len(captured[0]["data"]), 1_920)
+        self.assertEqual(captured[0]["sample_rate"], 48_000)
+        await sink.close()
+
     async def test_one_publication_serves_multiple_turns_until_close(self) -> None:
         runtime = load_runtime()
         calls: list[tuple[str, object]] = []
@@ -592,9 +765,20 @@ class CheckpointBLiveKitTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await sink.start()
-        self.assertTrue(await sink.write("turn-one", b"\0\0" * 320, lambda: False))
-        self.assertTrue(await sink.finish("turn-one", lambda: False))
-        self.assertTrue(await sink.write("turn-two", b"\0\0" * 320, lambda: False))
+        publication = await sink.prepare("turn-one", 1)
+        self.assertEqual(publication, "publication-session")
+        self.assertTrue(await sink.write(
+            "turn-one", b"\0\0" * 2_880, lambda: False, media_generation=1
+        ))
+        self.assertTrue(await sink.finish("turn-one", lambda: False, media_generation=1))
+        await sink.prepare("turn-two", 2)
+        self.assertTrue(await sink.write(
+            "turn-two", b"\0\0" * 1_000, lambda: False, media_generation=2
+        ))
+        self.assertTrue(await sink.finish("turn-two", lambda: False, media_generation=2))
+        final_original = sink.submitted_bytes
+        final_padding = sink.padded_bytes
+        final_frames = sink.submitted_frames
         await sink.clear("turn-two")
         await sink.close()
 
@@ -603,7 +787,13 @@ class CheckpointBLiveKitTests(unittest.IsolatedAsyncioTestCase):
             [call for call in calls if call[0] == "unpublish"],
             [("unpublish", "publication-session")],
         )
-        self.assertEqual(len([call for call in calls if call[0] == "capture"]), 2)
+        captured = [call[1] for call in calls if call[0] == "capture"]
+        self.assertEqual(len(captured), 5)
+        self.assertTrue(all(frame["sample_rate"] == 48_000 for frame in captured))
+        self.assertTrue(all(frame["num_channels"] == 1 for frame in captured))
+        self.assertTrue(all(frame["samples_per_channel"] == 960 for frame in captured))
+        self.assertTrue(all(len(frame["data"]) == 1_920 for frame in captured))
+        self.assertEqual((final_original, final_padding, final_frames), (2_000, 1_840, 2))
 
 
 if __name__ == "__main__":
