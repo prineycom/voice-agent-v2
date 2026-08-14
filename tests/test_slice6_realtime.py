@@ -206,15 +206,28 @@ class CrossGenerationCapacityRunner(OverlapRunner):
             segment_started_observer(0)
             if trace_observer is not None:
                 trace_observer(
+                    "tts", "noncooperative_worker_started", {"segment_index": 0}
+                )
+
+            def drain_worker() -> None:
+                self.old_started.set()
+                self.old_release.wait(2)
+                if trace_observer is not None:
+                    trace_observer(
+                        "tts", "noncooperative_worker_finished", {"segment_index": 0}
+                    )
+                segment_audio_observer(0, None)
+
+            drain = threading.Thread(target=drain_worker)
+            self.drain_threads.append(drain)
+            drain.start()
+            while not cancellation.cancelled:
+                time.sleep(0.01)
+            if trace_observer is not None:
+                trace_observer(
                     "llm_provider", "cooperative_cleanup_complete",
                     {"context_committed": True},
                 )
-                trace_observer("tts", "noncooperative_worker_started", {})
-            self.old_started.set()
-            self.old_release.wait(2)
-            if trace_observer is not None:
-                trace_observer("tts", "noncooperative_worker_finished", {})
-            segment_audio_observer(0, None)
             return TraceResult((), b"", b"")
 
         events: list[dict[str, object]] = []
@@ -290,14 +303,61 @@ class CrossGenerationCapacityTests(unittest.IsolatedAsyncioTestCase):
             runner.old_release.set()
             for release in audio.release:
                 release.set()
+            for drain in runner.drain_threads:
+                await asyncio.to_thread(drain.join, 0.5)
             await asyncio.wait_for(session.wait_for_cleanup(), 1)
 
+        self.assertTrue(all(not drain.is_alive() for drain in runner.drain_threads))
         self.assertEqual(events.events[-1]["type"], "turn.completed")
         self.assertEqual(events.events[-1]["turn_id"], second_turn)
         self.assertIn(
             "turn.interrupted",
             [event["type"] for event in events.events if event["turn_id"] == first_turn],
         )
+
+
+class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pre_ready_worker_loss_degrades_and_closes_session(self) -> None:
+        class UnreadyRunner:
+            def ready_for_admission(self) -> bool:
+                return False
+
+        events = MemoryEvents()
+        failures: list[tuple[str, str]] = []
+        session = RealtimeSession(
+            session_id="session-ready-loss",
+            runner=UnreadyRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            failure_handler=lambda stage, code: failures.append((stage, code)),
+        )
+
+        self.assertFalse(await session.ready())
+        self.assertEqual(failures, [("tts", "tts_backend_not_ready")])
+        self.assertEqual(
+            events.events,
+            [
+                {
+                    "schema_version": CONTROL_EVENT_VERSION,
+                    "session_id": "session-ready-loss",
+                    "turn_id": "session",
+                    "stream_epoch": 1,
+                    "turn_generation": 0,
+                    "request_id": "session",
+                    "media_generation": 0,
+                    "sequence": 1,
+                    "type": "session.degraded",
+                    "terminal": False,
+                    "payload": {
+                        "state": "degraded",
+                        "stage": "tts",
+                        "code": "tts_backend_not_ready",
+                    },
+                }
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "session is closed"):
+            await session.start_utterance()
 
 
 class FinalSegmentOverlapRunner(OverlapRunner):

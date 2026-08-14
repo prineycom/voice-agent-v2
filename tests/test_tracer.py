@@ -9,6 +9,7 @@ import unittest
 from voice_agent_v2.audio import DEFAULT_AUDIO_FORMAT, generated_input_pcm, generated_output_pcm
 from voice_agent_v2.contracts import CONTRACT_VERSIONS, EVENT_ENVELOPE_VERSION, TERMINAL_TYPES
 from voice_agent_v2.schema import SchemaViolation, validate
+from voice_agent_v2.v2_contracts import validate_tts_v2_document
 from voice_agent_v2.tracer import (
     AUDIO_CHUNK_BYTES,
     FIXED_RESPONSE,
@@ -153,6 +154,24 @@ class ContractFixtureTests(unittest.TestCase):
             sum(chunk["byte_count"] for chunk in tts_v2["result"]["chunks"]),
             tts_v2["result"]["audio_bytes"],
         )
+        validate_tts_v2_document(tts_v2)
+        invalid_documents = {}
+        invalid_documents["noncontiguous sequence"] = deepcopy(tts_v2)
+        invalid_documents["noncontiguous sequence"]["result"]["chunks"][1]["sequence"] = 0
+        invalid_documents["odd PCM16 chunk"] = deepcopy(tts_v2)
+        invalid_documents["odd PCM16 chunk"]["result"]["chunks"][0]["byte_count"] -= 1
+        invalid_documents["chunk count"] = deepcopy(tts_v2)
+        invalid_documents["chunk count"]["result"]["chunk_count"] = 1
+        invalid_documents["audio bytes"] = deepcopy(tts_v2)
+        invalid_documents["audio bytes"]["result"]["audio_bytes"] -= 2
+        invalid_documents["samples"] = deepcopy(tts_v2)
+        invalid_documents["samples"]["result"]["samples"] -= 1
+        invalid_documents["duration"] = deepcopy(tts_v2)
+        invalid_documents["duration"]["result"]["duration_ms"] = 999
+        for case, invalid_document in invalid_documents.items():
+            with self.subTest(semantic_case=case):
+                with self.assertRaises(ValueError):
+                    validate_tts_v2_document(invalid_document)
         fractional_duration = deepcopy(tts_v2)
         fractional_duration["result"]["duration_ms"] = 120.5
         validate(fractional_duration, tts_v2_schema)
@@ -164,6 +183,10 @@ class ContractFixtureTests(unittest.TestCase):
         rejected_chunk["result"]["chunks"][0]["byte_count"] = 65_537
         with self.assertRaises(SchemaViolation):
             validate(rejected_chunk, tts_v2_schema)
+        odd_chunk = deepcopy(tts_v2)
+        odd_chunk["result"]["chunks"][0]["byte_count"] = 65_535
+        with self.assertRaises(SchemaViolation):
+            validate(odd_chunk, tts_v2_schema)
 
         rejected_output = deepcopy(tts_v2)
         rejected_output["request"]["audio"]["sample_rate_hz"] = 16_000

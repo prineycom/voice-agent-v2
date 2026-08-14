@@ -340,15 +340,20 @@ class RealtimeSession:
     def active_turn_id(self) -> str | None:
         return self._active.turn_id if self._active and not self._active.terminal else None
 
-    async def ready(self) -> None:
-        admission = getattr(self.runner, "ready_for_admission", None)
-        if admission is not None and not admission():
-            raise RuntimeError("TTS pool is not ready for admission")
-        await self._emit(
-            SESSION_TURN_ID,
-            "session.ready",
-            {"state": "ready", "barge_in_drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS},
-        )
+    async def ready(self) -> bool:
+        async with self._lock:
+            if self._closed:
+                return False
+            admission = getattr(self.runner, "ready_for_admission", None)
+            if admission is not None and not admission():
+                await self._degrade_locked("tts", "tts_backend_not_ready")
+                return False
+            await self._emit(
+                SESSION_TURN_ID,
+                "session.ready",
+                {"state": "ready", "barge_in_drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS},
+            )
+            return True
 
     async def start_utterance(self, *, announce: bool = True) -> str:
         async with self._reconnect_lock:
@@ -833,6 +838,8 @@ class RealtimeSession:
         )
         pcm_capacity = asyncio.Semaphore(PCM_PUMP_MAX_BLOCKS)
         reserved_segments: set[int] = set()
+        noncooperative_reserved_segments: set[int] = set()
+        segment_release_events: dict[int, asyncio.Event] = {}
         outstanding_pcm = 0
         pump_errors: list[BaseException] = []
         delivery_block_bytes = (
@@ -904,6 +911,7 @@ class RealtimeSession:
                 self._segment_capacity.release()
                 raise StageFailure("tts", "selected_tts_output_out_of_bounds")
             reserved_segments.add(segment_index)
+            segment_release_events[segment_index] = asyncio.Event()
             context.segment_queue_high_water = max(
                 context.segment_queue_high_water, len(reserved_segments)
             )
@@ -912,7 +920,11 @@ class RealtimeSession:
             if segment_index not in reserved_segments:
                 return
             reserved_segments.remove(segment_index)
+            noncooperative_reserved_segments.discard(segment_index)
             self._segment_capacity.release()
+            released = segment_release_events.get(segment_index)
+            if released is not None:
+                released.set()
 
         async def enqueue_segment(
             chunk_index: int, chunk: bytes, *, reserved: bool = False
@@ -1078,6 +1090,9 @@ class RealtimeSession:
             def observe_trace(stage: str, event: str, fields: dict[str, object]) -> None:
                 if stage == "tts" and event == "noncooperative_worker_started":
                     context.noncooperative_worker_drains += 1
+                    segment_index = fields.get("segment_index")
+                    if isinstance(segment_index, int) and not isinstance(segment_index, bool):
+                        noncooperative_reserved_segments.add(segment_index)
                 elif stage == "tts" and event == "noncooperative_worker_finished":
                     context.noncooperative_worker_drains = max(
                         0, context.noncooperative_worker_drains - 1
@@ -1135,8 +1150,24 @@ class RealtimeSession:
                 if not consumer.done():
                     consumer.cancel()
             await asyncio.gather(*consumers, return_exceptions=True)
-            for segment_index in tuple(reserved_segments):
+            retained_segments = reserved_segments & noncooperative_reserved_segments
+            for segment_index in tuple(reserved_segments - retained_segments):
                 await release_segment(segment_index)
+            if retained_segments:
+                retained_events = tuple(
+                    segment_release_events[segment_index]
+                    for segment_index in retained_segments
+                )
+
+                async def await_retained_releases() -> str | None:
+                    await asyncio.gather(*(released.wait() for released in retained_events))
+                    return None
+
+                detached_release = asyncio.create_task(
+                    await_retained_releases(),
+                    name=f"segment-release-{context.turn_id}",
+                )
+                self._track_cleanup(detached_release, admission_blocking=False)
 
         if context.terminal or self._closed:
             return

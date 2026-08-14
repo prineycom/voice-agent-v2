@@ -69,6 +69,11 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
             raise SchemaViolation(f"{path}: number is not above exclusive minimum")
         if "maximum" in schema and instance > schema["maximum"]:
             raise SchemaViolation(f"{path}: number is above maximum")
+        if "multipleOf" in schema:
+            divisor = schema["multipleOf"]
+            quotient = instance / divisor
+            if not math.isclose(quotient, round(quotient), rel_tol=0.0, abs_tol=1e-12):
+                raise SchemaViolation(f"{path}: number is not a multiple")
 
     if isinstance(instance, dict):
         required = schema.get("required", [])
