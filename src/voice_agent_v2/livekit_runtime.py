@@ -122,12 +122,17 @@ class LiveTurnRunner:
                 request_id=effective_request_id,
             )
         finally:
-            turn_observations = self.tts.take_turn_observations(
-                session_id,
-                stream_epoch,
-                turn_id,
-                turn_generation,
-                effective_request_id,
+            take_turn_observations = getattr(self.tts, "take_turn_observations", None)
+            turn_observations = (
+                take_turn_observations(
+                    session_id,
+                    stream_epoch,
+                    turn_id,
+                    turn_generation,
+                    effective_request_id,
+                )
+                if take_turn_observations is not None
+                else ()
             )
             if trace_observer is not None:
                 for observation in turn_observations:
