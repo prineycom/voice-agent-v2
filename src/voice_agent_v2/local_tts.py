@@ -1,4 +1,4 @@
-"""Selected local Qwen3 CustomVoice TTS adapter with streaming PCM and no default retention."""
+"""Fail-closed local TTS selection with Qwen3 as the unchanged default backend."""
 
 from __future__ import annotations
 

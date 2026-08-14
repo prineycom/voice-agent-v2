@@ -74,12 +74,12 @@ with zero post-cancel chunks, and the same resident adapter process served warm-
 cancellation, and recovery. Peak total VRAM was 8,406 MiB and peak VoxCPM2 process VRAM was
 8,184 MiB; the isolated run retained 3,494 MiB minimum free VRAM.
 
-The required full-stack reserve fails before Whisper is added: VoxCPM2 peak plus the current
-approximately 2,900 MiB LFM process projects to 11,306 MiB used and only 976 MiB free, below the
-non-negotiable 1,536 MiB reserve. Current Whisper evidence adds a further 2,388 MiB above its
-measurement baseline. Starting the full overlap would knowingly violate the gate, so it was not
-done. Runner readiness requires 9,728 MiB free before load and fails before GPU allocation when the
-resident stack cannot preserve the reserve.
+The required full-stack reserve fails before Whisper is added: the 8,406 MiB isolated total-GPU
+peak plus the current approximately 2,900 MiB LFM process projects to 11,306 MiB used and only
+976 MiB free, below the non-negotiable 1,536 MiB reserve. Current Whisper evidence adds a further
+2,388 MiB above its measurement baseline. Starting the full overlap would knowingly violate the
+gate, so it was not done. Runner readiness requires 9,728 MiB free before load and fails before GPU
+allocation when the resident stack cannot preserve the reserve.
 
 **Recommendation: no-go for Pasha's manual full-app voice test on the current stack.** The branch
 is kept deployable and fail-closed for later re-evaluation if an upstream accelerated runtime

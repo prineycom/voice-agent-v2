@@ -1,6 +1,6 @@
 # Review: voxcpm2-fast-tts
 
-**Source:** current diff on `fm/voice-agent-v2-voxcpm2-fast-tts`  
+**Source:** current diff on `fm/voice-agent-v2-voxcpm2-fast-tts`
 **Status:** ✅ pass
 
 ## Findings

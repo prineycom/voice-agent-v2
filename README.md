@@ -39,7 +39,7 @@ Generate a dedicated LiveKit key pair and fill every blank in the ignored `.env.
 "${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
 ```
 
-The active app accepts no `LITELLM_*` configuration. `./setup-slice6` verifies, but never downloads or replaces, the exact cache-local Issue #15 model/runtime. Run the focused real provider check with `./verify-local-lfm`; it proves the hashes, loopback endpoint, exact identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, cancellation and recovery. Run `./verify-real-streaming` to start/reuse the exact loopback LFM plus resident Qwen and prove the first PCM chunk arrives before total sentence/TTS completion; it logs timings/counts only, not content or audibility. Then this is the single development start command:
+The active app accepts no `LITELLM_*` configuration. `./setup-slice6` verifies, but never downloads or replaces, the exact cache-local Issue #15 model/runtime. Run the focused real provider check with `./verify-local-lfm`; it proves the hashes, loopback endpoint, exact identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, cancellation and recovery. Run `./verify-real-streaming` to start/reuse the exact loopback LFM plus resident Qwen and prove the first PCM chunk arrives before total sentence/TTS completion; it logs timings/counts only, not content or audibility. Then this is the single default development start command:
 
 ```sh
 ./run-slice6
