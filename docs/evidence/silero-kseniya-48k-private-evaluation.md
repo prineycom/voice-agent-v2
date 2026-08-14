@@ -34,7 +34,7 @@ The model is used only for private local noncommercial evaluation under CC BY-NC
 - Input remains explicit mono `pcm_s16le/16000`: 20-ms/640-byte microphone frames and 30-second/960,000-byte request bound.
 - Output is native mono `pcm_s16le/48000`: `AudioSource(48000,1)`, 20-ms/1,920-byte LiveKit frames, 60-ms/5,760-byte delivery blocks, two blocks maximum, separate final padding/original totals, and 180-second/17,280,000-byte turn bound.
 - Each segment is at most 240 visible characters and 15 seconds / 1,440,000 raw bytes. Worker protocol chunks are ordered and at most 64 KiB; the parent validates exact identity/format/chunk/sample/byte/duration/terminal totals, aggregates one complete segment, and releases the worker before playback.
-- The scheduler admits at most two complete synthesized segments and preserves pending PCM across segment boundaries before one final partial frame.
+- One process-wide segment permit is reserved before synthesis and retained through segment-buffer consumption. The two permits therefore bound in-flight synthesis plus buffered PCM across turns; pending PCM is preserved across segment boundaries before one final partial frame.
 
 ## Text behavior
 
@@ -44,9 +44,9 @@ Visible/history text and synthesis text are separate. Common number/date/time/ab
 
 ## Two-worker and interruption behavior
 
-Exactly two stable worker slots, `silero-1` and `silero-2`, each own one resident model and one request. Each process is frozen to two intra-op threads and one inter-op thread (four intra-op threads total on the 6-core/12-thread host). Same-turn segments serialize with worker affinity. There is no worker backlog and no third simultaneous process.
+Exactly two stable worker slots, `silero-1` and `silero-2`, each own one resident model and one request. Each process is frozen to two intra-op threads and one inter-op thread (four intra-op threads total on the 6-core/12-thread host). Same-turn segments serialize with worker affinity and do not migrate while their affinity slot is occupied. There is no worker backlog and no third simultaneous process. Initial readiness remains unavailable to every caller until both workers finish warm-up, then publishes atomically.
 
-A current turn may use the second worker while one obsolete non-cooperative call finishes silently. Both busy waits no longer than 750 ms and then fails `silero_capacity_timeout`. Request errors are never retried. Worker/protocol failure quarantines that slot and drops readiness below two; only an explicit post-degradation recovery may recreate it, never ordinary barge-in.
+A current turn may use the second worker while one obsolete non-cooperative call finishes silently. If no eligible slot is available, admission waits no longer than 750 ms and then fails `silero_capacity_timeout`. Request errors are never retried. Worker/protocol failure quarantines that slot and drops readiness below two; only an explicit post-degradation recovery may recreate it, never ordinary barge-in.
 
 Freshness key: `(session_id, stream_epoch, turn_id, turn_generation, request_id, segment_index)` plus output media generation. Checks run before dispatch, after worker return, before/inside segment and block buffers, pump, sink, every LiveKit frame, and completion/context commit. Valid interruption invalidates the old turn before replacement admission, clears old segment/block/source queues, suppresses stale PCM/completion, and lets only the active Silero call finish silently. Cooperative STT/LFM cleanup still drains before conflicting replacement work. UI suspension alone is not treated as sufficient.
 
@@ -66,9 +66,9 @@ Passing behavior includes:
 - v1 preservation and TTS/event/control v2 strict fixtures;
 - STT v1 rejection of 48-kHz input and TTS v2 rejection of 16-kHz output;
 - Russian segmentation/shaping, hard-cap/no-midword/final-tail/plain-text/visible-text separation;
-- exactly two workers, no third, 750-ms capacity failure, same-turn serialization, obsolete/current overlap, stale post-worker discard, no request retry, below-two readiness, explicit recovery;
+- exactly two workers, atomic post-warm-up readiness, no third, 750-ms eligible-slot capacity failure, same-turn affinity/serialization, obsolete/current overlap, stale post-worker discard, no request retry, below-two readiness, explicit recovery;
 - late TTS failure preserving visible and already accepted prefix without completion/fallback;
-- request freshness at controller, segment buffer, two-block pump, sink, frame, and completion boundaries;
+- request freshness and the shared two-segment permit bound across synthesis, segment buffer, two-block pump, sink, frame, and completion boundaries;
 - exact 60-ms blocks, 20-ms/1,920-byte 48-kHz frames, persistent publication, and final partial original/padded accounting;
 - browser deferred attachment, matching publication generation, immediate valid suspension, invalid/old no-op, reconnect suppression, current-page history, and the validated license/voice badge;
 - real headless Firefox plus official local LiveKit with deterministic fake inference. This is transport/publication evidence, not audibility.
