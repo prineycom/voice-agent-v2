@@ -302,7 +302,7 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertTrue(abort_seen.is_set())
         self.assertLess(time.monotonic() - started, 0.5)
 
-    def test_handoff_cleanup_blocks_overlapping_generation_until_confirmed(self) -> None:
+    def test_handoff_cleanup_allows_replacement_generation_to_use_second_slot(self) -> None:
         callback_seen = threading.Event()
         cleanup_entered = threading.Event()
         cleanup_release = threading.Event()
@@ -351,23 +351,18 @@ class LocalLFMProviderTests(unittest.TestCase):
         worker.start()
         self.assertTrue(cleanup_entered.wait(0.5))
         self.assertEqual(provider.handoff_capacity_state(), "cleaning")
-        with self.assertRaises(StageFailure) as pending:
-            provider.respond(
-                session_id="session-b", turn_id="turn-b", transcript="Запрос"
-            )
-        self.assertEqual(pending.exception.code, "local_lfm_handoff_cleanup_pending")
-
-        cleanup_release.set()
-        worker.join(0.5)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(failures, ["selected_provider_identity_mismatch"])
-        self.assertEqual(provider.handoff_capacity_state(), "available")
         self.assertEqual(
             provider.respond(
                 session_id="session-b", turn_id="turn-b", transcript="Запрос"
             ),
             "Восстановлено.",
         )
+
+        cleanup_release.set()
+        worker.join(0.5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, ["selected_provider_identity_mismatch"])
+        self.assertEqual(provider.handoff_capacity_state(), "available")
 
     def test_handoff_cleanup_timeout_closes_provider_capacity(self) -> None:
         callback_seen = threading.Event()

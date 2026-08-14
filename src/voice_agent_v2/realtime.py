@@ -14,13 +14,19 @@ import threading
 import time
 from typing import Awaitable, Callable, Protocol
 
-from .audio import OUTPUT_MEDIA_MAX_BYTES
+from .audio import (
+    INPUT_AUDIO_FORMAT,
+    INPUT_MEDIA_MAX_BYTES,
+    OUTPUT_DELIVERY_BLOCK_BYTES,
+    OUTPUT_MEDIA_MAX_BYTES,
+    TTS_OUTPUT_AUDIO_FORMAT,
+)
 from .contracts import StageFailure, valid_correlation_id
 from .tracer import CancellationToken, TraceResult
 
-CONTROL_EVENT_VERSION = "voice-agent.realtime-control.v1"
+CONTROL_EVENT_VERSION = "voice-agent.realtime-control.v2"
 CLIENT_CONTROL_VERSION = "voice-agent.client-control.v1"
-CONTROL_TOPIC = "voice-agent.control.v1"
+CONTROL_TOPIC = "voice-agent.control.v2"
 CLIENT_CONTROL_TOPIC = "voice-agent.client-control.v1"
 SESSION_TURN_ID = "session"
 MAX_CONTROL_BYTES = 65_536
@@ -33,6 +39,7 @@ PUBLIC_EVENT_TYPES = frozenset({
     "session.reconnected",
     "session.degraded",
     "turn.listening",
+    "turn.media-ready",
     "stt.final",
     "turn.thinking",
     "llm.visible",
@@ -43,7 +50,8 @@ PUBLIC_EVENT_TYPES = frozenset({
 })
 TERMINAL_EVENT_TYPES = frozenset({"turn.completed", "turn.interrupted", "turn.failed"})
 TURN_PREDECESSOR = {
-    "stt.final": "turn.listening",
+    "turn.media-ready": "turn.listening",
+    "stt.final": "turn.media-ready",
     "turn.thinking": "stt.final",
     "llm.visible": {"turn.thinking", "llm.visible", "turn.speaking"},
     "turn.speaking": {"turn.thinking", "llm.visible"},
@@ -52,7 +60,7 @@ TURN_PREDECESSOR = {
 BARGE_IN_DRAIN_BOUND_MS = 250
 CANCELLATION_CLEANUP_BOUND_MS = 1_000
 CONTROL_PUBLISH_BOUND_MS = 1_000
-MAX_UTTERANCE_BYTES = 30 * 16_000 * 2
+MAX_UTTERANCE_BYTES = INPUT_MEDIA_MAX_BYTES
 TERMINAL_CONTROLLER_FAILURE_CODES = frozenset({"local_lfm_handoff_cleanup_failed"})
 
 
@@ -88,6 +96,10 @@ class TurnContext:
     turn_id: str
     cancellation: CancellationToken
     endpoint_monotonic: float
+    stream_epoch: int = 1
+    turn_generation: int = 1
+    request_id: str = "request-test"
+    media_generation: int = 1
     task: asyncio.Task[None] | None = None
     terminal: bool = False
     announced: bool = True
@@ -98,15 +110,21 @@ class TurnContext:
     audio_chunk_sequence: int = 0
     audio_bytes_streamed: int = 0
     pcm_queue_high_water: int = 0
+    segment_queue_high_water: int = 0
     first_visible_ms: float | None = None
     first_pcm_ms: float | None = None
+    media_publication_id: str | None = None
+    internal_event_sequence: int = 0
+    inference_stage: str = "stt"
 
 
 @dataclass(frozen=True)
 class PcmPumpItem:
     request: TurnContext
-    chunk_index: int
+    block_index: int
     pcm: bytes
+    final_partial: bool = False
+    block_size: int = OUTPUT_DELIVERY_BLOCK_BYTES
 
 
 def _bounded_json_value(value: object, depth: int = 0) -> bool:
@@ -142,11 +160,15 @@ class ControlEventGate:
         self.current_turn_id: str | None = None
         self.current_turn_terminal = True
         self.last_turn_event: str | None = None
+        self.current_turn_generation = 0
+        self.current_request_id = SESSION_TURN_ID
+        self.current_media_generation = 0
         self.drop_count = 0
 
     def accept(self, event: object) -> bool:
         if not isinstance(event, dict) or set(event) != {
             "schema_version", "session_id", "turn_id", "stream_epoch",
+            "turn_generation", "request_id", "media_generation",
             "sequence", "type", "terminal", "payload",
         }:
             return self._drop()
@@ -155,6 +177,9 @@ class ControlEventGate:
         sequence = event.get("sequence")
         epoch = event.get("stream_epoch")
         terminal = event.get("terminal")
+        turn_generation = event.get("turn_generation")
+        request_id = event.get("request_id")
+        media_generation = event.get("media_generation")
         if (
             event.get("schema_version") != CONTROL_EVENT_VERSION
             or event.get("session_id") != self.session_id
@@ -166,6 +191,14 @@ class ControlEventGate:
             or sequence > MAX_EVENT_SEQUENCE
             or not isinstance(epoch, int)
             or isinstance(epoch, bool)
+            or not isinstance(turn_generation, int)
+            or isinstance(turn_generation, bool)
+            or not 0 <= turn_generation <= MAX_EVENT_SEQUENCE
+            or not isinstance(request_id, str)
+            or not valid_correlation_id(request_id)
+            or not isinstance(media_generation, int)
+            or isinstance(media_generation, bool)
+            or not 0 <= media_generation <= MAX_EVENT_SEQUENCE
             or not isinstance(event_type, str)
             or event_type not in PUBLIC_EVENT_TYPES
             or not isinstance(terminal, bool)
@@ -181,18 +214,41 @@ class ControlEventGate:
             self.current_turn_id = None
             self.current_turn_terminal = True
             self.last_turn_event = None
+            self.current_turn_generation = 0
+            self.current_request_id = SESSION_TURN_ID
+            self.current_media_generation = 0
         elif epoch != self.stream_epoch:
             return self._drop()
         elif event_type.startswith("session."):
-            if turn_id != SESSION_TURN_ID:
+            if (
+                turn_id != SESSION_TURN_ID
+                or turn_generation != 0
+                or request_id != SESSION_TURN_ID
+                or media_generation != 0
+            ):
                 return self._drop()
         elif event_type == "turn.listening":
-            if self.current_turn_id == turn_id or not self.current_turn_terminal:
+            if (
+                self.current_turn_id == turn_id
+                or not self.current_turn_terminal
+                or turn_generation < 1
+                or request_id == SESSION_TURN_ID
+                or media_generation < 1
+            ):
                 return self._drop()
             self.current_turn_id = turn_id
+            self.current_turn_generation = turn_generation
+            self.current_request_id = request_id
+            self.current_media_generation = media_generation
             self.current_turn_terminal = False
             self.last_turn_event = event_type
-        elif turn_id != self.current_turn_id or self.current_turn_terminal:
+        elif (
+            turn_id != self.current_turn_id
+            or turn_generation != self.current_turn_generation
+            or request_id != self.current_request_id
+            or media_generation != self.current_media_generation
+            or self.current_turn_terminal
+        ):
             return self._drop()
         elif event_type in TURN_PREDECESSOR:
             predecessor = TURN_PREDECESSOR[event_type]
@@ -240,6 +296,7 @@ class RealtimeSession:
         self.stream_epoch = 1
         self._event_sequence = 0
         self._turn_sequence = 0
+        self._media_generation = 0
         self._client_sequence = 0
         self._last_reconnect_request: tuple[int, int] | None = None
         self._last_reconnect_payload: dict[str, object] | None = None
@@ -252,7 +309,9 @@ class RealtimeSession:
         self._reconnect_lock = asyncio.Lock()
         self._disconnect_lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[str | None]] = set()
+        self._detached_cleanup_tasks: set[asyncio.Task[str | None]] = set()
         self._cleanup_error: str | None = None
+        self._turn_tasks: set[asyncio.Task[None]] = set()
         self.drop_counts = {"stale_event": 0, "client_control": 0}
         self.diagnostic_failure_counts = {"validation": 0, "write": 0, "observer": 0}
 
@@ -278,6 +337,9 @@ class RealtimeSession:
         return self._active.turn_id if self._active and not self._active.terminal else None
 
     async def ready(self) -> None:
+        admission = getattr(self.runner, "ready_for_admission", None)
+        if admission is not None and not admission():
+            raise RuntimeError("TTS pool is not ready for admission")
         await self._emit(
             SESSION_TURN_ID,
             "session.ready",
@@ -289,13 +351,30 @@ class RealtimeSession:
             async with self._lock:
                 if self._closed:
                     raise RuntimeError("session is closed")
+                admission = getattr(self.runner, "ready_for_admission", None)
+                if admission is not None and not admission():
+                    await self._degrade_locked("tts", "tts_backend_not_ready")
+                    raise RuntimeError("TTS backend is not ready for admission")
                 if self._active is not None and not self._active.terminal:
+                    interrupted_context = self._active
                     cleanup, drain_error, _publication_id = await self._interrupt_locked("barge_in")
                     if drain_error is not None:
                         await self._degrade_locked("publication", drain_error)
                         raise RuntimeError("audio publication could not be cancelled safely")
                     if cleanup is not None:
-                        self._watch_cleanup(cleanup)
+                        if interrupted_context.inference_stage == "tts":
+                            self._watch_cleanup(cleanup)
+                        else:
+                            try:
+                                cleanup_error = await asyncio.wait_for(
+                                    asyncio.shield(cleanup),
+                                    CANCELLATION_CLEANUP_BOUND_MS / 1000,
+                                )
+                            except TimeoutError:
+                                cleanup_error = "cancellation_cleanup_timeout"
+                            if cleanup_error is not None:
+                                await self._degrade_locked("controller", cleanup_error)
+                                raise RuntimeError("inference cancellation did not drain safely")
                 elif self._active is not None:
                     drain_error, _publication_id = await self._clear_audio(SESSION_TURN_ID)
                     if drain_error is not None:
@@ -305,17 +384,56 @@ class RealtimeSession:
 
     async def _admit_listening_locked(self, *, announce: bool = True) -> str:
         self._turn_sequence += 1
+        self._media_generation += 1
         turn_id = f"turn-{self._turn_sequence:08d}"
         context = TurnContext(
             turn_id=turn_id,
+            stream_epoch=self.stream_epoch,
+            turn_generation=self._turn_sequence,
+            request_id=f"request-{self._turn_sequence:08d}",
+            media_generation=self._media_generation,
             cancellation=CancellationToken(),
             endpoint_monotonic=time.monotonic(),
             announced=announce,
         )
         self._active = context
         if announce:
-            await self._emit(turn_id, "turn.listening", {"state": "listening"})
+            await self._announce_context_locked(context)
         return turn_id
+
+    async def _announce_context_locked(self, context: TurnContext) -> None:
+        await self._emit(context.turn_id, "turn.listening", {"state": "listening"})
+        prepare = getattr(self.audio_sink, "prepare", None)
+        if prepare is None:
+            publication_id = "legacy-test-publication"
+        else:
+            publication_id = await asyncio.wait_for(
+                prepare(context.turn_id, context.media_generation),
+                CONTROL_PUBLISH_BOUND_MS / 1000,
+            )
+        if not isinstance(publication_id, str) or not publication_id or len(publication_id) > 128:
+            raise RuntimeError("audio publication has no bounded identity")
+        context.media_publication_id = publication_id
+        tts_profile = getattr(self.runner, "tts_profile", None)
+        metadata = tts_profile.public_metadata() if tts_profile is not None else {
+            "profile": "deterministic-test",
+            "backend": "deterministic",
+            "speaker": "test",
+            "output_sample_rate_hz": 48_000,
+            "native_sample_rate_hz": 48_000,
+            "license": "test-only",
+            "private_noncommercial_only": True,
+        }
+        await self._emit(
+            context.turn_id,
+            "turn.media-ready",
+            {
+                "state": "media-ready",
+                "server_media_publication_id": publication_id,
+                "audio": TTS_OUTPUT_AUDIO_FORMAT.as_dict(),
+                "tts": metadata,
+            },
+        )
 
     async def abandon_unannounced_utterance(self, turn_id: str) -> bool:
         async with self._lock:
@@ -347,7 +465,7 @@ class RealtimeSession:
             context.endpoint_monotonic = endpoint
             if not context.announced:
                 try:
-                    await self._emit(context.turn_id, "turn.listening", {"state": "listening"})
+                    await self._announce_context_locked(context)
                 except BaseException:
                     context.terminal = True
                     if self._active is context:
@@ -357,6 +475,8 @@ class RealtimeSession:
             context.task = asyncio.create_task(
                 self._run_turn(context, bytes(pcm)), name=f"realtime-{context.turn_id}"
             )
+            self._turn_tasks.add(context.task)
+            context.task.add_done_callback(self._turn_tasks.discard)
             return context.turn_id
 
     async def submit_utterance(self, pcm: bytes) -> str:
@@ -446,11 +566,19 @@ class RealtimeSession:
         self._closed = True
         await self._publish_degraded_locked(stage, code)
 
-    async def _rollback_context(self, context: TurnContext) -> str | None:
+    async def _rollback_context(
+        self, context: TurnContext, *, restore_context: bool = True
+    ) -> str | None:
         async with self._runner_lock:
             if context.rollback_complete:
                 return context.rollback_error
-            discard = getattr(self.runner, "discard_turn", None)
+            discard = getattr(
+                self.runner,
+                "discard_turn" if restore_context else "discard_obsolete_turn",
+                None,
+            )
+            if discard is None and not restore_context:
+                discard = getattr(self.runner, "discard_turn", None)
             try:
                 if discard is not None:
                     await asyncio.to_thread(discard, self.session_id, context.turn_id)
@@ -459,11 +587,14 @@ class RealtimeSession:
             context.rollback_complete = True
             return context.rollback_error
 
-    def _track_cleanup(self, cleanup: asyncio.Task[str | None]) -> None:
-        self._cleanup_tasks.add(cleanup)
+    def _track_cleanup(
+        self, cleanup: asyncio.Task[str | None], *, admission_blocking: bool = True
+    ) -> None:
+        tasks = self._cleanup_tasks if admission_blocking else self._detached_cleanup_tasks
+        tasks.add(cleanup)
 
         def complete(task: asyncio.Task[str | None]) -> None:
-            self._cleanup_tasks.discard(task)
+            tasks.discard(task)
             try:
                 error = task.result()
             except BaseException:
@@ -508,6 +639,13 @@ class RealtimeSession:
         error = await self._await_cleanup_barrier(None)
         if error is not None:
             raise RuntimeError(error)
+        if self._detached_cleanup_tasks:
+            results = await asyncio.gather(
+                *(asyncio.shield(task) for task in tuple(self._detached_cleanup_tasks)),
+                return_exceptions=True,
+            )
+            if any(isinstance(result, BaseException) or result is not None for result in results):
+                raise RuntimeError("cancellation_cleanup_failed")
         context = self._active
         task = context.task if context is not None else None
         if task is not None and task is not asyncio.current_task():
@@ -526,7 +664,11 @@ class RealtimeSession:
         asyncio.create_task(finish(), name=f"watch-{cleanup.get_name()}")
 
     def _ensure_context_cleanup(
-        self, context: TurnContext, *, wait_for_turn: bool = True
+        self,
+        context: TurnContext,
+        *,
+        wait_for_turn: bool = True,
+        admission_blocking: bool = True,
     ) -> asyncio.Task[str | None]:
         if context.cancellation_cleanup is not None:
             return context.cancellation_cleanup
@@ -535,24 +677,36 @@ class RealtimeSession:
             cancel_error: Exception | None = None
             try:
                 await asyncio.to_thread(context.cancellation.cancel)
-                await asyncio.to_thread(self.runner.cancel)
+                cancel_turn = getattr(self.runner, "cancel_turn", None)
+                if cancel_turn is not None:
+                    await asyncio.to_thread(
+                        cancel_turn,
+                        self.session_id,
+                        context.stream_epoch,
+                        context.turn_id,
+                        context.turn_generation,
+                    )
+                else:
+                    await asyncio.to_thread(self.runner.cancel)
             except Exception as error:
                 cancel_error = error
-            awaited = context.task if wait_for_turn else context.worker
+            awaited = context.task if wait_for_turn else None
             if awaited is not None and awaited is not asyncio.current_task():
                 try:
                     await awaited
                 except Exception as error:
                     cancel_error = cancel_error or error
             if not context.rollback_complete:
-                context.rollback_error = await self._rollback_context(context)
+                context.rollback_error = await self._rollback_context(
+                    context, restore_context=wait_for_turn
+                )
             if cancel_error is not None:
                 return "cancellation_cleanup_failed"
             return context.rollback_error
 
         cleanup = asyncio.create_task(cancel_runner(), name=f"cancel-{context.turn_id}")
         context.cancellation_cleanup = cleanup
-        self._track_cleanup(cleanup)
+        self._track_cleanup(cleanup, admission_blocking=admission_blocking)
         return cleanup
 
     async def _interrupt_locked(
@@ -562,12 +716,21 @@ class RealtimeSession:
         if context is None or context.terminal:
             return None, None, None
         context.terminal = True
+        # Invalidate request-scoped provider/TTS work before a replacement can be
+        # admitted. Cancellation callbacks are non-blocking; a Silero model call
+        # may continue only as a silent worker drain.
+        context.cancellation.cancel()
         started = time.monotonic()
         try:
             drain_error, publication_id = await self._clear_audio(context.turn_id)
         finally:
             drain_ms = (time.monotonic() - started) * 1000
-            cleanup = self._ensure_context_cleanup(context)
+            detach_obsolete_tts = context.inference_stage == "tts"
+            cleanup = self._ensure_context_cleanup(
+                context,
+                wait_for_turn=not detach_obsolete_tts,
+                admission_blocking=not detach_obsolete_tts,
+            )
         if notify_client:
             payload: dict[str, object] = {
                 "outcome": "interrupted",
@@ -617,14 +780,36 @@ class RealtimeSession:
 
         loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+        segment_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(maxsize=2)
+        segment_capacity = asyncio.Semaphore(2)
         pcm_queue: asyncio.Queue[PcmPumpItem | None] = asyncio.Queue(
             maxsize=PCM_PUMP_MAX_BLOCKS
         )
         pcm_capacity = asyncio.Semaphore(PCM_PUMP_MAX_BLOCKS)
+        outstanding_segments = 0
         outstanding_pcm = 0
         pump_errors: list[BaseException] = []
+        delivery_block_bytes = (
+            640
+            if getattr(getattr(self.runner, "tts", None), "version", None)
+            == "voice-agent.tts.v1"
+            else OUTPUT_DELIVERY_BLOCK_BYTES
+        )
+        expected_audio_chunk = 0
+
+        def fresh() -> bool:
+            return (
+                self._active is context
+                and not context.terminal
+                and not context.cancellation.cancelled
+                and not self._closed
+                and self.stream_epoch == context.stream_epoch
+            )
 
         def observe(event: dict[str, object]) -> None:
+            if not fresh():
+                self.drop_counts["stale_event"] += 1
+                return
             delivery = asyncio.run_coroutine_threadsafe(event_queue.put(event), loop)
             while True:
                 try:
@@ -635,11 +820,22 @@ class RealtimeSession:
                         delivery.cancel()
                         return
 
-        async def enqueue_pcm(chunk_index: int, chunk: bytes) -> None:
+        async def enqueue_pcm(
+            block_index: int, chunk: bytes, *, final_partial: bool = False
+        ) -> None:
             nonlocal outstanding_pcm
+            if not fresh():
+                self.drop_counts["stale_event"] += 1
+                return
             await pcm_capacity.acquire()
+            if not fresh():
+                pcm_capacity.release()
+                self.drop_counts["stale_event"] += 1
+                return
             try:
-                await pcm_queue.put(PcmPumpItem(context, chunk_index, chunk))
+                await pcm_queue.put(PcmPumpItem(
+                    context, block_index, chunk, final_partial, delivery_block_bytes
+                ))
             except BaseException:
                 pcm_capacity.release()
                 raise
@@ -648,7 +844,35 @@ class RealtimeSession:
                 context.pcm_queue_high_water, outstanding_pcm
             )
 
+        async def enqueue_segment(chunk_index: int, chunk: bytes) -> None:
+            nonlocal outstanding_segments
+            if not fresh():
+                raise StageFailure("tts", "selected_tts_cancelled")
+            await segment_capacity.acquire()
+            if not fresh():
+                segment_capacity.release()
+                raise StageFailure("tts", "selected_tts_cancelled")
+            try:
+                await segment_queue.put((chunk_index, chunk))
+            except BaseException:
+                segment_capacity.release()
+                raise
+            outstanding_segments += 1
+            context.segment_queue_high_water = max(
+                context.segment_queue_high_water, outstanding_segments
+            )
+
         def observe_audio(chunk_index: int, chunk: bytes) -> None:
+            nonlocal expected_audio_chunk
+            if (
+                chunk_index != expected_audio_chunk
+                or not chunk
+                or len(chunk) % TTS_OUTPUT_AUDIO_FORMAT.sample_width_bytes
+            ):
+                raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+            expected_audio_chunk += 1
+            if not fresh():
+                raise StageFailure("tts", "selected_tts_cancelled")
             barrier = asyncio.run_coroutine_threadsafe(event_queue.join(), loop)
             while True:
                 try:
@@ -658,8 +882,10 @@ class RealtimeSession:
                     if context.cancellation.cancelled or context.terminal or self._closed:
                         barrier.cancel()
                         raise StageFailure("tts", "selected_tts_cancelled")
+            if not fresh():
+                raise StageFailure("tts", "selected_tts_cancelled")
             delivery = asyncio.run_coroutine_threadsafe(
-                enqueue_pcm(chunk_index, bytes(chunk)), loop
+                enqueue_segment(chunk_index, bytes(chunk)), loop
             )
             while True:
                 try:
@@ -680,6 +906,37 @@ class RealtimeSession:
                 finally:
                     event_queue.task_done()
 
+        async def consume_segments() -> None:
+            nonlocal outstanding_segments
+            assembly = bytearray()
+            block_sequence = 0
+            while True:
+                item = await segment_queue.get()
+                try:
+                    if item is None:
+                        if assembly:
+                            await enqueue_pcm(
+                                block_sequence, bytes(assembly), final_partial=True
+                            )
+                        await pcm_queue.put(None)
+                        return
+                    _segment_index, segment = item
+                    if not fresh():
+                        self.drop_counts["stale_event"] += 1
+                        assembly.clear()
+                        continue
+                    assembly.extend(segment)
+                    while len(assembly) >= delivery_block_bytes:
+                        block = bytes(assembly[:delivery_block_bytes])
+                        del assembly[:delivery_block_bytes]
+                        await enqueue_pcm(block_sequence, block)
+                        block_sequence += 1
+                finally:
+                    if item is not None:
+                        outstanding_segments -= 1
+                        segment_capacity.release()
+                    segment_queue.task_done()
+
         async def consume_pcm() -> None:
             nonlocal outstanding_pcm
             while True:
@@ -689,9 +946,9 @@ class RealtimeSession:
                         return
                     await self._relay_queued_pcm(item)
                 except BaseException as error:
-                    pump_errors.append(error)
+                    if not pump_errors:
+                        pump_errors.append(error)
                     context.cancellation.cancel()
-                    return
                 finally:
                     if item is not None:
                         outstanding_pcm -= 1
@@ -711,43 +968,57 @@ class RealtimeSession:
             "cancellation": context.cancellation,
             "event_observer": observe,
         }
+        for name, value in (
+            ("stream_epoch", context.stream_epoch),
+            ("turn_generation", context.turn_generation),
+            ("request_id", context.request_id),
+        ):
+            if name in run_parameters:
+                runner_arguments[name] = value
         if "trace_observer" in run_parameters:
-            runner_arguments["trace_observer"] = lambda stage, event, fields: self._trace(
-                stage, event, turn_id=context.turn_id, **fields
-            )
+            def observe_trace(stage: str, event: str, fields: dict[str, object]) -> None:
+                if stage in {"stt", "llm_provider", "tts"}:
+                    context.inference_stage = stage
+                self._trace(stage, event, turn_id=context.turn_id, **fields)
+
+            runner_arguments["trace_observer"] = observe_trace
         if streaming_audio:
             runner_arguments["audio_observer"] = observe_audio
             runner_arguments["retain_output"] = False
 
         event_consumer = asyncio.create_task(consume_events(), name=f"events-{context.turn_id}")
+        segment_consumer = asyncio.create_task(
+            consume_segments(), name=f"segments-{context.turn_id}"
+        )
         pcm_consumer = asyncio.create_task(consume_pcm(), name=f"pcm-{context.turn_id}")
         result: TraceResult | None = None
         runner_failure: Exception | None = None
-        async with self._runner_lock:
-            if context.terminal or self._closed:
-                event_consumer.cancel()
-                pcm_consumer.cancel()
-                return
-            worker = asyncio.create_task(
-                asyncio.to_thread(self.runner.run_turn, **runner_arguments),
-                name=f"inference-{context.turn_id}",
-            )
-            context.worker = worker
+        if context.terminal or self._closed:
+            event_consumer.cancel()
+            segment_consumer.cancel()
+            pcm_consumer.cancel()
+            return
+        worker = asyncio.create_task(
+            asyncio.to_thread(self.runner.run_turn, **runner_arguments),
+            name=f"inference-{context.turn_id}",
+        )
+        context.worker = worker
+        try:
             try:
-                try:
-                    result = await worker
-                except Exception as error:
-                    runner_failure = error
-                await event_queue.put(None)
-                await pcm_queue.put(None)
-                await event_consumer
-                await pcm_consumer
-            finally:
-                if context.worker is worker:
-                    context.worker = None
-                for consumer in (event_consumer, pcm_consumer):
-                    if not consumer.done():
-                        consumer.cancel()
+                result = await worker
+            except Exception as error:
+                runner_failure = error
+            await event_queue.put(None)
+            await segment_queue.put(None)
+            await event_consumer
+            await segment_consumer
+            await pcm_consumer
+        finally:
+            if context.worker is worker:
+                context.worker = None
+            for consumer in (event_consumer, segment_consumer, pcm_consumer):
+                if not consumer.done():
+                    consumer.cancel()
 
         if pump_errors:
             error = pump_errors[0]
@@ -825,10 +1096,21 @@ class RealtimeSession:
             return
         finish = getattr(self.audio_sink, "finish", None)
         if finish is not None:
+            submitted_before_finish = getattr(self.audio_sink, "submitted_bytes", None)
             try:
+                finish_parameters = inspect.signature(finish).parameters
+                finish_arguments: dict[str, object] = {}
+                if "media_generation" in finish_parameters:
+                    finish_arguments["media_generation"] = context.media_generation
                 accepted = await finish(
                     context.turn_id,
-                    lambda: context.terminal or context.cancellation.cancelled,
+                    lambda: (
+                        context.terminal
+                        or context.cancellation.cancelled
+                        or self._active is not context
+                        or self.stream_epoch != context.stream_epoch
+                    ),
+                    **finish_arguments,
                 )
             except Exception:
                 accepted = False
@@ -839,6 +1121,25 @@ class RealtimeSession:
                     {"outcome": "failed", "stage": "publication", "code": "audio_stream_failed"},
                 )
                 return
+            submitted_after_finish = getattr(self.audio_sink, "submitted_bytes", None)
+            if (
+                context.first_pcm_ms is None
+                and submitted_before_finish is not None
+                and submitted_after_finish is not None
+                and submitted_after_finish > submitted_before_finish
+            ):
+                context.first_pcm_ms = round(
+                    max(0.0, (time.monotonic() - context.endpoint_monotonic) * 1000), 3
+                )
+                await self._emit(
+                    context.turn_id,
+                    "turn.speaking",
+                    {
+                        "state": "speaking",
+                        "server_streamed_output": True,
+                        "endpoint_to_first_accepted_pcm_ms": context.first_pcm_ms,
+                    },
+                )
 
         async with self._lock:
             if context.terminal or self._closed or self._active is not context:
@@ -864,12 +1165,10 @@ class RealtimeSession:
                 "outcome": "completed",
                 "output_bytes": output_bytes,
                 "server_pcm_queue_max_blocks": context.pcm_queue_high_water,
-                "audio_format": {
-                    "encoding": "pcm_s16le",
-                    "sample_rate_hz": 16_000,
-                    "channels": 1,
-                    "sample_width_bytes": 2,
-                },
+                "server_segment_queue_max_segments": context.segment_queue_high_water,
+                "audio_format": TTS_OUTPUT_AUDIO_FORMAT.as_dict(),
+                "output_padded_bytes": int(getattr(self.audio_sink, "padded_bytes", 0)),
+                "output_frames_submitted": int(getattr(self.audio_sink, "submitted_frames", 0)),
             }
             self._add_metrics(context, payload)
             await self._emit(context.turn_id, "turn.completed", payload, terminal=True)
@@ -920,10 +1219,16 @@ class RealtimeSession:
             or context.terminal
             or context.cancellation.cancelled
             or self._closed
+            or self.stream_epoch != context.stream_epoch
         ):
             self.drop_counts["stale_event"] += 1
             return
-        await self._relay_audio_chunk(context, item.chunk_index, item.pcm)
+        if (
+            len(item.pcm) > item.block_size
+            or (not item.final_partial and len(item.pcm) != item.block_size)
+        ):
+            raise StageFailure("publication", "audio_stream_invalid")
+        await self._relay_audio_chunk(context, item.block_index, item.pcm)
 
     async def _relay_audio_chunk(
         self, context: TurnContext, chunk_index: int, chunk: bytes
@@ -933,6 +1238,7 @@ class RealtimeSession:
             or self._closed
             or self._active is not context
             or context.cancellation.cancelled
+            or self.stream_epoch != context.stream_epoch
         ):
             self.drop_counts["stale_event"] += 1
             return
@@ -945,10 +1251,20 @@ class RealtimeSession:
             raise StageFailure("publication", "audio_stream_invalid")
         submitted_before = getattr(self.audio_sink, "submitted_bytes", None)
         try:
+            write_parameters = inspect.signature(self.audio_sink.write).parameters
+            write_arguments: dict[str, object] = {}
+            if "media_generation" in write_parameters:
+                write_arguments["media_generation"] = context.media_generation
             accepted = await self.audio_sink.write(
                 context.turn_id,
                 chunk,
-                lambda: context.terminal or context.cancellation.cancelled,
+                lambda: (
+                    context.terminal
+                    or context.cancellation.cancelled
+                    or self._active is not context
+                    or self.stream_epoch != context.stream_epoch
+                ),
+                **write_arguments,
             )
         except Exception as error:
             self._trace(
@@ -965,6 +1281,7 @@ class RealtimeSession:
                 or context.cancellation.cancelled
                 or self._closed
                 or self._active is not context
+                or self.stream_epoch != context.stream_epoch
             ):
                 self.drop_counts["stale_event"] += 1
                 return
@@ -974,6 +1291,7 @@ class RealtimeSession:
             or context.cancellation.cancelled
             or self._closed
             or self._active is not context
+            or self.stream_epoch != context.stream_epoch
         ):
             self.drop_counts["stale_event"] += 1
             return
@@ -1008,13 +1326,38 @@ class RealtimeSession:
             )
 
     async def _relay_internal(self, context: TurnContext, event: dict[str, object]) -> None:
-        if context.terminal or self._active is not context:
+        if (
+            context.terminal
+            or self._active is not context
+            or self.stream_epoch != context.stream_epoch
+        ):
             self.drop_counts["stale_event"] += 1
             return
         if event.get("session_id") != self.session_id or event.get("turn_id") != context.turn_id:
             self.drop_counts["stale_event"] += 1
             return
+        schema_version = event.get("schema_version")
+        if schema_version == "voice-agent.event-envelope.v2":
+            sequence = event.get("sequence")
+            if (
+                event.get("stream_epoch") != context.stream_epoch
+                or event.get("turn_generation") != context.turn_generation
+                or event.get("request_id") != context.request_id
+                or sequence != context.internal_event_sequence + 1
+            ):
+                self.drop_counts["stale_event"] += 1
+                return
+            context.internal_event_sequence = int(sequence)
+        elif schema_version != "voice-agent.event-envelope.v1":
+            self.drop_counts["stale_event"] += 1
+            return
         event_type = event.get("type")
+        if event_type == "turn.transcribing":
+            context.inference_stage = "stt"
+        elif event_type == "turn.thinking":
+            context.inference_stage = "llm_provider"
+        elif event_type in {"turn.speaking", "tts.audio"}:
+            context.inference_stage = "tts"
         if event_type in {
             "turn.listening", "turn.transcribing", "llm.final", "turn.speaking",
             "tts.audio", "turn.completed", "turn.interrupted", "turn.failed",
@@ -1107,9 +1450,12 @@ class RealtimeSession:
                     )
                 reset_error = reset_error or media_reset_error
             if cleanup is not None:
-                reset_error = reset_error or await self._await_cleanup_barrier(
-                    CANCELLATION_CLEANUP_BOUND_MS
-                )
+                try:
+                    reset_error = reset_error or await asyncio.wait_for(
+                        asyncio.shield(cleanup), CANCELLATION_CLEANUP_BOUND_MS / 1000
+                    )
+                except TimeoutError:
+                    reset_error = "cancellation_cleanup_timeout"
             try:
                 async with self._runner_lock:
                     reset = getattr(self.runner, "reset_session", None)
@@ -1154,9 +1500,13 @@ class RealtimeSession:
             cleanup_error = await self._await_cleanup_barrier(CANCELLATION_CLEANUP_BOUND_MS)
             if cleanup_error is not None:
                 raise RuntimeError(cleanup_error)
-            if context is not None and context.task is not None:
+            pending_turns = tuple(task for task in self._turn_tasks if not task.done())
+            if pending_turns:
                 try:
-                    await asyncio.wait_for(asyncio.shield(context.task), 1.25)
+                    await asyncio.wait_for(
+                        asyncio.gather(*(asyncio.shield(task) for task in pending_turns)),
+                        2.0,
+                    )
                 except TimeoutError as error:
                     raise RuntimeError("turn_cleanup_timeout") from error
             self._disconnect_complete = True
@@ -1174,11 +1524,24 @@ class RealtimeSession:
         self._event_sequence += 1
         if self._event_sequence > MAX_EVENT_SEQUENCE:
             raise RuntimeError("session event sequence exhausted")
+        if turn_id == SESSION_TURN_ID:
+            turn_generation = media_generation = 0
+            request_id = SESSION_TURN_ID
+        else:
+            context = self._active
+            if context is None or context.turn_id != turn_id:
+                raise RuntimeError("public event has no current correlation context")
+            turn_generation = context.turn_generation
+            request_id = context.request_id
+            media_generation = context.media_generation
         return {
             "schema_version": CONTROL_EVENT_VERSION,
             "session_id": self.session_id,
             "turn_id": turn_id,
             "stream_epoch": self.stream_epoch,
+            "turn_generation": turn_generation,
+            "request_id": request_id,
+            "media_generation": media_generation,
             "sequence": self._event_sequence,
             "type": event_type,
             "terminal": terminal,
@@ -1239,7 +1602,12 @@ class EnergyEndpoint:
             raise ValueError("endpoint durations must be positive frame multiples")
         self.threshold_rms = threshold_rms
         self.frame_ms = frame_ms
-        self.frame_bytes = 16_000 * 2 * frame_ms // 1000
+        self.frame_bytes = (
+            INPUT_AUDIO_FORMAT.sample_rate_hz
+            * INPUT_AUDIO_FORMAT.sample_width_bytes
+            * frame_ms
+            // 1000
+        )
         self.start_frames = start_ms // frame_ms
         self.end_frames = end_silence_ms // frame_ms
         self.min_speech_frames = min_speech_ms // frame_ms

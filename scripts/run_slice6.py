@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from voice_agent_v2.silero_tts import verify_silero_runtime
 from voice_agent_v2.slice6_config import (
     Slice6ConfigurationError,
     Slice6Settings,
@@ -227,6 +228,7 @@ def main() -> int:
     if not settings.web_dist.is_dir():
         raise RuntimeError("Slice 6 web build is missing; run ./setup-slice6")
     verify_local_lfm_artifacts()
+    silero_metadata = verify_silero_runtime()
 
     gateway_environment = dict(os.environ)
     gateway_environment["PYTHONPATH"] = str(ROOT / "src")
@@ -301,6 +303,10 @@ def main() -> int:
         print(
             f"local LFM: {LOCAL_LFM_ALIAS}, loopback-only HTTP/{LLAMA_PORT}, "
             "2 slots x 32768 tokens; no cloud provider or fallback"
+        )
+        print(
+            "TTS: Silero v5_5_ru / kseniya, native mono pcm_s16le/48000, "
+            f"{silero_metadata['workers']} isolated workers; private noncommercial only"
         )
         print("Press Ctrl+C to stop this development run.")
 

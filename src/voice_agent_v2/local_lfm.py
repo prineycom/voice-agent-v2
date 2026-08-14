@@ -106,8 +106,9 @@ class LocalLFMProvider:
         with self._operation_lock:
             if self._handoff_capacity_error is not None:
                 raise StageFailure("llm_provider", self._handoff_capacity_error)
-            if self._handoff_cleanup_generations:
-                raise StageFailure("llm_provider", "local_lfm_handoff_cleanup_pending")
+            # A cancelled handoff may still be silently draining a non-cooperative
+            # TTS call. llama.cpp owns two slots, so that stale handoff must not
+            # block the replacement provider request.
             self._operation_generation += 1
             generation = self._operation_generation
             if cancellation is not None and cancellation.cancelled:

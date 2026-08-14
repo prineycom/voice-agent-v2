@@ -1,0 +1,21 @@
+{
+  "schema_version": "voice-agent.realtime-control.v2",
+  "session_id": "session-synthetic-0001",
+  "turn_id": "turn-synthetic-0001",
+  "stream_epoch": 1,
+  "turn_generation": 1,
+  "request_id": "request-synthetic-0001",
+  "media_generation": 1,
+  "sequence": 1,
+  "type": "turn.media-ready",
+  "terminal": false,
+  "payload": {
+    "server_media_publication_id": "publication-synthetic-0001",
+    "audio": {
+      "encoding": "pcm_s16le",
+      "sample_rate_hz": 48000,
+      "channels": 1,
+      "sample_width_bytes": 2
+    }
+  }
+}

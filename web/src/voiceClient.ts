@@ -65,6 +65,13 @@ export class VoiceClient {
     payload: Uint8Array<ArrayBuffer>
   } | null = null
   private activeRemoteTrack: RemoteAudioTrack | null = null
+  private readonly remoteTracks = new Map<string, RemoteAudioTrack>()
+  private desiredMedia: {
+    publicationId: string
+    mediaGeneration: number
+    turnGeneration: number
+    requestId: string
+  } | null = null
   private streamEpoch = 0
   private microphoneEnabled = false
   private microphoneRequested = true
@@ -208,6 +215,8 @@ export class VoiceClient {
     this.reconnecting = false
     this.reconnectRequest = null
     this.activeRemoteTrack = null
+    this.remoteTracks.clear()
+    this.desiredMedia = null
     this.streamEpoch = 0
     const errors: unknown[] = []
     const microphone = this.microphone
@@ -316,28 +325,37 @@ export class VoiceClient {
   }
 
   private registerRoomHandlers(room: Room): void {
-    room.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
+    room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
       if (track.kind !== Track.Kind.Audio || !this.isExpectedAgent(participant.identity)) return
+      const publicationId = publication.trackSid
+      if (typeof publicationId !== 'string' || !publicationId || publicationId.length > 128) return
       const remoteTrack = track as RemoteAudioTrack
-      if (this.activeRemoteTrack === remoteTrack) return
+      this.remoteTracks.set(publicationId, remoteTrack)
       this.activeRemoteTrack = remoteTrack
-      if (this.reconnecting) {
-        this.recordDiagnostic('playback', 'persistent_track_deferred')
+      const desired = this.desiredMedia
+      if (
+        this.reconnecting
+        || desired === null
+        || desired.publicationId !== publicationId
+      ) {
+        this.recordDiagnostic('playback', 'publication_deferred')
         return
       }
-      this.playback.setTrack(remoteTrack)
-      this.recordDiagnostic('playback', 'persistent_track_attached')
+      this.playback.setTrack(remoteTrack, desired.mediaGeneration)
+      this.recordDiagnostic('playback', 'publication_generation_attached')
     })
-    room.on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => {
-      if (
-        track.kind !== Track.Kind.Audio
-        || !this.isExpectedAgent(participant.identity)
-        || this.activeRemoteTrack !== track
-      ) return
-      this.activeRemoteTrack = null
-      this.playback.clear()
-      this.recordDiagnostic('playback', 'persistent_track_detached')
-      if (!this.reconnecting && !this.stopping) {
+    room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+      if (track.kind !== Track.Kind.Audio || !this.isExpectedAgent(participant.identity)) return
+      const publicationId = publication.trackSid
+      if (typeof publicationId === 'string') this.remoteTracks.delete(publicationId)
+      if (this.activeRemoteTrack === track) this.activeRemoteTrack = null
+      const wasDesired = this.desiredMedia?.publicationId === publicationId
+      if (wasDesired) {
+        this.desiredMedia = null
+        this.playback.clear()
+        this.recordDiagnostic('playback', 'publication_generation_detached')
+      }
+      if (wasDesired && !this.reconnecting && !this.stopping) {
         void this.failSession('Аудиопоток агента недоступен', 'persistent_track_lost')
       }
     })
@@ -353,22 +371,83 @@ export class VoiceClient {
         return
       }
       let terminalFailure: string | null = null
-      if (event.type === 'session.ready') {
-        const reconnectCompleted = this.reconnecting
+      if (event.type === 'turn.listening') {
+        try {
+          this.playback.suspend()
+          this.desiredMedia = null
+          this.recordDiagnostic('playback', 'valid_turn_start_suspended_old_generation')
+        } catch (error) {
+          terminalFailure = 'Не удалось немедленно остановить старое аудио'
+          this.recordDiagnostic(
+            'playback', 'interrupt_suspend_failed', event, 'playback_interrupt_failed', error,
+          )
+        }
+      } else if (event.type === 'turn.interrupted') {
+        const desired = this.desiredMedia
+        if (desired !== null && desired.mediaGeneration === event.media_generation) {
+          try {
+            this.playback.suspend(event.media_generation)
+            this.desiredMedia = null
+            this.recordDiagnostic('playback', 'valid_interrupt_suspended_generation')
+          } catch (error) {
+            terminalFailure = 'Не удалось немедленно остановить прерванное аудио'
+            this.recordDiagnostic(
+              'playback', 'interrupt_suspend_failed', event, 'playback_interrupt_failed', error,
+            )
+          }
+        }
+      } else if (event.type === 'turn.media-ready') {
+        const publicationId = event.payload.server_media_publication_id
+        const audio = event.payload.audio
+        const tts = event.payload.tts
+        const profile = this.capability.tts_profile
+        const validAudio = (
+          typeof audio === 'object' && audio !== null
+          && (audio as Record<string, unknown>).encoding === 'pcm_s16le'
+          && (audio as Record<string, unknown>).sample_rate_hz === 48_000
+          && (audio as Record<string, unknown>).channels === 1
+          && (audio as Record<string, unknown>).sample_width_bytes === 2
+        )
+        const validTTS = (
+          typeof tts === 'object' && tts !== null
+          && (tts as Record<string, unknown>).profile === profile.profile
+          && (tts as Record<string, unknown>).backend === profile.backend
+          && (tts as Record<string, unknown>).speaker === profile.speaker
+          && (tts as Record<string, unknown>).output_sample_rate_hz === 48_000
+        )
+        if (
+          typeof publicationId !== 'string'
+          || !publicationId
+          || publicationId.length > 128
+          || !validAudio
+          || !validTTS
+        ) {
+          terminalFailure = 'Сервер прислал несовместимое описание аудио'
+        } else {
+          this.desiredMedia = {
+            publicationId,
+            mediaGeneration: event.media_generation,
+            turnGeneration: event.turn_generation,
+            requestId: event.request_id,
+          }
+          const remoteTrack = this.remoteTracks.get(publicationId)
+          if (remoteTrack !== undefined && !this.reconnecting) {
+            try {
+              this.playback.setTrack(remoteTrack, event.media_generation)
+              this.recordDiagnostic('playback', 'publication_generation_attached')
+            } catch (error) {
+              terminalFailure = 'Не удалось подключить актуальное аудио'
+              this.recordDiagnostic(
+                'playback', 'attach_failed', event, 'playback_attach_failed', error,
+              )
+            }
+          }
+        }
+      } else if (event.type === 'session.ready') {
         this.clearInitialReadyTimer()
         this.clearReconnectTimers()
         this.reconnectRequest = null
         this.reconnecting = false
-        if (reconnectCompleted && this.activeRemoteTrack !== null) {
-          try {
-            this.playback.setTrack(this.activeRemoteTrack)
-            this.recordDiagnostic('playback', 'persistent_track_reattached')
-          } catch (error) {
-            this.recordDiagnostic(
-              'playback', 'reattach_failed', undefined, 'playback_reattach_failed', error,
-            )
-          }
-        }
       } else if (event.type === 'session.reconnected') {
         this.streamEpoch = event.stream_epoch
       } else if (event.type === 'session.degraded') {
@@ -397,6 +476,7 @@ export class VoiceClient {
       this.clearReconnectTimers()
       this.reconnecting = true
       this.reconnectRequest = null
+      this.desiredMedia = null
       try {
         this.playback.suspend()
       } catch (error) {

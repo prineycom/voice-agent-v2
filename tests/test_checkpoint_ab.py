@@ -140,11 +140,11 @@ class BurstStreamingRunner(StreamingRunner):
         emit("llm.visible", {"response": "Потоковый ответ."})
         emit("turn.speaking", {"stage": "tts"})
         for index in range(5):
-            audio_observer(index, bytes([index, 0]) * 320)
-            emit("tts.audio", {"chunk_index": index, "byte_count": 640})
+            audio_observer(index, bytes([index, 0]) * 2_880)
+            emit("tts.audio", {"chunk_index": index, "byte_count": 5_760})
         self.operations.append("synthesis-final")
         emit("llm.final", {"response": "Потоковый ответ."})
-        emit("turn.completed", {"outcome": "completed", "output_bytes": 3_200}, True)
+        emit("turn.completed", {"outcome": "completed", "output_bytes": 28_800}, True)
         return TraceResult(tuple(events), b"", b"")
 
 
@@ -181,20 +181,20 @@ class BoundedPumpRunner(StreamingRunner):
         emit("turn.speaking", {"stage": "tts"})
         for index in range(3):
             self.chunk_started[index].set()
-            audio_observer(index, bytes([index, 0]) * 320)
+            audio_observer(index, bytes([index, 0]) * 8_640)
             self.chunk_returned[index].set()
-            emit("tts.audio", {"chunk_index": index, "byte_count": 640})
+            emit("tts.audio", {"chunk_index": index, "byte_count": 17_280})
         self.producer_final.set()
         emit("llm.final", {"response": "Потоковый ответ."})
-        emit("turn.completed", {"outcome": "completed", "output_bytes": 1_920}, True)
+        emit("turn.completed", {"outcome": "completed", "output_bytes": 51_840}, True)
         return TraceResult(tuple(events), b"", b"")
 
 
 class ControlledAudio(MemoryAudio):
     def __init__(self) -> None:
         super().__init__()
-        self.started = [threading.Event() for _ in range(3)]
-        self.release = [asyncio.Event() for _ in range(3)]
+        self.started = [threading.Event() for _ in range(9)]
+        self.release = [asyncio.Event() for _ in range(9)]
         self.write_index = 0
 
     async def write(self, _turn_id: str, pcm: bytes, cancelled) -> bool:
@@ -344,9 +344,12 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
             await asyncio.wait_for(session.wait_for_cleanup(), 1)
 
-        self.assertEqual(len(audio.chunks), 3)
+        self.assertEqual(len(audio.chunks), 9)
         self.assertEqual(events.events[-1]["type"], "turn.completed")
         self.assertEqual(events.events[-1]["payload"]["server_pcm_queue_max_blocks"], 2)
+        self.assertLessEqual(
+            events.events[-1]["payload"]["server_segment_queue_max_segments"], 2
+        )
 
     async def test_stale_request_tagged_pcm_is_dropped_before_sink_write(self) -> None:
         events = MemoryEvents()
@@ -390,7 +393,7 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [event["type"] for event in events.events],
-            ["turn.listening", "stt.final", "turn.thinking", "llm.visible", "turn.failed"],
+            ["turn.listening", "turn.media-ready", "stt.final", "turn.thinking", "llm.visible", "turn.failed"],
         )
         self.assertEqual(events.events[-2]["payload"]["response"], "Сохранённый ответ.")
         self.assertEqual(events.events[-1]["payload"]["stage"], "tts")
@@ -557,6 +560,53 @@ class CheckpointBWarmupTests(unittest.TestCase):
 
 
 class CheckpointBLiveKitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sink_rechecks_freshness_before_every_48khz_frame(self) -> None:
+        runtime = load_runtime()
+        captured: list[dict[str, object]] = []
+        stale = False
+
+        class Source:
+            async def capture_frame(self, frame) -> None:
+                nonlocal stale
+                captured.append(frame)
+                stale = True
+
+            def clear_queue(self) -> None:
+                return None
+
+            async def aclose(self) -> None:
+                return None
+
+        class Participant:
+            async def publish_track(self, _track, _options):
+                return types.SimpleNamespace(sid="publication-session")
+
+            async def unpublish_track(self, _publication_id: str) -> None:
+                return None
+
+        runtime.rtc.AudioFrame = lambda **kwargs: kwargs
+        runtime.rtc.LocalAudioTrack = types.SimpleNamespace(
+            create_audio_track=lambda _name, source: source
+        )
+        runtime.rtc.TrackPublishOptions = lambda: types.SimpleNamespace()
+        sink = runtime.LiveKitAudioSink(
+            types.SimpleNamespace(local_participant=Participant()),
+            Source(),
+            lambda _source: None,
+        )
+        await sink.start()
+        await sink.prepare("turn-one", 1)
+
+        accepted = await sink.write(
+            "turn-one", b"\0\0" * 2_880, lambda: stale, media_generation=1
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(len(captured[0]["data"]), 1_920)
+        self.assertEqual(captured[0]["sample_rate"], 48_000)
+        await sink.close()
+
     async def test_one_publication_serves_multiple_turns_until_close(self) -> None:
         runtime = load_runtime()
         calls: list[tuple[str, object]] = []
@@ -592,9 +642,20 @@ class CheckpointBLiveKitTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await sink.start()
-        self.assertTrue(await sink.write("turn-one", b"\0\0" * 320, lambda: False))
-        self.assertTrue(await sink.finish("turn-one", lambda: False))
-        self.assertTrue(await sink.write("turn-two", b"\0\0" * 320, lambda: False))
+        publication = await sink.prepare("turn-one", 1)
+        self.assertEqual(publication, "publication-session")
+        self.assertTrue(await sink.write(
+            "turn-one", b"\0\0" * 2_880, lambda: False, media_generation=1
+        ))
+        self.assertTrue(await sink.finish("turn-one", lambda: False, media_generation=1))
+        await sink.prepare("turn-two", 2)
+        self.assertTrue(await sink.write(
+            "turn-two", b"\0\0" * 1_000, lambda: False, media_generation=2
+        ))
+        self.assertTrue(await sink.finish("turn-two", lambda: False, media_generation=2))
+        final_original = sink.submitted_bytes
+        final_padding = sink.padded_bytes
+        final_frames = sink.submitted_frames
         await sink.clear("turn-two")
         await sink.close()
 
@@ -603,7 +664,13 @@ class CheckpointBLiveKitTests(unittest.IsolatedAsyncioTestCase):
             [call for call in calls if call[0] == "unpublish"],
             [("unpublish", "publication-session")],
         )
-        self.assertEqual(len([call for call in calls if call[0] == "capture"]), 2)
+        captured = [call[1] for call in calls if call[0] == "capture"]
+        self.assertEqual(len(captured), 5)
+        self.assertTrue(all(frame["sample_rate"] == 48_000 for frame in captured))
+        self.assertTrue(all(frame["num_channels"] == 1 for frame in captured))
+        self.assertTrue(all(frame["samples_per_channel"] == 960 for frame in captured))
+        self.assertTrue(all(len(frame["data"]) == 1_920 for frame in captured))
+        self.assertEqual((final_original, final_padding, final_frames), (2_000, 1_840, 2))
 
 
 if __name__ == "__main__":

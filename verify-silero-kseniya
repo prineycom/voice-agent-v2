@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PYTHON="${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/runtime/venv/bin/python"
+[ -x "$PYTHON" ] || {
+  echo 'Slice 6 runtime is missing; run ./setup-slice6' >&2
+  exit 2
+}
+TASK_ROOT=${VOICE_AGENT_TASK_RUNTIME_ROOT:-"$HOME/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship"}
+VOICE_AGENT_TASK_RUNTIME_ROOT="$TASK_ROOT" PYTHONPATH="$ROOT/src:$ROOT" \
+  exec "$PYTHON" -B "$ROOT/scripts/verify_silero_kseniya.py"

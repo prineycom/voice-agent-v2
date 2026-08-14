@@ -25,6 +25,20 @@ describe('persistent playback observation', () => {
     expect(blocked).toHaveBeenLastCalledWith(true)
   })
 
+  it('ignores old publication generations and suspends only the matching one', () => {
+    const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
+    const current = track(vi.fn().mockResolvedValue(undefined))
+    const stale = track(vi.fn().mockResolvedValue(undefined))
+
+    boundary.setTrack(current, 2)
+    boundary.setTrack(stale, 1)
+    expect(stale.attach).not.toHaveBeenCalled()
+    expect(boundary.suspend(1)).toBe(false)
+    expect(current.detach).not.toHaveBeenCalled()
+    expect(boundary.suspend(2)).toBe(true)
+    expect(current.detach).toHaveBeenCalledTimes(1)
+  })
+
   it('reattaches the same track after a brief suspension', () => {
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const remote = track(vi.fn().mockResolvedValue(undefined))

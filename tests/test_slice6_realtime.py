@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 
 from tests.test_checkpoint_ab import (
@@ -9,12 +10,14 @@ from tests.test_checkpoint_ab import (
     MemoryEvents,
     StreamingRunner,
 )
+from voice_agent_v2.contracts import EventEnvelopeV2
 from voice_agent_v2.realtime import (
     CONTROL_EVENT_VERSION,
     ControlEventGate,
     EnergyEndpoint,
     RealtimeSession,
 )
+from voice_agent_v2.tracer import TraceResult
 
 
 class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
@@ -61,6 +64,113 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session._active)
 
 
+class OverlapRunner:
+    def __init__(self) -> None:
+        self.tts = type("TTS", (), {"version": "voice-agent.tts.v2"})()
+        self.old_started = threading.Event()
+        self.old_release = threading.Event()
+        self.replacement_started = threading.Event()
+        self.cancelled_keys: list[tuple[str, int, str, int]] = []
+
+    def ready_for_admission(self) -> bool:
+        return True
+
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
+        audio_observer, stream_epoch, turn_generation, request_id,
+        trace_observer=None, retain_output=True,
+    ) -> TraceResult:
+        del input_pcm, retain_output
+        events: list[dict[str, object]] = []
+
+        def emit(event_type: str, payload: dict[str, object], terminal: bool = False) -> None:
+            event = EventEnvelopeV2(
+                session_id=session_id,
+                turn_id=turn_id,
+                stream_epoch=stream_epoch,
+                turn_generation=turn_generation,
+                request_id=request_id,
+                sequence=len(events) + 1,
+                event_type=event_type,
+                payload=payload,
+                terminal=terminal,
+            ).as_dict()
+            events.append(event)
+            event_observer(event)
+
+        if turn_generation == 1:
+            if trace_observer is not None:
+                trace_observer("tts", "segment_started", {})
+            self.old_started.set()
+            self.old_release.wait(2)
+            emit("turn.interrupted", {"outcome": "interrupted"}, True)
+            return TraceResult(tuple(events), b"", b"")
+
+        self.replacement_started.set()
+        emit("turn.transcribing", {"stage": "stt"})
+        emit("stt.final", {"transcript": "Тест."})
+        emit("turn.thinking", {"stage": "llm_provider"})
+        emit("llm.visible", {"response": "Новый ответ."})
+        audio_observer(0, b"\0\0" * 2_880)
+        emit("tts.audio", {"chunk_index": 0, "byte_count": 5_760})
+        emit("llm.final", {"response": "Новый ответ."})
+        emit("turn.completed", {"outcome": "completed", "output_bytes": 5_760}, True)
+        return TraceResult(tuple(events), b"", b"")
+
+    def cancel_turn(self, session_id, stream_epoch, turn_id, turn_generation) -> None:
+        self.cancelled_keys.append((session_id, stream_epoch, turn_id, turn_generation))
+
+    def cancel(self) -> None:
+        raise AssertionError("global cancellation must not be used for replacement")
+
+    def discard_turn(self, _session_id, _turn_id) -> None:
+        return None
+
+    def turn_delivered(self, _session_id, _turn_id) -> None:
+        return None
+
+
+class ObsoleteCurrentOverlapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacement_does_not_wait_for_obsolete_noncooperative_call(self) -> None:
+        runner = OverlapRunner()
+        events = MemoryEvents()
+        audio = MemoryAudio()
+        session = RealtimeSession(
+            session_id="session-overlap",
+            runner=runner,
+            event_sink=events,
+            audio_sink=audio,
+        )
+        first = await session.submit_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(runner.old_started.wait, 0.5))
+
+        second = await session.submit_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(runner.replacement_started.wait, 0.2))
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+        self.assertEqual(events.events[-1]["type"], "turn.completed")
+        self.assertEqual(events.events[-1]["turn_id"], second)
+        self.assertEqual(
+            runner.cancelled_keys,
+            [("session-overlap", 1, first, 1)],
+        )
+        self.assertEqual(len(audio.chunks), 1)
+        self.assertIn(
+            "turn.interrupted",
+            [event["type"] for event in events.events if event["turn_id"] == first],
+        )
+
+        runner.old_release.set()
+        await asyncio.wait_for(
+            asyncio.gather(*(task for task in tuple(session._turn_tasks))), 0.5
+        )
+        old_terminals = [
+            event for event in events.events
+            if event["turn_id"] == first and event["terminal"]
+        ]
+        self.assertEqual(len(old_terminals), 1)
+        self.assertEqual(old_terminals[0]["type"], "turn.interrupted")
+
+
 class RealtimeCheckpointTests(CheckpointARealtimeTests):
     """Checkpoint A behavior is the realtime regression contract."""
 
@@ -80,6 +190,9 @@ class ControlEventGateTests(unittest.TestCase):
             "session_id": "session-test",
             "turn_id": "session" if event_type.startswith("session.") else turn_id,
             "stream_epoch": 1,
+            "turn_generation": 0 if event_type.startswith("session.") else 1,
+            "request_id": "session" if event_type.startswith("session.") else "request-00000001",
+            "media_generation": 0 if event_type.startswith("session.") else 1,
             "sequence": sequence,
             "type": event_type,
             "terminal": terminal,
@@ -90,21 +203,23 @@ class ControlEventGateTests(unittest.TestCase):
         gate = ControlEventGate("session-test")
         self.assertTrue(gate.accept(self.event(1, "session.ready")))
         self.assertTrue(gate.accept(self.event(2, "turn.listening")))
-        self.assertFalse(gate.accept(self.event(3, "stt.final", turn_id="turn-other")))
-        self.assertTrue(gate.accept(self.event(3, "stt.final")))
-        self.assertFalse(gate.accept(self.event(3, "turn.thinking")))
-        self.assertFalse(gate.accept(self.event(4, "turn.playout-ready")))
+        self.assertTrue(gate.accept(self.event(3, "turn.media-ready")))
+        self.assertFalse(gate.accept(self.event(4, "stt.final", turn_id="turn-other")))
+        self.assertTrue(gate.accept(self.event(4, "stt.final")))
+        self.assertFalse(gate.accept(self.event(4, "turn.thinking")))
+        self.assertFalse(gate.accept(self.event(5, "turn.playout-ready")))
         self.assertEqual(gate.drop_count, 3)
 
     def test_immediate_completion_after_server_pcm_is_admitted(self) -> None:
         gate = ControlEventGate("session-test")
         events = (
             self.event(1, "turn.listening"),
-            self.event(2, "stt.final"),
-            self.event(3, "turn.thinking"),
-            self.event(4, "llm.visible"),
-            self.event(5, "turn.speaking"),
-            self.event(6, "turn.completed", terminal=True),
+            self.event(2, "turn.media-ready"),
+            self.event(3, "stt.final"),
+            self.event(4, "turn.thinking"),
+            self.event(5, "llm.visible"),
+            self.event(6, "turn.speaking"),
+            self.event(7, "turn.completed", terminal=True),
         )
         self.assertTrue(all(gate.accept(event) for event in events))
 

@@ -76,6 +76,11 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
             if key in properties:
                 validate(value, properties[key], f"{path}.{key}")
 
-    if isinstance(instance, list) and "items" in schema:
-        for index, item in enumerate(instance):
-            validate(item, schema["items"], f"{path}[{index}]")
+    if isinstance(instance, list):
+        if len(instance) < schema.get("minItems", 0):
+            raise SchemaViolation(f"{path}: array is too short")
+        if "maxItems" in schema and len(instance) > schema["maxItems"]:
+            raise SchemaViolation(f"{path}: array is too long")
+        if "items" in schema:
+            for index, item in enumerate(instance):
+                validate(item, schema["items"], f"{path}[{index}]")

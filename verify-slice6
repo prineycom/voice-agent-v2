@@ -22,5 +22,5 @@ PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_slice6_runtime.py"
   npm run build
 )
 PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_firefox_livekit.py"
-printf '%s\n' 'Slice 6 deterministic media/browser verification: PASS'
-printf '%s\n' 'Manual loopback microphone/listening and second-tailnet-client evidence: REQUIRED, not claimed'
+printf '%s\n' 'Slice 6 TTS-v2/input16/native48 generation-aware media/browser verification: PASS'
+printf '%s\n' 'Manual Kseniya audibility/joins/rapid barge-in, full-stack resources, and second-tailnet-client evidence: REQUIRED, not claimed'

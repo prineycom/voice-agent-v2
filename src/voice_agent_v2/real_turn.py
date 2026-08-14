@@ -6,10 +6,23 @@ import threading
 import time
 from typing import Callable
 
-from .audio import DEFAULT_AUDIO_FORMAT, OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SECONDS
-from .contracts import (
-    EventEnvelope, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure, valid_correlation_id,
+from .audio import (
+    INPUT_AUDIO_FORMAT,
+    OUTPUT_MEDIA_MAX_BYTES,
+    OUTPUT_MEDIA_MAX_SECONDS,
+    TTS_V1_OUTPUT_MEDIA_MAX_BYTES,
 )
+from .contracts import (
+    EventEnvelope,
+    EventEnvelopeV2,
+    LLM_VERSION,
+    STT_VERSION,
+    TTS_VERSION,
+    TTS_V2_VERSION,
+    StageFailure,
+    valid_correlation_id,
+)
+from .tts_text import RussianTTSSegmenter
 from .tracer import CancellationToken, TraceResult
 
 
@@ -32,13 +45,15 @@ class RealTurnController:
 
     def _validate_contract_versions(self) -> None:
         for stage, adapter, expected in (
-            ("stt", self.stt, STT_VERSION),
-            ("llm_provider", self.llm, LLM_VERSION),
-            ("tts", self.tts, TTS_VERSION),
+            ("stt", self.stt, (STT_VERSION,)),
+            ("llm_provider", self.llm, (LLM_VERSION,)),
+            ("tts", self.tts, (TTS_VERSION, TTS_V2_VERSION)),
         ):
             actual = getattr(adapter, "version", None)
-            if actual != expected:
-                raise ValueError(f"incompatible {stage} contract version: expected {expected!r}, got {actual!r}")
+            if actual not in expected:
+                raise ValueError(
+                    f"incompatible {stage} contract version: expected one of {expected!r}, got {actual!r}"
+                )
 
     def run_turn(
         self, *, session_id: str, turn_id: str, input_pcm: bytes,
@@ -49,20 +64,32 @@ class RealTurnController:
         trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
         audio_observer: Callable[[int, bytes], None] | None = None,
         retain_output: bool = True,
+        stream_epoch: int = 1,
+        turn_generation: int = 1,
+        request_id: str | None = None,
     ) -> TraceResult:
-        with self._turn_lock:
-            return self._run_turn(
-                session_id=session_id,
-                turn_id=turn_id,
-                input_pcm=input_pcm,
-                cancellation=cancellation,
-                cancel_after_output_chunks=cancel_after_output_chunks,
-                diagnostic_clock=diagnostic_clock,
-                event_observer=event_observer,
-                trace_observer=trace_observer,
-                audio_observer=audio_observer,
-                retain_output=retain_output,
-            )
+        operation = lambda: self._run_turn(
+            session_id=session_id,
+            turn_id=turn_id,
+            input_pcm=input_pcm,
+            cancellation=cancellation,
+            cancel_after_output_chunks=cancel_after_output_chunks,
+            diagnostic_clock=diagnostic_clock,
+            event_observer=event_observer,
+            trace_observer=trace_observer,
+            audio_observer=audio_observer,
+            retain_output=retain_output,
+            stream_epoch=stream_epoch,
+            turn_generation=turn_generation,
+            request_id=request_id or f"request-{turn_id.removeprefix('turn-')}",
+        )
+        # Historical v1/Qwen evidence retains its whole-turn serialization.  The
+        # active v2 scheduler must allow an obsolete Silero call and its replacement
+        # to occupy the two isolated workers concurrently.
+        if getattr(self.tts, "version", None) == TTS_VERSION:
+            with self._turn_lock:
+                return operation()
+        return operation()
 
     def _run_turn(
         self, *, session_id: str, turn_id: str, input_pcm: bytes,
@@ -73,10 +100,16 @@ class RealTurnController:
         trace_observer: Callable[[str, str, dict[str, object]], None] | None,
         audio_observer: Callable[[int, bytes], None] | None,
         retain_output: bool,
+        stream_epoch: int,
+        turn_generation: int,
+        request_id: str,
     ) -> TraceResult:
         self._validate_contract_versions()
-        if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
-            raise ValueError("session_id and turn_id must satisfy the correlation-ID contract")
+        if not all(valid_correlation_id(value) for value in (session_id, turn_id, request_id)):
+            raise ValueError("session, turn, and request IDs must satisfy the correlation-ID contract")
+        if stream_epoch < 1 or turn_generation < 1:
+            raise ValueError("stream epoch and turn generation must be positive")
+        active_v2 = getattr(self.tts, "version", None) == TTS_V2_VERSION
         events: list[dict[str, object]] = []
         output_chunks: list[bytes] = []
         tts_chunks = 0
@@ -89,11 +122,31 @@ class RealTurnController:
         def emit(event_type: str, payload: dict[str, object], terminal: bool = False) -> None:
             if any(event["terminal"] for event in events):
                 raise AssertionError("cannot emit after terminal")
-            event = EventEnvelope(
-                session_id=session_id, turn_id=turn_id, sequence=len(events) + 1,
-                event_type=event_type, payload=payload, terminal=terminal,
-                diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
-            ).as_dict()
+            envelope = (
+                EventEnvelopeV2(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    stream_epoch=stream_epoch,
+                    turn_generation=turn_generation,
+                    request_id=request_id,
+                    sequence=len(events) + 1,
+                    event_type=event_type,
+                    payload=payload,
+                    terminal=terminal,
+                    diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
+                )
+                if active_v2
+                else EventEnvelope(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    sequence=len(events) + 1,
+                    event_type=event_type,
+                    payload=payload,
+                    terminal=terminal,
+                    diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
+                )
+            )
+            event = envelope.as_dict()
             events.append(event)
             if event_observer is not None:
                 event_observer(event)
@@ -111,6 +164,13 @@ class RealTurnController:
 
         def cancel_adapters(*adapters) -> None:
             for adapter in adapters:
+                invalidate = getattr(adapter, "invalidate_turn", None)
+                if invalidate is not None:
+                    try:
+                        invalidate(session_id, stream_epoch, turn_id, turn_generation)
+                    except Exception:
+                        pass
+                    continue
                 cancel = getattr(adapter, "cancel_request", None)
                 if cancel is None:
                     cancel = getattr(adapter, "cancel", None)
@@ -144,15 +204,15 @@ class RealTurnController:
             return result
 
         emit("turn.listening", {
-            "audio_format": DEFAULT_AUDIO_FORMAT.as_dict(), "input_bytes": len(input_pcm),
-            "audio_duration_ms": len(input_pcm) / 2 / 16_000 * 1000,
+            "audio_format": INPUT_AUDIO_FORMAT.as_dict(), "input_bytes": len(input_pcm),
+            "audio_duration_ms": len(input_pcm) / 2 / INPUT_AUDIO_FORMAT.sample_rate_hz * 1000,
         })
         emit("turn.transcribing", {"stage": "stt"})
         try:
             transcript = run_stage(
                 lambda: self.stt.transcribe(
                     session_id=session_id, turn_id=turn_id, pcm=input_pcm,
-                    audio_format=DEFAULT_AUDIO_FORMAT, cancellation=token,
+                    audio_format=INPUT_AUDIO_FORMAT, cancellation=token,
                 ),
                 self.stt,
             )
@@ -172,6 +232,11 @@ class RealTurnController:
         visible_chars = 0
         tts_bytes = 0
         tts_deadline = time.monotonic() + MAX_TURN_TTS_SECONDS
+        tts_output_limit = (
+            MAX_TURN_TTS_OUTPUT_BYTES if active_v2 else TTS_V1_OUTPUT_MEDIA_MAX_BYTES
+        )
+        segmenter = RussianTTSSegmenter() if active_v2 else None
+        segment_index = 0
         create_turn_budget = getattr(self.tts, "create_turn_budget", None)
         turn_budget = create_turn_budget() if create_turn_budget is not None else None
 
@@ -188,12 +253,14 @@ class RealTurnController:
             })
             trace("llm_provider", "visible_sentence", visible_chars=visible_chars)
 
-        def synthesize_sentence(sentence: str) -> None:
-            nonlocal tts_error, tts_started, tts_chunks, tts_bytes
+        def synthesize_segment(segment: str) -> None:
+            nonlocal tts_error, tts_started, tts_chunks, tts_bytes, segment_index
             if token.cancelled:
                 raise _TurnInterrupted
             if tts_error is not None:
                 return
+            current_segment = segment_index
+            segment_index += 1
             try:
                 if not tts_started:
                     tts_started = True
@@ -205,13 +272,24 @@ class RealTurnController:
                 arguments = {
                     "session_id": session_id,
                     "turn_id": turn_id,
-                    "text": sentence,
+                    "text": segment,
                     "audio_format": self.tts.output_format,
                     "cancellation": token,
                 }
+                if active_v2:
+                    arguments.update({
+                        "stream_epoch": stream_epoch,
+                        "turn_generation": turn_generation,
+                        "request_id": request_id,
+                        "segment_index": current_segment,
+                    })
                 if turn_budget is not None:
                     arguments["turn_budget"] = turn_budget
-                trace("tts", "sentence_started", visible_chars=len(sentence))
+                trace(
+                    "tts", "segment_started",
+                    segment_index=current_segment,
+                    visible_chars=len(segment),
+                )
                 sentence_chunks = 0
                 for chunk in self.tts.stream_synthesize(**arguments):
                     if token.cancelled:
@@ -221,7 +299,7 @@ class RealTurnController:
                     tts_bytes += len(chunk)
                     if (
                         tts_chunks > MAX_TURN_TTS_CHUNKS
-                        or tts_bytes > MAX_TURN_TTS_OUTPUT_BYTES
+                        or tts_bytes > tts_output_limit
                         or time.monotonic() >= tts_deadline
                     ):
                         raise StageFailure("tts", "selected_tts_output_out_of_bounds")
@@ -231,6 +309,7 @@ class RealTurnController:
                         audio_observer(tts_chunks - 1, chunk)
                     emit("tts.audio", {
                         "chunk_index": tts_chunks - 1,
+                        "segment_index": current_segment,
                         "byte_count": len(chunk),
                         "audio_format": self.tts.output_format.as_dict(),
                     })
@@ -238,12 +317,34 @@ class RealTurnController:
                         token.cancel()
                 if token.cancelled:
                     raise _TurnInterrupted
-                trace("tts", "sentence_completed", chunk_count=sentence_chunks)
+                trace(
+                    "tts", "segment_completed",
+                    segment_index=current_segment,
+                    chunk_count=sentence_chunks,
+                )
             except _TurnInterrupted:
                 raise
             except StageFailure as error:
+                if token.cancelled:
+                    raise _TurnInterrupted from error
                 tts_error = error
-                trace("tts", "failed", failure_code=error.code)
+                trace("tts", "failed", segment_index=current_segment, failure_code=error.code)
+
+        def synthesize_visible_piece(piece: str) -> None:
+            nonlocal tts_error
+            if token.cancelled:
+                raise _TurnInterrupted
+            if not active_v2:
+                synthesize_segment(piece)
+                return
+            assert segmenter is not None
+            try:
+                segments = segmenter.feed(piece)
+            except StageFailure as error:
+                tts_error = error
+                return
+            for segment in segments:
+                synthesize_segment(segment)
 
         def generate_response() -> str:
             if hasattr(self.llm, "respond_with_handoff"):
@@ -251,7 +352,7 @@ class RealTurnController:
                     "session_id": session_id,
                     "turn_id": turn_id,
                     "transcript": transcript,
-                    "on_sentence": synthesize_sentence,
+                    "on_sentence": synthesize_visible_piece,
                     "cancellation": token,
                 }
                 if getattr(self.llm, "supports_visible_handoff", False):
@@ -259,15 +360,11 @@ class RealTurnController:
                 else:
                     def visible_then_synthesize(sentence: str) -> None:
                         publish_visible_sentence(sentence)
-                        synthesize_sentence(sentence)
+                        synthesize_visible_piece(sentence)
                     arguments["on_sentence"] = visible_then_synthesize
                 if getattr(self.llm, "supports_handoff_abort", False):
                     def abort_handoff() -> None:
-                        cancel = getattr(self.tts, "cancel_request", None)
-                        if cancel is None:
-                            cancel = getattr(self.tts, "cancel", None)
-                        if cancel is not None:
-                            cancel()
+                        cancel_adapters(self.tts)
 
                     arguments["on_handoff_abort"] = abort_handoff
                 return self.llm.respond_with_handoff(**arguments)
@@ -276,7 +373,7 @@ class RealTurnController:
                 cancellation=token,
             )
             publish_visible_sentence(response)
-            synthesize_sentence(response)
+            synthesize_visible_piece(response)
             return response
 
         try:
@@ -289,6 +386,14 @@ class RealTurnController:
         if token.cancelled:
             cancel_adapters(self.llm, self.tts)
             return interrupted()
+        if active_v2 and segmenter is not None and tts_error is None:
+            try:
+                for final_segment in segmenter.finish():
+                    synthesize_segment(final_segment)
+            except _TurnInterrupted:
+                return interrupted()
+            except StageFailure as error:
+                tts_error = error
         if not visible_fragments:
             emit("llm.visible", {
                 "response": response,

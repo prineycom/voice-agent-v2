@@ -27,6 +27,7 @@ from voice_agent_v2.livekit_runtime import (
     LiveKitRoomController,
 )
 from voice_agent_v2.realtime import RealtimeSession
+from voice_agent_v2.silero_tts import SileroVoiceProfile
 from voice_agent_v2.tracer import TraceResult
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,7 @@ async def wait_port(port: int, process: subprocess.Popen, timeout: float = 10) -
 class DeterministicRunner:
     def __init__(self) -> None:
         self.run_count = 0
+        self.tts_profile = SileroVoiceProfile()
 
     def run_turn(
         self,
@@ -294,7 +296,7 @@ async def main() -> int:
             .to_jwt()
         )
         await room.connect(f"ws://127.0.0.1:{livekit_port}", agent_token)
-        audio_source = rtc.AudioSource(16_000, 1, queue_size_ms=100)
+        audio_source = rtc.AudioSource(48_000, 1, queue_size_ms=100)
         audio_sink = LiveKitAudioSink(
             room,
             audio_source,
@@ -383,7 +385,16 @@ async def main() -> int:
             "token": browser_token,
             "expires_in_seconds": 60,
             "admission_timeout_ms": 30_000,
-            "control_version": "voice-agent.realtime-control.v1",
+            "control_version": "voice-agent.realtime-control.v2",
+            "tts_profile": {
+                "profile": "silero-kseniya",
+                "backend": "silero",
+                "speaker": "kseniya",
+                "output_sample_rate_hz": 48_000,
+                "native_sample_rate_hz": 48_000,
+                "license": "CC-BY-NC-SA-4.0",
+                "private_noncommercial_only": True,
+            },
         }
         server = ThreadingHTTPServer(
             ("127.0.0.1", web_port), handler_for(dist, capability)
@@ -578,6 +589,7 @@ async def main() -> int:
             "Ошибка",
             "Endpoint → текст",
             "Endpoint → server PCM",
+            "Silero v5_5_ru · kseniya · native mono PCM16 48 kHz · private noncommercial · CC BY-NC-SA 4.0",
         ):
             if visible_text not in body:
                 raise AssertionError(f"React history omitted {visible_text!r}")

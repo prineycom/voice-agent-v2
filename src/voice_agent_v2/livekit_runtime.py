@@ -13,12 +13,18 @@ from typing import Awaitable, Callable
 
 from livekit import api, rtc
 
-from .audio import OUTPUT_MEDIA_MAX_BYTES
+from .audio import (
+    INPUT_AUDIO_FORMAT,
+    OUTPUT_DELIVERY_BLOCK_BYTES,
+    OUTPUT_FRAME_BYTES,
+    OUTPUT_MEDIA_MAX_BYTES,
+    TTS_OUTPUT_AUDIO_FORMAT,
+)
 from .diagnostics import PrivacySafeTrace, TraceIdentity
 from .local_lfm import LocalLFMProvider
 from .local_stt import WhisperSTT
-from .local_tts import Qwen3TTS
 from .real_turn import RealTurnController
+from .silero_tts import SileroKseniyaTTS, SileroVoiceProfile
 from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
 from .realtime import (
     CLIENT_CONTROL_TOPIC,
@@ -32,7 +38,7 @@ from .slice6_config import Slice6Settings
 from .tracer import CancellationToken, TraceResult
 
 AUDIO_FRAME_MS = 20
-AUDIO_FRAME_BYTES = 16_000 * 2 * AUDIO_FRAME_MS // 1000
+AUDIO_FRAME_BYTES = OUTPUT_FRAME_BYTES
 AUDIO_QUEUE_MS = 100
 BROWSER_CONTROL_QUEUE_SIZE = 32
 MAX_SESSION_OBSERVATIONS = 128
@@ -50,9 +56,11 @@ class LiveTurnRunner:
         self.stt = WhisperSTT()
         del settings
         self.llm = LocalLFMProvider()
-        self.tts = Qwen3TTS()
+        self.tts_profile = SileroVoiceProfile()
+        self.tts = SileroKseniyaTTS()
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
+        self._turn_correlations: dict[tuple[str, str], tuple[int, int]] = {}
         self._startup_cancellation = CancellationToken()
         self._start_lock = threading.Lock()
         self._started = False
@@ -90,8 +98,15 @@ class LiveTurnRunner:
         trace_observer=None,
         audio_observer=None,
         retain_output: bool = True,
+        stream_epoch: int = 1,
+        turn_generation: int = 1,
+        request_id: str | None = None,
     ) -> TraceResult:
         self._snapshots[(session_id, turn_id)] = self.llm.snapshot_session(session_id)
+        if not hasattr(self, "_turn_correlations"):
+            self._turn_correlations = {}
+        self._turn_correlations[(session_id, turn_id)] = (stream_epoch, turn_generation)
+        tts_observation_start = len(self.tts.observations)
         try:
             return self.controller.run_turn(
                 session_id=session_id,
@@ -102,37 +117,92 @@ class LiveTurnRunner:
                 trace_observer=trace_observer,
                 audio_observer=audio_observer,
                 retain_output=retain_output,
+                stream_epoch=stream_epoch,
+                turn_generation=turn_generation,
+                request_id=request_id,
             )
         finally:
+            if trace_observer is not None:
+                for observation in self.tts.observations[tts_observation_start:]:
+                    safe_observation = {
+                        ("output_bytes" if key == "audio_bytes" else key): value
+                        for key, value in observation.items()
+                    }
+                    trace_observer("tts", "segment_observation", safe_observation)
+                counters = getattr(getattr(self.tts, "pool", None), "counters", None)
+                if isinstance(counters, dict):
+                    trace_observer(
+                        "tts",
+                        "pool_counters",
+                        {
+                            "ready_workers": self.tts.pool.ready_count,
+                            "request_count": int(counters.get("requests", 0)),
+                            "failure_count": int(counters.get("failures", 0)),
+                            "capacity_timeout_count": int(counters.get("capacity_timeouts", 0)),
+                            "stale_after_worker_count": int(counters.get("stale_after_worker", 0)),
+                            "stale_before_dispatch_count": int(counters.get("stale_before_dispatch", 0)),
+                        },
+                    )
             for adapter in (self.stt, self.llm, self.tts):
                 observations = adapter.observations
                 if len(observations) > MAX_SESSION_OBSERVATIONS:
                     del observations[:-MAX_SESSION_OBSERVATIONS]
 
+    def _release_tts_turn(self, session_id: str, turn_id: str) -> None:
+        correlations = getattr(self, "_turn_correlations", {})
+        correlation = correlations.pop((session_id, turn_id), None)
+        release = getattr(self.tts, "release_turn", None)
+        if correlation is not None and release is not None:
+            release(session_id, correlation[0], turn_id, correlation[1])
+
     def discard_turn(self, session_id: str, turn_id: str) -> None:
         snapshot = self._snapshots.pop((session_id, turn_id), None)
         if snapshot is not None:
             self.llm.restore_session(session_id, snapshot)
+        self._release_tts_turn(session_id, turn_id)
+
+    def discard_obsolete_turn(self, session_id: str, turn_id: str) -> None:
+        """Drop only the snapshot for a cancelled pre-commit TTS handoff."""
+        self._snapshots.pop((session_id, turn_id), None)
+        self._release_tts_turn(session_id, turn_id)
 
     def turn_delivered(self, session_id: str, turn_id: str) -> None:
         self._snapshots.pop((session_id, turn_id), None)
+        self._release_tts_turn(session_id, turn_id)
 
-    def cancel(self) -> None:
-        """Invalidate only active generation/synthesis requests; keep resident models alive."""
+    def ready_for_admission(self) -> bool:
+        ready = getattr(self.tts, "ready_for_admission", None)
+        return self._started and (ready is None or bool(ready()))
+
+    def cancel_turn(
+        self, session_id: str, stream_epoch: int, turn_id: str, turn_generation: int
+    ) -> None:
+        """Invalidate one obsolete turn without touching a newer replacement."""
         errors: list[Exception] = []
-        for adapter in (self.llm, self.tts):
+        invalidate_tts = getattr(self.tts, "invalidate_turn", None)
+        if invalidate_tts is not None:
             try:
-                cancel_request = getattr(adapter, "cancel_request", None)
-                if cancel_request is not None:
-                    cancel_request()
+                invalidate_tts(session_id, stream_epoch, turn_id, turn_generation)
             except Exception as error:
                 errors.append(error)
+        # The old CancellationToken synchronously closes its own LocalLFM
+        # generation before replacement admission. Calling the provider's global
+        # cancel surface here could race and invalidate that replacement.
         if errors:
             raise ExceptionGroup("one or more inference requests failed to cancel", errors)
 
+    def cancel(self) -> None:
+        """Backend shutdown/startup cancellation, never ordinary turn replacement."""
+        self.llm.cancel_request()
+
     def reset_session(self, session_id: str) -> None:
         self.llm.reset_session(session_id)
-        self._snapshots.clear()
+        for key in tuple(getattr(self, "_turn_correlations", {})):
+            if key[0] == session_id:
+                self._release_tts_turn(*key)
+        for key in tuple(self._snapshots):
+            if key[0] == session_id:
+                self._snapshots.pop(key, None)
 
     def close(self, session_id: str) -> None:
         """Release session context without stopping backend-owned resident models."""
@@ -145,6 +215,9 @@ class LiveTurnRunner:
         for key in tuple(self._snapshots):
             if key[0] == session_id:
                 self._snapshots.pop(key, None)
+        for key in tuple(getattr(self, "_turn_correlations", {})):
+            if key[0] == session_id:
+                self._release_tts_turn(*key)
         if errors:
             raise ExceptionGroup("one or more inference session resources failed to close", errors)
 
@@ -158,6 +231,7 @@ class LiveTurnRunner:
             except Exception as error:
                 errors.append(error)
         self._snapshots.clear()
+        getattr(self, "_turn_correlations", {}).clear()
         self._started = False
         if errors:
             raise ExceptionGroup("one or more resident inference resources failed to close", errors)
@@ -194,8 +268,11 @@ class LiveKitAudioSink(AudioSink):
         self.source_changed = source_changed
         self.publication = None
         self._active_turn: str | None = None
+        self._active_media_generation: int | None = None
         self._pending_pcm = bytearray()
         self._submitted_bytes = 0
+        self._padded_bytes = 0
+        self._submitted_frames = 0
         self._lock = asyncio.Lock()
         self._closing = False
         self._closed = False
@@ -235,45 +312,106 @@ class LiveKitAudioSink(AudioSink):
     def submitted_bytes(self) -> int:
         return self._submitted_bytes
 
-    async def write(self, turn_id: str, pcm: bytes, cancelled) -> bool:
-        if not pcm or len(pcm) % 2 or len(pcm) > OUTPUT_MEDIA_MAX_BYTES:
+    @property
+    def padded_bytes(self) -> int:
+        return self._padded_bytes
+
+    @property
+    def submitted_frames(self) -> int:
+        return self._submitted_frames
+
+    async def prepare(self, turn_id: str, media_generation: int) -> str:
+        if media_generation < 1:
+            raise RuntimeError("invalid media generation")
+        async with self._lock:
+            if self._closing or self._closed or self.publication is None:
+                raise RuntimeError("LiveKit audio publication is unavailable")
+            if self._active_turn not in {None, turn_id}:
+                raise RuntimeError("another LiveKit audio request is active")
+            self._active_turn = turn_id
+            self._active_media_generation = media_generation
+            self._pending_pcm.clear()
+            self._submitted_bytes = 0
+            self._padded_bytes = 0
+            self._submitted_frames = 0
+            return self._publication_id(self.publication)
+
+    async def write(
+        self, turn_id: str, pcm: bytes, cancelled, media_generation: int | None = None
+    ) -> bool:
+        if not pcm or len(pcm) % 2 or len(pcm) > OUTPUT_DELIVERY_BLOCK_BYTES:
             return False
         async with self._lock:
             if self._closing or self._closed or self.publication is None:
                 raise RuntimeError("LiveKit audio publication is unavailable")
             if cancelled():
                 return False
-            if self._active_turn not in {None, turn_id}:
-                raise RuntimeError("another LiveKit audio request is active")
             if self._active_turn is None:
-                self._submitted_bytes = 0
-            self._active_turn = turn_id
+                # Compatibility for historical sink-level tests; active v2 always
+                # calls prepare and supplies its generation before any PCM.
+                self._active_turn = turn_id
+                self._active_media_generation = media_generation or 1
+                self._submitted_bytes = self._padded_bytes = self._submitted_frames = 0
+            if (
+                self._active_turn != turn_id
+                or (media_generation is not None and self._active_media_generation != media_generation)
+            ):
+                raise RuntimeError("another LiveKit audio request is active")
             self._pending_pcm.extend(pcm)
             while len(self._pending_pcm) >= AUDIO_FRAME_BYTES:
-                if cancelled() or self._active_turn != turn_id:
+                if (
+                    cancelled()
+                    or self._active_turn != turn_id
+                    or (media_generation is not None and self._active_media_generation != media_generation)
+                ):
                     return False
                 chunk = bytes(self._pending_pcm[:AUDIO_FRAME_BYTES])
                 del self._pending_pcm[:AUDIO_FRAME_BYTES]
                 frame = rtc.AudioFrame(
                     data=chunk,
-                    sample_rate=16_000,
-                    num_channels=1,
+                    sample_rate=TTS_OUTPUT_AUDIO_FORMAT.sample_rate_hz,
+                    num_channels=TTS_OUTPUT_AUDIO_FORMAT.channels,
                     samples_per_channel=AUDIO_FRAME_BYTES // 2,
                 )
                 await self.source.capture_frame(frame)
+                if cancelled():
+                    return False
                 self._submitted_bytes += len(chunk)
+                self._submitted_frames += 1
             return not cancelled() and self._active_turn == turn_id
 
-    async def finish(self, turn_id: str, cancelled) -> bool:
+    async def finish(
+        self, turn_id: str, cancelled, media_generation: int | None = None
+    ) -> bool:
         async with self._lock:
             if (
                 cancelled()
                 or self._active_turn != turn_id
-                or self._pending_pcm
                 or self.publication is None
+                or (media_generation is not None and self._active_media_generation != media_generation)
             ):
                 return False
+            if self._pending_pcm:
+                original_bytes = len(self._pending_pcm)
+                padding_bytes = AUDIO_FRAME_BYTES - original_bytes
+                frame_bytes = bytes(self._pending_pcm) + bytes(padding_bytes)
+                if cancelled():
+                    return False
+                frame = rtc.AudioFrame(
+                    data=frame_bytes,
+                    sample_rate=TTS_OUTPUT_AUDIO_FORMAT.sample_rate_hz,
+                    num_channels=TTS_OUTPUT_AUDIO_FORMAT.channels,
+                    samples_per_channel=AUDIO_FRAME_BYTES // 2,
+                )
+                await self.source.capture_frame(frame)
+                if cancelled():
+                    return False
+                self._submitted_bytes += original_bytes
+                self._padded_bytes += padding_bytes
+                self._submitted_frames += 1
+                self._pending_pcm.clear()
             self._active_turn = None
+            self._active_media_generation = None
             return True
 
     async def abandon(self, turn_id: str) -> str | None:
@@ -285,6 +423,7 @@ class LiveKitAudioSink(AudioSink):
             if self._active_turn not in {None, turn_id}:
                 return publication_id
             self._active_turn = None
+            self._active_media_generation = None
             self._pending_pcm.clear()
             return publication_id
 
@@ -296,8 +435,11 @@ class LiveKitAudioSink(AudioSink):
             if self._active_turn not in {None, turn_id}:
                 return publication_id
             self._active_turn = None
+            self._active_media_generation = None
             self._pending_pcm.clear()
             self._submitted_bytes = 0
+            self._padded_bytes = 0
+            self._submitted_frames = 0
             self.source.clear_queue()
             return publication_id
 
@@ -305,8 +447,11 @@ class LiveKitAudioSink(AudioSink):
         async with self._lock:
             self._transport_disconnected = True
             self._active_turn = None
+            self._active_media_generation = None
             self._pending_pcm.clear()
             self._submitted_bytes = 0
+            self._padded_bytes = 0
+            self._submitted_frames = 0
             if self.publication is not None:
                 self.source.clear_queue()
 
@@ -318,8 +463,11 @@ class LiveKitAudioSink(AudioSink):
             )
             transport_disconnected = self._transport_disconnected
             self._active_turn = None
+            self._active_media_generation = None
             self._pending_pcm.clear()
             self._submitted_bytes = 0
+            self._padded_bytes = 0
+            self._submitted_frames = 0
             if publication is not None:
                 self.source.clear_queue()
         if publication_id is not None and not transport_disconnected:
@@ -369,7 +517,11 @@ class LiveKitRoomController:
         self._owns_runner = runner is None
         self.runner = runner or LiveTurnRunner(settings)
         self.room = rtc.Room()
-        self.audio_source = rtc.AudioSource(16_000, 1, queue_size_ms=AUDIO_QUEUE_MS)
+        self.audio_source = rtc.AudioSource(
+            TTS_OUTPUT_AUDIO_FORMAT.sample_rate_hz,
+            TTS_OUTPUT_AUDIO_FORMAT.channels,
+            queue_size_ms=AUDIO_QUEUE_MS,
+        )
         self.trace = PrivacySafeTrace(
             TRACE_ROOT / f"{session_id}.jsonl", TraceIdentity(session_id)
         )
@@ -733,8 +885,8 @@ class LiveKitRoomController:
             stream = rtc.AudioStream.from_track(
                 track=track,
                 capacity=20,
-                sample_rate=16_000,
-                num_channels=1,
+                sample_rate=INPUT_AUDIO_FORMAT.sample_rate_hz,
+                num_channels=INPUT_AUDIO_FORMAT.channels,
                 frame_size_ms=AUDIO_FRAME_MS,
             )
             async for event in stream:
@@ -748,7 +900,9 @@ class LiveKitRoomController:
                 frame_pcm = bytes(event.frame.data)
                 frame_samples = len(frame_pcm) // 2
                 if audio_clock_origin is None:
-                    audio_clock_origin = time.monotonic() - frame_samples / 16_000
+                    audio_clock_origin = (
+                        time.monotonic() - frame_samples / INPUT_AUDIO_FORMAT.sample_rate_hz
+                    )
                 audio_clock_samples += frame_samples
                 for decision in endpoint.feed(frame_pcm):
                     if (
@@ -772,7 +926,11 @@ class LiveKitRoomController:
                             now
                             if audio_clock_origin is None
                             else audio_clock_origin
-                            + max(0.0, audio_clock_samples / 16_000 - terminal_silence_ms / 1000),
+                            + max(
+                                0.0,
+                                audio_clock_samples / INPUT_AUDIO_FORMAT.sample_rate_hz
+                                - terminal_silence_ms / 1000,
+                            ),
                         )
                         await self.session.finish_utterance(
                             payload, endpoint_monotonic=endpoint_monotonic
@@ -995,7 +1153,8 @@ class SessionRegistry:
                 self.settings.browser_join_timeout_seconds,
                 self.settings.room_token_ttl_seconds,
             ) * 1_000,
-            "control_version": "voice-agent.realtime-control.v1",
+            "control_version": "voice-agent.realtime-control.v2",
+            "tts_profile": self.runner.tts_profile.public_metadata(),
         }
 
     async def remove(self, session_id: str) -> None:

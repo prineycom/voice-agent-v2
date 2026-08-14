@@ -136,6 +136,46 @@ class ContractFixtureTests(unittest.TestCase):
                 fixture = json.loads((FIXTURES / f"{name}.v1.json").read_text())
                 validate(fixture, schema)
 
+    def test_v2_contract_examples_are_strict_and_v1_remains_unchanged(self) -> None:
+        for name in ("tts", "event-envelope", "realtime-control"):
+            with self.subTest(contract=name):
+                schema = json.loads((ROOT / "contracts" / f"{name}.v2.schema.json").read_text())
+                fixture = json.loads((FIXTURES / f"{name}.v2.json").read_text())
+                validate(fixture, schema)
+
+        tts_v2 = json.loads((FIXTURES / "tts.v2.json").read_text())
+        tts_v2_schema = json.loads((ROOT / "contracts" / "tts.v2.schema.json").read_text())
+        self.assertEqual(
+            [chunk["sequence"] for chunk in tts_v2["result"]["chunks"]],
+            list(range(tts_v2["result"]["chunk_count"])),
+        )
+        self.assertEqual(
+            sum(chunk["byte_count"] for chunk in tts_v2["result"]["chunks"]),
+            tts_v2["result"]["audio_bytes"],
+        )
+        rejected_chunk = deepcopy(tts_v2)
+        rejected_chunk["result"]["chunks"][0]["byte_count"] = 65_537
+        with self.assertRaises(SchemaViolation):
+            validate(rejected_chunk, tts_v2_schema)
+
+        rejected_output = deepcopy(tts_v2)
+        rejected_output["request"]["audio"]["sample_rate_hz"] = 16_000
+        with self.assertRaises(SchemaViolation):
+            validate(rejected_output, tts_v2_schema)
+
+        stt_v1 = json.loads((FIXTURES / "stt.v1.json").read_text())
+        stt_v1_schema = json.loads((ROOT / "contracts" / "stt.v1.schema.json").read_text())
+        rejected_input = deepcopy(stt_v1)
+        rejected_input["audio"]["sample_rate_hz"] = 48_000
+        with self.assertRaises(SchemaViolation):
+            validate(rejected_input, stt_v1_schema)
+
+        # Historical TTS v1 remains exactly 16 kHz and independently valid.
+        validate(
+            json.loads((FIXTURES / "tts.v1.json").read_text()),
+            json.loads((ROOT / "contracts" / "tts.v1.schema.json").read_text()),
+        )
+
     def test_all_public_events_satisfy_event_schema(self) -> None:
         schema = json.loads((ROOT / "contracts" / "event-envelope.v1.schema.json").read_text())
         for scenario in SCENARIOS:

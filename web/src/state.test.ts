@@ -3,6 +3,7 @@ import {
   CONTROL_VERSION,
   RealtimeControlGate,
   initialVoiceState,
+  parseCapability,
   parseControlEvent,
   voiceReducer,
   type ControlEvent,
@@ -17,6 +18,11 @@ const capability: SessionCapability = {
   expires_in_seconds: 300,
   admission_timeout_ms: 30_000,
   control_version: CONTROL_VERSION,
+  tts_profile: {
+    profile: 'silero-kseniya', backend: 'silero', speaker: 'kseniya',
+    output_sample_rate_hz: 48_000, native_sample_rate_hz: 48_000,
+    license: 'CC-BY-NC-SA-4.0', private_noncommercial_only: true,
+  },
 }
 
 function event(
@@ -26,11 +32,16 @@ function event(
   payload: Record<string, unknown> = {},
   streamEpoch = 1,
 ): ControlEvent {
+  const sessionEvent = type.startsWith('session.')
+  const turnGeneration = sessionEvent ? 0 : Number(turnId.match(/(\d+)$/)?.[1] ?? 1)
   return {
     schema_version: CONTROL_VERSION,
     session_id: capability.session_id,
-    turn_id: type.startsWith('session.') ? 'session' : turnId,
+    turn_id: sessionEvent ? 'session' : turnId,
     stream_epoch: streamEpoch,
+    turn_generation: turnGeneration,
+    request_id: sessionEvent ? 'session' : `request-${turnGeneration.toString().padStart(8, '0')}`,
+    media_generation: turnGeneration,
     sequence,
     type,
     terminal: ['turn.completed', 'turn.interrupted', 'turn.failed'].includes(type),
@@ -52,17 +63,20 @@ function apply(events: ControlEvent[]) {
 function completedTurn(startSequence: number, turnId: string, user: string, assistant: string) {
   return [
     event(startSequence, 'turn.listening', turnId),
-    event(startSequence + 1, 'stt.final', turnId, { transcript: user }),
-    event(startSequence + 2, 'turn.thinking', turnId),
-    event(startSequence + 3, 'llm.visible', turnId, {
+    event(startSequence + 1, 'turn.media-ready', turnId, {
+      server_media_publication_id: 'publication-test',
+    }),
+    event(startSequence + 2, 'stt.final', turnId, { transcript: user }),
+    event(startSequence + 3, 'turn.thinking', turnId),
+    event(startSequence + 4, 'llm.visible', turnId, {
       response: assistant,
       endpoint_to_first_visible_ms: 37,
     }),
-    event(startSequence + 4, 'turn.speaking', turnId, {
+    event(startSequence + 5, 'turn.speaking', turnId, {
       server_streamed_output: true,
       endpoint_to_first_accepted_pcm_ms: 64,
     }),
-    event(startSequence + 5, 'turn.completed', turnId, {
+    event(startSequence + 6, 'turn.completed', turnId, {
       outcome: 'completed',
       endpoint_to_first_visible_ms: 37,
       endpoint_to_first_accepted_pcm_ms: 64,
@@ -71,6 +85,17 @@ function completedTurn(startSequence: number, turnId: string, user: string, assi
 }
 
 describe('checkpoint A browser state', () => {
+  it('accepts only the fixed validated Silero/Kseniya native-48 capability', () => {
+    expect(parseCapability(capability)?.tts_profile.profile).toBe('silero-kseniya')
+    expect(parseCapability({
+      ...capability,
+      tts_profile: { ...capability.tts_profile, profile: 'qwen-ryan' },
+    })).toBeNull()
+    expect(parseCapability({
+      ...capability,
+      tts_profile: { ...capability.tts_profile, output_sample_rate_hz: 16_000 },
+    })).toBeNull()
+  })
   it('rejects removed playout events at the serialized protocol boundary', () => {
     expect(parseControlEvent(JSON.stringify(event(1, 'turn.listening')))?.type).toBe('turn.listening')
     const removed = {
@@ -85,7 +110,7 @@ describe('checkpoint A browser state', () => {
     const state = apply([
       event(1, 'session.ready'),
       ...completedTurn(2, 'turn-00000001', 'Первый вопрос.', 'Первый ответ.'),
-      ...completedTurn(8, 'turn-00000002', 'Второй вопрос.', 'Второй ответ.'),
+      ...completedTurn(9, 'turn-00000002', 'Второй вопрос.', 'Второй ответ.'),
     ])
 
     expect(state.phase).toBe('idle')
@@ -111,10 +136,11 @@ describe('checkpoint A browser state', () => {
     const state = apply([
       event(1, 'session.ready'),
       event(2, 'turn.listening'),
-      event(3, 'stt.final', 'turn-00000001', { transcript: 'Вопрос.' }),
-      event(4, 'turn.thinking'),
-      event(5, 'llm.visible', 'turn-00000001', { response: 'Видимый ответ.' }),
-      event(6, 'turn.failed', 'turn-00000001', {
+      event(3, 'turn.media-ready'),
+      event(4, 'stt.final', 'turn-00000001', { transcript: 'Вопрос.' }),
+      event(5, 'turn.thinking'),
+      event(6, 'llm.visible', 'turn-00000001', { response: 'Видимый ответ.' }),
+      event(7, 'turn.failed', 'turn-00000001', {
         outcome: 'failed', stage: 'tts', code: 'selected_tts_unavailable',
       }),
     ])
@@ -132,7 +158,8 @@ describe('checkpoint A browser state', () => {
     const state = apply([
       event(1, 'session.ready'),
       event(2, 'turn.listening'),
-      event(3, 'turn.failed', 'turn-00000001', {
+      event(3, 'turn.media-ready'),
+      event(4, 'turn.failed', 'turn-00000001', {
         outcome: 'failed', stage: 'stt', code: 'selected_stt_unavailable',
       }),
     ])
@@ -155,9 +182,10 @@ describe('checkpoint A browser state', () => {
     const gate = new RealtimeControlGate(capability.session_id, 1)
     expect(gate.accept(event(1, 'session.ready'))).toBe(true)
     expect(gate.accept(event(2, 'turn.listening'))).toBe(true)
-    expect(gate.accept(event(3, 'stt.final', 'turn-other'))).toBe(false)
-    expect(gate.accept(event(3, 'stt.final'))).toBe(true)
-    expect(gate.accept(event(3, 'turn.thinking'))).toBe(false)
+    expect(gate.accept(event(3, 'turn.media-ready'))).toBe(true)
+    expect(gate.accept(event(4, 'stt.final', 'turn-other'))).toBe(false)
+    expect(gate.accept(event(4, 'stt.final'))).toBe(true)
+    expect(gate.accept(event(4, 'turn.thinking'))).toBe(false)
   })
 
   it('keeps effective microphone truth and bounded transition errors in UI state', () => {
@@ -182,9 +210,10 @@ describe('checkpoint A browser state', () => {
     let state = apply([
       event(1, 'session.ready'),
       ...completedTurn(2, 'turn-00000001', 'Старый вопрос.', 'Старый ответ.'),
-      event(8, 'turn.listening', 'turn-00000002'),
-      event(9, 'stt.final', 'turn-00000002', { transcript: 'Новый вопрос.' }),
-      event(10, 'turn.thinking', 'turn-00000002'),
+      event(9, 'turn.listening', 'turn-00000002'),
+      event(10, 'turn.media-ready', 'turn-00000002'),
+      event(11, 'stt.final', 'turn-00000002', { transcript: 'Новый вопрос.' }),
+      event(12, 'turn.thinking', 'turn-00000002'),
     ])
     state = voiceReducer(state, {
       type: 'microphone', enabled: false, transitioning: false,
@@ -192,11 +221,11 @@ describe('checkpoint A browser state', () => {
     state = voiceReducer(state, { type: 'connection', connection: 'reconnecting' })
     state = voiceReducer(state, {
       type: 'control',
-      event: event(11, 'session.reconnected', 'session', { state: 'ready' }, 2),
+      event: event(13, 'session.reconnected', 'session', { state: 'ready' }, 2),
     })
     state = voiceReducer(state, {
       type: 'control',
-      event: event(12, 'session.ready', 'session', { state: 'ready' }, 2),
+      event: event(14, 'session.ready', 'session', { state: 'ready' }, 2),
     })
 
     expect(state.connection).toBe('ready')
