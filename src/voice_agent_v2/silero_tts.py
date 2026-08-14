@@ -261,6 +261,8 @@ class SileroWorkerPool:
     @property
     def ready_count(self) -> int:
         with self._condition:
+            if not self._started:
+                return 0
             return sum(slot.state in {"idle", "busy"} for slot in self._slots)
 
     def require_ready(self) -> None:
@@ -281,7 +283,7 @@ class SileroWorkerPool:
         try:
             self.verify_runtime()
             for slot in self._slots:
-                self._start_slot(slot)
+                self._start_slot(slot, ready_state="warming")
                 started.append(slot)
             # Warm every worker through the same public request/result validator.
             for index, slot in enumerate(self._slots):
@@ -296,12 +298,13 @@ class SileroWorkerPool:
                 pcm, _metadata = self._request_on_slot(slot, key, "Готово.")
                 if not pcm:
                     raise StageFailure("tts", "silero_warmup_failed")
-                with self._condition:
+            with self._condition:
+                for slot in self._slots:
                     slot.state = "idle"
                     slot.active_key = None
                     slot.last_idle = time.monotonic()
-            with self._condition:
                 self._started = True
+                self._condition.notify_all()
             return self.readiness_metadata()
         except BaseException as error:
             for slot in started:

@@ -333,36 +333,51 @@ class SileroPoolTests(unittest.TestCase):
             f"request-{turn:08d}", segment,
         )
 
-    def test_concurrent_start_still_creates_exactly_two_workers(self) -> None:
+    def test_concurrent_start_keeps_direct_callers_unready_until_both_warm(self) -> None:
         coordinator = ProcessCoordinator()
-        verification_entered = threading.Event()
-        verification_release = threading.Event()
-
-        def verify_runtime():
-            verification_entered.set()
-            verification_release.wait(1)
-            return {"verified": True}
-
+        warmup_release = threading.Event()
+        coordinator.gates["warmup-request-1"] = warmup_release
         pool = SileroWorkerPool(
             process_factory=coordinator.factory,
-            verify_runtime=verify_runtime,
+            verify_runtime=lambda: {"verified": True},
         )
         results: list[dict[str, object]] = []
-        threads = [threading.Thread(target=lambda: results.append(pool.start())) for _ in range(2)]
+        errors: list[BaseException] = []
+
+        def start() -> None:
+            try:
+                results.append(pool.start())
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=start) for _ in range(2)]
         try:
             threads[0].start()
-            self.assertTrue(verification_entered.wait(0.5))
+            worker_id, request_id = coordinator.entered.get(timeout=1)
+            self.assertEqual((worker_id, request_id), ("silero-1", "warmup-request-1"))
             threads[1].start()
             time.sleep(0.02)
-            self.assertEqual(len(coordinator.created), 0)
-            verification_release.set()
+
+            self.assertEqual(pool.ready_count, 0)
+            self.assertEqual({slot["state"] for slot in pool.slots}, {"warming"})
+            with self.assertRaises(StageFailure) as not_ready:
+                pool.synthesize(self.key(1), "Нельзя отправлять до прогрева.", None)
+            self.assertEqual(not_ready.exception.code, "silero_pool_not_ready")
+            self.assertEqual(len(coordinator.created), 2)
+
+            warmup_release.set()
             for thread in threads:
                 thread.join(1)
             self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
             self.assertEqual(len(results), 2)
+            self.assertEqual(pool.ready_count, 2)
             self.assertEqual(len(coordinator.created), 2)
             self.assertEqual(len([p for p in coordinator.created if p.process.poll() is None]), 2)
         finally:
+            warmup_release.set()
+            for thread in threads:
+                thread.join(1)
             pool.close()
 
     def test_exactly_two_warmed_workers_and_rate_specific_bounds(self) -> None:
