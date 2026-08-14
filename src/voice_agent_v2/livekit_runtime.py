@@ -61,6 +61,7 @@ class LiveTurnRunner:
         self.complete_segment_capacity = asyncio.BoundedSemaphore(2)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
         self._turn_correlations: dict[tuple[str, str], tuple[int, int]] = {}
+        self._turn_correlations_lock = threading.Lock()
         self._startup_cancellation = CancellationToken()
         self._start_lock = threading.Lock()
         self._started = False
@@ -105,9 +106,7 @@ class LiveTurnRunner:
         request_id: str | None = None,
     ) -> TraceResult:
         self._snapshots[(session_id, turn_id)] = self.llm.snapshot_session(session_id)
-        if not hasattr(self, "_turn_correlations"):
-            self._turn_correlations = {}
-        self._turn_correlations[(session_id, turn_id)] = (stream_epoch, turn_generation)
+        self.register_turn(session_id, stream_epoch, turn_id, turn_generation)
         effective_request_id = request_id or f"request-{turn_id.removeprefix('turn-')}"
         try:
             return self.controller.run_turn(
@@ -168,9 +167,32 @@ class LiveTurnRunner:
                 if len(observations) > MAX_SESSION_OBSERVATIONS:
                     del observations[:-MAX_SESSION_OBSERVATIONS]
 
+    def _correlation_lock(self) -> threading.Lock:
+        lock = getattr(self, "_turn_correlations_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._turn_correlations_lock = lock
+        return lock
+
+    def register_turn(
+        self, session_id: str, stream_epoch: int, turn_id: str, turn_generation: int
+    ) -> None:
+        key = (session_id, turn_id)
+        correlation = (stream_epoch, turn_generation)
+        with self._correlation_lock():
+            correlations = getattr(self, "_turn_correlations", None)
+            if correlations is None:
+                correlations = {}
+                self._turn_correlations = correlations
+            existing = correlations.get(key)
+            if existing is not None and existing != correlation:
+                raise RuntimeError("turn correlation changed during its lifecycle")
+            correlations[key] = correlation
+
     def _release_tts_turn(self, session_id: str, turn_id: str) -> None:
-        correlations = getattr(self, "_turn_correlations", {})
-        correlation = correlations.pop((session_id, turn_id), None)
+        with self._correlation_lock():
+            correlations = getattr(self, "_turn_correlations", {})
+            correlation = correlations.pop((session_id, turn_id), None)
         release = getattr(self.tts, "release_turn", None)
         if correlation is not None and release is not None:
             release(session_id, correlation[0], turn_id, correlation[1])
@@ -199,6 +221,7 @@ class LiveTurnRunner:
     ) -> None:
         """Invalidate one obsolete turn without touching a newer replacement."""
         errors: list[Exception] = []
+        self.register_turn(session_id, stream_epoch, turn_id, turn_generation)
         invalidate_tts = getattr(self.tts, "invalidate_turn", None)
         if invalidate_tts is not None:
             try:
@@ -217,7 +240,9 @@ class LiveTurnRunner:
 
     def reset_session(self, session_id: str) -> None:
         self.llm.reset_session(session_id)
-        for key in tuple(getattr(self, "_turn_correlations", {})):
+        with self._correlation_lock():
+            correlation_keys = tuple(getattr(self, "_turn_correlations", {}))
+        for key in correlation_keys:
             if key[0] == session_id:
                 self._release_tts_turn(*key)
         for key in tuple(self._snapshots):
@@ -235,7 +260,9 @@ class LiveTurnRunner:
         for key in tuple(self._snapshots):
             if key[0] == session_id:
                 self._snapshots.pop(key, None)
-        for key in tuple(getattr(self, "_turn_correlations", {})):
+        with self._correlation_lock():
+            correlation_keys = tuple(getattr(self, "_turn_correlations", {}))
+        for key in correlation_keys:
             if key[0] == session_id:
                 self._release_tts_turn(*key)
         if errors:
@@ -251,7 +278,8 @@ class LiveTurnRunner:
             except Exception as error:
                 errors.append(error)
         self._snapshots.clear()
-        getattr(self, "_turn_correlations", {}).clear()
+        with self._correlation_lock():
+            getattr(self, "_turn_correlations", {}).clear()
         self._started = False
         if errors:
             raise ExceptionGroup("one or more resident inference resources failed to close", errors)

@@ -8,6 +8,8 @@ import unittest
 from tests.test_checkpoint_ab import (
     CheckpointBLiveKitTests,
     CheckpointBWarmupTests,
+    MemoryAudio,
+    MemoryEvents,
     load_runtime,
 )
 from tests.test_silero_tts import FakeSTT, FakeVisibleLLM, ProcessCoordinator
@@ -163,6 +165,68 @@ class LiveTurnObservationTests(unittest.TestCase):
             old_release.set()
             old_thread.join(1)
             runner.tts.close()
+
+
+class TurnCorrelationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_immediate_discard_releases_invalidated_turns(self) -> None:
+        runtime = load_runtime()
+
+        class TrackingTTS:
+            def __init__(self) -> None:
+                self.invalid_turns: set[tuple[str, int, str, int]] = set()
+                self.released_turns: list[tuple[str, int, str, int]] = []
+
+            def invalidate_turn(
+                self,
+                session_id: str,
+                stream_epoch: int,
+                turn_id: str,
+                turn_generation: int,
+            ) -> None:
+                self.invalid_turns.add(
+                    (session_id, stream_epoch, turn_id, turn_generation)
+                )
+
+            def release_turn(
+                self,
+                session_id: str,
+                stream_epoch: int,
+                turn_id: str,
+                turn_generation: int,
+            ) -> None:
+                key = (session_id, stream_epoch, turn_id, turn_generation)
+                self.assert_invalidated(key)
+                self.invalid_turns.remove(key)
+                self.released_turns.append(key)
+
+            def assert_invalidated(self, key: tuple[str, int, str, int]) -> None:
+                if key not in self.invalid_turns:
+                    raise AssertionError("turn was released without prior invalidation")
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.tts = TrackingTTS()
+        runner.llm = types.SimpleNamespace()
+        runner._snapshots = {}
+        runner._turn_correlations = {}
+        runner._turn_correlations_lock = threading.Lock()
+        runner._started = True
+        runner.complete_segment_capacity = asyncio.BoundedSemaphore(2)
+        session = runtime.RealtimeSession(
+            session_id="session-immediate-discard",
+            runner=runner,
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+        )
+
+        for _ in range(32):
+            await session.start_utterance(announce=False)
+            await session.discard_utterance()
+            await session.wait_for_cleanup()
+            self.assertEqual(runner.tts.invalid_turns, set())
+            self.assertEqual(runner._turn_correlations, {})
+
+        self.assertEqual(len(runner.tts.released_turns), 32)
+        self.assertEqual(len(set(runner.tts.released_turns)), 32)
 
 
 class PersistentLiveKitTrackTests(CheckpointBLiveKitTests):

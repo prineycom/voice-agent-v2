@@ -834,6 +834,28 @@ class RealtimeSession:
             return
         if context.terminal or self._closed:
             return
+        register_turn = getattr(self.runner, "register_turn", None)
+        if register_turn is not None:
+            try:
+                register_turn(
+                    self.session_id,
+                    context.stream_epoch,
+                    context.turn_id,
+                    context.turn_generation,
+                )
+            except Exception:
+                await self._terminate_failed_turn(
+                    context,
+                    "turn.failed",
+                    {
+                        "outcome": "failed",
+                        "stage": "controller",
+                        "code": "turn_registration_failed",
+                    },
+                )
+                return
+        if context.terminal or self._closed:
+            return
 
         loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
