@@ -50,6 +50,7 @@ class ProcessCoordinator:
         self.gates: dict[str, threading.Event] = {}
         self.entered: queue.Queue[tuple[str, str]] = queue.Queue()
         self.fail_requests: set[str] = set()
+        self.error_overrides: dict[str, dict[str, object]] = {}
         self.final_overrides: dict[str, object] = {}
         self.output_chunks: tuple[bytes, ...] | None = None
         self._pid = 7000
@@ -86,7 +87,9 @@ class FakeProcess:
             "interop_threads": 1,
         }
 
-    def stream(self, request: dict, _timeout_seconds: float):
+    def stream(
+        self, request: dict, _timeout_seconds: float, *, error_validator=None
+    ):
         if request.get("protocol_version") != "voice-agent.silero-worker.v1":
             raise AssertionError("unexpected worker protocol")
         request_id = request["request_id"]
@@ -98,6 +101,18 @@ class FakeProcess:
                 raise RuntimeError("test gate timed out")
         if request_id in self.coordinator.fail_requests:
             raise AdapterRequestError("injected")
+        if request_id in self.coordinator.error_overrides:
+            error = {
+                "protocol_version": "voice-agent.silero-worker.v1",
+                "event": "error",
+                "request_id": request_id,
+                "key": key,
+                "error_class": "synthesis_failed",
+            }
+            error.update(self.coordinator.error_overrides[request_id])
+            if error_validator is not None:
+                error_validator(error)
+            raise AdapterRequestError(str(error.get("error_class", "adapter_error")))
         chunks = self.coordinator.output_chunks or (
             bytes([self.process.pid % 251, 0]) * 960,
         )
@@ -881,6 +896,50 @@ class SileroPoolTests(unittest.TestCase):
         finally:
             warmup_release.set()
             pool.close()
+
+    def test_validated_worker_error_is_request_failure_without_quarantine(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        try:
+            coordinator.error_overrides["request-00000001"] = {}
+
+            with self.assertRaises(StageFailure) as failure:
+                pool.synthesize(self.key(1), "Ошибка синтеза.", None)
+
+            self.assertEqual(failure.exception.code, "silero_synthesis_failed")
+            self.assertEqual(pool.ready_count, 2)
+            self.assertEqual(pool.counters["worker_quarantines"], 0)
+            self.assertEqual(len(coordinator.created), 2)
+        finally:
+            pool.close()
+
+    def test_invalid_worker_error_key_or_shape_quarantines_slot(self) -> None:
+        invalid_overrides = (
+            {
+                "key": TTSRequestKey(
+                    "session-test", 1, "turn-00000001", 1,
+                    "request-00000001", 9,
+                ).as_dict(),
+            },
+            {"unexpected": "field"},
+        )
+        for override in invalid_overrides:
+            with self.subTest(override=override):
+                coordinator = ProcessCoordinator()
+                pool = self.pool(coordinator)
+                try:
+                    coordinator.error_overrides["request-00000001"] = override
+
+                    with self.assertRaises(StageFailure) as failure:
+                        pool.synthesize(self.key(1), "Ошибка протокола.", None)
+
+                    self.assertEqual(failure.exception.code, "silero_worker_failed")
+                    self.assertEqual(pool.ready_count, 1)
+                    self.assertEqual(pool.counters["worker_quarantines"], 1)
+                    self.assertEqual(len(pool.process_ids), 1)
+                    self.assertEqual(len(coordinator.created), 2)
+                finally:
+                    pool.close()
 
     def test_failure_has_no_retry_and_explicit_recovery_never_co_starts_third(self) -> None:
         coordinator = ProcessCoordinator()

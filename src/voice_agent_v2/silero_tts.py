@@ -48,6 +48,21 @@ CAPACITY_WAIT_SECONDS = 0.750
 SYNTHESIS_TIMEOUT_SECONDS = 15.0
 MAX_WORKER_CHUNKS = 64
 MAX_SEGMENTS_PER_TURN = 16
+WORKER_REQUEST_ERROR_CLASSES = frozenset({
+    "invalid_request_shape",
+    "invalid_request_version",
+    "invalid_correlation",
+    "text_out_of_bounds",
+    "invalid_text_contract",
+    "unsupported_audio_format",
+    "request_too_large",
+    "invalid_waveform",
+    "waveform_out_of_bounds",
+    "synthesis_failed",
+})
+WORKER_ERROR_EVENT_FIELDS = frozenset({
+    "protocol_version", "event", "key", "request_id", "error_class",
+})
 
 
 def _sha256(path: Path) -> str:
@@ -523,7 +538,23 @@ class SileroWorkerPool:
         total_bytes = 0
         chunk_count = 0
         final: dict[str, object] | None = None
-        for event in process.stream(request, SYNTHESIS_TIMEOUT_SECONDS):
+
+        def validate_error_event(event: dict) -> None:
+            if (
+                set(event) != WORKER_ERROR_EVENT_FIELDS
+                or event.get("protocol_version") != WORKER_PROTOCOL_VERSION
+                or event.get("event") != "error"
+                or event.get("key") != key.as_dict()
+                or event.get("request_id") != key.request_id
+                or event.get("error_class") not in WORKER_REQUEST_ERROR_CLASSES
+            ):
+                raise AdapterProcessError("invalid Silero worker error frame")
+
+        for event in process.stream(
+            request,
+            SYNTHESIS_TIMEOUT_SECONDS,
+            error_validator=validate_error_event,
+        ):
             if event.get("protocol_version") != WORKER_PROTOCOL_VERSION:
                 raise AdapterProcessError("Silero worker protocol mismatch")
             if event.get("key") != key.as_dict():
