@@ -498,6 +498,56 @@ class SileroPoolTests(unittest.TestCase):
         finally:
             pool.close()
 
+    def test_recovery_waits_until_quarantined_process_has_fully_stopped(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        close_entered = threading.Event()
+        close_release = threading.Event()
+        quarantine = None
+        try:
+            old_process = coordinator.created[0]
+            original_close = old_process.close
+
+            def blocking_close() -> None:
+                close_entered.set()
+                if not close_release.wait(1):
+                    raise RuntimeError("test close gate timed out")
+                original_close()
+
+            old_process.close = blocking_close
+            quarantine = threading.Thread(
+                target=pool.quarantine_worker_for_controlled_check,
+                args=("silero-1",),
+            )
+            quarantine.start()
+            self.assertTrue(close_entered.wait(0.5))
+            self.assertEqual(len(coordinator.created), 2)
+            self.assertEqual(
+                len([process for process in coordinator.created if process.process.poll() is None]),
+                2,
+            )
+
+            with self.assertRaises(StageFailure) as unavailable:
+                pool.recover()
+
+            self.assertEqual(unavailable.exception.code, "silero_recovery_not_admissible")
+            self.assertEqual(len(coordinator.created), 2)
+            close_release.set()
+            quarantine.join(1)
+            self.assertFalse(quarantine.is_alive())
+
+            pool.recover()
+            self.assertEqual(len(coordinator.created), 3)
+            self.assertEqual(
+                len([process for process in coordinator.created if process.process.poll() is None]),
+                2,
+            )
+        finally:
+            close_release.set()
+            if quarantine is not None:
+                quarantine.join(1)
+            pool.close()
+
     def test_recovery_stays_unready_through_warmup_and_rejects_concurrent_recovery(self) -> None:
         coordinator = ProcessCoordinator()
         pool = self.pool(coordinator)

@@ -569,31 +569,46 @@ class SileroWorkerPool:
         }
         return pcm, metadata
 
-    def _quarantine(self, slot: _WorkerSlot) -> None:
+    def _quarantine(
+        self, slot: _WorkerSlot, *, expected_state: str | None = None
+    ) -> None:
         with self._condition:
-            slot.state = "unhealthy"
+            if expected_state is not None and slot.state != expected_state:
+                raise StageFailure("tts", "silero_recovery_not_admissible")
+            if slot.state in {"quarantining", "stopping"}:
+                return
+            if slot.state == "unhealthy" and slot.process is None:
+                return
+            slot.state = "quarantining"
             slot.active_key = None
             self.counters["worker_quarantines"] += 1
             self._condition.notify_all()
         self._stop_slot(slot, final_state="unhealthy")
 
-    def _stop_slot(self, slot: _WorkerSlot, *, final_state: str = "stopping") -> None:
-        process = slot.process
-        slot.state = final_state
-        slot.active_key = None
-        if process is not None:
-            try:
+    def _stop_slot(self, slot: _WorkerSlot, *, final_state: str = "stopped") -> None:
+        with self._condition:
+            process = slot.process
+            slot.state = "stopping"
+            slot.active_key = None
+            self._condition.notify_all()
+        try:
+            if process is not None:
                 process.close()
-            finally:
-                slot.process = None
-                slot.ready_metadata = None
+        finally:
+            with self._condition:
+                if slot.process is process:
+                    slot.process = None
+                    slot.ready_metadata = None
+                slot.state = final_state
+                self._condition.notify_all()
 
     def recover(self) -> dict[str, object]:
         """Explicit post-degradation recovery; never used as a request retry."""
         with self._condition:
             unhealthy = [slot for slot in self._slots if slot.state == "unhealthy"]
             if (
-                self._recovering
+                self._closed
+                or self._recovering
                 or not unhealthy
                 or any(slot.state == "busy" for slot in self._slots)
             ):
@@ -636,9 +651,9 @@ class SileroWorkerPool:
 
     def quarantine_worker_for_controlled_check(self, worker_id: str) -> None:
         slot = next((item for item in self._slots if item.worker_id == worker_id), None)
-        if slot is None or slot.state == "busy":
+        if slot is None:
             raise StageFailure("tts", "silero_recovery_not_admissible")
-        self._quarantine(slot)
+        self._quarantine(slot, expected_state="idle")
 
     def close(self) -> None:
         with self._condition:
@@ -671,7 +686,44 @@ class SileroKseniyaTTS:
     def __init__(self, pool: SileroWorkerPool | None = None) -> None:
         self.pool = pool or SileroWorkerPool()
         self.observations = self.pool.observations
+        self._observation_lock = threading.Lock()
+        self._turn_observations: dict[
+            tuple[str, int, str, int, str], list[dict[str, object]]
+        ] = {}
         self.ready_metadata: dict[str, object] | None = None
+
+    @staticmethod
+    def _observation_key(key: TTSRequestKey) -> tuple[str, int, str, int, str]:
+        return (
+            key.session_id,
+            key.stream_epoch,
+            key.turn_id,
+            key.turn_generation,
+            key.request_id,
+        )
+
+    def take_turn_observations(
+        self,
+        session_id: str,
+        stream_epoch: int,
+        turn_id: str,
+        turn_generation: int,
+        request_id: str,
+    ) -> tuple[dict[str, object], ...]:
+        correlation = (
+            session_id,
+            stream_epoch,
+            turn_id,
+            turn_generation,
+            request_id,
+        )
+        with self._observation_lock:
+            return tuple(self._turn_observations.pop(correlation, ()))
+
+    def trim_observations(self, limit: int) -> None:
+        with self._observation_lock:
+            if len(self.observations) > limit:
+                del self.observations[:-limit]
 
     @property
     def process_ids(self) -> tuple[int, ...]:
@@ -744,7 +796,7 @@ class SileroKseniyaTTS:
         if cancellation is not None and cancellation.cancelled:
             self.pool.invalidate_key(key)
             raise StageFailure("tts", "selected_tts_cancelled")
-        self.observations.append({
+        observation = {
             "backend": "silero",
             "model_identity": MODEL_IDENTITY,
             "speaker": SPEAKER,
@@ -758,7 +810,12 @@ class SileroKseniyaTTS:
             "sample_rate_hz": 48_000,
             "stale_discarded": False,
             "retained_by_adapter": False,
-        })
+        }
+        with self._observation_lock:
+            self.observations.append(observation)
+            self._turn_observations.setdefault(
+                self._observation_key(key), []
+            ).append(observation)
         if cancellation is not None and cancellation.cancelled:
             self.pool.invalidate_key(key)
             raise StageFailure("tts", "selected_tts_cancelled")
@@ -776,6 +833,15 @@ class SileroKseniyaTTS:
         self, session_id: str, stream_epoch: int, turn_id: str, turn_generation: int
     ) -> None:
         self.pool.release_turn(session_id, stream_epoch, turn_id, turn_generation)
+        with self._observation_lock:
+            for correlation in tuple(self._turn_observations):
+                if correlation[:4] == (
+                    session_id,
+                    stream_epoch,
+                    turn_id,
+                    turn_generation,
+                ):
+                    self._turn_observations.pop(correlation, None)
 
     def cancel_request(self) -> None:
         # Request-scoped CancellationToken callbacks own invalidation.  A global

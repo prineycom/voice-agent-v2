@@ -106,7 +106,7 @@ class LiveTurnRunner:
         if not hasattr(self, "_turn_correlations"):
             self._turn_correlations = {}
         self._turn_correlations[(session_id, turn_id)] = (stream_epoch, turn_generation)
-        tts_observation_start = len(self.tts.observations)
+        effective_request_id = request_id or f"request-{turn_id.removeprefix('turn-')}"
         try:
             return self.controller.run_turn(
                 session_id=session_id,
@@ -119,11 +119,18 @@ class LiveTurnRunner:
                 retain_output=retain_output,
                 stream_epoch=stream_epoch,
                 turn_generation=turn_generation,
-                request_id=request_id,
+                request_id=effective_request_id,
             )
         finally:
+            turn_observations = self.tts.take_turn_observations(
+                session_id,
+                stream_epoch,
+                turn_id,
+                turn_generation,
+                effective_request_id,
+            )
             if trace_observer is not None:
-                for observation in self.tts.observations[tts_observation_start:]:
+                for observation in turn_observations:
                     safe_observation = {
                         ("output_bytes" if key == "audio_bytes" else key): value
                         for key, value in observation.items()
@@ -144,6 +151,10 @@ class LiveTurnRunner:
                         },
                     )
             for adapter in (self.stt, self.llm, self.tts):
+                trim_observations = getattr(adapter, "trim_observations", None)
+                if trim_observations is not None:
+                    trim_observations(MAX_SESSION_OBSERVATIONS)
+                    continue
                 observations = adapter.observations
                 if len(observations) > MAX_SESSION_OBSERVATIONS:
                     del observations[:-MAX_SESSION_OBSERVATIONS]

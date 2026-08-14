@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import types
 import unittest
 
@@ -9,6 +10,96 @@ from tests.test_checkpoint_ab import (
     CheckpointBWarmupTests,
     load_runtime,
 )
+from tests.test_silero_tts import FakeSTT, FakeVisibleLLM, ProcessCoordinator
+from voice_agent_v2.silero_tts import SileroKseniyaTTS, SileroWorkerPool
+from voice_agent_v2.tracer import CancellationToken
+
+
+class LiveTurnObservationTests(unittest.TestCase):
+    def test_overlapping_turns_trace_only_their_own_tts_observations(self) -> None:
+        runtime = load_runtime()
+        coordinator = ProcessCoordinator()
+        pool = SileroWorkerPool(
+            process_factory=coordinator.factory,
+            verify_runtime=lambda: {"verified": True},
+        )
+        pool.start()
+        old_release = threading.Event()
+        coordinator.gates["request-old"] = old_release
+
+        class STT(FakeSTT):
+            def __init__(self) -> None:
+                self.observations: list[dict[str, object]] = []
+
+        class LLM(FakeVisibleLLM):
+            def __init__(self) -> None:
+                super().__init__(("Готовый ответ.",))
+                self.observations: list[dict[str, object]] = []
+
+            def snapshot_session(self, _session_id: str):
+                return ()
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.stt = STT()
+        runner.llm = LLM()
+        runner.tts = SileroKseniyaTTS(pool)
+        runner.controller = runtime.RealTurnController(runner.stt, runner.llm, runner.tts)
+        runner._snapshots = {}
+        runner._turn_correlations = {}
+        traces: dict[str, list[dict[str, object]]] = {"old": [], "current": []}
+        failures: list[BaseException] = []
+
+        def run_old() -> None:
+            try:
+                runner.run_turn(
+                    session_id="session-test",
+                    turn_id="turn-old",
+                    input_pcm=b"\0\0" * 320,
+                    cancellation=CancellationToken(),
+                    event_observer=lambda _event: None,
+                    trace_observer=lambda stage, event, fields: (
+                        traces["old"].append(fields)
+                        if (stage, event) == ("tts", "segment_observation")
+                        else None
+                    ),
+                    request_id="request-old",
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        old_thread = threading.Thread(target=run_old)
+        try:
+            old_thread.start()
+            coordinator.entered.get(timeout=1)
+            result = runner.run_turn(
+                session_id="session-test",
+                turn_id="turn-current",
+                input_pcm=b"\0\0" * 320,
+                cancellation=CancellationToken(),
+                event_observer=lambda _event: None,
+                trace_observer=lambda stage, event, fields: (
+                    traces["current"].append(fields)
+                    if (stage, event) == ("tts", "segment_observation")
+                    else None
+                ),
+                request_id="request-current",
+                turn_generation=2,
+            )
+            self.assertEqual(result.terminal_event["type"], "turn.completed")
+            old_release.set()
+            old_thread.join(1)
+            self.assertFalse(old_thread.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(len(traces["old"]), 1)
+            self.assertEqual(len(traces["current"]), 1)
+            self.assertNotEqual(
+                traces["old"][0]["worker_id"],
+                traces["current"][0]["worker_id"],
+            )
+        finally:
+            old_release.set()
+            old_thread.join(1)
+            runner.tts.close()
 
 
 class PersistentLiveKitTrackTests(CheckpointBLiveKitTests):
