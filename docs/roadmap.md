@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 product delivery
 >
-> **Last updated:** 2026-08-12
+> **Last updated:** 2026-08-14
 
 This roadmap is a sequence of independently deliverable vertical slices. It contains no calendar estimates. A slice starts only when its dependencies and incoming evidence gate are satisfied; it finishes only with the stated user-visible behavior and evidence.
 
@@ -285,7 +285,9 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 
 > **Authorized 2026-08-11:** Pasha explicitly authorized the failed, operator-opaque LiteLLM `deepseek-v4-flash` route for Slice 6 private live transcript testing. ADR-0006 supersedes ADR-0005's consumed live-traffic scope and requires the endpoint only from untracked server-side `LITELLM_BASE_URL`; current HTTP transport and every prior latency/reliability/privacy limitation remain visible, with no fallback or production approval.
 >
-> **Combined Slice 6 / Issue #15 checkpoint (2026-08-12):** the first physical Firefox attempt failed. The same-PR correction now includes simplification Checkpoints A and B: browser media acknowledgements no longer determine correctness, completion means local generation plus server PCM submission, current-page history shows terminal outcomes and server endpoint metrics, and one persistent session track is fed by a two-block Qwen PCM pump after a real discard-only resident-Qwen warm-up. Pinned cache-local Silero v6 still owns speech admission, visible LFM sentences remain incremental, and the active fixed local LFM2.5 Q4_K_M/llama.cpp path has no cloud fallback. Request-scoped cancellation, prefix context, reconnect redesign, and the final deletion sweep remain later Checkpoints C–E. Automated evidence makes no microphone, `ryan` audibility, physical playback, or 250 ms claim; manual checkpoint 1 remains required and the failed physical status is not relabelled.
+> **Combined Slice 6 / Issue #15 checkpoint (2026-08-12):** the first physical Firefox attempt failed and remains failed evidence. The corrected local LFM/VAD/LiveKit boundaries passed automated checks, but physical acceptance remained open.
+>
+> **Private Silero/Kseniya native-48 evaluation branch (2026-08-14):** ADR-0009 adds TTS/event/control v2 without mutating v1, fixes active composition directly to exact cache-local Silero `v5_5_ru` / `kseniya`, keeps microphone/VAD/Whisper at mono 16 kHz, and sends native mono 48-kHz output through two isolated resident workers and generation-gated browser playback. There is no TTS selector, Qwen adapter, co-start, retry, or fallback. Deterministic contracts/media/browser checks and focused two-worker/VAD/STT evidence pass; Pasha's Kseniya audibility, joins, rapid physical interruption, tailnet, and full-stack resource acceptance remain required. The branch is unmerged and carries no production/commercial authority.
 
 ### User-visible outcome
 
@@ -295,7 +297,8 @@ A user opens the private web app, speaks over LiveKit, hears the locally synthes
 
 - Local LiveKit server, minimal web gateway, and minimal browser conversation UI.
 - Tailscale/loopback HTTPS entry, scoped room capability, WebRTC microphone/agent audio, and versioned control events.
-- Session reconnect behavior and full barge-in cancellation across controller, selected LLM provider, TTS, published audio, and queued client output.
+- Session reconnect behavior and full request/turn/media-generation barge-in cancellation across controller, selected LLM provider, TTS, published audio, and queued client output.
+- Backend-neutral TTS v2 plus one fixed Silero/Kseniya adapter, deterministic segmentation/shaping, two resident workers, explicit input16/output48 formats, and native 48-kHz LiveKit frames.
 - Headless deterministic media test plus real browser validation.
 - Minimum tailnet port/exposure documentation based on actual results.
 
@@ -311,8 +314,8 @@ A user opens the private web app, speaks over LiveKit, hears the locally synthes
 
 - Loopback browser and a second tailnet browser can connect using only tailnet membership plus protocol-required room capability.
 - STT/TTS/local LFM inference and all management endpoints remain host-local. The active app makes no cloud LLM request, requires no provider credential/endpoint, and exposes no inference endpoint or LiveKit signing material to the browser.
-- Published microphone audio yields one correlated transcript and audible agent response over LiveKit.
-- Barge-in marks the prior turn interrupted, stops prior audio within the declared bound, discards old queued events, and completes a new turn without correlation leaks.
+- Published mono 16-kHz microphone audio yields one correlated transcript and an audible Kseniya response delivered as native mono 48-kHz PCM over LiveKit.
+- Barge-in marks the prior turn interrupted, immediately suspends only the matching browser media generation, clears old server delivery, permits only an active non-cooperative Silero call to finish silently, and completes a new turn without stale PCM/completion or correlation leaks. A rapid second valid interruption obeys the same rule; invalid/old controls do nothing.
 - Disconnect/reconnect cannot replay a stale answer as a new turn.
 - Media/control timing and resource use stay within the Slice 5 reserve and preregistered latency budget.
 - A deterministic headless test covers success, disconnect, duplicate/late event, and interruption without requiring real models or secrets.
@@ -323,11 +326,11 @@ Run network-denied deterministic headless media tests, then selected-provider re
 
 ### Evidence required before Design Gate V
 
-- Headless success/fault/interruption results: deterministic pass recorded in [`docs/evidence/slice-6-livekit-media-interruption.md`](evidence/slice-6-livekit-media-interruption.md).
+- Headless success/fault/interruption results: deterministic pass recorded in [`docs/evidence/slice-6-livekit-media-interruption.md`](evidence/slice-6-livekit-media-interruption.md); TTS v2/native48/two-worker evidence is recorded separately in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](evidence/silero-kseniya-48k-private-evaluation.md).
 - Real loopback and second-tailnet-client latency traces: **pending physical-browser gate**.
 - Redacted bind/port and scoped-capability review: server bind/capability pass recorded; Tailscale HTTPS/browser path pending.
 - Browser capture showing conversation, transcript state, audible response, reconnect safety, and successful barge-in: **pending physical-browser gate**.
-- Focused local-LFM identity/two-slot/visible-answer/cancellation evidence: pass; combined Whisper/Qwen/LiveKit/browser sustained resource evidence inside the 12 GB host budget: **pending physical-browser/full-stack gate**.
+- Focused local-LFM identity/two-slot/visible-answer/cancellation evidence: pass. Focused exact Silero identity/two-worker/native48/obsolete-current/VAD-Whisper evidence: pass. Combined llama.cpp + Whisper + two Silero workers + LiveKit + browser sustained resource evidence inside the 12 GB host budget: **pending physical-browser/full-stack gate**.
 
 ## Design Gate V — Grill the avatar module and MVP eye
 

@@ -6,7 +6,9 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Combined Slice 6 / Issue #15 manual acceptance failed on 2026-08-12; the authorized correction remains awaiting a new physical-browser and full-stack resource acceptance.** The active app uses only the pinned cache-local official LFM2.5 Q4_K_M model on GPU-enabled llama.cpp; LiteLLM/DeepSeek is absent from Slice 6 configuration/readiness/requests and there is no cloud fallback. Network-denied controller tests, installed LiveKit/provider contracts, React state/media tests, focused real two-slot LFM integration, scoped capability, loopback gateway, and restricted LiveKit bind smokes pass. Real loopback/tailnet microphone/listening, actual barge-in timing, sustained coexistence with Whisper/Qwen/LiveKit/browser, and subjective response acceptance remain required and are not claimed. Historical DeepSeek failures and authorizations remain factual in ADR-0005/0006; ADR-0008 supersedes them for the active app.
+**The private Silero/Kseniya native-48 test branch passes deterministic and focused exact-cache checks; Pasha's physical Firefox acceptance is still required, and the branch must remain open and unmerged.** Active Slice 6 composition is fixed directly to cache-local Silero `v5_5_ru`, speaker `kseniya`, behind TTS v2. There is no TTS selector, Qwen adapter, co-start, hot switch, fallback, or cross-adapter retry. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`. The local LFM2.5 Q4_K_M path remains fixed and cloud-free.
+
+Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
 ## Root verification
 
@@ -24,36 +26,50 @@ It uses only POSIX `sh` and the Python 3.11+ standard library, creates isolated 
 
 The command reports each preserved path. Both PCM files use signed 16-bit little-endian mono samples at 16 kHz; `output.pcm` contains the deterministic audible tone. The destination must not already exist, preventing accidental replacement of prior evidence. The toolchain is a Slice 1 reproducibility choice only; it does not select the future production application or inference framework.
 
-## Slice 6 development application
+## Slice 6 Silero/Kseniya development application
 
-One-time setup acquires the checksum-pinned LiveKit server, the pinned Python SDK/runtime, and locked browser packages into ignored cache/build directories. It does not download models or place configuration, credentials, recordings, or generated audio in Git:
+One-time setup acquires pinned LiveKit/browser tooling and verifies local model prerequisites. Silero setup is strictly verify-only: it never downloads, replaces, modifies, copies, or relocates the exact existing artifact.
 
 ```sh
 ./setup-slice6
+./setup-silero-kseniya
 cp .env.slice6.example .env.slice6
 ```
 
-Generate a dedicated LiveKit key pair and fill every blank in the ignored `.env.slice6`:
+Generate a dedicated LiveKit key pair and fill every blank in ignored `.env.slice6`:
 
 ```sh
 "${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
 ```
 
-The active app accepts no `LITELLM_*` configuration. `./setup-slice6` verifies, but never downloads or replaces, the exact cache-local Issue #15 model/runtime. Run the focused real provider check with `./verify-local-lfm`; it proves the hashes, loopback endpoint, exact identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, cancellation and recovery. Run `./verify-real-streaming` to start/reuse the exact loopback LFM plus resident Qwen and prove the first PCM chunk arrives before total sentence/TTS completion; it logs timings/counts only, not content or audibility. Then this is the single development start command:
+The active app accepts no `LITELLM_*` or TTS-selection configuration. Run the model-free/full browser boundary and the two separate exact-cache checks:
+
+```sh
+./verify-slice6
+./verify-local-lfm
+./verify-silero-kseniya
+```
+
+`./verify-silero-kseniya` loads exactly two resident CPU workers from the pinned read-only model cache, proves native 48-kHz totals, obsolete/current overlap with stale discard, full two-worker RSS/CPU, VAD/Whisper coexistence, and explicit controlled recovery. It writes content-free task evidence only under `~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship/`. It does not claim audibility, voice quality, physical barge-in, or the complete browser stack. `./verify-real-streaming` is now only a compatibility alias for this active check; it no longer imports or starts Qwen.
+
+Start the foreground development stack with:
 
 ```sh
 ./run-slice6
 ```
 
-It verifies and starts the pinned llama.cpp server, LiveKit, gateway/controller, and two foreground Tailscale Serve proxies; all are cleaned up on exit. Open `http://127.0.0.1:8000` on the host (loopback is a browser secure-context exception) or the configured tailnet HTTPS application URL. The configured paths are loopback TCP `18080` for local LFM, `8000` for the gateway, and `7880` for LiveKit signaling; Tailscale Serve HTTPS for the application/signaling (example ports `8443`/`7443`); and only tailnet UDP `7882` for WebRTC media. The LFM endpoint is never proxied or returned to the browser. ICE/TCP media, port `7881`, TURN, public exposure, provider/model administration, and detailed health endpoints are disabled/absent. The restricted server binds were measured; the two Tailscale HTTPS paths still require the real second-client gate.
+Startup verifies the exact LFM and Silero identities before it starts local llama.cpp, LiveKit, the gateway/controller, and foreground Tailscale Serve. The agent publishes one persistent 48-kHz LiveKit source; request/media generations determine when the browser may attach it. Microphone input remains explicitly 16 kHz. Shared services, firewall, Tailscale, and LiveKit server settings are not modified by setup or verification.
 
-Run the complete deterministic/installed-runtime/browser check with:
+### Pasha physical acceptance and rollback
 
-```sh
-./verify-slice6
-```
+1. Check out this branch, run the setup/verification commands above, fill ignored `.env.slice6`, and run `./run-slice6`. Do not run it beside another stack on the same ports.
+2. Open `http://127.0.0.1:8000`. Confirm the badge says **Silero v5_5_ru · kseniya · native mono PCM16 48 kHz · private noncommercial · CC BY-NC-SA 4.0**.
+3. Exercise an ordinary Russian answer; numbers; `14.08.2026` and `09:30`; `PDF`/`SSD`; and a punctuation-rich response long enough to require several segments. Visible/history text must remain the original LLM text and must never show internal `+` stress markers.
+4. While speech is audible, speak to barge in; interrupt the replacement again rapidly. Old audio must stop within 250 ms of confirmed server speech start, never resume, and the newest turn must remain usable. Any capacity/synthesis/readiness failure must be explicit, content-free, and must not retry or fall back.
+5. Record pass/fail, perceived joins (target ≤120 ms; repeated >200 ms fails), redacted diagnostics, and full-stack resources. Automated counters do not prove the speaker was audible.
+6. To roll back, stop this foreground run with Ctrl+C, check out the previously recorded branch/commit, and run that revision's own setup/verify/start procedure. Preserve caches. There is deliberately no in-branch Qwen switch.
 
-The command also runs a real headless Firefox against official local LiveKit with deterministic fake inference; this proves data-channel/track/publication/error lifecycle only. It reports the physical-browser gates as required rather than claiming them. `./verify-local-lfm` is a separate real-model host check and remains outside dependency-free CI. Privacy-safe server JSONL diagnostics are retained outside Git under `~/.cache/voice-agent-v2/slice-6/diagnostics/`; the browser exposes **Скачать диагностику** for a redacted lifecycle timeline. Neither contains audio or conversation text. Exact evidence and the operator checklist are in [`docs/evidence/slice-6-livekit-media-interruption.md`](docs/evidence/slice-6-livekit-media-interruption.md).
+The detailed evidence boundary and checklist are in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](docs/evidence/silero-kseniya-48k-private-evaluation.md). Do not merge this branch until physical acceptance, separate licensing, and legal review are all complete.
 
 ## Final Slice 5 human acceptance
 

@@ -1,6 +1,6 @@
 # Contract ownership
 
-These machine-readable V1 contracts are executable controller seams. The original inference contracts remain transport-neutral; Slice 6 adds the LiveKit data-transport envelopes without selecting a future avatar contract. [`docs/architecture.md`](../docs/architecture.md#5-contracts-and-ownership) remains authoritative for system boundaries.
+These machine-readable contracts are executable controller seams. Every V1 file remains immutable historical evidence. The private ADR-0009 branch adds backend-neutral TTS v2 and compatible event/realtime-control v2; it does not mutate STT v1, add an avatar contract, or authorize a second TTS adapter. [`docs/architecture.md`](../docs/architecture.md#5-contracts-and-ownership) remains authoritative for system boundaries.
 
 | Contract | Owner | Producer → consumer | Limits and terminal semantics |
 | --- | --- | --- | --- |
@@ -10,12 +10,15 @@ These machine-readable V1 contracts are executable controller seams. The origina
 | `tts.v1` | TTS seam | Session controller ↔ deterministic TTS | Text is bounded to 4096 characters. PCM chunks are ordered from zero, each is at most 64 KiB, and share the declared format. Failure emits no audio; cancellation emits no chunks after interruption. |
 | `realtime-control.v1` | Session controller | Session controller → browser | Reliable LiveKit data messages carry bounded session/turn IDs, a connection epoch, one session-wide increasing sequence, closed event types, lifecycle order, and terminal semantics. The browser drops wrong-version/session/epoch/turn, duplicate, late, out-of-order, oversized, and malformed input before UI actions. `turn.completed` means local generation finished and all accepted PCM frames were submitted to the persistent server media source; it does not depend on browser playback observations or prove physical playback, audibility, microphone operation, or barge-in timing. |
 | `client-control.v1` | Session controller | Browser → session controller | The sole admitted control is a bounded, increasing, current-epoch-correlated reconnect notice. Browser playback and autoplay observations are telemetry only; no media acknowledgement participates in turn correctness. Duplicate, late, malformed, wrong-session/epoch, and unknown client events are dropped. |
+| `tts.v2` | TTS service | Session controller ↔ model-neutral local TTS adapter | Session/epoch/turn/turn-generation/request/segment identity, closed adapter capabilities, plain shaped text, explicit mono `pcm_s16le/48000`, ordered ≤64-KiB worker chunks, exact samples/bytes/duration, and one terminal outcome. Active composition contains only Silero `v5_5_ru` / `kseniya`; V1 remains unchanged. |
+| `event-envelope.v2` | Session controller | Real controller → realtime bridge | Preserves STT/LLM v1 while selecting TTS v2 and carrying stream epoch, turn generation, and request ID through every internal event. |
+| `realtime-control.v2` | Session controller | Session controller → browser | Adds turn/request/output-media generation and `turn.media-ready`. The browser attaches the persistent publication only for the matching current generation, suspends it on a valid current interruption, and ignores invalid/old controls. Reliable topic is `voice-agent.control.v2`. |
 
 The JSON Schema files are checked by `./verify` using the dependency-free validator. Python `Protocol` definitions and `src/voice_agent_v2/realtime.py` exercise the producer/consumer ownership without requiring LiveKit or network access.
 
 ## Fixture policy
 
-- `fixtures/*.v1.json` are valid producer/consumer examples.
+- `fixtures/*.v1.json` remain immutable historical producer/consumer examples; the corresponding `.v2.json` files are the active TTS/event/control examples.
 - `fixtures/traces/*.jsonl` are canonical normalized public traces for success, injected hard failures, and cancellation.
 - `fixtures/pcm-hashes.json` declares the raw generated PCM identities and format. PCM bytes are regenerated, not stored as recordings.
 - Changing a contract, fixture, or tracer without updating the others makes `./verify` fail.
