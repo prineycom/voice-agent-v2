@@ -2,10 +2,10 @@
 
 - **Issue:** [#7](https://github.com/prineycom/voice-agent-v2/issues/7)
 - **Checkpoint date:** 2026-08-12
-- **Status:** Failed manual attempt on 2026-08-12; authorized correction passes deterministic/runtime/Firefox boundaries, and a new physical-browser/full-stack acceptance remains open
+- **Status:** Historical 2026-08-12 checkpoint; the failed manual attempt remains evidence, while the active Silero/Kseniya branch is documented separately
 - **Legacy source:** None inspected or used
 
-This report distinguishes executable evidence from physical observations. Pasha's first Firefox attempt failed: background/silence triggered turns and no useful visible/audible response was accepted. The diagnosis is preserved outside the repository; none of the corrections below relabel that failed test or claim final Slice 6 acceptance.
+This report preserves the pre-ADR-0009 Slice 6/Issue #15 checkpoint and distinguishes its executable evidence from physical observations. Pasha's first Firefox attempt failed: background/silence triggered turns and no useful visible/audible response was accepted. The diagnosis is preserved outside the repository; nothing below relabels that failed test or claims final Slice 6 acceptance. The active TTS v2/native-48 composition, current verification limits, and remaining acceptance procedure are owned by [`silero-kseniya-48k-private-evaluation.md`](silero-kseniya-48k-private-evaluation.md).
 
 ## Implemented stack and boundaries
 
@@ -15,7 +15,7 @@ This report distinguishes executable evidence from physical observations. Pasha'
 | Server RTC/capability | official Python `livekit==1.1.14`, `livekit-api==1.2.0` | `scripts/verify_slice6_runtime.py` verifies installed versions and decodes the generated JWT without opening a socket. |
 | Application glue | `fastapi==0.141.1`, `uvicorn==0.52.1` | Loopback-only gateway smoke returned exactly `{"available":true,"session_limit":1}` with no-store, CSP, microphone Permissions-Policy, and no provider endpoint. |
 | Browser | React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, official `livekit-client` `2.21.0` | Locked npm install, typecheck, then-current Vitest suite, and production build passed at the recorded checkpoint. |
-| Inference | Existing `RealTurnController`, Whisper large-v3-turbo, fixed local official LFM2.5 Q4_K_M on llama.cpp, Qwen3 CustomVoice/`ryan` | `LiveTurnRunner` reuses the controller with the new provider-neutral local adapter; no second pipeline or cloud fallback was added. |
+| Inference at this checkpoint | Existing `RealTurnController`, Whisper large-v3-turbo, fixed local official LFM2.5 Q4_K_M on llama.cpp, Qwen3 CustomVoice/`ryan` | Historical pre-ADR-0009 composition; the active branch replaces only this TTS leg as documented in the current evidence report. |
 
 `./setup-slice6` keeps the LiveKit binary/Python environment in the ignored user cache and browser dependencies/build output in ignored directories. It verifies but never downloads/replaces the exact local LFM/llama.cpp cache when present. `.env.slice6`, signing material, models, model caches, recordings, transcripts, generated audio and runtime logs remain outside Git. The foreground runner verifies model/runtime hashes, starts llama.cpp on loopback, gives LiveKit only its config/signing pair, gives the gateway/controller only server configuration it owns, and strips secrets from Tailscale Serve children. No provider token exists in the active stack.
 
@@ -95,21 +95,22 @@ The provider check recorded:
 - mid-request cancellation returned `selected_provider_cancelled`, and replacement requests completed in about 0.53–0.74 s;
 - observed focused llama.cpp process VRAM was about 2,900 MiB, with no other inference model resident.
 
-This focused measurement proves the provider/service contract, not full-stack coexistence. Resident llama.cpp plus real Whisper, Qwen3, LiveKit, gateway and browser VRAM/RAM/CPU, contention, sustained multi-turn and physical response quality are still pending. CI runs deterministic local-provider behavior and manifest wiring without requiring the 1.67 GB cache; the real host check fails closed if the exact cache is absent.
+This focused measurement proved the provider/service contract, not full-stack coexistence. At this checkpoint, resident llama.cpp plus real Whisper, Qwen3, LiveKit, gateway and browser VRAM/RAM/CPU, contention, sustained multi-turn and physical response quality were still pending. The current Silero/full-stack resource gate is owned by the active evidence report.
 
-## Interruption and reconnect policy
+## Historical interruption and reconnect policy
+
+The following describes the preserved pre-ADR-0009 implementation. Endpointing and reconnect ownership remain relevant, but its Qwen track-retirement and browser-subscription rules are not the active TTS/media contract. ADR-0009 and the [current evidence report](silero-kseniya-48k-private-evaluation.md) own request/turn/media-generation invalidation, persistent-publication attachment, and Silero cancellation behavior.
 
 - Endpointing uses the checksum-pinned Silero v6 ONNX artifact on CPU: 20 ms input, 32 ms inference windows, 96 ms speech confirmation at probability 0.60, 0.35 continuation hysteresis, 640 ms trailing silence, 256 ms pre-roll, and a 15 s maximum. Silence, stationary background and intermittent high-energy/AGC-like candidates have executable no-admission tests; a public Russian LibriSpeech fixture confirms speech detection when the authorized cache is present. RMS is diagnostics only.
-- Barge-in first terminalizes the old turn, clears the 100 ms LiveKit source queue, invalidates the browser's old audio subscription and admits only a freshly subscribed track, cancels the selected provider and process-isolated STT/TTS, rolls back undelivered LLM context, and serializes replacement work.
-- During transport reconnect, the browser detaches audio and drops all old-epoch data. The server cancels/drains active work, resets all in-memory conversation context, advances the epoch, and only then reports ready. Cleanup/reset timeout produces `session.degraded` and closes turn admission.
-- Each complete visible LFM sentence is published immediately and handed to Qwen while SSE continues; each Qwen PCM chunk enters the correlated LiveKit source immediately. Hidden reasoning never crosses either boundary. Provider/TTS failure stops future output and is explicit; valid visible text is not hidden by TTS failure. A late failure cannot retract already delivered visible/PCM prefix, while barge-in prevents any later old prefix from escaping. No alternate model, endpoint, alias, redirect or fabricated answer exists.
-- Normal teardown retires the exact publication while room transport is available. After confirmed room disconnect, cleanup retires it locally and closes the source without another unpublish request; repeated cleanup joins that same operation.
+- Barge-in terminalized the old turn, cleared the LiveKit source queue, invalidated the old browser subscription, cancelled provider/STT/TTS work, rolled back undelivered LLM context, and serialized replacement work.
+- During transport reconnect, the browser detached audio and dropped old-epoch data. The server cancelled/drained active work, reset in-memory conversation context, advanced the epoch, and only then reported ready.
+- Complete visible LFM sentences were handed to Qwen while SSE continued; Qwen PCM chunks entered the correlated LiveKit source immediately. Hidden reasoning did not cross either boundary, and no alternate model, endpoint, alias, redirect, or fabricated answer existed.
 
 ## Preserved failed evidence and limitations
 
 Nothing in this slice rewrites historical machine-readable benchmark results. The failed `deepseek-v4-flash` latency, reliability, fairness, isolation/empty-response, privacy/provenance and cost gates remain in the existing Slice 2–5 evidence and architecture summaries. ADR-0006 remains the historical temporary authorization; ADR-0008 removes that route from the active app. The earlier LFM BF16/vLLM failure also remains failed; selecting a separately measured Q4_K_M/llama.cpp runtime does not relabel it.
 
-The Slice 5 cloud-provider stack observed a `7,600 MiB` local Whisper/Qwen peak with `4,682 MiB` then free. The focused local-LFM server alone observed about `2,900 MiB` process VRAM. These measurements are not additive proof and do not establish a new combined ceiling; deterministic/runtime/bind smokes did not load llama.cpp, Whisper, Qwen, LiveKit and a real browser together, so they provide **no combined VRAM/RAM/CPU or latency pass**. Final acceptance requires a safe non-OOM reserve on the 12,282 MiB device under real overlap and barge-in.
+The Slice 5 cloud-provider stack observed a `7,600 MiB` local Whisper/Qwen peak with `4,682 MiB` then free. The focused local-LFM server alone observed about `2,900 MiB` process VRAM. These historical measurements are not additive proof and do not establish a new combined ceiling. The active composition's full-stack resource gate is defined in the current evidence report.
 
 Automated RTP counters, Web Audio callbacks, media-element state, LiveKit subscription events, and server queue drain are not physical evidence. They do not establish that the microphone captured speech, the speaker was audible, the response tail played, or barge-in stopped sound within 250 ms. Only the remaining Pasha-owned browser/listening procedure can establish those facts.
 
@@ -122,14 +123,6 @@ Other open limits:
 - no physical loopback audio, remote browser, reconnect, or barge-in capture yet;
 - Tailscale HTTPS application/signaling ports have not yet been accepted from a second client.
 
-## Exact remaining Pasha acceptance
+## Remaining acceptance
 
-Keep all captures outside Git and do not paste secrets or conversation content into the issue/PR.
-
-1. On the canonical host, use the already running corrected stack or fill ignored `.env.slice6`, run `./setup-slice6`, then `./run-slice6`. Observe the printed loopback/tailnet URLs, no credential requirement, no startup traceback, and a new content-free session JSONL under `~/.cache/voice-agent-v2/slice-6/diagnostics/`.
-2. In a host browser, open `http://127.0.0.1:8000`, choose **Подключить микрофон**, and allow microphone/audio if prompted. Speak one bounded Russian utterance. Observe ordered listening → transcribing → thinking → speaking → completed state, the matching concise local-LFM response, and an audible `ryan` response. A local model timeout, hidden-only, truncated, empty or resource failure must appear explicitly with no cloud/fallback request.
-3. While a second response is audibly playing, begin a new utterance. Capture control/audio timing. Observe the old turn become `turn.interrupted`, old sound cease within 250 ms of server speech-start detection, a new correlated turn complete, no old words resume, and the dropped-event count not increase for valid traffic.
-4. During another response, interrupt the browser network long enough to show **Переподключение…**, then restore it. Observe no old response play after reconnection, state return to ready only after the epoch reset, and a fresh utterance complete without stale transcript/response/audio.
-5. Disconnect the host browser so the one-session limit is free. From a second device that is already a tailnet member, open `SLICE6_APP_PUBLIC_URL`, connect, speak, see the correlated transcript/response/state, and hear the agent. Confirm no public/non-tailnet path was added and capture the selected WebRTC path as tailnet UDP `7882` plus WSS signaling on the configured port.
-6. During the loopback and remote cases, capture local-LFM visible TTFT/completion, endpoint-to-first-playout/completion and total-board/process VRAM, RAM and CPU with resident llama.cpp plus real Whisper, Qwen3, LiveKit, gateway and browser. Confirm the 12,282 MiB device keeps a safe reserve under overlap/barge-in and the preregistered latency budget. Report every local-provider timeout/empty/truncated response as failure, never as a passing retry or cloud fallback.
-7. Before disconnecting after any error, capture the exact UI alert and press **Скачать диагностику**. Save that redacted JSONL, one browser capture showing transcript/turn state and successful barge-in, and a redacted listener/capability review outside Git. Only those observations can close the pending roadmap evidence.
+The authoritative current checklist is [Pasha manual acceptance in the Silero/Kseniya evidence report](silero-kseniya-48k-private-evaluation.md#pasha-manual-acceptance--still-required). This historical Qwen/`ryan` checklist is intentionally not retained as parallel active guidance.

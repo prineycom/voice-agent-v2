@@ -2,7 +2,7 @@
 
 **Source:** https://github.com/prineycom/voice-agent-v2/issues/7 and mandatory same-PR scope update https://github.com/prineycom/voice-agent-v2/issues/15
 **Parent:** —
-**Status:** ❌ physical attempt failed on 2026-08-12; authorized same-PR Silero/streaming/diagnostics/Firefox corrections are implemented, but repeat physical/full-stack acceptance is pending
+**Status:** Historical pre-ADR-0009 report; the 2026-08-12 physical failure remains evidence, and current scope is owned by the Silero/Kseniya evaluation report
 
 ## Changed files
 
@@ -51,8 +51,6 @@
 - `./verify-local-lfm` verifies hashes, loopback-only health/identity, two simultaneous requests, two 32,768-token slots, bounded visible Russian output, hidden-reasoning isolation, cancellation, slot release and recovery.
 - Historical DeepSeek and BF16/vLLM failures remain preserved rather than rewritten.
 
-## Unresolved uncertainty
+## Current status
 
-- Pasha must perform and record the exact loopback and second-tailnet-browser checklist only against the final local-LFM stack in `docs/evidence/slice-6-livekit-media-interruption.md`.
-- Actual microphone endpoint behavior, audible local-LFM→`ryan` output, 250 ms barge-in, reconnect playout suppression, endpoint-to-playout latency, Tailscale HTTPS/ICE selection and combined llama.cpp+Whisper+Qwen+LiveKit+browser resource reserve are not claimed.
-- Focused local-provider timing/behavior passed, but sustained full-stack and subjective response quality remain unresolved; any timeout/hidden-only/truncated/local-resource failure must fail explicitly with no cloud fallback.
+This historical report does not own the active acceptance checklist. Use [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](../../evidence/silero-kseniya-48k-private-evaluation.md) for the current fixed TTS composition, verified scope, remaining physical/full-stack gates, and rollback.

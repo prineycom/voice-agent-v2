@@ -1,7 +1,7 @@
 # Fix Report: Slice 6 manual acceptance failure
 
 **Source:** `/home/priney/Projects/mymate/data/voice-agent-v2-slice-6-livekit-media-interruption/manual-acceptance-fixes.md`
-**Status:** ⚠️ automated corrections pass; repeat physical acceptance pending
+**Status:** Historical pre-ADR-0009 correction report; current acceptance is owned by the Silero/Kseniya evaluation report
 **Scope stayed small:** no — this is an explicitly authorized same-slice shipping correction spanning VAD, streaming and observability
 
 ## Clarification decisions
@@ -37,6 +37,6 @@
 | `./verify-local-lfm` | pending final delivery run | Real model/two-slot check remains host-only. |
 | no-mistakes / PR CI | pending | Must update the existing PR #16 only. |
 
-## Follow-ups
+## Current follow-up
 
-- Pasha must repeat the physical loopback/tailnet microphone, visible response, audible `ryan`, barge-in and combined-resource procedure. Physical success is not claimed.
+Use [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](../../evidence/silero-kseniya-48k-private-evaluation.md) for the active fixed-TTS composition and remaining physical/full-stack acceptance. This historical Qwen/`ryan` follow-up is not parallel current guidance.
