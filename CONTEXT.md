@@ -28,3 +28,8 @@
 - **Turn correlation ID** — An opaque identifier used to associate all media, events, inference work, and observations belonging to one voice turn.
 - **Voice turn** — One user utterance and the resulting agent response, ending in completion, interruption, or failure.
 - **Utterance** — A bounded span of user speech treated as input to a voice turn.
+- **UI shell** — The browser layout layer that owns the full-screen avatar container, overlay elements (status, speech text, microphone, menu), and slide-in panels. It knows nothing about avatar internals.
+- **Avatar viewport** — The full-viewport container element owned by the UI shell and provided to the avatar host for rendering. The avatar host owns everything inside it.
+- **Slide-in panel** — A semi-transparent overlay panel (conversation history or detailed status) that slides in from the right edge over the avatar without replacing the main screen.
+- **Neon minimal** — The cyberpunk visual design language: dark base, neon accent colors (cyan, magenta), glow effects, monospace uppercase labels, subtle scanlines. CSS-only effects. See ADR-0012.
+- **Reduce motion toggle** — A user-controlled UI menu option that suppresses avatar animation independently of the system `prefers-reduced-motion` accessibility setting.
