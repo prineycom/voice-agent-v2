@@ -129,10 +129,10 @@ def main() -> int:
             "idle_rss_mib": round(idle_rss / 2**20, 3),
         }
 
-        old_key = __import__("voice_agent_v2.contracts", fromlist=["TTSRequestKey"]).TTSRequestKey(
+        old_key = __import__("voice_agent_v2.v2_contracts", fromlist=["TTSRequestKey"]).TTSRequestKey(
             "real-session", 1, "turn-obsolete", 1, "request-obsolete", 0
         )
-        current_key = __import__("voice_agent_v2.contracts", fromlist=["TTSRequestKey"]).TTSRequestKey(
+        current_key = __import__("voice_agent_v2.v2_contracts", fromlist=["TTSRequestKey"]).TTSRequestKey(
             "real-session", 1, "turn-current", 2, "request-current", 0
         )
         old_token = CancellationToken()

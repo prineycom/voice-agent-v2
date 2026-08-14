@@ -12,8 +12,8 @@ from tests.test_checkpoint_ab import (
     MemoryEvents,
     StreamingRunner,
 )
-from voice_agent_v2.audio import OUTPUT_DELIVERY_BLOCK_BYTES
-from voice_agent_v2.contracts import EventEnvelopeV2
+from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES
+from voice_agent_v2.v2_contracts import EventEnvelopeV2
 from voice_agent_v2.realtime import (
     CONTROL_EVENT_VERSION,
     ControlEventGate,
@@ -377,6 +377,82 @@ class FinalSegmentOverlapTests(unittest.IsolatedAsyncioTestCase):
             asyncio.gather(*(task for task in tuple(session._turn_tasks))), 0.5
         )
         await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+
+
+class DelayedCooperativeCleanupRunner(OverlapRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cooperative_cleanup_started = threading.Event()
+        self.cooperative_cleanup_release = threading.Event()
+
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
+        audio_observer, stream_epoch, turn_generation, request_id,
+        trace_observer=None, retain_output=True,
+    ) -> TraceResult:
+        if turn_generation != 1:
+            return super().run_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_pcm=input_pcm,
+                cancellation=cancellation,
+                event_observer=event_observer,
+                audio_observer=audio_observer,
+                stream_epoch=stream_epoch,
+                turn_generation=turn_generation,
+                request_id=request_id,
+                trace_observer=trace_observer,
+                retain_output=retain_output,
+            )
+        del input_pcm, event_observer, audio_observer, retain_output
+        if trace_observer is not None:
+            trace_observer("tts", "noncooperative_worker_started", {})
+        self.old_started.set()
+        while not cancellation.cancelled:
+            time.sleep(0.005)
+        self.cooperative_cleanup_started.set()
+        self.cooperative_cleanup_release.wait(2)
+        if trace_observer is not None:
+            trace_observer(
+                "llm_provider", "cooperative_cleanup_complete",
+                {"context_committed": False},
+            )
+        self.old_release.wait(2)
+        if trace_observer is not None:
+            trace_observer("tts", "noncooperative_worker_finished", {})
+        return TraceResult((), b"", b"")
+
+
+class DelayedCooperativeCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacement_detaches_after_delayed_cooperative_cleanup_signal(self) -> None:
+        runner = DelayedCooperativeCleanupRunner()
+        session = RealtimeSession(
+            session_id="session-delayed-cleanup",
+            runner=runner,
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(runner.old_started.wait, 0.5))
+
+        replacement = asyncio.create_task(session.submit_utterance(b"\0\0" * 320))
+        try:
+            self.assertTrue(
+                await asyncio.to_thread(runner.cooperative_cleanup_started.wait, 0.5)
+            )
+            await asyncio.sleep(0.03)
+            self.assertFalse(replacement.done())
+            self.assertFalse(runner.replacement_started.is_set())
+
+            runner.cooperative_cleanup_release.set()
+            await asyncio.wait_for(replacement, 0.5)
+            self.assertTrue(await asyncio.to_thread(runner.replacement_started.wait, 0.5))
+            self.assertFalse(runner.old_release.is_set())
+        finally:
+            runner.cooperative_cleanup_release.set()
+            runner.old_release.set()
+            await asyncio.gather(replacement, return_exceptions=True)
+            await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
 
 
 class CooperativeCleanupRunner(OverlapRunner):

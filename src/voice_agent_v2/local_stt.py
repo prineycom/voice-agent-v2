@@ -8,8 +8,8 @@ import threading
 import time
 import wave
 
-from .audio import INPUT_AUDIO_FORMAT
 from .contracts import AudioFormat, STT_VERSION, StageFailure, valid_correlation_id
+from .v2_audio import INPUT_AUDIO_FORMAT
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 

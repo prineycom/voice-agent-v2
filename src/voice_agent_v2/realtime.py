@@ -14,14 +14,15 @@ import threading
 import time
 from typing import Awaitable, Callable, Protocol
 
-from .audio import (
+from .contracts import StageFailure, valid_correlation_id
+from .v2_audio import (
     INPUT_AUDIO_FORMAT,
     INPUT_MEDIA_MAX_BYTES,
     OUTPUT_DELIVERY_BLOCK_BYTES,
     TTS_OUTPUT_AUDIO_FORMAT,
     TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
 )
-from .contracts import TTS_V2_VERSION, StageFailure, valid_correlation_id
+from .v2_contracts import TTS_V2_VERSION
 from .tracer import CancellationToken, TraceResult
 
 CONTROL_EVENT_VERSION = "voice-agent.realtime-control.v2"
@@ -710,17 +711,36 @@ class RealtimeSession:
                     await asyncio.to_thread(self.runner.cancel)
             except Exception as error:
                 cancel_error = error
-            detach_noncooperative_tts = (
-                wait_for_turn
-                and context.noncooperative_worker_drains > 0
-                and context.cooperative_cleanup_complete.is_set()
-            )
-            awaited = context.task if wait_for_turn and not detach_noncooperative_tts else None
+            detach_noncooperative_tts = False
+            awaited = context.task if wait_for_turn else None
             if awaited is not None and awaited is not asyncio.current_task():
-                try:
-                    await awaited
-                except Exception as error:
-                    cancel_error = cancel_error or error
+                deadline = (
+                    asyncio.get_running_loop().time()
+                    + CANCELLATION_CLEANUP_BOUND_MS / 1000
+                )
+                while (
+                    not awaited.done()
+                    and not context.cooperative_cleanup_complete.is_set()
+                ):
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        return "cancellation_cleanup_timeout"
+                    await asyncio.wait((awaited,), timeout=min(remaining, 0.01))
+                detach_noncooperative_tts = (
+                    not awaited.done()
+                    and context.cooperative_cleanup_complete.is_set()
+                    and context.noncooperative_worker_drains > 0
+                )
+                if not detach_noncooperative_tts:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if not awaited.done() and remaining > 0:
+                        await asyncio.wait((awaited,), timeout=remaining)
+                    if not awaited.done():
+                        return "cancellation_cleanup_timeout"
+                    try:
+                        await awaited
+                    except Exception as error:
+                        cancel_error = cancel_error or error
             if not context.rollback_complete:
                 context.rollback_error = await self._rollback_context(
                     context,

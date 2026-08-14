@@ -8,14 +8,14 @@ import threading
 import types
 import unittest
 
-from voice_agent_v2.audio import OUTPUT_DELIVERY_BLOCK_BYTES, TTS_OUTPUT_AUDIO_FORMAT
 from voice_agent_v2.contracts import (
     EventEnvelope,
     LLM_VERSION,
     STT_VERSION,
-    TTS_V2_VERSION,
     valid_correlation_id,
 )
+from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES, TTS_OUTPUT_AUDIO_FORMAT
+from voice_agent_v2.v2_contracts import TTS_V2_VERSION
 from voice_agent_v2.local_tts import Qwen3TTS
 from voice_agent_v2.real_turn import RealTurnController
 import voice_agent_v2.realtime as realtime_module

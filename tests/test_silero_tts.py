@@ -6,21 +6,16 @@ import time
 import types
 import unittest
 
-from voice_agent_v2.audio import (
+from voice_agent_v2.audio import OUTPUT_MEDIA_MAX_BYTES
+from voice_agent_v2.contracts import LLM_VERSION, STT_VERSION, StageFailure
+from voice_agent_v2.v2_audio import (
     INPUT_AUDIO_FORMAT,
     OUTPUT_DELIVERY_BLOCK_BYTES,
     OUTPUT_FRAME_BYTES,
-    OUTPUT_MEDIA_MAX_BYTES,
     TTS_OUTPUT_AUDIO_FORMAT,
     TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
 )
-from voice_agent_v2.contracts import (
-    LLM_VERSION,
-    STT_VERSION,
-    TTS_V2_VERSION,
-    StageFailure,
-    TTSRequestKey,
-)
+from voice_agent_v2.v2_contracts import TTSRequestKey, TTS_V2_VERSION
 from voice_agent_v2.local_tts import TurnTTSBudget
 from voice_agent_v2.process_adapter import AdapterRequestError
 from voice_agent_v2.silero_tts import (
@@ -56,6 +51,7 @@ class ProcessCoordinator:
         self.entered: queue.Queue[tuple[str, str]] = queue.Queue()
         self.fail_requests: set[str] = set()
         self.final_overrides: dict[str, object] = {}
+        self.output_chunks: tuple[bytes, ...] | None = None
         self._pid = 7000
 
     def factory(self, worker_id, _log_path, _environment):
@@ -102,16 +98,20 @@ class FakeProcess:
                 raise RuntimeError("test gate timed out")
         if request_id in self.coordinator.fail_requests:
             raise AdapterRequestError("injected")
-        pcm = bytes([self.process.pid % 251, 0]) * 960
-        yield {
-            "protocol_version": "voice-agent.silero-worker.v1",
-            "event": "chunk",
-            "request_id": request_id,
-            "key": key,
-            "sequence": 0,
-            "bytes": len(pcm),
-            "pcm_base64": __import__("base64").b64encode(pcm).decode("ascii"),
-        }
+        chunks = self.coordinator.output_chunks or (
+            bytes([self.process.pid % 251, 0]) * 960,
+        )
+        for sequence, chunk in enumerate(chunks):
+            yield {
+                "protocol_version": "voice-agent.silero-worker.v1",
+                "event": "chunk",
+                "request_id": request_id,
+                "key": key,
+                "sequence": sequence,
+                "bytes": len(chunk),
+                "pcm_base64": __import__("base64").b64encode(chunk).decode("ascii"),
+            }
+        pcm = b"".join(chunks)
         final = {
             "protocol_version": "voice-agent.silero-worker.v1",
             "event": "final",
@@ -124,10 +124,10 @@ class FakeProcess:
             "sample_rate_hz": 48_000,
             "channels": 1,
             "sample_width_bytes": 2,
-            "chunk_count": 1,
+            "chunk_count": len(chunks),
             "audio_bytes": len(pcm),
             "samples": len(pcm) // 2,
-            "duration_ms": 20.0,
+            "duration_ms": len(pcm) // 2 / 48_000 * 1_000,
             "latency_ms": 1.0,
             "terminal_count": 1,
         }
@@ -549,6 +549,30 @@ class SileroPoolTests(unittest.TestCase):
                 v2_overflow.exception.code, "selected_tts_output_out_of_bounds"
             )
         finally:
+            pool.close()
+
+    def test_adapter_preserves_worker_chunk_bound_at_public_v2_boundary(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        tts = SileroKseniyaTTS(pool)
+        coordinator.output_chunks = (b"\1\0" * 32_768, b"\2\0" * 960)
+        try:
+            chunks = list(
+                tts.stream_synthesize(
+                    session_id="session-test",
+                    stream_epoch=1,
+                    turn_id="turn-00000001",
+                    turn_generation=1,
+                    request_id="request-00000001",
+                    segment_index=0,
+                    text="Проверка ограниченных блоков.",
+                )
+            )
+
+            self.assertEqual(chunks, list(coordinator.output_chunks))
+            self.assertTrue(all(0 < len(chunk) <= 65_536 for chunk in chunks))
+        finally:
+            tts.release_turn("session-test", 1, "turn-00000001", 1)
             pool.close()
 
     def test_worker_timing_must_match_samples_and_remain_finite(self) -> None:

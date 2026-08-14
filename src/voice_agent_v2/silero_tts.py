@@ -13,19 +13,14 @@ import threading
 import time
 from typing import Callable, Iterator
 
-from .audio import (
+from .contracts import AudioFormat, StageFailure, valid_correlation_id
+from .v2_audio import (
     TTS_OUTPUT_AUDIO_FORMAT,
     TTS_SEGMENT_MAX_BYTES,
     TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
     TTS_V2_OUTPUT_MEDIA_MAX_SECONDS,
 )
-from .contracts import (
-    AudioFormat,
-    StageFailure,
-    TTSRequestKey,
-    TTS_V2_VERSION,
-    valid_correlation_id,
-)
+from .v2_contracts import TTSRequestKey, TTS_V2_VERSION
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 from .tts_text import SHAPING_VERSION, shape_russian_tts
@@ -449,7 +444,7 @@ class SileroWorkerPool:
                     raise StageFailure("tts", "selected_tts_cancelled")
                 slot = self._acquire_slot(key, cancellation)
                 try:
-                    pcm, metadata = self._request_on_slot(slot, key, text)
+                    chunks, metadata = self._request_on_slot(slot, key, text)
                 except AdapterRequestError as error:
                     self.counters["failures"] += 1
                     raise StageFailure("tts", "silero_synthesis_failed") from error
@@ -462,10 +457,6 @@ class SileroWorkerPool:
                 if not self._is_fresh(key) or (cancellation is not None and cancellation.cancelled):
                     self.counters["stale_after_worker"] += 1
                     raise StageFailure("tts", "selected_tts_cancelled")
-                chunks = tuple(
-                    pcm[offset:offset + 65_536]
-                    for offset in range(0, len(pcm), 65_536)
-                )
                 return chunks, metadata
         finally:
             unregister()
@@ -514,7 +505,7 @@ class SileroWorkerPool:
 
     def _request_on_slot(
         self, slot: _WorkerSlot, key: TTSRequestKey, text: str
-    ) -> tuple[bytes, dict[str, object]]:
+    ) -> tuple[tuple[bytes, ...], dict[str, object]]:
         process = slot.process
         if process is None:
             raise AdapterProcessError("worker is absent")
@@ -545,7 +536,12 @@ class SileroWorkerPool:
                 if not isinstance(encoded, str):
                     raise AdapterProcessError("Silero chunk encoding mismatch")
                 chunk = base64.b64decode(encoded, validate=True)
-                if event.get("bytes") != len(chunk) or not chunk or len(chunk) % 2:
+                if (
+                    event.get("bytes") != len(chunk)
+                    or not chunk
+                    or len(chunk) % 2
+                    or len(chunk) > 65_536
+                ):
                     raise AdapterProcessError("Silero chunk size mismatch")
                 chunk_count += 1
                 total_bytes += len(chunk)
@@ -601,7 +597,7 @@ class SileroWorkerPool:
             "latency_ms": float(latency),
             "chunk_count": chunk_count,
         }
-        return pcm, metadata
+        return tuple(pcm_parts), metadata
 
     def _quarantine(
         self, slot: _WorkerSlot, *, expected_state: str | None = None
@@ -860,10 +856,7 @@ class SileroKseniyaTTS:
         if cancellation is not None and cancellation.cancelled:
             self.pool.invalidate_key(key)
             raise StageFailure("tts", "selected_tts_cancelled")
-        # The worker protocol stays bounded at <=64 KiB. The parent deliberately
-        # aggregates one bounded complete segment, releases the worker, then hands
-        # that segment to the two-segment scheduler before playback.
-        yield b"".join(chunks)
+        yield from chunks
 
     def invalidate_turn(
         self, session_id: str, stream_epoch: int, turn_id: str, turn_generation: int

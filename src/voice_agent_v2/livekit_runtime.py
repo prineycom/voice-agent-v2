@@ -13,7 +13,7 @@ from typing import Awaitable, Callable
 
 from livekit import api, rtc
 
-from .audio import (
+from .v2_audio import (
     INPUT_AUDIO_FORMAT,
     OUTPUT_DELIVERY_BLOCK_BYTES,
     OUTPUT_FRAME_BYTES,

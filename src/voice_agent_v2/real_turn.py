@@ -6,23 +6,21 @@ import threading
 import time
 from typing import Callable
 
-from .audio import (
-    INPUT_AUDIO_FORMAT,
-    OUTPUT_MEDIA_MAX_BYTES,
-    OUTPUT_MEDIA_MAX_SECONDS,
-    TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
-    TTS_V2_OUTPUT_MEDIA_MAX_SECONDS,
-)
+from .audio import OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SECONDS
 from .contracts import (
     EventEnvelope,
-    EventEnvelopeV2,
     LLM_VERSION,
     STT_VERSION,
     TTS_VERSION,
-    TTS_V2_VERSION,
     StageFailure,
     valid_correlation_id,
 )
+from .v2_audio import (
+    INPUT_AUDIO_FORMAT,
+    TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
+    TTS_V2_OUTPUT_MEDIA_MAX_SECONDS,
+)
+from .v2_contracts import EventEnvelopeV2, TTS_V2_VERSION
 from .tts_text import RussianTTSSegmenter
 from .tracer import CancellationToken, TraceResult
 
