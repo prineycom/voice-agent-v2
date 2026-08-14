@@ -582,18 +582,28 @@ class SileroWorkerPool:
                     self.counters["stale_before_dispatch"] += 1
                     raise StageFailure("tts", "selected_tts_cancelled")
                 self.require_ready()
-                idle = [slot for slot in self._slots if slot.state == "idle"]
-                if idle:
-                    affinity = self._affinity.get(turn_key)
+                affinity = self._affinity.get(turn_key)
+                if affinity is not None:
                     selected = next(
-                        (slot for slot in idle if slot.worker_id == affinity),
-                        min(idle, key=lambda slot: slot.last_idle),
+                        (slot for slot in self._slots if slot.worker_id == affinity),
+                        None,
                     )
-                    selected.state = "busy"
-                    selected.active_key = key
-                    self._affinity[turn_key] = selected.worker_id
-                    self.counters["requests"] += 1
-                    return selected
+                    if selected is None:
+                        raise StageFailure("tts", "silero_pool_not_ready")
+                    if selected.state == "idle":
+                        selected.state = "busy"
+                        selected.active_key = key
+                        self.counters["requests"] += 1
+                        return selected
+                else:
+                    idle = [slot for slot in self._slots if slot.state == "idle"]
+                    if idle:
+                        selected = min(idle, key=lambda slot: slot.last_idle)
+                        selected.state = "busy"
+                        selected.active_key = key
+                        self._affinity[turn_key] = selected.worker_id
+                        self.counters["requests"] += 1
+                        return selected
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self.counters["capacity_timeouts"] += 1

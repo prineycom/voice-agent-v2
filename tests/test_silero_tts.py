@@ -731,6 +731,63 @@ class SileroPoolTests(unittest.TestCase):
         finally:
             pool.close()
 
+    def test_affined_turn_never_migrates_to_an_idle_worker(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator, wait=0.1)
+        blocker_gates = [threading.Event(), threading.Event()]
+        blocker_threads: list[threading.Thread] = []
+        outcomes: list[object] = []
+        try:
+            first_chunks, _metadata = pool.synthesize(
+                self.key(1), "Первый сегмент.", None
+            )
+            pinned_worker = next(
+                process.worker_id
+                for process in coordinator.created
+                if first_chunks[0][0] == process.process.pid % 251
+            )
+
+            for turn, gate in zip((2, 3), blocker_gates):
+                key = self.key(turn)
+                coordinator.gates[key.request_id] = gate
+                thread = threading.Thread(
+                    target=lambda item=key: outcomes.append(
+                        pool.synthesize(item, "Блокирующий сегмент.", None)
+                    )
+                )
+                blocker_threads.append(thread)
+                thread.start()
+                worker_id, request_id = coordinator.entered.get(timeout=1)
+                self.assertEqual(request_id, key.request_id)
+                if turn == 3:
+                    self.assertEqual(worker_id, pinned_worker)
+
+            blocker_gates[0].set()
+            blocker_threads[0].join(1)
+            self.assertFalse(blocker_threads[0].is_alive())
+            self.assertEqual(pool.ready_count, 2)
+
+            started = time.monotonic()
+            with self.assertRaises(StageFailure) as failure:
+                pool.synthesize(self.key(1, 1), "Второй сегмент.", None)
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(failure.exception.code, "silero_capacity_timeout")
+            self.assertGreaterEqual(elapsed, 0.08)
+            self.assertLess(elapsed, 0.30)
+            self.assertEqual(len(coordinator.created), 2)
+            self.assertEqual(pool.process_start_count, 2)
+            with self.assertRaises(queue.Empty):
+                coordinator.entered.get(timeout=0.05)
+        finally:
+            for gate in blocker_gates:
+                gate.set()
+            for thread in blocker_threads:
+                thread.join(1)
+            for turn in (1, 2, 3):
+                pool.release_turn("session-test", 1, f"turn-{turn:08d}", turn)
+            pool.close()
+
     def test_both_busy_waits_at_most_750ms_without_third_or_retry(self) -> None:
         coordinator = ProcessCoordinator()
         pool = self.pool(coordinator)
