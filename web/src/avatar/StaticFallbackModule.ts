@@ -17,6 +17,8 @@ export class StaticFallbackModule implements AvatarModuleV1 {
 
   private root: HTMLDivElement | null = null
 
+  setFailureHandler(): void {}
+
   mount(container: HTMLElement): void {
     const root = document.createElement('div')
     root.className = 'avatar-static-fallback'

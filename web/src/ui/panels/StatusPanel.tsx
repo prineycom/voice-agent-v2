@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AvatarHealthV1 } from '../../avatar/contract'
 import type { TurnHistoryItem } from '../../state'
 import type { UiSystemComponent } from '../stateMapping'
@@ -96,16 +96,22 @@ export function StatusPanel({
   onClose(): void
 }) {
   const [tab, setTab] = useState<StatusTab>('system')
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const latestTurn = history.at(-1) ?? null
+  useEffect(() => {
+    if (open) closeButtonRef.current?.focus()
+  }, [open])
+
   return (
     <aside
       className={`slide-panel status-panel${open ? ' slide-panel--open' : ''}`}
       aria-hidden={!open}
       aria-label="Detailed status"
+      inert={!open}
     >
       <header className="panel-header">
         <h2>STATUS</h2>
-        <button type="button" className="panel-close" aria-label="Close status" onClick={onClose}>×</button>
+        <button ref={closeButtonRef} type="button" className="panel-close" aria-label="Close status" onClick={onClose}>×</button>
       </header>
       <div className="panel-tabs" role="tablist" aria-label="Status view">
         <button

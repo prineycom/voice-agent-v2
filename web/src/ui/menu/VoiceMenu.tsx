@@ -1,3 +1,5 @@
+import type { RefObject } from 'react'
+
 export function VoiceMenu({
   open,
   historyOpen,
@@ -8,6 +10,7 @@ export function VoiceMenu({
   onToggleHistory,
   onToggleStatus,
   onToggleReducedMotion,
+  triggerRef,
 }: {
   open: boolean
   historyOpen: boolean
@@ -18,6 +21,7 @@ export function VoiceMenu({
   onToggleHistory(): void
   onToggleStatus(): void
   onToggleReducedMotion(): void
+  triggerRef: RefObject<HTMLButtonElement | null>
 }) {
   const select = (action: () => void) => {
     action()
@@ -26,6 +30,7 @@ export function VoiceMenu({
   return (
     <div className="voice-menu">
       <button
+        ref={triggerRef}
         type="button"
         className="menu-button"
         aria-label="Open menu"

@@ -75,8 +75,15 @@ export interface AvatarModuleManifestV1 {
  * Version 1 renderer boundary. The module owns its DOM/renderer, interpolation,
  * scheduling and frames; it receives only host-validated renderer-neutral input.
  */
+export interface AvatarModuleFailureV1 {
+  kind: 'render-loop-failed'
+}
+
+export type AvatarModuleFailureHandlerV1 = (failure: AvatarModuleFailureV1) => void
+
 export interface AvatarModuleV1 {
   readonly manifest: AvatarModuleManifestV1
+  setFailureHandler(handler: AvatarModuleFailureHandlerV1 | null): void
   mount(container: HTMLElement): void
   update(input: ValidatedAvatarControlV1): void
   cancel(timestampMs: number): void
@@ -130,8 +137,19 @@ function invalidControl(): AvatarControlValidationResultV1 {
   return { accepted: false, rejectedSignals: 1 }
 }
 
+export function avatarTimestampIsAdmissible(timestampMs: unknown, hostNowMs: number): timestampMs is number {
+  return finite(timestampMs)
+    && timestampMs >= 0
+    && finite(hostNowMs)
+    && hostNowMs >= 0
+    && timestampMs <= hostNowMs + MAX_FUTURE_SKEW_MS
+}
+
 /** Runtime validation is required even though in-repository producers are typed. */
-export function validateAvatarControl(input: unknown): AvatarControlValidationResultV1 {
+export function validateAvatarControl(
+  input: unknown,
+  hostNowMs: number = performance.now(),
+): AvatarControlValidationResultV1 {
   try {
     if (typeof input !== 'object' || input === null || Array.isArray(input)) return invalidControl()
     const value = input as Record<string, unknown>
@@ -139,7 +157,7 @@ export function validateAvatarControl(input: unknown): AvatarControlValidationRe
     if (keys.some((key) => !CONTROL_KEYS.has(key))) return invalidControl()
     if (
       value.schemaVersion !== AVATAR_CONTROL_SCHEMA_VERSION
-      || !finite(value.timestampMs) || value.timestampMs < 0
+      || !avatarTimestampIsAdmissible(value.timestampMs, hostNowMs)
       || !Number.isSafeInteger(value.idleSeed) || (value.idleSeed as number) < 0
       || (value.idleSeed as number) > MAX_IDLE_SEED
       || !LIFECYCLES.has(value.lifecycle as AvatarLifecycleState)

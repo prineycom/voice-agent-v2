@@ -22,6 +22,7 @@ function testAvatarHost(onUpdate = vi.fn()): AvatarHostV1 {
         capabilities: AVATAR_REQUIRED_CAPABILITIES,
         deterministic: true,
       },
+      setFailureHandler: vi.fn(),
       mount(container) {
         root = document.createElement('div')
         root.dataset.testAvatar = 'mounted'
@@ -85,12 +86,22 @@ describe('Slice 7 modular shell', () => {
     ])
 
     await user.click(within(menu).getByRole('menuitemcheckbox', { name: /HISTORY/ }))
-    expect(screen.getByLabelText('Conversation history').getAttribute('aria-hidden')).toBe('false')
+    const historyPanel = screen.getByLabelText('Conversation history')
+    expect(historyPanel.getAttribute('aria-hidden')).toBe('false')
+    expect(historyPanel.hasAttribute('inert')).toBe(false)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close history' }))
     expect(screen.getByText('Расскажи, что ты видишь.')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: 'Close history' }))
+    expect(historyPanel.hasAttribute('inert')).toBe(true)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open menu' }))
 
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
     await user.click(screen.getByRole('menuitemcheckbox', { name: /STATUS/ }))
-    expect(screen.getByLabelText('Detailed status').getAttribute('aria-hidden')).toBe('false')
+    const statusPanel = screen.getByLabelText('Detailed status')
+    expect(statusPanel.getAttribute('aria-hidden')).toBe('false')
+    expect(statusPanel.hasAttribute('inert')).toBe(false)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close status' }))
     expect(screen.getByRole('tab', { name: 'SYSTEM' })).toBeTruthy()
     expect(screen.getByRole('tab', { name: 'TIMELINE' })).toBeTruthy()
   })

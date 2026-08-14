@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import type { TurnHistoryItem, TurnOutcome } from '../../state'
 
 const OUTCOME_LABELS: Record<TurnOutcome, string> = {
@@ -20,15 +21,21 @@ export function HistoryPanel({
   history: TurnHistoryItem[]
   onClose(): void
 }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (open) closeButtonRef.current?.focus()
+  }, [open])
+
   return (
     <aside
       className={`slide-panel history-panel${open ? ' slide-panel--open' : ''}`}
       aria-hidden={!open}
       aria-label="Conversation history"
+      inert={!open}
     >
       <header className="panel-header">
         <h2>HISTORY</h2>
-        <button type="button" className="panel-close" aria-label="Close history" onClick={onClose}>×</button>
+        <button ref={closeButtonRef} type="button" className="panel-close" aria-label="Close history" onClick={onClose}>×</button>
       </header>
       <div className="panel-scroll" aria-live="polite">
         {history.length === 0 ? (

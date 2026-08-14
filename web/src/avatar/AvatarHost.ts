@@ -1,4 +1,5 @@
 import {
+  avatarTimestampIsAdmissible,
   manifestIsCompatible,
   validateAvatarControl,
   type AvatarHealthV1,
@@ -8,6 +9,10 @@ import {
 } from './contract'
 
 export type AvatarHealthListener = (health: AvatarHealthV1) => void
+
+type AvatarCommand =
+  | { kind: 'update'; control: ValidatedAvatarControlV1 }
+  | { kind: 'cancel'; timestampMs: number }
 
 /**
  * Owns module compatibility, input validation, lifecycle and an explicitly
@@ -20,12 +25,14 @@ export class AvatarHostV1 {
   private lastTimestampMs = -1
   private rejectedInputs = 0
   private renderFailures = 0
+  private lastCommand: AvatarCommand | null = null
   private lastPublishedHealth: AvatarHealthV1 | null = null
   private readonly healthListeners = new Set<AvatarHealthListener>()
 
   constructor(
     private readonly factories: readonly AvatarModuleFactoryV1[],
     private readonly onHealth?: AvatarHealthListener,
+    private readonly now: () => number = () => performance.now(),
   ) {
     if (factories.length === 0) throw new Error('avatar host requires at least one module factory')
   }
@@ -47,7 +54,7 @@ export class AvatarHostV1 {
 
   update(input: unknown): void {
     if (this.container === null || this.activeModule === null) return
-    const result = validateAvatarControl(input)
+    const result = validateAvatarControl(input, this.now())
     if (!result.accepted) {
       this.rejectedInputs += result.rejectedSignals
       this.publishHealth()
@@ -61,6 +68,7 @@ export class AvatarHostV1 {
       return
     }
     this.lastTimestampMs = control.timestampMs
+    this.lastCommand = { kind: 'update', control }
     try {
       this.activeModule.update(control)
     } catch {
@@ -72,14 +80,16 @@ export class AvatarHostV1 {
 
   cancel(timestampMs: number): void {
     if (
-      this.activeModule === null || !Number.isFinite(timestampMs)
-      || timestampMs < 0 || timestampMs < this.lastTimestampMs
+      this.activeModule === null
+      || !avatarTimestampIsAdmissible(timestampMs, this.now())
+      || timestampMs < this.lastTimestampMs
     ) {
       this.rejectedInputs += 1
       this.publishHealth()
       return
     }
     this.lastTimestampMs = timestampMs
+    this.lastCommand = { kind: 'cancel', timestampMs }
     try {
       this.activeModule.cancel(timestampMs)
     } catch {
@@ -109,6 +119,7 @@ export class AvatarHostV1 {
       this.container?.replaceChildren()
       this.container = null
       this.lastTimestampMs = -1
+      this.lastCommand = null
       this.publishHealth()
     }
   }
@@ -144,6 +155,19 @@ export class AvatarHostV1 {
     }
   }
 
+  private handleModuleFailure(module: AvatarModuleV1): void {
+    if (module !== this.activeModule) return
+    this.renderFailures += 1
+    const fallback = this.switchToNextModule()
+    try {
+      if (this.lastCommand?.kind === 'update') fallback?.update(this.lastCommand.control)
+      if (this.lastCommand?.kind === 'cancel') fallback?.cancel(this.lastCommand.timestampMs)
+    } catch {
+      this.disableFailedFallback(fallback)
+    }
+    this.publishHealth()
+  }
+
   private disableFailedFallback(fallback: AvatarModuleV1 | null): void {
     this.renderFailures += 1
     try {
@@ -168,6 +192,8 @@ export class AvatarHostV1 {
           candidate.dispose()
           continue
         }
+        const failureSource = candidate
+        candidate.setFailureHandler(() => this.handleModuleFailure(failureSource))
         candidate.mount(this.container)
         this.activeModule = candidate
         this.activeFactoryIndex = index

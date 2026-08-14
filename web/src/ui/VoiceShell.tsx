@@ -56,6 +56,8 @@ export function VoiceShell({
   const [activePanel, setActivePanel] = useState<'history' | 'status' | null>(null)
   const [readyFlash, setReadyFlash] = useState(false)
   const swipeStartRef = useRef<{ x: number; panelOpen: boolean } | null>(null)
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const previousPanelRef = useRef(activePanel)
   const {
     userReducedMotion,
     systemReducedMotion,
@@ -72,6 +74,11 @@ export function VoiceShell({
       ? 'ambient-reduced'
       : 'full'
   const onAvatarHealth = useCallback((health: AvatarHealthV1) => setAvatarHealth(health), [])
+
+  useEffect(() => {
+    if (previousPanelRef.current !== null && activePanel === null) menuButtonRef.current?.focus()
+    previousPanelRef.current = activePanel
+  }, [activePanel])
 
   useLayoutEffect(() => {
     if (state.connection !== 'ready') {
@@ -140,6 +147,7 @@ export function VoiceShell({
         onToggleHistory={() => setActivePanel((current) => current === 'history' ? null : 'history')}
         onToggleStatus={() => setActivePanel((current) => current === 'status' ? null : 'status')}
         onToggleReducedMotion={toggleUserReducedMotion}
+        triggerRef={menuButtonRef}
       />
 
       <HistoryPanel

@@ -1,6 +1,7 @@
 import {
   AVATAR_HOST_INTERFACE_VERSION,
   AVATAR_REQUIRED_CAPABILITIES,
+  type AvatarModuleFailureHandlerV1,
   type AvatarModuleV1,
   type ValidatedAvatarControlV1,
 } from '../contract'
@@ -36,6 +37,11 @@ export class MvpEyeModule implements AvatarModuleV1 {
   private regularPupil: SVGCircleElement | null = null
   private control: ValidatedAvatarControlV1 | null = null
   private animationFrame: number | null = null
+  private failureHandler: AvatarModuleFailureHandlerV1 | null = null
+
+  setFailureHandler(handler: AvatarModuleFailureHandlerV1 | null): void {
+    this.failureHandler = handler
+  }
 
   mount(container: HTMLElement): void {
     if (this.root !== null) throw new Error('MVP eye is already mounted')
@@ -133,11 +139,17 @@ export class MvpEyeModule implements AvatarModuleV1 {
     this.loader = null
     this.regularPupil = null
     this.control = null
+    this.failureHandler = null
   }
 
   private readonly render = (timeMs: number): void => {
-    this.draw(timeMs)
-    this.animationFrame = this.root === null ? null : requestAnimationFrame(this.render)
+    try {
+      this.draw(timeMs)
+      this.animationFrame = this.root === null ? null : requestAnimationFrame(this.render)
+    } catch {
+      this.animationFrame = null
+      this.failureHandler?.({ kind: 'render-loop-failed' })
+    }
   }
 
   private draw(timeMs: number): void {
