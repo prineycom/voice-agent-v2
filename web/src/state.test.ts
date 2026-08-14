@@ -154,6 +154,25 @@ describe('checkpoint A browser state', () => {
     })
   })
 
+  it('keeps speaking while later visible text arrives', () => {
+    const state = apply([
+      event(1, 'session.ready'),
+      event(2, 'turn.listening'),
+      event(3, 'turn.media-ready'),
+      event(4, 'stt.final', 'turn-00000001', { transcript: 'Вопрос.' }),
+      event(5, 'turn.thinking'),
+      event(6, 'llm.visible', 'turn-00000001', { response: 'Первый ответ.' }),
+      event(7, 'turn.speaking'),
+      event(8, 'llm.visible', 'turn-00000001', {
+        response: 'Первый ответ. Продолжение.',
+      }),
+    ])
+
+    expect(state.phase).toBe('speaking')
+    expect(state.response).toBe('Первый ответ. Продолжение.')
+    expect(state.history[0].assistant).toBe('Первый ответ. Продолжение.')
+  })
+
   it('records STT failure without inventing a transcript or degrading the session', () => {
     const state = apply([
       event(1, 'session.ready'),

@@ -503,7 +503,8 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   ) return drop(state)
 
   let phase: TurnPhase = state.phase
-  if (event.type === 'stt.final' || event.type === 'turn.thinking' || event.type === 'llm.visible') phase = 'thinking'
+  if (event.type === 'stt.final' || event.type === 'turn.thinking') phase = 'thinking'
+  if (event.type === 'llm.visible' && state.phase !== 'speaking') phase = 'thinking'
   if (event.type === 'turn.speaking') phase = 'speaking'
   if (event.terminal) phase = 'idle'
   const transcript = event.type === 'stt.final' && typeof event.payload.transcript === 'string'

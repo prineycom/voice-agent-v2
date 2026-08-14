@@ -178,9 +178,23 @@ class RussianSegmentationTests(unittest.TestCase):
         self.assertIn("Пи-Ди-Эф", first.synthesis_text)
         self.assertNotEqual(first.synthesis_text, visible)
         self.assertEqual(shape_russian_tts("Все готовы.").synthesis_text, "Все готовы.")
+        for tagged in ("<speak>Секрет.</speak>", "<тег>Секрет.</тег>"):
+            with self.subTest(tagged=tagged), self.assertRaises(StageFailure) as failure:
+                shape_russian_tts(tagged)
+            self.assertEqual(failure.exception.code, "tts_plain_text_required")
+
+    def test_split_tag_is_rejected_before_its_buffer_can_be_segmented(self) -> None:
+        segmenter = RussianTTSSegmenter()
+        self.assertEqual(segmenter.feed("<spe"), ())
         with self.assertRaises(StageFailure) as failure:
-            shape_russian_tts("<speak>Секрет.</speak>")
+            segmenter.feed("ak>Секрет.</speak>")
         self.assertEqual(failure.exception.code, "tts_plain_text_required")
+
+        unicode_segmenter = RussianTTSSegmenter()
+        self.assertEqual(unicode_segmenter.feed("<те"), ())
+        with self.assertRaises(StageFailure) as unicode_failure:
+            unicode_segmenter.feed("г>Секрет.</тег>")
+        self.assertEqual(unicode_failure.exception.code, "tts_plain_text_required")
 
 
 class FakeSTT:
@@ -289,6 +303,36 @@ class RealTurnTTSV2Tests(unittest.TestCase):
         self.assertTrue(observed_audio)
         visible = [event["payload"]["response"] for event in result.events if event["type"] == "llm.visible"]
         self.assertEqual(visible[-1], "".join(self.pieces()))
+
+    def test_split_unicode_tag_fails_tts_without_rewriting_visible_text(self) -> None:
+        pieces = ("<те", "г>Секрет.</тег>")
+        tts = FakeTTSV2()
+        controller = RealTurnController(FakeSTT(), FakeVisibleLLM(pieces), tts)
+        result = controller.run_turn(
+            session_id="session-test",
+            turn_id="turn-test",
+            input_pcm=b"\0\0" * 320,
+            request_id="request-test",
+        )
+
+        expected = "".join(pieces)
+        self.assertEqual(result.terminal_event["type"], "turn.failed")
+        self.assertEqual(result.terminal_event["payload"]["code"], "tts_plain_text_required")
+        self.assertEqual(tts.calls, [])
+        self.assertEqual(
+            [
+                event["payload"]["response"]
+                for event in result.events
+                if event["type"] == "llm.visible"
+            ][-1],
+            expected,
+        )
+        self.assertEqual(
+            next(event for event in result.events if event["type"] == "llm.final")[
+                "payload"
+            ]["response"],
+            expected,
+        )
 
     def test_visible_decimal_prefix_remains_byte_exact(self) -> None:
         pieces = ("Значение равно 3.", "14 и не меняется.")

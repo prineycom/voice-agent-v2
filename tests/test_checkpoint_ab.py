@@ -8,8 +8,16 @@ import threading
 import types
 import unittest
 
-from voice_agent_v2.contracts import EventEnvelope, valid_correlation_id
+from voice_agent_v2.audio import OUTPUT_DELIVERY_BLOCK_BYTES, TTS_OUTPUT_AUDIO_FORMAT
+from voice_agent_v2.contracts import (
+    EventEnvelope,
+    LLM_VERSION,
+    STT_VERSION,
+    TTS_V2_VERSION,
+    valid_correlation_id,
+)
 from voice_agent_v2.local_tts import Qwen3TTS
+from voice_agent_v2.real_turn import RealTurnController
 import voice_agent_v2.realtime as realtime_module
 from voice_agent_v2.realtime import RealtimeSession
 from voice_agent_v2.tracer import TraceResult
@@ -108,6 +116,72 @@ class MemoryAudio:
     async def clear(self, turn_id: str) -> str | None:
         self.cleared.append(turn_id)
         return "persistent-publication"
+
+
+class FailingPrepareAudio(MemoryAudio):
+    async def prepare(self, _turn_id: str, _media_generation: int) -> str:
+        raise RuntimeError("publication unavailable")
+
+
+class CapacitySTT:
+    version = STT_VERSION
+
+    def transcribe(self, **_arguments) -> str:
+        return "Проверочный вопрос."
+
+
+class CapacityLLM:
+    version = LLM_VERSION
+    provider_mode = "local"
+    provider_identity = "deterministic-local"
+    supports_visible_handoff = True
+    visible_handoff_is_cumulative = True
+
+    def respond_with_handoff(self, *, on_sentence, on_visible_sentence, **_arguments) -> str:
+        pieces = (
+            "Первое достаточно длинное предложение полностью готово для синтеза. ",
+            "Второе достаточно длинное предложение полностью готово для синтеза. ",
+            "Третье достаточно длинное предложение полностью готово для синтеза.",
+        )
+        cumulative = ""
+        for piece in pieces:
+            cumulative += piece
+            on_visible_sentence(cumulative)
+            on_sentence(piece)
+        return cumulative
+
+
+class CapacityTTS:
+    version = TTS_V2_VERSION
+    output_format = TTS_OUTPUT_AUDIO_FORMAT
+    capabilities = {"cooperative_cancel": True}
+
+    def __init__(self) -> None:
+        self.started = [threading.Event() for _ in range(3)]
+
+    def stream_synthesize(self, *, segment_index: int, **_arguments):
+        self.started[segment_index].set()
+        yield bytes([segment_index, 0]) * (
+            OUTPUT_DELIVERY_BLOCK_BYTES * 4 // 2
+        )
+
+
+class CapacityAudio(MemoryAudio):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = [threading.Event() for _ in range(12)]
+        self.release = [asyncio.Event() for _ in range(12)]
+        self.write_index = 0
+
+    async def write(self, _turn_id: str, pcm: bytes, cancelled) -> bool:
+        index = self.write_index
+        self.write_index += 1
+        self.started[index].set()
+        await self.release[index].wait()
+        if cancelled():
+            return False
+        self.chunks.append(pcm)
+        return True
 
 
 class BurstStreamingRunner(StreamingRunner):
@@ -272,6 +346,23 @@ class VisibleTTSFailureRunner(StreamingRunner):
 
 
 class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_publication_is_prepared_before_a_turn_is_announced(self) -> None:
+        events = MemoryEvents()
+        audio = FailingPrepareAudio()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=audio,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "publication unavailable"):
+            await session.submit_utterance(b"\0\0" * 320)
+
+        self.assertEqual(events.events, [])
+        self.assertIsNone(session.active_turn_id)
+        self.assertEqual(audio.abandoned, ["turn-00000001"])
+
     async def test_streamed_turn_completes_without_browser_media_controls(self) -> None:
         events = MemoryEvents()
         audio = MemoryAudio()
@@ -348,6 +439,38 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.events[-1]["type"], "turn.completed")
         self.assertEqual(events.events[-1]["payload"]["server_pcm_queue_max_blocks"], 2)
         self.assertLessEqual(
+            events.events[-1]["payload"]["server_segment_queue_max_segments"], 2
+        )
+
+    async def test_segment_capacity_is_reserved_before_synthesis(self) -> None:
+        events = MemoryEvents()
+        audio = CapacityAudio()
+        tts = CapacityTTS()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=RealTurnController(CapacitySTT(), CapacityLLM(), tts),
+            event_sink=events,
+            audio_sink=audio,
+        )
+
+        await session.submit_utterance(b"\0\0" * 320)
+        try:
+            self.assertTrue(await asyncio.to_thread(audio.started[0].wait, 0.5))
+            self.assertTrue(await asyncio.to_thread(tts.started[1].wait, 0.5))
+            await asyncio.sleep(0.05)
+            self.assertFalse(tts.started[2].is_set())
+
+            audio.release[0].set()
+            self.assertTrue(await asyncio.to_thread(audio.started[1].wait, 0.5))
+            audio.release[1].set()
+            self.assertTrue(await asyncio.to_thread(tts.started[2].wait, 0.5))
+        finally:
+            for release in audio.release:
+                release.set()
+            await asyncio.wait_for(session.wait_for_cleanup(), 1)
+
+        self.assertEqual(events.events[-1]["type"], "turn.completed")
+        self.assertEqual(
             events.events[-1]["payload"]["server_segment_queue_max_segments"], 2
         )
 

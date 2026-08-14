@@ -63,6 +63,8 @@ class RealTurnController:
         event_observer: Callable[[dict[str, object]], None] | None = None,
         trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
         audio_observer: Callable[[int, bytes], None] | None = None,
+        segment_started_observer: Callable[[int], None] | None = None,
+        segment_audio_observer: Callable[[int, bytes | None], None] | None = None,
         retain_output: bool = True,
         stream_epoch: int = 1,
         turn_generation: int = 1,
@@ -78,6 +80,8 @@ class RealTurnController:
             event_observer=event_observer,
             trace_observer=trace_observer,
             audio_observer=audio_observer,
+            segment_started_observer=segment_started_observer,
+            segment_audio_observer=segment_audio_observer,
             retain_output=retain_output,
             stream_epoch=stream_epoch,
             turn_generation=turn_generation,
@@ -99,6 +103,8 @@ class RealTurnController:
         event_observer: Callable[[dict[str, object]], None] | None,
         trace_observer: Callable[[str, str, dict[str, object]], None] | None,
         audio_observer: Callable[[int, bytes], None] | None,
+        segment_started_observer: Callable[[int], None] | None,
+        segment_audio_observer: Callable[[int, bytes | None], None] | None,
         retain_output: bool,
         stream_epoch: int,
         turn_generation: int,
@@ -109,6 +115,8 @@ class RealTurnController:
             raise ValueError("session, turn, and request IDs must satisfy the correlation-ID contract")
         if stream_epoch < 1 or turn_generation < 1:
             raise ValueError("stream epoch and turn generation must be positive")
+        if (segment_started_observer is None) != (segment_audio_observer is None):
+            raise ValueError("segment reservation observers must be supplied together")
         active_v2 = getattr(self.tts, "version", None) == TTS_V2_VERSION
         events: list[dict[str, object]] = []
         output_chunks: list[bytes] = []
@@ -266,7 +274,11 @@ class RealTurnController:
                 return
             current_segment = segment_index
             segment_index += 1
+            reservation_active = False
             try:
+                if segment_started_observer is not None:
+                    segment_started_observer(current_segment)
+                    reservation_active = True
                 if not tts_started:
                     tts_started = True
                     emit("turn.speaking", {
@@ -296,6 +308,7 @@ class RealTurnController:
                     visible_chars=len(segment),
                 )
                 sentence_chunks = 0
+                sentence_output = bytearray()
                 noncooperative = active_v2 and not bool(
                     getattr(self.tts, "capabilities", {}).get("cooperative_cancel", True)
                 )
@@ -316,7 +329,9 @@ class RealTurnController:
                             raise StageFailure("tts", "selected_tts_output_out_of_bounds")
                         if retain_output:
                             output_chunks.append(chunk)
-                        if audio_observer is not None:
+                        if segment_audio_observer is not None:
+                            sentence_output.extend(chunk)
+                        elif audio_observer is not None:
                             audio_observer(tts_chunks - 1, chunk)
                         emit("tts.audio", {
                             "chunk_index": tts_chunks - 1,
@@ -335,6 +350,9 @@ class RealTurnController:
                         )
                 if token.cancelled:
                     raise _TurnInterrupted
+                if segment_audio_observer is not None:
+                    reservation_active = False
+                    segment_audio_observer(current_segment, bytes(sentence_output))
                 trace(
                     "tts", "segment_completed",
                     segment_index=current_segment,
@@ -347,6 +365,9 @@ class RealTurnController:
                     raise _TurnInterrupted from error
                 tts_error = error
                 trace("tts", "failed", segment_index=current_segment, failure_code=error.code)
+            finally:
+                if reservation_active and segment_audio_observer is not None:
+                    segment_audio_observer(current_segment, None)
 
         def synthesize_visible_piece(piece: str) -> None:
             nonlocal tts_error

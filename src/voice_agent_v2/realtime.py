@@ -21,7 +21,7 @@ from .audio import (
     OUTPUT_MEDIA_MAX_BYTES,
     TTS_OUTPUT_AUDIO_FORMAT,
 )
-from .contracts import StageFailure, valid_correlation_id
+from .contracts import TTS_V2_VERSION, StageFailure, valid_correlation_id
 from .tracer import CancellationToken, TraceResult
 
 CONTROL_EVENT_VERSION = "voice-agent.realtime-control.v2"
@@ -396,22 +396,36 @@ class RealtimeSession:
         )
         self._active = context
         if announce:
-            await self._announce_context_locked(context)
+            try:
+                await self._announce_context_locked(context)
+            except BaseException:
+                context.terminal = True
+                if self._active is context:
+                    self._active = None
+                if context.media_publication_id is not None:
+                    await self._abandon_audio(context.turn_id)
+                raise
         return turn_id
 
     async def _announce_context_locked(self, context: TurnContext) -> None:
-        await self._emit(context.turn_id, "turn.listening", {"state": "listening"})
         prepare = getattr(self.audio_sink, "prepare", None)
         if prepare is None:
             publication_id = "legacy-test-publication"
         else:
-            publication_id = await asyncio.wait_for(
-                prepare(context.turn_id, context.media_generation),
-                CONTROL_PUBLISH_BOUND_MS / 1000,
-            )
+            try:
+                publication_id = await asyncio.wait_for(
+                    prepare(context.turn_id, context.media_generation),
+                    CONTROL_PUBLISH_BOUND_MS / 1000,
+                )
+            except BaseException:
+                await self._abandon_audio(context.turn_id)
+                raise
         if not isinstance(publication_id, str) or not publication_id or len(publication_id) > 128:
+            if prepare is not None:
+                await self._abandon_audio(context.turn_id)
             raise RuntimeError("audio publication has no bounded identity")
         context.media_publication_id = publication_id
+        await self._emit(context.turn_id, "turn.listening", {"state": "listening"})
         tts_profile = getattr(self.runner, "tts_profile", None)
         metadata = tts_profile.public_metadata() if tts_profile is not None else {
             "profile": "deterministic-test",
@@ -468,6 +482,8 @@ class RealtimeSession:
                     context.terminal = True
                     if self._active is context:
                         self._active = None
+                    if context.media_publication_id is not None:
+                        await self._abandon_audio(context.turn_id)
                     raise
                 context.announced = True
             context.task = asyncio.create_task(
@@ -806,6 +822,7 @@ class RealtimeSession:
             else OUTPUT_DELIVERY_BLOCK_BYTES
         )
         expected_audio_chunk = 0
+        expected_synthesis_segment = 0
 
         def fresh() -> bool:
             return (
@@ -854,7 +871,7 @@ class RealtimeSession:
                 context.pcm_queue_high_water, outstanding_pcm
             )
 
-        async def enqueue_segment(chunk_index: int, chunk: bytes) -> None:
+        async def reserve_segment() -> None:
             nonlocal outstanding_segments
             if not fresh():
                 raise StageFailure("tts", "selected_tts_cancelled")
@@ -862,15 +879,43 @@ class RealtimeSession:
             if not fresh():
                 segment_capacity.release()
                 raise StageFailure("tts", "selected_tts_cancelled")
-            try:
-                await segment_queue.put((chunk_index, chunk))
-            except BaseException:
-                segment_capacity.release()
-                raise
             outstanding_segments += 1
             context.segment_queue_high_water = max(
                 context.segment_queue_high_water, outstanding_segments
             )
+
+        async def release_segment() -> None:
+            nonlocal outstanding_segments
+            outstanding_segments -= 1
+            segment_capacity.release()
+
+        async def enqueue_segment(
+            chunk_index: int, chunk: bytes, *, reserved: bool = False
+        ) -> None:
+            if not reserved:
+                await reserve_segment()
+            if not fresh():
+                await release_segment()
+                raise StageFailure("tts", "selected_tts_cancelled")
+            try:
+                await segment_queue.put((chunk_index, chunk))
+            except BaseException:
+                await release_segment()
+                raise
+
+        def wait_for_delivery(delivery) -> None:
+            while True:
+                try:
+                    delivery.result(timeout=PCM_PRODUCER_WAIT_SECONDS)
+                    return
+                except TimeoutError:
+                    if context.cancellation.cancelled or context.terminal or self._closed:
+                        delivery.cancel()
+                        raise StageFailure("tts", "selected_tts_cancelled")
+
+        def wait_for_event_barrier() -> None:
+            barrier = asyncio.run_coroutine_threadsafe(event_queue.join(), loop)
+            wait_for_delivery(barrier)
 
         def observe_audio(chunk_index: int, chunk: bytes) -> None:
             nonlocal expected_audio_chunk
@@ -883,28 +928,39 @@ class RealtimeSession:
             expected_audio_chunk += 1
             if not fresh():
                 raise StageFailure("tts", "selected_tts_cancelled")
-            barrier = asyncio.run_coroutine_threadsafe(event_queue.join(), loop)
-            while True:
-                try:
-                    barrier.result(timeout=PCM_PRODUCER_WAIT_SECONDS)
-                    break
-                except TimeoutError:
-                    if context.cancellation.cancelled or context.terminal or self._closed:
-                        barrier.cancel()
-                        raise StageFailure("tts", "selected_tts_cancelled")
+            wait_for_event_barrier()
             if not fresh():
                 raise StageFailure("tts", "selected_tts_cancelled")
             delivery = asyncio.run_coroutine_threadsafe(
                 enqueue_segment(chunk_index, bytes(chunk)), loop
             )
-            while True:
-                try:
-                    delivery.result(timeout=PCM_PRODUCER_WAIT_SECONDS)
-                    return
-                except TimeoutError:
-                    if context.cancellation.cancelled or context.terminal or self._closed:
-                        delivery.cancel()
-                        raise StageFailure("tts", "selected_tts_cancelled")
+            wait_for_delivery(delivery)
+
+        def reserve_synthesis_segment(_segment_index: int) -> None:
+            wait_for_delivery(asyncio.run_coroutine_threadsafe(reserve_segment(), loop))
+
+        def observe_synthesis_segment(
+            segment_index: int, chunk: bytes | None
+        ) -> None:
+            nonlocal expected_synthesis_segment
+            if segment_index != expected_synthesis_segment:
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+            expected_synthesis_segment += 1
+            if chunk is None:
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                return
+            if not chunk or len(chunk) % TTS_OUTPUT_AUDIO_FORMAT.sample_width_bytes:
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+            try:
+                wait_for_event_barrier()
+            except BaseException:
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                raise
+            wait_for_delivery(asyncio.run_coroutine_threadsafe(
+                enqueue_segment(segment_index, bytes(chunk), reserved=True), loop
+            ))
 
         async def consume_events() -> None:
             while True:
@@ -943,8 +999,7 @@ class RealtimeSession:
                         block_sequence += 1
                 finally:
                     if item is not None:
-                        outstanding_segments -= 1
-                        segment_capacity.release()
+                        await release_segment()
                     segment_queue.task_done()
 
         async def consume_pcm() -> None:
@@ -1001,6 +1056,14 @@ class RealtimeSession:
             runner_arguments["trace_observer"] = observe_trace
         if streaming_audio:
             runner_arguments["audio_observer"] = observe_audio
+            if (
+                getattr(getattr(self.runner, "tts", None), "version", None)
+                == TTS_V2_VERSION
+                and "segment_started_observer" in run_parameters
+                and "segment_audio_observer" in run_parameters
+            ):
+                runner_arguments["segment_started_observer"] = reserve_synthesis_segment
+                runner_arguments["segment_audio_observer"] = observe_synthesis_segment
             runner_arguments["retain_output"] = False
 
         event_consumer = asyncio.create_task(consume_events(), name=f"events-{context.turn_id}")

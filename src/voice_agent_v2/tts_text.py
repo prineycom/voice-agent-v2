@@ -25,7 +25,14 @@ _COMMON_DOT_ABBREVIATIONS = frozenset({
     "г", "гг", "ул", "д", "кв", "стр", "рис", "им", "т", "е", "н", "э",
     "тд", "тп", "др", "проф", "акад", "руб", "коп",
 })
-_SSML_OR_TAG = re.compile(r"<\s*/?\s*[a-zA-Z][^>]*>")
+_SSML_OR_TAG = re.compile(
+    r"<\s*(?:/?\s*(?:[^\W\d_]|[_:])|[!?])[^>]*>", re.UNICODE
+)
+
+
+def _reject_markup(text: str) -> None:
+    if _SSML_OR_TAG.search(text) or "\x00" in text:
+        raise StageFailure("tts", "tts_plain_text_required")
 
 
 def _boundary_followed_by_space_or_end(text: str, end: int) -> bool:
@@ -87,6 +94,7 @@ class RussianTTSSegmenter:
 
     def __init__(self) -> None:
         self._buffer = ""
+        self._validation_tail = ""
         self._segments = 0
         self._finished = False
 
@@ -99,6 +107,13 @@ class RussianTTSSegmenter:
             raise StageFailure("tts", "tts_segmenter_already_final")
         if not isinstance(visible_piece, str):
             raise StageFailure("tts", "tts_text_out_of_bounds")
+        validation_text = self._validation_tail + visible_piece
+        _reject_markup(validation_text)
+        unmatched_open = validation_text.rfind("<")
+        unmatched_close = validation_text.rfind(">")
+        self._validation_tail = (
+            validation_text[unmatched_open:] if unmatched_open > unmatched_close else ""
+        )
         piece = visible_piece.strip()
         if piece:
             if self._buffer and not self._buffer[-1].isspace():
@@ -293,8 +308,7 @@ def _match_case(source: str, replacement: str) -> str:
 def shape_russian_tts(visible_text: str) -> ShapedTTS:
     if not isinstance(visible_text, str) or not visible_text.strip() or len(visible_text) > HARD_MAX_CHARS:
         raise StageFailure("tts", "tts_text_out_of_bounds")
-    if _SSML_OR_TAG.search(visible_text) or "\x00" in visible_text:
-        raise StageFailure("tts", "tts_plain_text_required")
+    _reject_markup(visible_text)
     text = visible_text.strip()
 
     abbreviations = {
