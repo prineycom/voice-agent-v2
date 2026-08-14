@@ -45,6 +45,31 @@ SERVER_SECRET_NAMES = frozenset({
     "LIVEKIT_KEYS",
 })
 FORBIDDEN_CLOUD_NAMES = frozenset({"LITELLM_BASE_URL", "LITELLM_TOKEN_FILE"})
+SERVE_READINESS_TIMEOUT_SECONDS = 5.0
+SERVE_STATUS_LIMIT_BYTES = 64 * 1024
+
+
+class ProcessSupervisor:
+    """Own and stop only child processes started by this runner."""
+
+    def __init__(self) -> None:
+        self.processes: list[subprocess.Popen] = []
+
+    def start(self, command: list[str], **kwargs: object) -> subprocess.Popen:
+        process = subprocess.Popen(command, **kwargs)
+        self.processes.append(process)
+        return process
+
+    def close(self) -> None:
+        first_error: BaseException | None = None
+        for process in reversed(self.processes):
+            try:
+                stop(process)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
 
 def required(name: str) -> str:
@@ -173,6 +198,150 @@ def stop(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+def read_tailscale_serve_status(
+    environment: dict[str, str], *, timeout: float = 5.0,
+) -> dict[str, object]:
+    try:
+        status = subprocess.run(
+            ["tailscale", "serve", "status", "--json"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise Slice6ConfigurationError("Tailscale Serve status is unavailable") from error
+    if status.returncode != 0 or len(status.stdout.encode("utf-8")) > SERVE_STATUS_LIMIT_BYTES:
+        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+    try:
+        document = json.loads(status.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise Slice6ConfigurationError("Tailscale Serve status is unavailable") from error
+    if not isinstance(document, dict):
+        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+    return document
+
+
+def serve_route_state(
+    document: dict[str, object], *, hostname: str, https_port: int, target: str,
+) -> str:
+    configurations: list[dict[str, object]] = [document]
+    foreground = document.get("Foreground", {})
+    if not isinstance(foreground, dict):
+        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+    for configuration in foreground.values():
+        if not isinstance(configuration, dict):
+            raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+        configurations.append(configuration)
+
+    port_key = str(https_port)
+    web_key = f"{hostname}:{https_port}"
+    port_suffix = f":{https_port}"
+    exact_found = False
+    conflicting_use_found = False
+    for configuration in configurations:
+        tcp = configuration.get("TCP", {})
+        web = configuration.get("Web", {})
+        if not isinstance(tcp, dict) or not isinstance(web, dict):
+            raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+        tcp_entry = tcp.get(port_key)
+        web_entry = web.get(web_key)
+        handlers = web_entry.get("Handlers") if isinstance(web_entry, dict) else None
+        root_handler = handlers.get("/") if isinstance(handlers, dict) else None
+        exact = (
+            isinstance(tcp_entry, dict)
+            and tcp_entry.get("HTTPS") is True
+            and isinstance(root_handler, dict)
+            and root_handler.get("Proxy") == target
+        )
+        web_uses_port = any(
+            isinstance(key, str) and (key == port_key or key.endswith(port_suffix))
+            for key in web
+        )
+        uses_port = tcp_entry is not None or web_uses_port
+        exact_found = exact_found or exact
+        conflicting_use_found = conflicting_use_found or (uses_port and not exact)
+
+    if exact_found and not conflicting_use_found:
+        return "preexisting"
+    if not exact_found and not conflicting_use_found:
+        return "absent"
+    return "conflict"
+
+
+def wait_for_serve_route(
+    process: subprocess.Popen,
+    *,
+    environment: dict[str, str],
+    hostname: str,
+    https_port: int,
+    target: str,
+    timeout: float = SERVE_READINESS_TIMEOUT_SECONDS,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        if process.poll() is not None:
+            raise RuntimeError(f"Tailscale Serve HTTPS/{https_port} exited before readiness")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"Tailscale Serve HTTPS/{https_port} did not register within {timeout:.0f}s"
+            )
+        try:
+            document = read_tailscale_serve_status(
+                environment, timeout=min(1.0, remaining),
+            )
+        except Slice6ConfigurationError:
+            document = {}
+        if document and serve_route_state(
+            document, hostname=hostname, https_port=https_port, target=target,
+        ) == "preexisting":
+            if process.poll() is not None:
+                raise RuntimeError(f"Tailscale Serve HTTPS/{https_port} exited before readiness")
+            return
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
+def reconcile_serve_routes(
+    *,
+    supervisor: ProcessSupervisor,
+    environment: dict[str, str],
+    hostname: str,
+    routes: tuple[tuple[int, str], ...],
+    timeout: float = SERVE_READINESS_TIMEOUT_SECONDS,
+) -> dict[int, str]:
+    document = read_tailscale_serve_status(environment)
+    states = {
+        https_port: serve_route_state(
+            document, hostname=hostname, https_port=https_port, target=target,
+        )
+        for https_port, target in routes
+    }
+    conflicts = [str(port) for port, state in states.items() if state == "conflict"]
+    if conflicts:
+        raise Slice6ConfigurationError(
+            "conflicting Tailscale Serve mapping on HTTPS/" + ", HTTPS/".join(conflicts)
+        )
+
+    for https_port, target in routes:
+        if states[https_port] == "preexisting":
+            continue
+        process = supervisor.start([
+            "tailscale", "serve", "--yes", f"--https={https_port}", target,
+        ], env=environment)
+        wait_for_serve_route(
+            process,
+            environment=environment,
+            hostname=hostname,
+            https_port=https_port,
+            target=target,
+            timeout=timeout,
+        )
+        states[https_port] = "owned"
+    return states
+
+
 def main() -> int:
     if any(name in os.environ for name in FORBIDDEN_CLOUD_NAMES):
         raise Slice6ConfigurationError("LiteLLM configuration is forbidden in the local-LFM runtime")
@@ -247,7 +416,7 @@ def main() -> int:
     llama_environment["HOME"] = str(LFM_CACHE / "runtime" / "home")
     llama_environment["XDG_CACHE_HOME"] = str(LFM_CACHE / "runtime" / "home" / ".cache")
     llama_environment["LD_LIBRARY_PATH"] = f"{CUDA_OVERLAY}:{LLAMA_BIN_DIRECTORY}"
-    processes: list[subprocess.Popen] = []
+    supervisor = ProcessSupervisor()
     stopping = False
 
     def request_stop(_signum=None, _frame=None) -> None:
@@ -261,18 +430,16 @@ def main() -> int:
         llama_log = LFM_CACHE / "logs" / "slice6-local-lfm.log"
         llama_log.parent.mkdir(parents=True, exist_ok=True)
         llama_output = llama_log.open("ab", buffering=0)
-        local_lfm = subprocess.Popen(
+        local_lfm = supervisor.start(
             llama_command(), cwd=LFM_CACHE, env=llama_environment,
             stdout=llama_output, stderr=subprocess.STDOUT,
         )
-        processes.append(local_lfm)
         wait_for_port(local_lfm, LLAMA_PORT, "local LFM", timeout=30)
 
-        livekit = subprocess.Popen([str(binary)], cwd=ROOT, env=livekit_environment)
-        processes.append(livekit)
+        livekit = supervisor.start([str(binary)], cwd=ROOT, env=livekit_environment)
         wait_for_port(livekit, SIGNAL_PORT, "LiveKit")
 
-        gateway = subprocess.Popen(
+        gateway = supervisor.start(
             [
                 str(python), "-m", "uvicorn", "voice_agent_v2.slice6_gateway:app",
                 "--host", "127.0.0.1", "--port", str(GATEWAY_PORT),
@@ -281,18 +448,17 @@ def main() -> int:
             cwd=ROOT,
             env=gateway_environment,
         )
-        processes.append(gateway)
         wait_for_port(gateway, GATEWAY_PORT, "Slice 6 gateway", timeout=20)
 
-        app_serve = subprocess.Popen([
-            "tailscale", "serve", "--yes", f"--https={app_https_port}",
-            f"http://127.0.0.1:{GATEWAY_PORT}",
-        ], env=tailscale_environment)
-        signal_serve = subprocess.Popen([
-            "tailscale", "serve", "--yes", f"--https={signal_https_port}",
-            f"http://127.0.0.1:{SIGNAL_PORT}",
-        ], env=tailscale_environment)
-        processes.extend([app_serve, signal_serve])
+        serve_states = reconcile_serve_routes(
+            supervisor=supervisor,
+            environment=tailscale_environment,
+            hostname=str(app_public.hostname),
+            routes=(
+                (app_https_port, f"http://127.0.0.1:{GATEWAY_PORT}"),
+                (signal_https_port, f"http://127.0.0.1:{SIGNAL_PORT}"),
+            ),
+        )
         print("Voice Agent v2 Slice 6 local-LFM development app started")
         print(f"loopback: http://127.0.0.1:{GATEWAY_PORT}")
         print(f"tailnet: {app_public_url}")
@@ -308,19 +474,27 @@ def main() -> int:
             "TTS: Silero v5_5_ru / kseniya, native mono pcm_s16le/48000, "
             f"{silero_metadata['workers']} isolated workers; private noncommercial only"
         )
+        print(
+            "Tailscale Serve ownership: "
+            + ", ".join(
+                f"HTTPS/{port}={serve_states[port]}"
+                for port in (app_https_port, signal_https_port)
+            )
+        )
         print("Press Ctrl+C to stop this development run.")
 
         while not stopping:
-            for process in processes:
+            for process in supervisor.processes:
                 if process.poll() is not None:
                     raise RuntimeError("a Slice 6 development process exited unexpectedly")
             time.sleep(0.25)
     finally:
-        for process in reversed(processes):
-            stop(process)
-        llama_output_object = locals().get("llama_output")
-        if llama_output_object is not None:
-            llama_output_object.close()
+        try:
+            supervisor.close()
+        finally:
+            llama_output_object = locals().get("llama_output")
+            if llama_output_object is not None:
+                llama_output_object.close()
     return 0
 
 

@@ -8,6 +8,10 @@ CONFIG=$ROOT/.env.slice6
   echo "Copy .env.slice6.example to .env.slice6 and set every required value." >&2
   exit 2
 }
+# Ambient cloud configuration is unrelated to this fixed local-LFM runtime. Clear it
+# before loading the explicit operator-owned file so configured forbidden names still
+# reach the Python fail-closed validation below.
+unset LITELLM_BASE_URL LITELLM_TOKEN_FILE
 set -a
 # This file is explicit operator-owned server configuration and must remain untracked.
 . "$CONFIG"
