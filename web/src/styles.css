@@ -36,6 +36,8 @@ button { color: inherit; font: inherit; }
   color: var(--text-primary);
 }
 
+.voice-shell__content { position: absolute; inset: 0; }
+
 .voice-shell::after {
   content: "";
   position: absolute;
@@ -176,8 +178,13 @@ button.connection-indicator--action { color: var(--accent-amber); }
 .panel-empty { color: var(--text-secondary); font-size: .72rem; letter-spacing: .1em; }
 .panel-label { margin: 0 0 6px; color: var(--accent-cyan); font-size: .65rem; letter-spacing: .12em; }
 .dialogue-text { margin: 0 0 16px; font-family: var(--dialogue-sans); font-size: .94rem; line-height: 1.52; }
-.history-item { padding: 18px 0; border-bottom: 1px solid var(--border-subtle); }
-.history-item:first-child { padding-top: 0; }
+.history-item { border-bottom: 1px solid var(--border-subtle); }
+.history-item__select { display: block; width: 100%; padding: 18px 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.history-item:first-child .history-item__select { padding-top: 0; }
+.history-item__select[aria-pressed="true"] { box-shadow: inset 2px 0 var(--accent-magenta); }
+.history-item__select .panel-label,
+.history-item__select .dialogue-text,
+.history-item__select .outcome { display: block; }
 .outcome { margin: 0; color: var(--text-secondary); font-size: .64rem; letter-spacing: .08em; }
 .outcome--completed { color: var(--accent-green); }
 .outcome--interrupted { color: var(--accent-amber); }

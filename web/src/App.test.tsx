@@ -8,10 +8,11 @@ import {
   type AvatarModuleV1,
 } from './avatar/contract'
 import { ReviewStand } from './ReviewStand'
-import { REDUCE_MOTION_STORAGE_KEY } from './ui/useReducedMotion'
+import { AvatarViewport } from './ui/AvatarViewport'
 import { historyUserText } from './ui/panels/HistoryPanel'
+import { REDUCE_MOTION_STORAGE_KEY } from './ui/useReducedMotion'
 
-function testAvatarHost(onUpdate = vi.fn()): AvatarHostV1 {
+function testAvatarHost(onUpdate = vi.fn(), onCancel = vi.fn()): AvatarHostV1 {
   return new AvatarHostV1([() => {
     let root: HTMLElement | null = null
     const module: AvatarModuleV1 = {
@@ -29,7 +30,7 @@ function testAvatarHost(onUpdate = vi.fn()): AvatarHostV1 {
         container.replaceChildren(root)
       },
       update: onUpdate,
-      cancel: vi.fn(),
+      cancel: onCancel,
       dispose() { root?.remove(); root = null },
     }
     return module
@@ -91,6 +92,9 @@ describe('Slice 7 modular shell', () => {
     expect(historyPanel.hasAttribute('inert')).toBe(false)
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close history' }))
     expect(screen.getByText('Расскажи, что ты видишь.')).toBeTruthy()
+    const selectedTurn = screen.getByRole('button', { name: 'Select turn turn-review-0000' })
+    await user.click(selectedTurn)
+    expect(selectedTurn.getAttribute('aria-pressed')).toBe('true')
 
     await user.click(screen.getByRole('button', { name: 'Close history' }))
     expect(historyPanel.hasAttribute('inert')).toBe(true)
@@ -103,7 +107,12 @@ describe('Slice 7 modular shell', () => {
     expect(statusPanel.hasAttribute('inert')).toBe(false)
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close status' }))
     expect(screen.getByRole('tab', { name: 'SYSTEM' })).toBeTruthy()
-    expect(screen.getByRole('tab', { name: 'TIMELINE' })).toBeTruthy()
+    await user.click(screen.getByRole('tab', { name: 'TIMELINE' }))
+    expect(screen.getByText('TURN turn-review-0000')).toBeTruthy()
+    expect(screen.getByText('FIRST VISIBLE RESPONSE')).toBeTruthy()
+    expect(screen.getByText('SERVER-ACCEPTED PCM')).toBeTruthy()
+    expect(screen.queryByText('LLM FIRST TOKEN')).toBeNull()
+    expect(screen.queryByText('TTS FIRST AUDIO')).toBeNull()
   })
 
   it('uses the menu disconnect action and actionable full-screen reconnect overlay', async () => {
@@ -112,9 +121,68 @@ describe('Slice 7 modular shell', () => {
 
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
     await user.click(screen.getByRole('menuitem', { name: 'DISCONNECT' }))
-    expect(screen.getByRole('alert').textContent).toContain('CONNECTION LOST')
-    await user.click(screen.getByRole('button', { name: 'RECONNECT' }))
-    expect(screen.getByRole('status', { name: /READY/ })).toBeTruthy()
+    expect(screen.getByRole('alertdialog', { name: 'Connection lost' }).textContent).toContain('CONNECTION LOST')
+    const shellContent = document.querySelector('.voice-shell__content')
+    expect(shellContent?.hasAttribute('inert')).toBe(true)
+    const reconnect = screen.getByRole('button', { name: 'RECONNECT' })
+    expect(document.activeElement).toBe(reconnect)
+    await user.click(reconnect)
+    expect(screen.getByRole('dialog', { name: 'Ready' })).toBeTruthy()
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Ready' })).toBeNull())
+    expect(shellContent?.hasAttribute('inert')).toBe(false)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open menu' }))
+  })
+
+  it('suppresses avatar controls after interruption until the lifecycle resumes', () => {
+    const update = vi.fn()
+    const cancel = vi.fn()
+    const host = testAvatarHost(update, cancel)
+    const envelopeSubscription: {
+      listener: ((observation: { level: number; observedAtMs: number }) => void) | null
+    } = { listener: null }
+    const subscribeSpeechEnvelope = (listener: (observation: { level: number; observedAtMs: number }) => void) => {
+      envelopeSubscription.listener = listener
+      return () => { envelopeSubscription.listener = null }
+    }
+    const onHealth = vi.fn()
+    const { rerender } = render(
+      <AvatarViewport
+        host={host}
+        lifecycle="speaking"
+        motion="full"
+        subscribeSpeechEnvelope={subscribeSpeechEnvelope}
+        onHealth={onHealth}
+      />,
+    )
+    const updatesBeforeCancel = update.mock.calls.length
+
+    rerender(
+      <AvatarViewport
+        host={host}
+        lifecycle="interrupted"
+        motion="full"
+        subscribeSpeechEnvelope={subscribeSpeechEnvelope}
+        onHealth={onHealth}
+      />,
+    )
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledTimes(updatesBeforeCancel)
+    envelopeSubscription.listener?.({ level: 0.8, observedAtMs: performance.now() })
+    expect(update).toHaveBeenCalledTimes(updatesBeforeCancel)
+
+    rerender(
+      <AvatarViewport
+        host={host}
+        lifecycle="idle"
+        motion="full"
+        subscribeSpeechEnvelope={subscribeSpeechEnvelope}
+        onHealth={onHealth}
+      />,
+    )
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      lifecycle: 'idle',
+      speechEnvelope: null,
+    }))
   })
 
   it('maps the system reduced-motion preference to ambient-reduced avatar input', async () => {

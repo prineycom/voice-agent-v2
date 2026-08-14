@@ -48,7 +48,11 @@ export function AvatarViewport({
 
   useEffect(() => {
     const now = performance.now()
-    if (lifecycle === 'interrupted') host.cancel(now)
+    if (lifecycle === 'interrupted') {
+      envelopeRef.current = null
+      host.cancel(now)
+      return
+    }
     host.update({
       schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,
       timestampMs: now,
@@ -64,6 +68,7 @@ export function AvatarViewport({
   }, [host, idleSeed, lifecycle, motion, trackingTarget])
 
   useEffect(() => subscribeSpeechEnvelope((observation) => {
+    if (lifecycleRef.current === 'interrupted') return
     envelopeRef.current = observation
     const now = performance.now()
     host.update({

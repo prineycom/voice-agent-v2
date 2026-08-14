@@ -15,10 +15,14 @@ export function historyUserText(item: TurnHistoryItem): string {
 export function HistoryPanel({
   open,
   history,
+  selectedTurnId,
+  onSelectTurn,
   onClose,
 }: {
   open: boolean
   history: TurnHistoryItem[]
+  selectedTurnId: string | null
+  onSelectTurn(turnId: string): void
   onClose(): void
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -42,14 +46,22 @@ export function HistoryPanel({
           <p className="panel-empty">NO TURNS YET</p>
         ) : [...history].reverse().map((item) => (
           <article className="history-item" key={item.turnId}>
-            <p className="panel-label">USER</p>
-            <p className="dialogue-text">{historyUserText(item)}</p>
-            <p className="panel-label">AGENT</p>
-            <p className="dialogue-text">{item.assistant || 'Preparing response…'}</p>
-            <p className={`outcome outcome--${item.outcome ?? 'active'}`}>
-              {item.outcome === null ? 'ACTIVE' : OUTCOME_LABELS[item.outcome]}
-              {item.audioUnavailable ? ' · AUDIO UNAVAILABLE' : ''}
-            </p>
+            <button
+              type="button"
+              className="history-item__select"
+              aria-label={`Select turn ${item.turnId}`}
+              aria-pressed={selectedTurnId === item.turnId}
+              onClick={() => onSelectTurn(item.turnId)}
+            >
+              <span className="panel-label">USER</span>
+              <span className="dialogue-text">{historyUserText(item)}</span>
+              <span className="panel-label">AGENT</span>
+              <span className="dialogue-text">{item.assistant || 'Preparing response…'}</span>
+              <span className={`outcome outcome--${item.outcome ?? 'active'}`}>
+                {item.outcome === null ? 'ACTIVE' : OUTCOME_LABELS[item.outcome]}
+                {item.audioUnavailable ? ' · AUDIO UNAVAILABLE' : ''}
+              </span>
+            </button>
           </article>
         ))}
       </div>

@@ -32,10 +32,10 @@ start() {
     return
   fi
   rm -f "$PID_FILE"
-  git -C "$ROOT" diff --quiet && git -C "$ROOT" diff --cached --quiet || {
+  if [ -n "$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)" ]; then
     echo "Refusing to deploy a dirty worktree; commit the exact review head first." >&2
     exit 2
-  }
+  fi
   BUILD=$(git -C "$ROOT" rev-parse HEAD)
   mkdir -p "$ROOT/tmp"
   (

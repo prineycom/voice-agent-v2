@@ -1,3 +1,4 @@
+import type { RefObject } from 'react'
 import type { ConnectionState } from '../../state'
 
 export function ConnectionIndicator({
@@ -41,24 +42,60 @@ export function FullscreenConnectionOverlay({
   readyFlash,
   connectAttempted,
   onReconnect,
+  overlayRef,
 }: {
   connection: ConnectionState
   readyFlash: boolean
   connectAttempted: boolean
   onReconnect(): void
+  overlayRef: RefObject<HTMLDivElement | null>
 }) {
   if (connection === 'ready' && !readyFlash) return null
   if (connection === 'ready') {
-    return <div className="connection-overlay connection-overlay--ready" role="status">READY</div>
+    return (
+      <div
+        ref={overlayRef}
+        className="connection-overlay connection-overlay--ready"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Ready"
+        tabIndex={-1}
+      >READY</div>
+    )
   }
   if (connection === 'connecting' || (connection === 'idle' && !connectAttempted)) {
-    return <div className="connection-overlay" role="status">CONNECTING…</div>
+    return (
+      <div
+        ref={overlayRef}
+        className="connection-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Connecting"
+        tabIndex={-1}
+      >CONNECTING…</div>
+    )
   }
   if (connection === 'reconnecting') {
-    return <div className="connection-overlay connection-overlay--warning" role="status">RECONNECTING…</div>
+    return (
+      <div
+        ref={overlayRef}
+        className="connection-overlay connection-overlay--warning"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Reconnecting"
+        tabIndex={-1}
+      >RECONNECTING…</div>
+    )
   }
   return (
-    <div className="connection-overlay connection-overlay--error" role="alert">
+    <div
+      ref={overlayRef}
+      className="connection-overlay connection-overlay--error"
+      role="alertdialog"
+      aria-modal="true"
+      aria-label="Connection lost"
+      tabIndex={-1}
+    >
       <p>CONNECTION LOST</p>
       <button type="button" className="neon-action" onClick={onReconnect}>RECONNECT</button>
     </div>

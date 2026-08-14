@@ -20,6 +20,14 @@ function reviewState(): VoiceState {
     transcript: 'Расскажи, что ты видишь.',
     response: 'Я вижу спокойный неоновый интерфейс и готова продолжить разговор.',
     history: [{
+      turnId: 'turn-review-0000',
+      user: 'Поприветствуй меня.',
+      assistant: 'Привет! Я готова к разговору.',
+      outcome: 'completed',
+      audioUnavailable: false,
+      endpointToFirstVisibleMs: 356,
+      endpointToFirstAcceptedPcmMs: 590,
+    }, {
       turnId: 'turn-review-0001',
       user: 'Расскажи, что ты видишь.',
       assistant: 'Я вижу спокойный неоновый интерфейс и готова продолжить разговор.',

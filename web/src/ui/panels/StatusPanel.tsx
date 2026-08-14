@@ -60,8 +60,8 @@ function TimelineTab({
           <ol className="timeline-list">
             <li><span>ENDPOINT</span><strong>OBSERVED</strong></li>
             <li><span>STT FINAL</span><strong>{item.user ? 'OBSERVED' : 'NOT OBSERVED'}</strong></li>
-            <li><span>LLM FIRST TOKEN</span><strong>{milliseconds(item.endpointToFirstVisibleMs)}</strong></li>
-            <li><span>TTS FIRST AUDIO</span><strong>{milliseconds(item.endpointToFirstAcceptedPcmMs)}</strong></li>
+            <li><span>FIRST VISIBLE RESPONSE</span><strong>{milliseconds(item.endpointToFirstVisibleMs)}</strong></li>
+            <li><span>SERVER-ACCEPTED PCM</span><strong>{milliseconds(item.endpointToFirstAcceptedPcmMs)}</strong></li>
             <li><span>COMPLETION</span><strong>{item.outcome?.toUpperCase() ?? 'ACTIVE'}</strong></li>
           </ol>
         </>
@@ -79,6 +79,7 @@ export function StatusPanel({
   components,
   ttsSummary,
   history,
+  selectedTurnId,
   droppedEvents,
   avatarHealth,
   buildVersion,
@@ -89,6 +90,7 @@ export function StatusPanel({
   components: UiSystemComponent[]
   ttsSummary: string
   history: TurnHistoryItem[]
+  selectedTurnId: string | null
   droppedEvents: number
   avatarHealth: AvatarHealthV1
   buildVersion: string
@@ -97,7 +99,7 @@ export function StatusPanel({
 }) {
   const [tab, setTab] = useState<StatusTab>('system')
   const closeButtonRef = useRef<HTMLButtonElement>(null)
-  const latestTurn = history.at(-1) ?? null
+  const selectedTurn = history.find((item) => item.turnId === selectedTurnId) ?? history.at(-1) ?? null
   useEffect(() => {
     if (open) closeButtonRef.current?.focus()
   }, [open])
@@ -137,7 +139,7 @@ export function StatusPanel({
           />
         ) : (
           <TimelineTab
-            item={latestTurn}
+            item={selectedTurn}
             droppedEvents={droppedEvents}
             onDownloadDiagnostics={onDownloadDiagnostics}
           />
