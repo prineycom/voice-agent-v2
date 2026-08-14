@@ -1,7 +1,6 @@
 import {
   manifestIsCompatible,
   validateAvatarControl,
-  type AvatarControlInputV1,
   type AvatarHealthV1,
   type AvatarModuleFactoryV1,
   type AvatarModuleV1,
@@ -19,9 +18,9 @@ export class AvatarHostV1 {
   private activeModule: AvatarModuleV1 | null = null
   private activeFactoryIndex = -1
   private lastTimestampMs = -1
-  private lastControl: ValidatedAvatarControlV1 | null = null
   private rejectedInputs = 0
   private renderFailures = 0
+  private lastPublishedHealth: AvatarHealthV1 | null = null
   private readonly healthListeners = new Set<AvatarHealthListener>()
 
   constructor(
@@ -46,9 +45,15 @@ export class AvatarHostV1 {
     }
   }
 
-  update(input: AvatarControlInputV1): void {
+  update(input: unknown): void {
     if (this.container === null || this.activeModule === null) return
-    const control = validateAvatarControl(input)
+    const result = validateAvatarControl(input)
+    if (!result.accepted) {
+      this.rejectedInputs += result.rejectedSignals
+      this.publishHealth()
+      return
+    }
+    const control = result.control
     this.rejectedInputs += control.rejectedSignals
     if (control.timestampMs < this.lastTimestampMs) {
       this.rejectedInputs += 1
@@ -56,27 +61,30 @@ export class AvatarHostV1 {
       return
     }
     this.lastTimestampMs = control.timestampMs
-    this.lastControl = control
     try {
       this.activeModule.update(control)
     } catch {
       this.renderFailures += 1
-      this.failOver(control)
+      this.failOverUpdate(control)
     }
     this.publishHealth()
   }
 
   cancel(timestampMs: number): void {
-    if (this.activeModule === null || !Number.isFinite(timestampMs) || timestampMs < 0) {
+    if (
+      this.activeModule === null || !Number.isFinite(timestampMs)
+      || timestampMs < 0 || timestampMs < this.lastTimestampMs
+    ) {
       this.rejectedInputs += 1
       this.publishHealth()
       return
     }
+    this.lastTimestampMs = timestampMs
     try {
       this.activeModule.cancel(timestampMs)
     } catch {
       this.renderFailures += 1
-      if (this.lastControl !== null) this.failOver(this.lastControl)
+      this.failOverCancellation(timestampMs)
     }
     this.publishHealth()
   }
@@ -86,7 +94,7 @@ export class AvatarHostV1 {
     return {
       status: !mounted ? 'failed' : this.activeFactoryIndex === 0 ? 'ready' : 'degraded',
       activeModuleId: this.activeModule?.manifest.id ?? null,
-      usingFallback: this.activeFactoryIndex > 0,
+      usingFallback: mounted && this.activeFactoryIndex > 0,
       rejectedInputs: this.rejectedInputs,
       renderFailures: this.renderFailures,
     }
@@ -100,13 +108,12 @@ export class AvatarHostV1 {
       this.activeFactoryIndex = -1
       this.container?.replaceChildren()
       this.container = null
-      this.lastControl = null
       this.lastTimestampMs = -1
       this.publishHealth()
     }
   }
 
-  private failOver(control: ValidatedAvatarControlV1): void {
+  private switchToNextModule(): AvatarModuleV1 | null {
     const nextFactory = this.activeFactoryIndex + 1
     try {
       this.activeModule?.dispose()
@@ -114,19 +121,39 @@ export class AvatarHostV1 {
       this.renderFailures += 1
     }
     this.activeModule = null
+    this.activeFactoryIndex = -1
     this.container?.replaceChildren()
-    if (!this.activateFirstCompatibleModule(nextFactory)) return
-    const fallback = this.activeModule as AvatarModuleV1 | null
+    return this.activateFirstCompatibleModule(nextFactory) ? this.activeModule : null
+  }
+
+  private failOverUpdate(control: ValidatedAvatarControlV1): void {
+    const fallback = this.switchToNextModule()
     try {
       fallback?.update(control)
     } catch {
+      this.disableFailedFallback(fallback)
+    }
+  }
+
+  private failOverCancellation(timestampMs: number): void {
+    const fallback = this.switchToNextModule()
+    try {
+      fallback?.cancel(timestampMs)
+    } catch {
+      this.disableFailedFallback(fallback)
+    }
+  }
+
+  private disableFailedFallback(fallback: AvatarModuleV1 | null): void {
+    this.renderFailures += 1
+    try {
+      fallback?.dispose()
+    } catch {
       this.renderFailures += 1
-      try {
-        fallback?.dispose()
-      } finally {
-        this.activeModule = null
-        this.container?.replaceChildren()
-      }
+    } finally {
+      this.activeModule = null
+      this.activeFactoryIndex = -1
+      this.container?.replaceChildren()
     }
   }
 
@@ -161,6 +188,16 @@ export class AvatarHostV1 {
 
   private publishHealth(): void {
     const health = this.health()
+    const previous = this.lastPublishedHealth
+    if (
+      previous !== null
+      && previous.status === health.status
+      && previous.activeModuleId === health.activeModuleId
+      && previous.usingFallback === health.usingFallback
+      && previous.rejectedInputs === health.rejectedInputs
+      && previous.renderFailures === health.renderFailures
+    ) return
+    this.lastPublishedHealth = health
     this.onHealth?.(health)
     for (const listener of this.healthListeners) listener(health)
   }

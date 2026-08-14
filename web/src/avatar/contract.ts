@@ -55,9 +55,13 @@ export interface ValidatedAvatarControlV1 {
   lifecycle: AvatarLifecycleState
   motion: AvatarMotionPreference
   trackingTarget: AvatarTrackingTargetV1 | null
-  speechEnvelopeLevel: number
+  speechEnvelope: AvatarSpeechEnvelopeV1 | null
   rejectedSignals: number
 }
+
+export type AvatarControlValidationResultV1 =
+  | { accepted: true; control: ValidatedAvatarControlV1 }
+  | { accepted: false; rejectedSignals: number }
 
 export interface AvatarModuleManifestV1 {
   interfaceVersion: typeof AVATAR_HOST_INTERFACE_VERSION
@@ -95,9 +99,9 @@ const LIFECYCLES = new Set<AvatarLifecycleState>([
 const MOTION_PREFERENCES = new Set<AvatarMotionPreference>([
   'full', 'ambient-reduced', 'static',
 ])
-const MAX_TARGET_AGE_MS = 750
-const MAX_ENVELOPE_AGE_MS = 250
-const MAX_FUTURE_SKEW_MS = 100
+export const MAX_TARGET_AGE_MS = 750
+export const MAX_ENVELOPE_AGE_MS = 250
+export const MAX_FUTURE_SKEW_MS = 100
 const MIN_TARGET_CONFIDENCE = 0.2
 const MAX_IDLE_SEED = 0xffff_ffff
 
@@ -110,61 +114,98 @@ function validAge(observedAtMs: number, nowMs: number, maximumAgeMs: number): bo
   return age >= -MAX_FUTURE_SKEW_MS && age <= maximumAgeMs
 }
 
+const CONTROL_KEYS = new Set([
+  'schemaVersion', 'timestampMs', 'idleSeed', 'lifecycle', 'motion',
+  'trackingTarget', 'speechEnvelope',
+])
+const TARGET_KEYS = new Set(['x', 'y', 'confidence', 'observedAtMs'])
+const ENVELOPE_KEYS = new Set(['level', 'observedAtMs', 'source'])
+
+function recordHasOnlyKeys(value: unknown, keys: ReadonlySet<string>): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.keys(value).every((key) => keys.has(key))
+}
+
+function invalidControl(): AvatarControlValidationResultV1 {
+  return { accepted: false, rejectedSignals: 1 }
+}
+
 /** Runtime validation is required even though in-repository producers are typed. */
-export function validateAvatarControl(input: AvatarControlInputV1): ValidatedAvatarControlV1 {
-  let rejectedSignals = 0
-  const timestampMs = finite(input.timestampMs) && input.timestampMs >= 0 ? input.timestampMs : 0
-  if (timestampMs !== input.timestampMs) rejectedSignals += 1
-  const idleSeed = Number.isSafeInteger(input.idleSeed)
-    && input.idleSeed >= 0
-    && input.idleSeed <= MAX_IDLE_SEED
-    ? input.idleSeed
-    : 1
-  if (idleSeed !== input.idleSeed) rejectedSignals += 1
-  const lifecycle = LIFECYCLES.has(input.lifecycle) ? input.lifecycle : 'idle'
-  if (lifecycle !== input.lifecycle) rejectedSignals += 1
-  const motion = MOTION_PREFERENCES.has(input.motion) ? input.motion : 'static'
-  if (motion !== input.motion) rejectedSignals += 1
-
-  let trackingTarget: AvatarTrackingTargetV1 | null = null
-  const target = input.trackingTarget
-  if (target !== null && target !== undefined) {
+export function validateAvatarControl(input: unknown): AvatarControlValidationResultV1 {
+  try {
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) return invalidControl()
+    const value = input as Record<string, unknown>
+    const keys = Object.keys(value)
+    if (keys.some((key) => !CONTROL_KEYS.has(key))) return invalidControl()
     if (
-      finite(target.x) && target.x >= -1 && target.x <= 1
-      && finite(target.y) && target.y >= -1 && target.y <= 1
-      && finite(target.confidence) && target.confidence >= MIN_TARGET_CONFIDENCE && target.confidence <= 1
-      && finite(target.observedAtMs) && validAge(target.observedAtMs, timestampMs, MAX_TARGET_AGE_MS)
-    ) {
-      trackingTarget = { ...target }
-    } else {
-      rejectedSignals += 1
-    }
-  }
+      value.schemaVersion !== AVATAR_CONTROL_SCHEMA_VERSION
+      || !finite(value.timestampMs) || value.timestampMs < 0
+      || !Number.isSafeInteger(value.idleSeed) || (value.idleSeed as number) < 0
+      || (value.idleSeed as number) > MAX_IDLE_SEED
+      || !LIFECYCLES.has(value.lifecycle as AvatarLifecycleState)
+      || !MOTION_PREFERENCES.has(value.motion as AvatarMotionPreference)
+    ) return invalidControl()
 
-  let speechEnvelopeLevel = 0
-  const envelope = input.speechEnvelope
-  if (envelope !== null && envelope !== undefined) {
-    if (
-      envelope.source === 'decoded-playout'
-      && finite(envelope.level) && envelope.level >= 0 && envelope.level <= 1
-      && finite(envelope.observedAtMs)
-      && validAge(envelope.observedAtMs, timestampMs, MAX_ENVELOPE_AGE_MS)
-    ) {
-      speechEnvelopeLevel = envelope.level
-    } else {
-      rejectedSignals += 1
+    const timestampMs = value.timestampMs
+    let rejectedSignals = 0
+    let trackingTarget: AvatarTrackingTargetV1 | null = null
+    const target = value.trackingTarget
+    if (target !== null && target !== undefined) {
+      if (
+        recordHasOnlyKeys(target, TARGET_KEYS)
+        && finite(target.x) && target.x >= -1 && target.x <= 1
+        && finite(target.y) && target.y >= -1 && target.y <= 1
+        && finite(target.confidence) && target.confidence >= MIN_TARGET_CONFIDENCE
+        && target.confidence <= 1
+        && finite(target.observedAtMs)
+        && validAge(target.observedAtMs, timestampMs, MAX_TARGET_AGE_MS)
+      ) {
+        trackingTarget = {
+          x: target.x,
+          y: target.y,
+          confidence: target.confidence,
+          observedAtMs: target.observedAtMs,
+        }
+      } else {
+        rejectedSignals += 1
+      }
     }
-  }
 
-  return {
-    schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,
-    timestampMs,
-    idleSeed,
-    lifecycle,
-    motion,
-    trackingTarget,
-    speechEnvelopeLevel,
-    rejectedSignals,
+    let speechEnvelope: AvatarSpeechEnvelopeV1 | null = null
+    const envelope = value.speechEnvelope
+    if (envelope !== null && envelope !== undefined) {
+      if (
+        recordHasOnlyKeys(envelope, ENVELOPE_KEYS)
+        && envelope.source === 'decoded-playout'
+        && finite(envelope.level) && envelope.level >= 0 && envelope.level <= 1
+        && finite(envelope.observedAtMs)
+        && validAge(envelope.observedAtMs, timestampMs, MAX_ENVELOPE_AGE_MS)
+      ) {
+        speechEnvelope = {
+          level: envelope.level,
+          observedAtMs: envelope.observedAtMs,
+          source: envelope.source,
+        }
+      } else {
+        rejectedSignals += 1
+      }
+    }
+
+    return {
+      accepted: true,
+      control: {
+        schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,
+        timestampMs,
+        idleSeed: value.idleSeed as number,
+        lifecycle: value.lifecycle as AvatarLifecycleState,
+        motion: value.motion as AvatarMotionPreference,
+        trackingTarget,
+        speechEnvelope,
+        rejectedSignals,
+      },
+    }
+  } catch {
+    return invalidControl()
   }
 }
 

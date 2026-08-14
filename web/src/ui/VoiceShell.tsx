@@ -12,6 +12,7 @@ import { HistoryPanel } from './panels/HistoryPanel'
 import { StatusPanel } from './panels/StatusPanel'
 import { mapVoiceStateToUi } from './stateMapping'
 import { useReducedMotion } from './useReducedMotion'
+import { useTurnFailureLifecycle } from './useTurnFailureLifecycle'
 
 interface VoiceShellProps {
   state: VoiceState
@@ -60,9 +61,10 @@ export function VoiceShell({
     systemReducedMotion,
     toggleUserReducedMotion,
   } = useReducedMotion()
+  const turnFailureActive = useTurnFailureLifecycle(state)
   const model = useMemo(
-    () => mapVoiceStateToUi(state, avatarHealth),
-    [state, avatarHealth],
+    () => mapVoiceStateToUi(state, avatarHealth, turnFailureActive),
+    [state, avatarHealth, turnFailureActive],
   )
   const motion = userReducedMotion
     ? 'static'

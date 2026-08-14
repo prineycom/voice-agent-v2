@@ -1,10 +1,10 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import App from './App'
 import { AvatarHostV1 } from './avatar/AvatarHost'
 import { createStaticFallbackModule } from './avatar/StaticFallbackModule'
 import { createMvpEyeModule } from './avatar/eye/MvpEyeModule'
-import { VoiceSessionProvider } from './VoiceSessionContext'
+import { ReviewStand } from './ReviewStand'
+import './styles.css'
 
 const root = document.getElementById('root')
 if (root === null) throw new Error('root element is missing')
@@ -17,8 +17,6 @@ const buildVersion = import.meta.env.VITE_APP_VERSION || 'development'
 
 createRoot(root).render(
   <StrictMode>
-    <VoiceSessionProvider>
-      <App avatarHost={avatarHost} buildVersion={buildVersion} />
-    </VoiceSessionProvider>
+    <ReviewStand avatarHost={avatarHost} buildVersion={buildVersion} />
   </StrictMode>,
 )

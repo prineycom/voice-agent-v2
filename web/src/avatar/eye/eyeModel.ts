@@ -1,6 +1,8 @@
-import type {
-  AvatarLifecycleState,
-  ValidatedAvatarControlV1,
+import {
+  MAX_ENVELOPE_AGE_MS,
+  MAX_TARGET_AGE_MS,
+  type AvatarLifecycleState,
+  type ValidatedAvatarControlV1,
 } from '../contract'
 
 export const EYE_PUPIL_BOUND_X = 0.38
@@ -44,6 +46,11 @@ function effectiveLifecycle(
   return lifecycle === 'interrupted' && elapsedMs >= 360 ? 'idle' : lifecycle
 }
 
+function observationIsFresh(observedAtMs: number, timeMs: number, maximumAgeMs: number): boolean {
+  const ageMs = timeMs - observedAtMs
+  return ageMs >= 0 && ageMs <= maximumAgeMs
+}
+
 /** Pure renderer model: the same validated fixture and time always produce the same state. */
 export function computeEyeRenderState(
   control: ValidatedAvatarControlV1,
@@ -57,11 +64,15 @@ export function computeEyeRenderState(
   let pupilX = 0
   let pupilY = 0
 
+  const trackingTarget = control.trackingTarget !== null
+    && observationIsFresh(control.trackingTarget.observedAtMs, safeTimeMs, MAX_TARGET_AGE_MS)
+    ? control.trackingTarget
+    : null
   if (!staticFrame && lifecycle !== 'thinking') {
-    if (control.trackingTarget !== null) {
-      const confidence = control.trackingTarget.confidence
-      pupilX = control.trackingTarget.x * EYE_PUPIL_BOUND_X * confidence
-      pupilY = control.trackingTarget.y * EYE_PUPIL_BOUND_Y * confidence
+    if (trackingTarget !== null) {
+      const confidence = trackingTarget.confidence
+      pupilX = trackingTarget.x * EYE_PUPIL_BOUND_X * confidence
+      pupilY = trackingTarget.y * EYE_PUPIL_BOUND_Y * confidence
     } else if (ambientEnabled) {
       const xPhase = seededUnit(control.idleSeed, 7) * Math.PI * 2
       const yPhase = seededUnit(control.idleSeed, 11) * Math.PI * 2
@@ -72,7 +83,9 @@ export function computeEyeRenderState(
 
   const blinkClosure = ambientEnabled && !staticFrame ? blinkAt(safeTimeMs, control.idleSeed) : 0
   const speechEnvelope = lifecycle === 'speaking' && !staticFrame
-    ? clamp(control.speechEnvelopeLevel, 0, 1)
+    && control.speechEnvelope !== null
+    && observationIsFresh(control.speechEnvelope.observedAtMs, safeTimeMs, MAX_ENVELOPE_AGE_MS)
+    ? clamp(control.speechEnvelope.level, 0, 1)
     : 0
   const stateScale = lifecycle === 'listening'
     ? 1.035

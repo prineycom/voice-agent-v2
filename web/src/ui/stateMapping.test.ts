@@ -45,6 +45,15 @@ describe('voice reducer to UI domain mapping', () => {
       lastTurnEvent: 'turn.interrupted',
     }, avatarReady).avatarLifecycle).toBe('interrupted')
 
+    const failedTurn = {
+      ...initialVoiceState,
+      connection: 'ready' as const,
+      currentTurnTerminal: true,
+      lastTurnEvent: 'turn.failed' as const,
+    }
+    expect(mapVoiceStateToUi(failedTurn, avatarReady, true).avatarLifecycle).toBe('error')
+    expect(mapVoiceStateToUi(failedTurn, avatarReady, false).avatarLifecycle).toBe('idle')
+
     expect(mapVoiceStateToUi({
       ...initialVoiceState,
       connection: 'ready',

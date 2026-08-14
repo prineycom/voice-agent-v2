@@ -117,7 +117,7 @@ export class MvpEyeModule implements AvatarModuleV1 {
       timestampMs,
       lifecycle: 'interrupted',
       trackingTarget: null,
-      speechEnvelopeLevel: 0,
+      speechEnvelope: null,
     }
     this.draw(timestampMs)
   }

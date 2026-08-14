@@ -39,8 +39,9 @@ function voicePathHealth(connection: ConnectionState): ComponentHealth {
 export function mapVoiceStateToUi(
   state: VoiceState,
   avatarHealth: AvatarHealthV1,
+  turnFailureActive = false,
 ): VoiceUiModel {
-  const avatarLifecycle: AvatarLifecycleState = state.connection === 'failed'
+  const avatarLifecycle: AvatarLifecycleState = state.connection === 'failed' || turnFailureActive
     ? 'error'
     : state.connection === 'reconnecting'
       ? 'reconnecting'

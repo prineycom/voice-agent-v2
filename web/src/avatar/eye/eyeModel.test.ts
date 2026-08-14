@@ -12,7 +12,7 @@ import {
 } from './eyeModel'
 
 function control(overrides: Partial<AvatarControlInputV1> = {}) {
-  return validateAvatarControl({
+  const result = validateAvatarControl({
     schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,
     timestampMs: 1_000,
     idleSeed: 0x51ce_0007,
@@ -22,6 +22,8 @@ function control(overrides: Partial<AvatarControlInputV1> = {}) {
     speechEnvelope: null,
     ...overrides,
   })
+  if (!result.accepted) throw new Error('test control was rejected')
+  return result.control
 }
 
 function replay(input: ReturnType<typeof control>): string {
@@ -76,11 +78,13 @@ describe('deterministic MVP eye model', () => {
     expect(computeEyeRenderState(interrupted, 1_360).lifecycle).toBe('idle')
   })
 
-  it('pulses only speaking state from a validated decoded-playout envelope', () => {
-    const speaking = computeEyeRenderState(control({
+  it('pulses only speaking state from a fresh validated decoded-playout envelope', () => {
+    const speakingControl = control({
       lifecycle: 'speaking',
       speechEnvelope: { level: 0.75, observedAtMs: 1_000, source: 'decoded-playout' },
-    }), 1_000)
+    })
+    const speaking = computeEyeRenderState(speakingControl, 1_000)
+    const expired = computeEyeRenderState(speakingControl, 1_251)
     const thinking = computeEyeRenderState(control({
       lifecycle: 'thinking',
       speechEnvelope: { level: 0.75, observedAtMs: 1_000, source: 'decoded-playout' },
@@ -88,7 +92,21 @@ describe('deterministic MVP eye model', () => {
 
     expect(speaking.speechEnvelope).toBe(0.75)
     expect(speaking.outerScale).toBeGreaterThan(1.15)
+    expect(expired.speechEnvelope).toBe(0)
     expect(thinking.speechEnvelope).toBe(0)
+  })
+
+  it('expires a tracking observation at the renderer frame boundary', () => {
+    const trackedControl = control({
+      motion: 'ambient-reduced',
+      trackingTarget: { x: 1, y: -1, confidence: 1, observedAtMs: 1_000 },
+    })
+
+    expect(computeEyeRenderState(trackedControl, 1_750)).toMatchObject({
+      pupilX: EYE_PUPIL_BOUND_X,
+      pupilY: -EYE_PUPIL_BOUND_Y,
+    })
+    expect(computeEyeRenderState(trackedControl, 1_751)).toMatchObject({ pupilX: 0, pupilY: 0 })
   })
 
   it('applies both reduced-motion levels without losing understandable state', () => {

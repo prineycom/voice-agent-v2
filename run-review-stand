@@ -40,7 +40,7 @@ start() {
   mkdir -p "$ROOT/tmp"
   (
     cd "$ROOT/web"
-    VITE_APP_VERSION="$BUILD" npm run build
+    VITE_APP_VERSION="$BUILD" npm run build:review
   )
   nohup python3 "$ROOT/scripts/review_stand.py" serve >"$LOG_FILE" 2>&1 &
   PID=$!
