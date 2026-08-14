@@ -50,7 +50,7 @@ The active app accepts no `LITELLM_*` or TTS-selection configuration. Run the mo
 ./verify-silero-kseniya
 ```
 
-`./verify-silero-kseniya` loads exactly two resident CPU workers from the pinned read-only model cache, proves native 48-kHz totals, obsolete/current overlap with stale discard, full two-worker RSS/CPU, VAD/Whisper coexistence, and explicit controlled recovery. It writes content-free task evidence only under `~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship/`. It does not claim audibility, voice quality, physical barge-in, or the complete browser stack. `./verify-real-streaming` is now only a compatibility alias for this active check; it no longer imports or starts Qwen.
+`./verify-silero-kseniya` loads exactly two resident CPU workers from the pinned read-only model cache, proves native 48-kHz totals, obsolete/current overlap with stale discard, full two-worker RSS/CPU, VAD/Whisper coexistence, and explicit controlled recovery. It writes content-free task evidence only under `~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship/`. It does not claim audibility, voice quality, physical barge-in, or the complete browser stack. `./verify-real-streaming` remains a historical Qwen compatibility harness and is not part of the active branch checks.
 
 Start the foreground development stack with:
 
@@ -62,14 +62,7 @@ Startup verifies the exact LFM and Silero identities before it starts local llam
 
 ### Pasha physical acceptance and rollback
 
-1. Check out this branch, run the setup/verification commands above, fill ignored `.env.slice6`, and run `./run-slice6`. Do not run it beside another stack on the same ports.
-2. Open `http://127.0.0.1:8000`. Confirm the badge says **Silero v5_5_ru · kseniya · native mono PCM16 48 kHz · private noncommercial · CC BY-NC-SA 4.0**.
-3. Exercise an ordinary Russian answer; numbers; `14.08.2026` and `09:30`; `PDF`/`SSD`; and a punctuation-rich response long enough to require several segments. Visible/history text must remain the original LLM text and must never show internal `+` stress markers.
-4. While speech is audible, speak to barge in; interrupt the replacement again rapidly. Old audio must stop within 250 ms of confirmed server speech start, never resume, and the newest turn must remain usable. Any capacity/synthesis/readiness failure must be explicit, content-free, and must not retry or fall back.
-5. Record pass/fail, perceived joins (target ≤120 ms; repeated >200 ms fails), redacted diagnostics, and full-stack resources. Automated counters do not prove the speaker was audible.
-6. To roll back, stop this foreground run with Ctrl+C, check out the previously recorded branch/commit, and run that revision's own setup/verify/start procedure. Preserve caches. There is deliberately no in-branch Qwen switch.
-
-The detailed evidence boundary and checklist are in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](docs/evidence/silero-kseniya-48k-private-evaluation.md). Do not merge this branch until physical acceptance, separate licensing, and legal review are all complete.
+Follow the authoritative acceptance and rollback checklist in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](docs/evidence/silero-kseniya-48k-private-evaluation.md). It owns the required Kseniya audibility/quality/join, repeated barge-in, tailnet, full-stack resource, evidence-handling, and rollback procedure. Do not merge this branch until physical acceptance, separate licensing, and legal review are all complete.
 
 ## Final Slice 5 human acceptance
 
