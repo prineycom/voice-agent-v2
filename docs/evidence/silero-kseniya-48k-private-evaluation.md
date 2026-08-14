@@ -106,11 +106,25 @@ This is full two-worker measurement, not a 2× extrapolation. It proves native s
 
 TTS readiness, identity, capacity, synthesis, format, protocol, timeout, and resource failures are content-free and terminal for spoken output. Visible text and already accepted prefix remain; later segments stop; `turn.completed` is absent. No hidden retry/fallback exists. Default server/browser diagnostics prohibit prompt, transcript, response, raw audio, PCM, environment, token, or secret content. They expose only bounded correlation, backend/model/speaker/rate/worker IDs, counts, timings, queue high-water, padding, stale/failure counters, and readiness transitions.
 
+## Official startup ownership
+
+`./run-slice6` discards only ambient inherited `LITELLM_BASE_URL` and `LITELLM_TOKEN_FILE` before it sources operator-owned `.env.slice6`; putting either name in that file remains an explicit fail-closed configuration error. It reads current Tailscale Serve status without credentials before mutation, including the CLI's per-client `Foreground` documents. Exact existing application/signaling mappings are externally owned and remain after shutdown, conflicts fail before any route starts, and absent routes start as foreground children serially only after a bounded exact-status check. Cleanup stops only children created by that invocation, so unrelated handlers (including HTTPS `443` → `127.0.0.1:3000`) and pre-existing exact mappings survive. There is no global reset, background route, service manager, retry, or blind startup sleep.
+
+The corrected host smoke started the official wrapper with both forbidden names present only in the inherited ambient environment. The operator file did not configure them, so the fixed local-LFM gate admitted startup. Both initially absent Serve routes registered serially as two foreground children and remained supervised. The stable stack observed:
+
+- loopback HTTP `8000`, LiveKit signaling TCP `7880`, tailnet WebRTC UDP `7882`, and local LFM HTTP `18080` listening on their documented addresses;
+- HTTP 200 from loopback `8000`, tailnet HTTPS `8443`, and signaling HTTPS `7443`, plus local LFM `{"status":"ok"}`;
+- exactly two resident `silero_kseniya_worker.py` processes and the fixed Kseniya/native-48 identity printed by the runner;
+- unchanged unrelated HTTPS `443` → `127.0.0.1:3000` throughout;
+- clean Ctrl+C teardown, semantic equality of Serve status before/after, no `8443`/`7443` foreground entries, and no owned process or `8000`/`7880`/`7882`/`18080` listener remaining.
+
+This is startup, routing, identity, residency, and cleanup evidence only. It does not prove browser interaction, audibility, voice quality, physical barge-in, or second-client tailnet acceptance.
+
 ## Pasha manual acceptance — still required
 
 Keep captures outside Git and do not paste secrets or conversation content into a PR.
 
-1. Record the previous branch/commit. On this branch run `./setup-slice6`, `./setup-silero-kseniya`, `./verify-slice6`, `./verify-local-lfm`, and `./verify-silero-kseniya`; fill ignored `.env.slice6`; start only `./run-slice6` after confirming no other stack occupies its ports.
+1. Record the previous branch/commit. On this branch run `./setup-slice6`, `./setup-silero-kseniya`, `./verify-slice6`, `./verify-local-lfm`, and `./verify-silero-kseniya`; fill ignored `.env.slice6`; start only `./run-slice6` after confirming no other stack occupies its loopback/service ports. Confirm the printed Serve ownership for `8443` and `7443` is `owned` or intentionally `preexisting`; any conflict must fail closed.
 2. Open `http://127.0.0.1:8000`, connect the microphone, and verify the exact Silero/Kseniya/native48/private-noncommercial/CC badge.
 3. Speak a normal Russian request. Confirm a useful visible original-LFM response and audible Kseniya speech; automation does not establish either physical fact.
 4. Exercise numbers, a `14.08.2026` date, `09:30`, `PDF`/`SSD`, `ё`, and an answer long enough for multiple sentence/clause segments. Confirm natural/intelligible pronunciation and joins. Join target is ≤120 ms; repeated >200-ms gaps or broken intonation fails. Confirm visible/history text did not change and contains no injected `+`.
