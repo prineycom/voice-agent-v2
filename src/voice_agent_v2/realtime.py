@@ -115,7 +115,7 @@ class TurnContext:
     first_pcm_ms: float | None = None
     media_publication_id: str | None = None
     internal_event_sequence: int = 0
-    inference_stage: str = "stt"
+    noncooperative_worker_drains: int = 0
 
 
 @dataclass(frozen=True)
@@ -356,25 +356,21 @@ class RealtimeSession:
                     await self._degrade_locked("tts", "tts_backend_not_ready")
                     raise RuntimeError("TTS backend is not ready for admission")
                 if self._active is not None and not self._active.terminal:
-                    interrupted_context = self._active
                     cleanup, drain_error, _publication_id = await self._interrupt_locked("barge_in")
                     if drain_error is not None:
                         await self._degrade_locked("publication", drain_error)
                         raise RuntimeError("audio publication could not be cancelled safely")
                     if cleanup is not None:
-                        if interrupted_context.inference_stage == "tts":
-                            self._watch_cleanup(cleanup)
-                        else:
-                            try:
-                                cleanup_error = await asyncio.wait_for(
-                                    asyncio.shield(cleanup),
-                                    CANCELLATION_CLEANUP_BOUND_MS / 1000,
-                                )
-                            except TimeoutError:
-                                cleanup_error = "cancellation_cleanup_timeout"
-                            if cleanup_error is not None:
-                                await self._degrade_locked("controller", cleanup_error)
-                                raise RuntimeError("inference cancellation did not drain safely")
+                        try:
+                            cleanup_error = await asyncio.wait_for(
+                                asyncio.shield(cleanup),
+                                CANCELLATION_CLEANUP_BOUND_MS / 1000,
+                            )
+                        except TimeoutError:
+                            cleanup_error = "cancellation_cleanup_timeout"
+                        if cleanup_error is not None:
+                            await self._degrade_locked("controller", cleanup_error)
+                            raise RuntimeError("inference cancellation did not drain safely")
                 elif self._active is not None:
                     drain_error, _publication_id = await self._clear_audio(SESSION_TURN_ID)
                     if drain_error is not None:
@@ -646,10 +642,15 @@ class RealtimeSession:
             )
             if any(isinstance(result, BaseException) or result is not None for result in results):
                 raise RuntimeError("cancellation_cleanup_failed")
-        context = self._active
-        task = context.task if context is not None else None
-        if task is not None and task is not asyncio.current_task():
-            await asyncio.shield(task)
+        while True:
+            pending_turns = tuple(
+                task
+                for task in self._turn_tasks
+                if task is not asyncio.current_task() and not task.done()
+            )
+            if not pending_turns:
+                break
+            await asyncio.gather(*(asyncio.shield(task) for task in pending_turns))
         error = await self._await_cleanup_barrier(None)
         if error is not None:
             raise RuntimeError(error)
@@ -725,12 +726,7 @@ class RealtimeSession:
             drain_error, publication_id = await self._clear_audio(context.turn_id)
         finally:
             drain_ms = (time.monotonic() - started) * 1000
-            detach_obsolete_tts = context.inference_stage == "tts"
-            cleanup = self._ensure_context_cleanup(
-                context,
-                wait_for_turn=not detach_obsolete_tts,
-                admission_blocking=not detach_obsolete_tts,
-            )
+            cleanup = self._ensure_context_cleanup(context)
         if notify_client:
             payload: dict[str, object] = {
                 "outcome": "interrupted",
@@ -977,8 +973,12 @@ class RealtimeSession:
                 runner_arguments[name] = value
         if "trace_observer" in run_parameters:
             def observe_trace(stage: str, event: str, fields: dict[str, object]) -> None:
-                if stage in {"stt", "llm_provider", "tts"}:
-                    context.inference_stage = stage
+                if stage == "tts" and event == "noncooperative_worker_started":
+                    context.noncooperative_worker_drains += 1
+                elif stage == "tts" and event == "noncooperative_worker_finished":
+                    context.noncooperative_worker_drains = max(
+                        0, context.noncooperative_worker_drains - 1
+                    )
                 self._trace(stage, event, turn_id=context.turn_id, **fields)
 
             runner_arguments["trace_observer"] = observe_trace
@@ -1020,6 +1020,8 @@ class RealtimeSession:
                 if not consumer.done():
                     consumer.cancel()
 
+        if context.terminal or self._closed:
+            return
         if pump_errors:
             error = pump_errors[0]
             stage = error.stage if isinstance(error, StageFailure) else "publication"
@@ -1352,12 +1354,6 @@ class RealtimeSession:
             self.drop_counts["stale_event"] += 1
             return
         event_type = event.get("type")
-        if event_type == "turn.transcribing":
-            context.inference_stage = "stt"
-        elif event_type == "turn.thinking":
-            context.inference_stage = "llm_provider"
-        elif event_type in {"turn.speaking", "tts.audio"}:
-            context.inference_stage = "tts"
         if event_type in {
             "turn.listening", "turn.transcribing", "llm.final", "turn.speaking",
             "tts.audio", "turn.completed", "turn.interrupted", "turn.failed",

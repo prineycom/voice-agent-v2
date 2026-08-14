@@ -191,15 +191,18 @@ class FakeVisibleLLM:
     provider_mode = "local"
     provider_identity = "deterministic-local"
     supports_visible_handoff = True
+    visible_handoff_is_cumulative = True
 
     def __init__(self, pieces: tuple[str, ...]) -> None:
         self.pieces = pieces
 
     def respond_with_handoff(self, *, on_sentence, on_visible_sentence, **_arguments) -> str:
+        cumulative = ""
         for piece in self.pieces:
-            on_visible_sentence(piece)
+            cumulative += piece
+            on_visible_sentence(cumulative)
             on_sentence(piece)
-        return " ".join(self.pieces)
+        return cumulative
 
 
 class FakeTTSV2:
@@ -207,6 +210,7 @@ class FakeTTSV2:
     identity = MODEL_IDENTITY
     speaker = "kseniya"
     output_format = TTS_OUTPUT_AUDIO_FORMAT
+    capabilities = {"cooperative_cancel": False}
 
     def __init__(self, fail_segment: int | None = None) -> None:
         self.fail_segment = fail_segment
@@ -231,7 +235,7 @@ class RealTurnTTSV2Tests(unittest.TestCase):
     def pieces(self) -> tuple[str, ...]:
         return (
             "На двери висит замок, а рядом находится старинный замок.",
-            "Сегодня 14.08.2026 года встреча начнётся в 09:30.",
+            " Сегодня 14.08.2026 года встреча начнётся в 09:30.",
         )
 
     def test_visible_history_is_original_while_v2_segments_are_correlated_and_shaped(self) -> None:
@@ -254,7 +258,7 @@ class RealTurnTTSV2Tests(unittest.TestCase):
         self.assertTrue(all(event["turn_generation"] == 7 for event in result.events))
         self.assertTrue(all(event["request_id"] == "request-test" for event in result.events))
         visible = [event["payload"]["response"] for event in result.events if event["type"] == "llm.visible"]
-        self.assertEqual(visible[-1], " ".join(self.pieces()))
+        self.assertEqual(visible[-1], "".join(self.pieces()))
         self.assertNotIn("+", visible[-1])
         self.assertEqual([call["segment_index"] for call in tts.calls], list(range(len(tts.calls))))
         self.assertTrue(all(call["stream_epoch"] == 3 for call in tts.calls))
@@ -280,7 +284,32 @@ class RealTurnTTSV2Tests(unittest.TestCase):
         self.assertNotIn("turn.completed", [event["type"] for event in result.events])
         self.assertTrue(observed_audio)
         visible = [event["payload"]["response"] for event in result.events if event["type"] == "llm.visible"]
-        self.assertEqual(visible[-1], " ".join(self.pieces()))
+        self.assertEqual(visible[-1], "".join(self.pieces()))
+
+    def test_visible_decimal_prefix_remains_byte_exact(self) -> None:
+        pieces = ("Значение равно 3.", "14 и не меняется.")
+        controller = RealTurnController(FakeSTT(), FakeVisibleLLM(pieces), FakeTTSV2())
+        result = controller.run_turn(
+            session_id="session-test",
+            turn_id="turn-test",
+            input_pcm=b"\0\0" * 320,
+            request_id="request-test",
+        )
+
+        expected = "".join(pieces)
+        visible = [
+            event["payload"]["response"]
+            for event in result.events
+            if event["type"] == "llm.visible"
+        ]
+        self.assertEqual(visible[-1], expected)
+        self.assertEqual(
+            next(event for event in result.events if event["type"] == "llm.final")[
+                "payload"
+            ]["response"],
+            expected,
+        )
+        self.assertTrue(all("3. 14" not in prefix for prefix in visible))
 
 
 class SileroPoolTests(unittest.TestCase):
@@ -441,6 +470,28 @@ class SileroPoolTests(unittest.TestCase):
                 gate.set()
             for worker in workers:
                 worker.join(1)
+            pool.close()
+
+    def test_failed_recovery_warmup_keeps_replacement_quarantined(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        try:
+            pool.quarantine_worker_for_controlled_check("silero-1")
+            coordinator.fail_requests.add("recovery-request-1")
+
+            with self.assertRaises(StageFailure) as failure:
+                pool.recover()
+
+            self.assertEqual(failure.exception.code, "silero_recovery_failed")
+            self.assertEqual(pool.ready_count, 1)
+            self.assertEqual(
+                next(slot for slot in pool.slots if slot["worker_id"] == "silero-1")[
+                    "state"
+                ],
+                "unhealthy",
+            )
+            self.assertEqual(len(pool.process_ids), 1)
+        finally:
             pool.close()
 
     def test_failure_has_no_retry_and_explicit_recovery_never_co_starts_third(self) -> None:

@@ -589,17 +589,23 @@ class SileroWorkerPool:
             if not unhealthy or any(slot.state == "busy" for slot in self._slots):
                 raise StageFailure("tts", "silero_recovery_not_admissible")
         for slot in unhealthy:
-            self._start_slot(slot)
-            key = TTSRequestKey(
-                "recovery-session", 1, f"recovery-{slot.worker_id}", 1,
-                f"recovery-request-{slot.worker_id[-1]}", 0,
-            )
-            pcm, _ = self._request_on_slot(slot, key, "Готово.")
-            if not pcm:
-                self._quarantine(slot)
-                raise StageFailure("tts", "silero_recovery_failed")
-            slot.state = "idle"
-            slot.last_idle = time.monotonic()
+            try:
+                self._start_slot(slot)
+                key = TTSRequestKey(
+                    "recovery-session", 1, f"recovery-{slot.worker_id}", 1,
+                    f"recovery-request-{slot.worker_id[-1]}", 0,
+                )
+                pcm, _ = self._request_on_slot(slot, key, "Готово.")
+                if not pcm:
+                    raise StageFailure("tts", "silero_recovery_failed")
+            except Exception as error:
+                if slot.process is not None or slot.state != "unhealthy":
+                    self._quarantine(slot)
+                raise StageFailure("tts", "silero_recovery_failed") from error
+            with self._condition:
+                slot.state = "idle"
+                slot.active_key = None
+                slot.last_idle = time.monotonic()
         with self._condition:
             self._condition.notify_all()
         return self.readiness_metadata()

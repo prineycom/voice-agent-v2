@@ -19,6 +19,37 @@ class ResidentQwenWarmupTests(CheckpointBWarmupTests):
     """Checkpoint B discard-only resident Qwen warm-up behavior."""
 
 
+class CloseRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_repeats_when_nested_close_remains_incomplete(self) -> None:
+        runtime = load_runtime()
+
+        class CleanupBoundary:
+            async def wait_for_cleanup(self) -> None:
+                return None
+
+        controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
+        controller.session_id = "session-test"
+        controller.session = CleanupBoundary()
+        controller.audio_sink = CleanupBoundary()
+        controller._close_retry_task = None
+        controller._cleanup_complete = False
+        attempts = 0
+
+        async def close(*, notify: bool = True) -> None:
+            nonlocal attempts
+            self.assertTrue(notify)
+            attempts += 1
+            if attempts == 2:
+                controller._cleanup_complete = True
+
+        controller.close = close
+        controller._schedule_close_retry(True)
+        await asyncio.wait_for(controller._close_retry_task, 0.5)
+
+        self.assertEqual(attempts, 2)
+        self.assertTrue(controller._cleanup_complete)
+
+
 class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_invalidation_discards_active_stale_vad_candidate(self) -> None:
         runtime = load_runtime()

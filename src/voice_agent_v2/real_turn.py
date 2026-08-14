@@ -228,7 +228,7 @@ class RealTurnController:
 
         tts_error: StageFailure | None = None
         tts_started = False
-        visible_fragments: list[str] = []
+        visible_text = ""
         visible_chars = 0
         tts_bytes = 0
         tts_deadline = time.monotonic() + MAX_TURN_TTS_SECONDS
@@ -240,18 +240,23 @@ class RealTurnController:
         create_turn_budget = getattr(self.tts, "create_turn_budget", None)
         turn_budget = create_turn_budget() if create_turn_budget is not None else None
 
-        def publish_visible_sentence(sentence: str) -> None:
-            nonlocal visible_chars
+        def publish_visible_text(update: str) -> None:
+            nonlocal visible_chars, visible_text
             if token.cancelled:
                 raise _TurnInterrupted
-            visible_fragments.append(sentence)
-            visible_chars += len(sentence)
+            if getattr(self.llm, "visible_handoff_is_cumulative", False):
+                if not update.startswith(visible_text):
+                    raise StageFailure("llm_provider", "selected_provider_protocol_error")
+                visible_text = update
+            else:
+                visible_text += update
+            visible_chars = len(visible_text)
             emit("llm.visible", {
-                "response": " ".join(visible_fragments),
+                "response": visible_text,
                 "provider_mode": self.llm.provider_mode,
                 "provider_identity": self.llm.provider_identity,
             })
-            trace("llm_provider", "visible_sentence", visible_chars=visible_chars)
+            trace("llm_provider", "visible_text", visible_chars=visible_chars)
 
         def synthesize_segment(segment: str) -> None:
             nonlocal tts_error, tts_started, tts_chunks, tts_bytes, segment_index
@@ -291,30 +296,43 @@ class RealTurnController:
                     visible_chars=len(segment),
                 )
                 sentence_chunks = 0
-                for chunk in self.tts.stream_synthesize(**arguments):
-                    if token.cancelled:
-                        continue
-                    tts_chunks += 1
-                    sentence_chunks += 1
-                    tts_bytes += len(chunk)
-                    if (
-                        tts_chunks > MAX_TURN_TTS_CHUNKS
-                        or tts_bytes > tts_output_limit
-                        or time.monotonic() >= tts_deadline
-                    ):
-                        raise StageFailure("tts", "selected_tts_output_out_of_bounds")
-                    if retain_output:
-                        output_chunks.append(chunk)
-                    if audio_observer is not None:
-                        audio_observer(tts_chunks - 1, chunk)
-                    emit("tts.audio", {
-                        "chunk_index": tts_chunks - 1,
-                        "segment_index": current_segment,
-                        "byte_count": len(chunk),
-                        "audio_format": self.tts.output_format.as_dict(),
-                    })
-                    if cancel_after_output_chunks == tts_chunks:
-                        token.cancel()
+                noncooperative = active_v2 and not bool(
+                    getattr(self.tts, "capabilities", {}).get("cooperative_cancel", True)
+                )
+                if noncooperative:
+                    trace("tts", "noncooperative_worker_started", segment_index=current_segment)
+                try:
+                    for chunk in self.tts.stream_synthesize(**arguments):
+                        if token.cancelled:
+                            continue
+                        tts_chunks += 1
+                        sentence_chunks += 1
+                        tts_bytes += len(chunk)
+                        if (
+                            tts_chunks > MAX_TURN_TTS_CHUNKS
+                            or tts_bytes > tts_output_limit
+                            or time.monotonic() >= tts_deadline
+                        ):
+                            raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+                        if retain_output:
+                            output_chunks.append(chunk)
+                        if audio_observer is not None:
+                            audio_observer(tts_chunks - 1, chunk)
+                        emit("tts.audio", {
+                            "chunk_index": tts_chunks - 1,
+                            "segment_index": current_segment,
+                            "byte_count": len(chunk),
+                            "audio_format": self.tts.output_format.as_dict(),
+                        })
+                        if cancel_after_output_chunks == tts_chunks:
+                            token.cancel()
+                finally:
+                    if noncooperative:
+                        trace(
+                            "tts",
+                            "noncooperative_worker_finished",
+                            segment_index=current_segment,
+                        )
                 if token.cancelled:
                     raise _TurnInterrupted
                 trace(
@@ -356,15 +374,20 @@ class RealTurnController:
                     "cancellation": token,
                 }
                 if getattr(self.llm, "supports_visible_handoff", False):
-                    arguments["on_visible_sentence"] = publish_visible_sentence
+                    arguments["on_visible_sentence"] = publish_visible_text
                 else:
                     def visible_then_synthesize(sentence: str) -> None:
-                        publish_visible_sentence(sentence)
+                        publish_visible_text(sentence)
                         synthesize_visible_piece(sentence)
                     arguments["on_sentence"] = visible_then_synthesize
                 if getattr(self.llm, "supports_handoff_abort", False):
-                    def abort_handoff() -> None:
+                    def abort_handoff() -> bool:
                         cancel_adapters(self.tts)
+                        return active_v2 and not bool(
+                            getattr(self.tts, "capabilities", {}).get(
+                                "cooperative_cancel", True
+                            )
+                        )
 
                     arguments["on_handoff_abort"] = abort_handoff
                 return self.llm.respond_with_handoff(**arguments)
@@ -372,7 +395,7 @@ class RealTurnController:
                 session_id=session_id, turn_id=turn_id, transcript=transcript,
                 cancellation=token,
             )
-            publish_visible_sentence(response)
+            publish_visible_text(response)
             synthesize_visible_piece(response)
             return response
 
@@ -394,7 +417,9 @@ class RealTurnController:
                 return interrupted()
             except StageFailure as error:
                 tts_error = error
-        if not visible_fragments:
+        if visible_text != response:
+            visible_text = response
+            visible_chars = len(response)
             emit("llm.visible", {
                 "response": response,
                 "provider_mode": self.llm.provider_mode,

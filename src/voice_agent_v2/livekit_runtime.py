@@ -1008,9 +1008,12 @@ class LiveKitRoomController:
 
         async def retry_after_cleanup() -> None:
             try:
-                await self.session.wait_for_cleanup()
-                await self.audio_sink.wait_for_cleanup()
-                await self.close(notify=notify)
+                while not self._cleanup_complete:
+                    await self.session.wait_for_cleanup()
+                    await self.audio_sink.wait_for_cleanup()
+                    await self.close(notify=notify)
+                    if not self._cleanup_complete:
+                        await asyncio.sleep(0.05)
             except Exception:
                 pass
 

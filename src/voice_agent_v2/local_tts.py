@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Iterator
 
-from .audio import OUTPUT_MEDIA_MAX_SECONDS, TTS_V1_OUTPUT_MEDIA_MAX_BYTES
+from .audio import OUTPUT_MEDIA_MAX_BYTES, OUTPUT_MEDIA_MAX_SECONDS
 from .contracts import AudioFormat, StageFailure, TTS_VERSION, valid_correlation_id
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
@@ -22,7 +22,7 @@ OUTPUT_FORMAT = AudioFormat()
 TTS_REQUEST_TIMEOUT_SECONDS = float(OUTPUT_MEDIA_MAX_SECONDS)
 MAX_TTS_CHUNKS = 4096
 MAX_TTS_AUDIO_SECONDS = OUTPUT_MEDIA_MAX_SECONDS
-MAX_TTS_OUTPUT_BYTES = TTS_V1_OUTPUT_MEDIA_MAX_BYTES
+MAX_TTS_OUTPUT_BYTES = OUTPUT_MEDIA_MAX_BYTES
 
 
 @dataclass

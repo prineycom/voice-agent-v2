@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import unittest
 
 from tests.test_checkpoint_ab import (
@@ -71,6 +72,7 @@ class OverlapRunner:
         self.old_release = threading.Event()
         self.replacement_started = threading.Event()
         self.cancelled_keys: list[tuple[str, int, str, int]] = []
+        self.drain_threads: list[threading.Thread] = []
 
     def ready_for_admission(self) -> bool:
         return True
@@ -100,9 +102,19 @@ class OverlapRunner:
 
         if turn_generation == 1:
             if trace_observer is not None:
-                trace_observer("tts", "segment_started", {})
-            self.old_started.set()
-            self.old_release.wait(2)
+                trace_observer("tts", "noncooperative_worker_started", {})
+
+            def drain_worker() -> None:
+                self.old_started.set()
+                self.old_release.wait(2)
+                if trace_observer is not None:
+                    trace_observer("tts", "noncooperative_worker_finished", {})
+
+            drain = threading.Thread(target=drain_worker)
+            self.drain_threads.append(drain)
+            drain.start()
+            while not cancellation.cancelled:
+                time.sleep(0.01)
             emit("turn.interrupted", {"outcome": "interrupted"}, True)
             return TraceResult(tuple(events), b"", b"")
 
@@ -160,6 +172,8 @@ class ObsoleteCurrentOverlapTests(unittest.IsolatedAsyncioTestCase):
         )
 
         runner.old_release.set()
+        await asyncio.to_thread(runner.drain_threads[0].join, 0.5)
+        self.assertFalse(runner.drain_threads[0].is_alive())
         await asyncio.wait_for(
             asyncio.gather(*(task for task in tuple(session._turn_tasks))), 0.5
         )
@@ -169,6 +183,75 @@ class ObsoleteCurrentOverlapTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(old_terminals), 1)
         self.assertEqual(old_terminals[0]["type"], "turn.interrupted")
+
+
+class CooperativeCleanupRunner(OverlapRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cooperative_cleanup_started = threading.Event()
+
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
+        audio_observer, stream_epoch, turn_generation, request_id,
+        trace_observer=None, retain_output=True,
+    ) -> TraceResult:
+        if turn_generation != 1:
+            return super().run_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_pcm=input_pcm,
+                cancellation=cancellation,
+                event_observer=event_observer,
+                audio_observer=audio_observer,
+                stream_epoch=stream_epoch,
+                turn_generation=turn_generation,
+                request_id=request_id,
+                trace_observer=trace_observer,
+                retain_output=retain_output,
+            )
+        del input_pcm, audio_observer, retain_output
+        if trace_observer is not None:
+            trace_observer("tts", "segment_completed", {})
+        self.cooperative_cleanup_started.set()
+        self.old_release.wait(2)
+        event = EventEnvelopeV2(
+            session_id=session_id,
+            turn_id=turn_id,
+            stream_epoch=stream_epoch,
+            turn_generation=turn_generation,
+            request_id=request_id,
+            sequence=1,
+            event_type="turn.interrupted",
+            payload={"outcome": "interrupted"},
+            terminal=True,
+        ).as_dict()
+        event_observer(event)
+        return TraceResult((event,), b"", b"")
+
+
+class CooperativeCleanupBarrierTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacement_waits_for_post_tts_cooperative_cleanup(self) -> None:
+        runner = CooperativeCleanupRunner()
+        session = RealtimeSession(
+            session_id="session-cleanup",
+            runner=runner,
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+        self.assertTrue(
+            await asyncio.to_thread(runner.cooperative_cleanup_started.wait, 0.5)
+        )
+
+        replacement = asyncio.create_task(session.submit_utterance(b"\0\0" * 320))
+        await asyncio.sleep(0.05)
+        self.assertFalse(replacement.done())
+        self.assertFalse(runner.replacement_started.is_set())
+
+        runner.old_release.set()
+        await asyncio.wait_for(replacement, 0.5)
+        self.assertTrue(await asyncio.to_thread(runner.replacement_started.wait, 0.5))
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
 
 
 class RealtimeCheckpointTests(CheckpointARealtimeTests):

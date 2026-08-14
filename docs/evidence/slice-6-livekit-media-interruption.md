@@ -7,8 +7,6 @@
 
 This report distinguishes executable evidence from physical observations. Pasha's first Firefox attempt failed: background/silence triggered turns and no useful visible/audible response was accepted. The diagnosis is preserved outside the repository; none of the corrections below relabel that failed test or claim final Slice 6 acceptance.
 
-> **Later private TTS evaluation branch:** ADR-0009 replaces only the active TTS leg with Silero/Kseniya TTS v2 and native 48-kHz media while preserving this Qwen/TTS-v1 report as historical evidence. Its separate results and still-open Pasha checklist are in [`silero-kseniya-48k-private-evaluation.md`](silero-kseniya-48k-private-evaluation.md). No Qwen selector/fallback remains active on that branch.
-
 ## Implemented stack and boundaries
 
 | Boundary | Pinned implementation | Evidence |
