@@ -112,8 +112,13 @@ class RealTurnController:
         self._validate_contract_versions()
         if not all(valid_correlation_id(value) for value in (session_id, turn_id, request_id)):
             raise ValueError("session, turn, and request IDs must satisfy the correlation-ID contract")
-        if stream_epoch < 1 or turn_generation < 1:
-            raise ValueError("stream epoch and turn generation must be positive")
+        if any(
+            type(value) is not int or not 1 <= value <= 1_000_000_000
+            for value in (stream_epoch, turn_generation)
+        ):
+            raise ValueError(
+                "stream epoch and turn generation must be integers from 1 to 1000000000"
+            )
         if (segment_started_observer is None) != (segment_audio_observer is None):
             raise ValueError("segment reservation observers must be supplied together")
         active_v2 = getattr(self.tts, "version", None) == TTS_V2_VERSION

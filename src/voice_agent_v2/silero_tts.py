@@ -64,6 +64,22 @@ WORKER_REQUEST_ERROR_CLASSES = frozenset({
     "waveform_out_of_bounds",
     "synthesis_failed",
 })
+WORKER_READY_EVENT_FIELDS = frozenset({
+    "protocol_version", "event", "worker_id", "pid", "model_identity",
+    "model_size_bytes", "model_sha256", "speaker", "native_sample_rates_hz",
+    "output_audio", "complete_waveform", "cooperative_cancel",
+    "max_parallel_requests", "intraop_threads", "interop_threads",
+})
+WORKER_CHUNK_EVENT_FIELDS = frozenset({
+    "protocol_version", "event", "key", "request_id", "sequence", "bytes",
+    "pcm_base64",
+})
+WORKER_FINAL_EVENT_FIELDS = frozenset({
+    "protocol_version", "event", "key", "request_id", "status",
+    "model_identity", "speaker", "encoding", "sample_rate_hz", "channels",
+    "sample_width_bytes", "chunk_count", "audio_bytes", "samples",
+    "duration_ms", "latency_ms", "terminal_count",
+})
 WORKER_ERROR_EVENT_FIELDS = frozenset({
     "protocol_version", "event", "key", "request_id", "error_class",
 })
@@ -420,6 +436,7 @@ class SileroWorkerPool:
         metadata = process.start(30)
         expected = {
             "protocol_version": WORKER_PROTOCOL_VERSION,
+            "event": "ready",
             "worker_id": slot.worker_id,
             "model_identity": MODEL_IDENTITY,
             "model_size_bytes": MODEL_SIZE,
@@ -433,7 +450,7 @@ class SileroWorkerPool:
             "intraop_threads": 2,
             "interop_threads": 1,
         }
-        if any(
+        if set(metadata) != WORKER_READY_EVENT_FIELDS or any(
             not _protocol_value_equal(metadata.get(name), value)
             for name, value in expected.items()
         ):
@@ -640,13 +657,15 @@ class SileroWorkerPool:
                 raise AdapterProcessError("Silero correlation mismatch")
             kind = event.get("event")
             if kind == "chunk":
+                if set(event) != WORKER_CHUNK_EVENT_FIELDS:
+                    raise AdapterProcessError("invalid Silero worker chunk frame")
                 if (
                     type(event.get("sequence")) is not int
                     or event.get("sequence") != chunk_count
                 ):
                     raise AdapterProcessError("Silero chunk sequence mismatch")
                 encoded = event.get("pcm_base64")
-                if not isinstance(encoded, str):
+                if type(encoded) is not str:
                     raise AdapterProcessError("Silero chunk encoding mismatch")
                 chunk = base64.b64decode(encoded, validate=True)
                 if (
@@ -663,6 +682,8 @@ class SileroWorkerPool:
                     raise AdapterProcessError("Silero output exceeds segment bound")
                 pcm_parts.append(chunk)
             elif kind == "final":
+                if set(event) != WORKER_FINAL_EVENT_FIELDS:
+                    raise AdapterProcessError("invalid Silero worker final frame")
                 if final is not None:
                     raise AdapterProcessError("duplicate Silero terminal")
                 final = event

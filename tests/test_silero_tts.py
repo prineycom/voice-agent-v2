@@ -50,7 +50,9 @@ class ProcessCoordinator:
         self.gates: dict[str, threading.Event] = {}
         self.entered: queue.Queue[tuple[str, str]] = queue.Queue()
         self.fail_requests: set[str] = set()
+        self.ready_overrides: dict[str, dict[str, object]] = {}
         self.error_overrides: dict[str, dict[str, object]] = {}
+        self.chunk_overrides: dict[str, dict[str, object]] = {}
         self.final_overrides: dict[str, object] = {}
         self.output_chunks: tuple[bytes, ...] | None = None
         self._pid = 7000
@@ -69,7 +71,7 @@ class FakeProcess:
         self.coordinator = coordinator
 
     def start(self, _timeout_seconds: float) -> dict:
-        return {
+        ready = {
             "event": "ready",
             "protocol_version": "voice-agent.silero-worker.v1",
             "worker_id": self.worker_id,
@@ -86,6 +88,8 @@ class FakeProcess:
             "intraop_threads": 2,
             "interop_threads": 1,
         }
+        ready.update(self.coordinator.ready_overrides.get(self.worker_id, {}))
+        return ready
 
     def stream(
         self, request: dict, _timeout_seconds: float, *, error_validator=None
@@ -117,7 +121,7 @@ class FakeProcess:
             bytes([self.process.pid % 251, 0]) * 960,
         )
         for sequence, chunk in enumerate(chunks):
-            yield {
+            event = {
                 "protocol_version": "voice-agent.silero-worker.v1",
                 "event": "chunk",
                 "request_id": request_id,
@@ -126,6 +130,8 @@ class FakeProcess:
                 "bytes": len(chunk),
                 "pcm_base64": __import__("base64").b64encode(chunk).decode("ascii"),
             }
+            event.update(self.coordinator.chunk_overrides.get(request_id, {}))
+            yield event
         pcm = b"".join(chunks)
         final = {
             "protocol_version": "voice-agent.silero-worker.v1",
@@ -401,6 +407,30 @@ class RealTurnTTSV2Tests(unittest.TestCase):
             observed_sequences,
             [int(event["sequence"]) for event in result.events],
         )
+
+    def test_invalid_v2_generation_correlation_is_rejected_before_publication(self) -> None:
+        invalid_values = (True, 1_000_000_001)
+        for field in ("stream_epoch", "turn_generation"):
+            for value in invalid_values:
+                with self.subTest(field=field, value=value):
+                    tts = FakeTTSV2()
+                    observed: list[dict[str, object]] = []
+                    arguments = {
+                        "session_id": "session-test",
+                        "turn_id": "turn-test",
+                        "input_pcm": b"\0\0" * 320,
+                        "request_id": "request-test",
+                        "event_observer": observed.append,
+                        field: value,
+                    }
+
+                    with self.assertRaisesRegex(ValueError, "integers from 1"):
+                        RealTurnController(
+                            FakeSTT(), FakeVisibleLLM(self.pieces()), tts
+                        ).run_turn(**arguments)
+
+                    self.assertEqual(observed, [])
+                    self.assertEqual(tts.calls, [])
 
     def test_tts_failure_keeps_visible_text_and_accepted_prefix_without_completion(self) -> None:
         tts = FakeTTSV2(fail_segment=1)
@@ -921,6 +951,52 @@ class SileroPoolTests(unittest.TestCase):
         finally:
             warmup_release.set()
             pool.close()
+
+    def test_ready_frame_with_extra_field_prevents_pool_readiness(self) -> None:
+        coordinator = ProcessCoordinator()
+        coordinator.ready_overrides["silero-1"] = {"unexpected": "field"}
+        pool = SileroWorkerPool(
+            process_factory=coordinator.factory,
+            verify_runtime=lambda: {"verified": True},
+        )
+        try:
+            with self.assertRaises(StageFailure) as failure:
+                pool.start()
+
+            self.assertEqual(failure.exception.code, "silero_worker_identity_mismatch")
+            self.assertEqual(pool.ready_count, 0)
+            self.assertEqual(len(coordinator.created), 1)
+            self.assertEqual(
+                len([p for p in coordinator.created if p.process.poll() is None]), 0
+            )
+        finally:
+            pool.close()
+
+    def test_chunk_or_final_frame_with_extra_field_quarantines_worker(self) -> None:
+        for frame in ("chunk", "final"):
+            with self.subTest(frame=frame):
+                coordinator = ProcessCoordinator()
+                pool = self.pool(coordinator)
+                try:
+                    overrides = (
+                        coordinator.chunk_overrides
+                        if frame == "chunk"
+                        else coordinator.final_overrides
+                    )
+                    if frame == "chunk":
+                        overrides["request-00000001"] = {"unexpected": "field"}
+                    else:
+                        overrides["unexpected"] = "field"
+
+                    with self.assertRaises(StageFailure) as failure:
+                        pool.synthesize(self.key(1), "Ошибка протокола.", None)
+
+                    self.assertEqual(failure.exception.code, "silero_worker_failed")
+                    self.assertEqual(pool.ready_count, 1)
+                    self.assertEqual(pool.counters["worker_quarantines"], 1)
+                    self.assertEqual(len(pool.process_ids), 1)
+                finally:
+                    pool.close()
 
     def test_validated_worker_error_is_request_failure_without_quarantine(self) -> None:
         coordinator = ProcessCoordinator()
