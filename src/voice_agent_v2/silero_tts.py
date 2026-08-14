@@ -258,11 +258,26 @@ class SileroWorkerPool:
         with self._condition:
             return len(set(self._turn_locks) | set(self._affinity) | set(self._invalid_turns))
 
+    def _refresh_worker_health_locked(self) -> None:
+        changed = False
+        for slot in self._slots:
+            if slot.state not in {"idle", "busy"}:
+                continue
+            if slot.ready_metadata is not None and self._slot_pid(slot) is not None:
+                continue
+            slot.state = "unhealthy"
+            slot.ready_metadata = None
+            self.counters["worker_quarantines"] += 1
+            changed = True
+        if changed:
+            self._condition.notify_all()
+
     @property
     def ready_count(self) -> int:
         with self._condition:
             if not self._started:
                 return 0
+            self._refresh_worker_health_locked()
             return sum(slot.state in {"idle", "busy"} for slot in self._slots)
 
     def require_ready(self) -> None:
@@ -617,12 +632,17 @@ class SileroWorkerPool:
     def recover(self) -> dict[str, object]:
         """Explicit post-degradation recovery; never used as a request retry."""
         with self._condition:
+            self._refresh_worker_health_locked()
             unhealthy = [slot for slot in self._slots if slot.state == "unhealthy"]
             if (
                 self._closed
                 or self._recovering
                 or not unhealthy
-                or any(slot.state == "busy" for slot in self._slots)
+                or any(
+                    slot.state not in {"idle", "unhealthy"}
+                    or slot.active_key is not None
+                    for slot in self._slots
+                )
             ):
                 raise StageFailure("tts", "silero_recovery_not_admissible")
             self._recovering = True
@@ -632,6 +652,8 @@ class SileroWorkerPool:
         try:
             for slot in unhealthy:
                 try:
+                    if slot.process is not None:
+                        self._stop_slot(slot, final_state="recovering")
                     self._start_slot(slot, ready_state="recovering")
                     key = TTSRequestKey(
                         "recovery-session", 1, f"recovery-{slot.worker_id}", 1,

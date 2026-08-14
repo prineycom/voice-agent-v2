@@ -27,6 +27,7 @@ from voice_agent_v2.silero_tts import (
     MODEL_IDENTITY,
     MODEL_SHA256,
     MODEL_SIZE,
+    SileroKseniyaTTS,
     SileroTurnBudget,
     SileroWorkerPool,
 )
@@ -689,6 +690,43 @@ class SileroPoolTests(unittest.TestCase):
             waiter.join(1)
             for worker in workers:
                 worker.join(1)
+            pool.close()
+
+    def test_idle_process_loss_blocks_admission_until_explicit_recovery(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        tts = SileroKseniyaTTS(pool)
+        try:
+            lost_process = coordinator.created[0]
+            lost_process.process.running = False
+
+            self.assertFalse(tts.ready_for_admission())
+            self.assertEqual(pool.ready_count, 1)
+            self.assertEqual(
+                next(slot for slot in pool.slots if slot["worker_id"] == "silero-1")[
+                    "state"
+                ],
+                "unhealthy",
+            )
+            with self.assertRaises(StageFailure) as unavailable:
+                pool.synthesize(self.key(1), "Нельзя принять новый ход.", None)
+            self.assertEqual(unavailable.exception.code, "silero_pool_not_ready")
+            self.assertEqual(len(coordinator.created), 2)
+            self.assertEqual(
+                len([process for process in coordinator.created if process.process.poll() is None]),
+                1,
+            )
+
+            recovered = pool.recover()
+
+            self.assertEqual(recovered["worker_count"], 2)
+            self.assertTrue(tts.ready_for_admission())
+            self.assertEqual(len(coordinator.created), 3)
+            self.assertEqual(
+                len([process for process in coordinator.created if process.process.poll() is None]),
+                2,
+            )
+        finally:
             pool.close()
 
     def test_failed_recovery_warmup_keeps_replacement_quarantined(self) -> None:
