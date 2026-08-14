@@ -17,7 +17,6 @@ from .audio import (
     INPUT_AUDIO_FORMAT,
     OUTPUT_DELIVERY_BLOCK_BYTES,
     OUTPUT_FRAME_BYTES,
-    OUTPUT_MEDIA_MAX_BYTES,
     TTS_OUTPUT_AUDIO_FORMAT,
 )
 from .diagnostics import PrivacySafeTrace, TraceIdentity

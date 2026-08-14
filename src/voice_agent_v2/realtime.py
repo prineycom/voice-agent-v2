@@ -18,8 +18,8 @@ from .audio import (
     INPUT_AUDIO_FORMAT,
     INPUT_MEDIA_MAX_BYTES,
     OUTPUT_DELIVERY_BLOCK_BYTES,
-    OUTPUT_MEDIA_MAX_BYTES,
     TTS_OUTPUT_AUDIO_FORMAT,
+    TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
 )
 from .contracts import TTS_V2_VERSION, StageFailure, valid_correlation_id
 from .tracer import CancellationToken, TraceResult
@@ -1167,7 +1167,7 @@ class RealtimeSession:
             not isinstance(output_bytes, int)
             or isinstance(output_bytes, bool)
             or output_bytes < 1
-            or output_bytes > OUTPUT_MEDIA_MAX_BYTES
+            or output_bytes > TTS_V2_OUTPUT_MEDIA_MAX_BYTES
             or context.audio_bytes_streamed != output_bytes
         ):
             await self._terminate_failed_turn(
@@ -1328,7 +1328,7 @@ class RealtimeSession:
             chunk_index != context.audio_chunk_sequence
             or not chunk
             or len(chunk) % 2
-            or context.audio_bytes_streamed + len(chunk) > OUTPUT_MEDIA_MAX_BYTES
+            or context.audio_bytes_streamed + len(chunk) > TTS_V2_OUTPUT_MEDIA_MAX_BYTES
         ):
             raise StageFailure("publication", "audio_stream_invalid")
         submitted_before = getattr(self.audio_sink, "submitted_bytes", None)

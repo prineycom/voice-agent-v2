@@ -10,7 +10,8 @@ from .audio import (
     INPUT_AUDIO_FORMAT,
     OUTPUT_MEDIA_MAX_BYTES,
     OUTPUT_MEDIA_MAX_SECONDS,
-    TTS_V1_OUTPUT_MEDIA_MAX_BYTES,
+    TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
+    TTS_V2_OUTPUT_MEDIA_MAX_SECONDS,
 )
 from .contracts import (
     EventEnvelope,
@@ -27,8 +28,8 @@ from .tracer import CancellationToken, TraceResult
 
 
 MAX_TURN_TTS_CHUNKS = 4096
-MAX_TURN_TTS_OUTPUT_BYTES = OUTPUT_MEDIA_MAX_BYTES
-MAX_TURN_TTS_SECONDS = float(OUTPUT_MEDIA_MAX_SECONDS)
+MAX_TURN_TTS_V2_OUTPUT_BYTES = TTS_V2_OUTPUT_MEDIA_MAX_BYTES
+MAX_TURN_TTS_V2_SECONDS = float(TTS_V2_OUTPUT_MEDIA_MAX_SECONDS)
 
 
 class _TurnInterrupted(Exception):
@@ -119,6 +120,7 @@ class RealTurnController:
             raise ValueError("segment reservation observers must be supplied together")
         active_v2 = getattr(self.tts, "version", None) == TTS_V2_VERSION
         events: list[dict[str, object]] = []
+        event_lock = threading.Lock()
         output_chunks: list[bytes] = []
         tts_chunks = 0
         token = cancellation or CancellationToken()
@@ -128,37 +130,38 @@ class RealTurnController:
                 trace_observer(stage, event, fields)
 
         def emit(event_type: str, payload: dict[str, object], terminal: bool = False) -> None:
-            if any(event["terminal"] for event in events):
-                raise AssertionError("cannot emit after terminal")
-            envelope = (
-                EventEnvelopeV2(
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    stream_epoch=stream_epoch,
-                    turn_generation=turn_generation,
-                    request_id=request_id,
-                    sequence=len(events) + 1,
-                    event_type=event_type,
-                    payload=payload,
-                    terminal=terminal,
-                    diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
+            with event_lock:
+                if any(event["terminal"] for event in events):
+                    raise AssertionError("cannot emit after terminal")
+                envelope = (
+                    EventEnvelopeV2(
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        stream_epoch=stream_epoch,
+                        turn_generation=turn_generation,
+                        request_id=request_id,
+                        sequence=len(events) + 1,
+                        event_type=event_type,
+                        payload=payload,
+                        terminal=terminal,
+                        diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
+                    )
+                    if active_v2
+                    else EventEnvelope(
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        sequence=len(events) + 1,
+                        event_type=event_type,
+                        payload=payload,
+                        terminal=terminal,
+                        diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
+                    )
                 )
-                if active_v2
-                else EventEnvelope(
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    sequence=len(events) + 1,
-                    event_type=event_type,
-                    payload=payload,
-                    terminal=terminal,
-                    diagnostic_timestamp=diagnostic_clock() if diagnostic_clock else None,
-                )
-            )
-            event = envelope.as_dict()
-            events.append(event)
-            if event_observer is not None:
-                event_observer(event)
-            trace("controller", "event", event_type=event_type, terminal=terminal)
+                event = envelope.as_dict()
+                events.append(event)
+                if event_observer is not None:
+                    event_observer(event)
+                trace("controller", "event", event_type=event_type, terminal=terminal)
 
         def fail(error: StageFailure) -> TraceResult:
             payload: dict[str, object] = {
@@ -239,9 +242,11 @@ class RealTurnController:
         visible_text = ""
         visible_chars = 0
         tts_bytes = 0
-        tts_deadline = time.monotonic() + MAX_TURN_TTS_SECONDS
+        tts_deadline = time.monotonic() + (
+            MAX_TURN_TTS_V2_SECONDS if active_v2 else float(OUTPUT_MEDIA_MAX_SECONDS)
+        )
         tts_output_limit = (
-            MAX_TURN_TTS_OUTPUT_BYTES if active_v2 else TTS_V1_OUTPUT_MEDIA_MAX_BYTES
+            MAX_TURN_TTS_V2_OUTPUT_BYTES if active_v2 else OUTPUT_MEDIA_MAX_BYTES
         )
         segmenter = RussianTTSSegmenter() if active_v2 else None
         segment_index = 0

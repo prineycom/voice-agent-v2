@@ -13,10 +13,10 @@ import time
 from typing import Callable, Iterator
 
 from .audio import (
-    OUTPUT_MEDIA_MAX_BYTES,
-    OUTPUT_MEDIA_MAX_SECONDS,
     TTS_OUTPUT_AUDIO_FORMAT,
     TTS_SEGMENT_MAX_BYTES,
+    TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
+    TTS_V2_OUTPUT_MEDIA_MAX_SECONDS,
 )
 from .contracts import (
     AudioFormat,
@@ -171,14 +171,14 @@ class SileroTurnBudget:
 
     @classmethod
     def create(cls) -> "SileroTurnBudget":
-        return cls(deadline=time.monotonic() + OUTPUT_MEDIA_MAX_SECONDS)
+        return cls(deadline=time.monotonic() + TTS_V2_OUTPUT_MEDIA_MAX_SECONDS)
 
     def consume(self, byte_count: int) -> None:
         self.segments += 1
         self.output_bytes += byte_count
         if (
             self.segments > MAX_SEGMENTS_PER_TURN
-            or self.output_bytes > OUTPUT_MEDIA_MAX_BYTES
+            or self.output_bytes > TTS_V2_OUTPUT_MEDIA_MAX_BYTES
             or time.monotonic() >= self.deadline
         ):
             raise StageFailure("tts", "selected_tts_output_out_of_bounds")

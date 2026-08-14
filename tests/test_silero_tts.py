@@ -12,6 +12,7 @@ from voice_agent_v2.audio import (
     OUTPUT_FRAME_BYTES,
     OUTPUT_MEDIA_MAX_BYTES,
     TTS_OUTPUT_AUDIO_FORMAT,
+    TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
 )
 from voice_agent_v2.contracts import (
     LLM_VERSION,
@@ -20,11 +21,13 @@ from voice_agent_v2.contracts import (
     StageFailure,
     TTSRequestKey,
 )
+from voice_agent_v2.local_tts import TurnTTSBudget
 from voice_agent_v2.process_adapter import AdapterRequestError
 from voice_agent_v2.silero_tts import (
     MODEL_IDENTITY,
     MODEL_SHA256,
     MODEL_SIZE,
+    SileroTurnBudget,
     SileroWorkerPool,
 )
 from voice_agent_v2.real_turn import RealTurnController
@@ -297,6 +300,80 @@ class RealTurnTTSV2Tests(unittest.TestCase):
         self.assertTrue(any("зам+ок" in str(call["synthesis_text"]) for call in tts.calls))
         self.assertEqual(sum(len(pcm) for _index, pcm in observed_audio), result.terminal_event["payload"]["output_bytes"])
 
+    def test_concurrent_handoff_events_have_serial_delivery_and_unique_sequences(self) -> None:
+        class ConcurrentCallbackLLM(FakeVisibleLLM):
+            def __init__(self) -> None:
+                super().__init__(("Это достаточно длинная проверочная фраза для синтеза.",))
+                self.text = self.pieces[0]
+                self.delivery_started = threading.Event()
+                self.release_delivery = threading.Event()
+                self.callback_started = threading.Event()
+                self.errors: list[BaseException] = []
+
+            def respond_with_handoff(
+                self, *, on_sentence, on_visible_sentence, **_arguments
+            ) -> str:
+                def run(callback) -> None:
+                    try:
+                        callback()
+                    except BaseException as error:
+                        self.errors.append(error)
+
+                visible = threading.Thread(
+                    target=run,
+                    args=(lambda: on_visible_sentence(self.text),),
+                )
+                visible.start()
+                if not self.delivery_started.wait(1):
+                    raise AssertionError("visible event delivery did not start")
+
+                def synthesize() -> None:
+                    self.callback_started.set()
+                    on_sentence(self.text)
+
+                speech = threading.Thread(target=run, args=(synthesize,))
+                speech.start()
+                if not self.callback_started.wait(1):
+                    raise AssertionError("speech callback did not start")
+                time.sleep(0.05)
+                self.release_delivery.set()
+                visible.join(1)
+                speech.join(1)
+                if visible.is_alive() or speech.is_alive():
+                    raise AssertionError("concurrent callbacks did not finish")
+                if self.errors:
+                    raise self.errors[0]
+                return self.text
+
+        llm = ConcurrentCallbackLLM()
+        overlapping_delivery = threading.Event()
+        observed_sequences: list[int] = []
+
+        def observe(event: dict[str, object]) -> None:
+            observed_sequences.append(int(event["sequence"]))
+            if event["type"] == "llm.visible":
+                llm.delivery_started.set()
+                if not llm.release_delivery.wait(1):
+                    raise AssertionError("visible event delivery was not released")
+            elif llm.delivery_started.is_set() and not llm.release_delivery.is_set():
+                overlapping_delivery.set()
+
+        result = RealTurnController(FakeSTT(), llm, FakeTTSV2()).run_turn(
+            session_id="session-test",
+            turn_id="turn-test",
+            input_pcm=b"\0\0" * 320,
+            request_id="request-test",
+            event_observer=observe,
+        )
+
+        self.assertEqual(result.terminal_event["type"], "turn.completed")
+        self.assertFalse(overlapping_delivery.is_set())
+        self.assertEqual(observed_sequences, list(range(1, len(result.events) + 1)))
+        self.assertEqual(
+            observed_sequences,
+            [int(event["sequence"]) for event in result.events],
+        )
+
     def test_tts_failure_keeps_visible_text_and_accepted_prefix_without_completion(self) -> None:
         tts = FakeTTSV2(fail_segment=1)
         controller = RealTurnController(FakeSTT(), FakeVisibleLLM(self.pieces()), tts)
@@ -449,7 +526,24 @@ class SileroPoolTests(unittest.TestCase):
             self.assertEqual(TTS_OUTPUT_AUDIO_FORMAT.sample_rate_hz, 48_000)
             self.assertEqual(OUTPUT_FRAME_BYTES, 1_920)
             self.assertEqual(OUTPUT_DELIVERY_BLOCK_BYTES, 5_760)
-            self.assertEqual(OUTPUT_MEDIA_MAX_BYTES, 17_280_000)
+            self.assertEqual(OUTPUT_MEDIA_MAX_BYTES, 5_760_000)
+            self.assertEqual(TTS_V2_OUTPUT_MEDIA_MAX_BYTES, 17_280_000)
+
+            v1_budget = TurnTTSBudget(deadline=float("inf"))
+            v1_budget.consume(OUTPUT_MEDIA_MAX_BYTES)
+            with self.assertRaises(StageFailure) as v1_overflow:
+                v1_budget.consume(1)
+            self.assertEqual(
+                v1_overflow.exception.code, "selected_tts_output_out_of_bounds"
+            )
+
+            v2_budget = SileroTurnBudget(deadline=float("inf"))
+            v2_budget.consume(TTS_V2_OUTPUT_MEDIA_MAX_BYTES)
+            with self.assertRaises(StageFailure) as v2_overflow:
+                v2_budget.consume(1)
+            self.assertEqual(
+                v2_overflow.exception.code, "selected_tts_output_out_of_bounds"
+            )
         finally:
             pool.close()
 
