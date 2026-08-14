@@ -127,7 +127,7 @@ Media and control remain distinct even when LiveKit transports both.
 
 **Decision:** remote microphone audio may travel only from an authorized tailnet client to LiveKit on the canonical host. Raw audio remains in local STT/TTS/media paths and is neither retained by default nor sent to a cloud LLM. In explicitly selected cloud mode, only the final transcript and permitted context cross the approved provider boundary. Synthesized audio may leave the host only through LiveKit to authorized session participants.
 
-**Hypothesis:** streaming STT and streaming TTS will meet the latency target with fewer resources than batch operation. The model/provider-budget and real-inference slices must test this.
+**Hypothesis:** streaming STT and incremental delivery of bounded complete-waveform TTS segments will meet the latency target with fewer resources than fully buffered turn delivery. The model/provider-budget and real-inference slices must test this.
 
 ## 5. Contracts and ownership
 
@@ -252,7 +252,7 @@ Every turn must be diagnosable without recording its private content by default.
 ### 8.1 Required structured observations
 
 - Build, contract, selected LLM provider mode/identity, loaded-model, and avatar-module identifiers.
-- Session and turn correlation IDs.
+- Session and turn correlation IDs. Concurrent TTS segment observations are selected by full session/epoch/turn/generation/request identity, never by temporal slices of shared adapter history.
 - State transitions and one terminal outcome per turn.
 - Audio duration/bytes, not raw audio.
 - Endpoint-to-STT-final, selected-provider time-to-first-token and completion, TTS time-to-first-audio, first programmatically observed browser audio signal, and total-turn timing; physical audibility/timing is recorded only by manual acceptance.
@@ -270,7 +270,7 @@ Raw recordings, transcripts, prompts, responses, model artifacts, tokens, and en
 
 ### 9.1 Tracked configuration
 
-Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, and the exact local LFM artifact/runtime/generation manifest. The active Slice 6 provider has no endpoint or credential configuration: llama.cpp is fixed at host loopback, and startup rejects every `LITELLM_*` value. Startup verifies the cache-local model size/hash and llama.cpp binary hash before admission.
+Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, and the exact local LFM and Silero artifact/runtime manifests. The active Slice 6 provider has no endpoint or credential configuration: llama.cpp is fixed at host loopback, and startup rejects every `LITELLM_*` value. Startup verifies both cache-local model identities and their pinned runtimes before admission.
 
 ### 9.2 Untracked local state
 
