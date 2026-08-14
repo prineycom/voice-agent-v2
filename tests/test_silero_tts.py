@@ -203,6 +203,7 @@ class RussianSegmentationTests(unittest.TestCase):
         for tagged in (
             "<speak>Секрет.</speak>",
             "<тег>Секрет.</тег>",
+            "<\u200ctag>Секрет.</\u200ctag>",
             "<незавершённый-тег",
         ):
             with self.subTest(tagged=tagged), self.assertRaises(StageFailure) as failure:
@@ -221,6 +222,14 @@ class RussianSegmentationTests(unittest.TestCase):
         with self.assertRaises(StageFailure) as unicode_failure:
             unicode_segmenter.feed("г>Секрет.</тег>")
         self.assertEqual(unicode_failure.exception.code, "tts_plain_text_required")
+
+        xml_name_start_segmenter = RussianTTSSegmenter()
+        self.assertEqual(xml_name_start_segmenter.feed("<"), ())
+        with self.assertRaises(StageFailure) as xml_name_start_failure:
+            xml_name_start_segmenter.feed("\u200ctag>Секрет.</\u200ctag>")
+        self.assertEqual(
+            xml_name_start_failure.exception.code, "tts_plain_text_required"
+        )
 
         long_prefix = RussianTTSSegmenter()
         unsafe = (
@@ -415,7 +424,7 @@ class RealTurnTTSV2Tests(unittest.TestCase):
         self.assertEqual(visible[-1], "".join(self.pieces()))
 
     def test_split_unicode_tag_fails_tts_without_rewriting_visible_text(self) -> None:
-        pieces = ("<те", "г>Секрет.</тег>")
+        pieces = ("<", "\u200ctag>Секрет.</\u200ctag>")
         tts = FakeTTSV2()
         controller = RealTurnController(FakeSTT(), FakeVisibleLLM(pieces), tts)
         result = controller.run_turn(

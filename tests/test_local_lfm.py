@@ -260,6 +260,53 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertTrue(provider.observations[-1]["success"])
         self.assertLess(provider.observations[-1]["completion_ms"], 50)
 
+    def test_cancel_after_stream_completion_detaches_blocked_final_handoff(self) -> None:
+        response = StubResponse([
+            stream_event(content="Готовый ответ."),
+            stream_event(finish="stop"),
+        ])
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(connection_factory=factory)
+        cancellation = CancellationToken()
+        callback_started = threading.Event()
+        callback_release = threading.Event()
+        abort_seen = threading.Event()
+        failures: list[BaseException] = []
+
+        def handoff(_sentence: str) -> None:
+            callback_started.set()
+            callback_release.wait(2)
+
+        def respond() -> None:
+            try:
+                provider.respond_with_handoff(
+                    session_id="session-a",
+                    turn_id="turn-a",
+                    transcript="Публичный запрос",
+                    on_sentence=handoff,
+                    on_handoff_abort=lambda: (abort_seen.set(), True)[1],
+                    cancellation=cancellation,
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        request = threading.Thread(target=respond)
+        request.start()
+        try:
+            self.assertTrue(callback_started.wait(0.5))
+            started = time.monotonic()
+            cancellation.cancel()
+            request.join(0.5)
+            self.assertFalse(request.is_alive())
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertTrue(abort_seen.is_set())
+            self.assertEqual(len(failures), 1)
+            self.assertIsInstance(failures[0], StageFailure)
+            self.assertEqual(failures[0].code, "selected_provider_cancelled")
+        finally:
+            callback_release.set()
+            request.join(1)
+
     def test_complete_sentence_handoff_occurs_before_stream_return(self) -> None:
         callback_seen = threading.Event()
         lines = [

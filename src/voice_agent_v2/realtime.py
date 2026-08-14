@@ -309,7 +309,12 @@ class RealtimeSession:
         self._disconnect_complete = False
         self._lock = asyncio.Lock()
         self._runner_lock = asyncio.Lock()
-        self._segment_capacity = asyncio.Semaphore(2)
+        shared_segment_capacity = getattr(runner, "complete_segment_capacity", None)
+        self._segment_capacity = (
+            shared_segment_capacity
+            if shared_segment_capacity is not None
+            else asyncio.BoundedSemaphore(2)
+        )
         self._reconnect_lock = asyncio.Lock()
         self._disconnect_lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[str | None]] = set()

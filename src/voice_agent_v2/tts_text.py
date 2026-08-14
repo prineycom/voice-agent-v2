@@ -25,21 +25,55 @@ _COMMON_DOT_ABBREVIATIONS = frozenset({
     "г", "гг", "ул", "д", "кв", "стр", "рис", "им", "т", "е", "н", "э",
     "тд", "тп", "др", "проф", "акад", "руб", "коп",
 })
-_SSML_OR_TAG = re.compile(
-    r"<\s*(?:/?\s*(?:[^\W\d_]|[_:])|[!?])[^>]*>", re.UNICODE
-)
-
-
-def _reject_markup(text: str) -> None:
-    if _SSML_OR_TAG.search(text) or "\x00" in text:
-        raise StageFailure("tts", "tts_plain_text_required")
+def _is_xml_name_start(character: str) -> bool:
+    if character in {":", "_"} or "A" <= character <= "Z" or "a" <= character <= "z":
+        return True
+    codepoint = ord(character)
+    return any(
+        start <= codepoint <= end
+        for start, end in (
+            (0xC0, 0xD6),
+            (0xD8, 0xF6),
+            (0xF8, 0x2FF),
+            (0x370, 0x37D),
+            (0x37F, 0x1FFF),
+            (0x200C, 0x200D),
+            (0x2070, 0x218F),
+            (0x2C00, 0x2FEF),
+            (0x3001, 0xD7FF),
+            (0xF900, 0xFDCF),
+            (0xFDF0, 0xFFFD),
+            (0x10000, 0xEFFFF),
+        )
+    )
 
 
 def _looks_like_tag_prefix(text: str) -> bool:
-    return bool(
-        re.match(r"^<\s*(?:/?\s*(?:[^\W\d_]|[_:])|[!?])", text, re.UNICODE)
-        or re.fullmatch(r"<\s*/?\s*", text)
-    )
+    if not text.startswith("<"):
+        return False
+    index = 1
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index < len(text) and text[index] == "/":
+        index += 1
+        while index < len(text) and text[index].isspace():
+            index += 1
+    if index == len(text):
+        return True
+    return text[index] in {"!", "?"} or _is_xml_name_start(text[index])
+
+
+def _reject_markup(text: str) -> None:
+    if "\x00" in text:
+        raise StageFailure("tts", "tts_plain_text_required")
+    offset = 0
+    while True:
+        start = text.find("<", offset)
+        if start < 0:
+            return
+        if _looks_like_tag_prefix(text[start:]) and text.find(">", start + 1) >= 0:
+            raise StageFailure("tts", "tts_plain_text_required")
+        offset = start + 1
 
 
 def _unmatched_tag_start(text: str) -> int | None:

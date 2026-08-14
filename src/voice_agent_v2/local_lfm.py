@@ -590,18 +590,28 @@ class LocalLFMProvider:
 
         handoff_finished = False
 
-        def finish_handoffs() -> None:
+        def finish_handoffs() -> str | None:
             nonlocal handoff_finished
             if handoff_finished:
-                return
-            if handoff_aborted.is_set():
-                abort_handoffs()
-                return
-            handoff_finished = True
+                return None
+            if handoff_aborted.is_set() or self._cancelled(generation):
+                return abort_handoffs()
             if handoff_queue is not None:
-                handoff_queue.put(None)
+                while True:
+                    if self._cancelled(generation):
+                        return abort_handoffs()
+                    try:
+                        handoff_queue.put(None, timeout=0.01)
+                        break
+                    except queue.Full:
+                        continue
             if handoff_thread is not None:
-                handoff_thread.join()
+                while handoff_thread.is_alive():
+                    if self._cancelled(generation):
+                        return abort_handoffs()
+                    handoff_thread.join(0.01)
+            handoff_finished = True
+            return None
 
         def abort_handoffs() -> str | None:
             nonlocal handoff_finished
@@ -698,7 +708,11 @@ class LocalLFMProvider:
                 error = StageFailure("llm_provider", code)
                 record_failure(error)
                 raise error from cause
-            finish_handoffs()
+            cleanup_code = finish_handoffs()
+            if cleanup_code is not None:
+                error = StageFailure("llm_provider", cleanup_code)
+                record_failure(error)
+                raise error
             if handoff_errors:
                 raise handoff_errors[0]
             if self._cancelled(generation):

@@ -58,6 +58,7 @@ class LiveTurnRunner:
         self.tts_profile = SileroVoiceProfile()
         self.tts = SileroKseniyaTTS()
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
+        self.complete_segment_capacity = asyncio.BoundedSemaphore(2)
         self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
         self._turn_correlations: dict[tuple[str, str], tuple[int, int]] = {}
         self._startup_cancellation = CancellationToken()

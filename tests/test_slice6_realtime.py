@@ -190,6 +190,8 @@ class ObsoleteCurrentOverlapTests(unittest.IsolatedAsyncioTestCase):
 class CrossGenerationCapacityRunner(OverlapRunner):
     def __init__(self) -> None:
         super().__init__()
+        self.complete_segment_capacity = asyncio.BoundedSemaphore(2)
+        self.old_session_id: str | None = None
         self.replacement_first_started = threading.Event()
         self.replacement_second_started = threading.Event()
 
@@ -202,7 +204,11 @@ class CrossGenerationCapacityRunner(OverlapRunner):
         del input_pcm, audio_observer, retain_output
         assert segment_started_observer is not None
         assert segment_audio_observer is not None
-        if turn_generation == 1:
+        if (
+            session_id == self.old_session_id
+            if self.old_session_id is not None
+            else turn_generation == 1
+        ):
             segment_started_observer(0)
             if trace_observer is not None:
                 trace_observer(
@@ -314,6 +320,52 @@ class CrossGenerationCapacityTests(unittest.IsolatedAsyncioTestCase):
             "turn.interrupted",
             [event["type"] for event in events.events if event["turn_id"] == first_turn],
         )
+
+    async def test_replacement_session_cannot_mint_new_segment_permits(self) -> None:
+        runner = CrossGenerationCapacityRunner()
+        runner.old_session_id = "session-old-capacity"
+        old_session = RealtimeSession(
+            session_id=runner.old_session_id,
+            runner=runner,
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+        )
+        replacement_audio = CapacityAudio()
+        replacement = RealtimeSession(
+            session_id="session-new-capacity",
+            runner=runner,
+            event_sink=MemoryEvents(),
+            audio_sink=replacement_audio,
+        )
+
+        await old_session.submit_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(runner.old_started.wait, 0.5))
+        await old_session.disconnect()
+        await replacement.submit_utterance(b"\0\0" * 320)
+        try:
+            self.assertTrue(
+                await asyncio.to_thread(runner.replacement_first_started.wait, 0.5)
+            )
+            self.assertTrue(
+                await asyncio.to_thread(replacement_audio.started[0].wait, 0.5)
+            )
+            await asyncio.sleep(0.05)
+            self.assertFalse(runner.replacement_second_started.is_set())
+
+            runner.old_release.set()
+            self.assertTrue(
+                await asyncio.to_thread(runner.replacement_second_started.wait, 0.5)
+            )
+        finally:
+            runner.old_release.set()
+            for release in replacement_audio.release:
+                release.set()
+            for drain in runner.drain_threads:
+                await asyncio.to_thread(drain.join, 0.5)
+            await asyncio.wait_for(old_session.wait_for_cleanup(), 1)
+            await asyncio.wait_for(replacement.wait_for_cleanup(), 1)
+
+        self.assertTrue(all(not drain.is_alive() for drain in runner.drain_threads))
 
 
 class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
