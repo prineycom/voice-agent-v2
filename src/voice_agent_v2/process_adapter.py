@@ -157,6 +157,12 @@ class AdapterProcess:
             if remaining <= 0:
                 raise AdapterProcessError("adapter timed out")
             response = self.receive(remaining)
+            protocol_version = value.get("protocol_version")
+            if (
+                protocol_version is not None
+                and response.get("protocol_version") != protocol_version
+            ):
+                raise AdapterProcessError("adapter protocol mismatch")
             if response.get("request_id") != value.get("request_id"):
                 raise AdapterProcessError("adapter correlation mismatch")
             if response.get("event") == "error":

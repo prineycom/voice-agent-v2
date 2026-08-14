@@ -204,6 +204,31 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertEqual(visible[-1], text)
         self.assertTrue(all(text.startswith(prefix) for prefix in visible))
 
+    def test_visible_stream_and_final_preserve_original_boundary_whitespace(self) -> None:
+        response = StubResponse([
+            stream_event(content=" Привет."),
+            stream_event(content=" "),
+            stream_event(finish="stop"),
+        ])
+        factory, _created = self.factory([response])
+        provider = LocalLFMProvider(connection_factory=factory)
+        visible: list[str] = []
+        handed_off: list[str] = []
+
+        text = provider.respond_with_handoff(
+            session_id="session-a",
+            turn_id="turn-a",
+            transcript="Публичный запрос",
+            on_sentence=handed_off.append,
+            on_visible_sentence=visible.append,
+        )
+
+        self.assertEqual(text, " Привет. ")
+        self.assertEqual(visible[-1], text)
+        self.assertTrue(all(text.startswith(prefix) for prefix in visible))
+        self.assertEqual(handed_off, ["Привет."])
+        self.assertEqual(provider.snapshot_session("session-a")[-1]["content"], text)
+
     def test_handoff_uses_its_own_deadline_after_stream_completion(self) -> None:
         response = StubResponse([
             stream_event(content="Готовый ответ."),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -38,6 +39,11 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
             "array": lambda value: isinstance(value, list),
             "string": lambda value: isinstance(value, str),
             "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+            "number": lambda value: (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ),
             "boolean": lambda value: isinstance(value, bool),
         }
         if expected_type not in predicates or not predicates[expected_type](instance):
@@ -56,11 +62,13 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
         if "pattern" in schema and re.search(schema["pattern"], instance) is None:
             raise SchemaViolation(f"{path}: string does not match pattern")
 
-    if isinstance(instance, int) and not isinstance(instance, bool):
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
         if "minimum" in schema and instance < schema["minimum"]:
-            raise SchemaViolation(f"{path}: integer is below minimum")
+            raise SchemaViolation(f"{path}: number is below minimum")
+        if "exclusiveMinimum" in schema and instance <= schema["exclusiveMinimum"]:
+            raise SchemaViolation(f"{path}: number is not above exclusive minimum")
         if "maximum" in schema and instance > schema["maximum"]:
-            raise SchemaViolation(f"{path}: integer is above maximum")
+            raise SchemaViolation(f"{path}: number is above maximum")
 
     if isinstance(instance, dict):
         required = schema.get("required", [])

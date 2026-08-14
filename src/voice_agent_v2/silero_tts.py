@@ -47,6 +47,7 @@ LIBTORCH_CPU_SHA256 = "629d28a5fb24e2c33df077e2d98d5da0c73d0b53e628bb826fd4ba366
 SPEAKER = "kseniya"
 WORKER_IDS = ("silero-1", "silero-2")
 POOL_SIZE = 2
+WORKER_PROTOCOL_VERSION = "voice-agent.silero-worker.v1"
 CAPACITY_WAIT_SECONDS = 0.750
 SYNTHESIS_TIMEOUT_SECONDS = 15.0
 MAX_WORKER_CHUNKS = 64
@@ -72,6 +73,8 @@ def verify_silero_runtime() -> dict[str, object]:
         and manifest.get("model", {}).get("native_sample_rates_hz") == [8_000, 24_000, 48_000]
         and manifest.get("runtime", {}).get("state_root")
         == "~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship"
+        and manifest.get("runtime", {}).get("worker_protocol")
+        == WORKER_PROTOCOL_VERSION
         and manifest.get("runtime", {}).get("workers") == POOL_SIZE
         and manifest.get("runtime", {}).get("automatic_retry") is False
         and manifest.get("runtime", {}).get("automatic_fallback") is False
@@ -209,6 +212,7 @@ class SileroWorkerPool:
         self._invalid_keys: set[TTSRequestKey] = set()
         self._started = False
         self._starting = False
+        self._recovering = False
         self._closed = False
         self.process_start_count = 0
         self.observations: list[dict[str, object]] = []
@@ -310,14 +314,14 @@ class SileroWorkerPool:
                 self._starting = False
                 self._condition.notify_all()
 
-    def _start_slot(self, slot: _WorkerSlot) -> None:
+    def _start_slot(self, slot: _WorkerSlot, *, ready_state: str = "idle") -> None:
         log_path = self.runtime_root / "logs" / f"{slot.worker_id}-{time.monotonic_ns()}.stderr.log"
         process = self.process_factory(
             slot.worker_id, log_path, _environment(slot.worker_id, self.runtime_root)
         )
         metadata = process.start(30)
         expected = {
-            "protocol_version": "voice-agent.silero-worker.v1",
+            "protocol_version": WORKER_PROTOCOL_VERSION,
             "worker_id": slot.worker_id,
             "model_identity": MODEL_IDENTITY,
             "model_size_bytes": MODEL_SIZE,
@@ -340,7 +344,7 @@ class SileroWorkerPool:
             raise StageFailure("tts", "silero_worker_identity_mismatch")
         slot.process = process
         slot.ready_metadata = dict(metadata)
-        slot.state = "idle"
+        slot.state = ready_state
         slot.last_idle = time.monotonic()
         self.process_start_count += 1
 
@@ -487,7 +491,7 @@ class SileroWorkerPool:
         if process is None:
             raise AdapterProcessError("worker is absent")
         request = {
-            "schema_version": TTS_V2_VERSION,
+            "protocol_version": WORKER_PROTOCOL_VERSION,
             "command": "synthesize",
             "key": key.as_dict(),
             "request_id": key.request_id,
@@ -501,6 +505,8 @@ class SileroWorkerPool:
         chunk_count = 0
         final: dict[str, object] | None = None
         for event in process.stream(request, SYNTHESIS_TIMEOUT_SECONDS):
+            if event.get("protocol_version") != WORKER_PROTOCOL_VERSION:
+                raise AdapterProcessError("Silero worker protocol mismatch")
             if event.get("key") != key.as_dict():
                 raise AdapterProcessError("Silero correlation mismatch")
             kind = event.get("event")
@@ -586,29 +592,47 @@ class SileroWorkerPool:
         """Explicit post-degradation recovery; never used as a request retry."""
         with self._condition:
             unhealthy = [slot for slot in self._slots if slot.state == "unhealthy"]
-            if not unhealthy or any(slot.state == "busy" for slot in self._slots):
+            if (
+                self._recovering
+                or not unhealthy
+                or any(slot.state == "busy" for slot in self._slots)
+            ):
                 raise StageFailure("tts", "silero_recovery_not_admissible")
-        for slot in unhealthy:
-            try:
-                self._start_slot(slot)
-                key = TTSRequestKey(
-                    "recovery-session", 1, f"recovery-{slot.worker_id}", 1,
-                    f"recovery-request-{slot.worker_id[-1]}", 0,
-                )
-                pcm, _ = self._request_on_slot(slot, key, "Готово.")
-                if not pcm:
-                    raise StageFailure("tts", "silero_recovery_failed")
-            except Exception as error:
-                if slot.process is not None or slot.state != "unhealthy":
-                    self._quarantine(slot)
-                raise StageFailure("tts", "silero_recovery_failed") from error
+            self._recovering = True
+            for slot in unhealthy:
+                slot.state = "recovering"
+        recovered: list[_WorkerSlot] = []
+        try:
+            for slot in unhealthy:
+                try:
+                    self._start_slot(slot, ready_state="recovering")
+                    key = TTSRequestKey(
+                        "recovery-session", 1, f"recovery-{slot.worker_id}", 1,
+                        f"recovery-request-{slot.worker_id[-1]}", 0,
+                    )
+                    pcm, _ = self._request_on_slot(slot, key, "Готово.")
+                    if not pcm:
+                        raise StageFailure("tts", "silero_recovery_failed")
+                    recovered.append(slot)
+                except Exception as error:
+                    if slot.process is not None or slot.state != "unhealthy":
+                        self._quarantine(slot)
+                    for warmed in recovered:
+                        self._quarantine(warmed)
+                    raise StageFailure("tts", "silero_recovery_failed") from error
             with self._condition:
-                slot.state = "idle"
-                slot.active_key = None
-                slot.last_idle = time.monotonic()
-        with self._condition:
-            self._condition.notify_all()
-        return self.readiness_metadata()
+                for slot in recovered:
+                    slot.state = "idle"
+                    slot.active_key = None
+                    slot.last_idle = time.monotonic()
+                self._recovering = False
+                self._condition.notify_all()
+            return self.readiness_metadata()
+        finally:
+            with self._condition:
+                if self._recovering:
+                    self._recovering = False
+                    self._condition.notify_all()
 
     def quarantine_worker_for_controlled_check(self, worker_id: str) -> None:
         slot = next((item for item in self._slots if item.worker_id == worker_id), None)
@@ -618,7 +642,7 @@ class SileroWorkerPool:
 
     def close(self) -> None:
         with self._condition:
-            while self._starting:
+            while self._starting or self._recovering:
                 self._condition.wait()
             if self._closed:
                 return

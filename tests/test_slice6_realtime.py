@@ -185,6 +185,85 @@ class ObsoleteCurrentOverlapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old_terminals[0]["type"], "turn.interrupted")
 
 
+class FinalSegmentOverlapRunner(OverlapRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.restored_turns: list[tuple[str, str]] = []
+
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
+        audio_observer, stream_epoch, turn_generation, request_id,
+        trace_observer=None, retain_output=True,
+    ) -> TraceResult:
+        if turn_generation != 1:
+            return super().run_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_pcm=input_pcm,
+                cancellation=cancellation,
+                event_observer=event_observer,
+                audio_observer=audio_observer,
+                stream_epoch=stream_epoch,
+                turn_generation=turn_generation,
+                request_id=request_id,
+                trace_observer=trace_observer,
+                retain_output=retain_output,
+            )
+        del input_pcm, audio_observer, retain_output
+        if trace_observer is not None:
+            trace_observer(
+                "llm_provider", "cooperative_cleanup_complete",
+                {"context_committed": True},
+            )
+            trace_observer("tts", "noncooperative_worker_started", {})
+        self.old_started.set()
+        self.old_release.wait(2)
+        if trace_observer is not None:
+            trace_observer("tts", "noncooperative_worker_finished", {})
+        event = EventEnvelopeV2(
+            session_id=session_id,
+            turn_id=turn_id,
+            stream_epoch=stream_epoch,
+            turn_generation=turn_generation,
+            request_id=request_id,
+            sequence=1,
+            event_type="turn.interrupted",
+            payload={"outcome": "interrupted"},
+            terminal=True,
+        ).as_dict()
+        event_observer(event)
+        return TraceResult((event,), b"", b"")
+
+    def discard_turn(self, session_id, turn_id) -> None:
+        self.restored_turns.append((session_id, turn_id))
+
+
+class FinalSegmentOverlapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacement_detaches_only_after_llm_cleanup_and_restores_context(self) -> None:
+        runner = FinalSegmentOverlapRunner()
+        session = RealtimeSession(
+            session_id="session-final-segment",
+            runner=runner,
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+        )
+        first = await session.submit_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(runner.old_started.wait, 0.5))
+
+        second = await asyncio.wait_for(
+            session.submit_utterance(b"\0\0" * 320), 0.5
+        )
+        self.assertTrue(await asyncio.to_thread(runner.replacement_started.wait, 0.2))
+        self.assertEqual(runner.restored_turns, [("session-final-segment", first)])
+        self.assertNotEqual(first, second)
+
+        runner.old_release.set()
+        await asyncio.wait_for(
+            asyncio.gather(*(task for task in tuple(session._turn_tasks))), 0.5
+        )
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+
+
 class CooperativeCleanupRunner(OverlapRunner):
     def __init__(self) -> None:
         super().__init__()

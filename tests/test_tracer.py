@@ -153,6 +153,13 @@ class ContractFixtureTests(unittest.TestCase):
             sum(chunk["byte_count"] for chunk in tts_v2["result"]["chunks"]),
             tts_v2["result"]["audio_bytes"],
         )
+        fractional_duration = deepcopy(tts_v2)
+        fractional_duration["result"]["duration_ms"] = 120.5
+        validate(fractional_duration, tts_v2_schema)
+        zero_duration = deepcopy(tts_v2)
+        zero_duration["result"]["duration_ms"] = 0
+        with self.assertRaises(SchemaViolation):
+            validate(zero_duration, tts_v2_schema)
         rejected_chunk = deepcopy(tts_v2)
         rejected_chunk["result"]["chunks"][0]["byte_count"] = 65_537
         with self.assertRaises(SchemaViolation):

@@ -462,14 +462,14 @@ class LocalLFMProvider:
                 self._raise_if_operation_stopped(
                     generation, deadline, deadline_expired
                 )
-            output = "".join(visible).strip()
+            output = "".join(visible)
             if response_models != {MODEL_ALIAS}:
                 raise StageFailure(
                     "llm_provider", "selected_provider_identity_mismatch"
                 )
             if finish_reason not in {"stop", "eos_token"}:
                 raise StageFailure("llm_provider", "local_lfm_incomplete_response")
-            if not output:
+            if not output.strip():
                 raise StageFailure(
                     "llm_provider", "empty_selected_provider_response"
                 )

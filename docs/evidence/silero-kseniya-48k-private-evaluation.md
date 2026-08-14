@@ -86,16 +86,16 @@ The check starts no network service or shared port and writes content-free evide
 | Observation | Result |
 | --- | ---: |
 | Ready/warmed worker processes | exactly 2 stable PIDs |
-| Full pool warmed idle RSS | 1,238.504 MiB |
+| Full pool warmed idle RSS | 1,240.484 MiB |
 | Obsolete/current overlap | 2 workers simultaneously busy |
 | Obsolete result | `selected_tts_cancelled`; zero delivered result |
 | Current native output | 841,200 bytes / 420,600 samples / 8,762.5 ms at 48 kHz |
-| Current synthesis | 236.295 ms; RTF 0.026967 |
-| Full pool observed peak RSS | 1,387.312 MiB |
-| Full pool aggregate CPU | 296.347% one-core equivalent |
+| Current synthesis | 219.389 ms; RTF 0.025037 |
+| Full pool observed peak RSS | 1,382.047 MiB |
+| Full pool aggregate CPU | 303.937% one-core equivalent |
 | Stale post-worker discard | 1 |
 | Third simultaneous worker | none |
-| Silero + pinned VAD + warmed Whisper RSS | 2,217.621 MiB |
+| Silero + pinned VAD + warmed Whisper RSS | 2,212.355 MiB |
 | Compute-process GPU used before → after Whisper | 49 → 2,333 MiB |
 | Controlled loss | readiness fell to 1; no retry/fallback |
 | Explicit post-degradation recovery | exactly 2 simultaneous workers restored |

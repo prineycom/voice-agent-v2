@@ -22,6 +22,7 @@
     "torch": "2.8.0+cpu",
     "torch_c_sha256": "5dc8a93ddc69041dbd3f796794e0c2b3f72b47e0dc24ae2b46d9e7d0dc78953b",
     "libtorch_cpu_sha256": "629d28a5fb24e2c33df077e2d98d5da0c73d0b53e628bb826fd4ba36616b482b",
+    "worker_protocol": "voice-agent.silero-worker.v1",
     "workers": 2,
     "intraop_threads_per_worker": 2,
     "interop_threads_per_worker": 1,

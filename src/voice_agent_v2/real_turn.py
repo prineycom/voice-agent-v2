@@ -399,8 +399,21 @@ class RealTurnController:
             synthesize_visible_piece(response)
             return response
 
+        def generate_response_with_cleanup_signal() -> str:
+            context_committed = False
+            try:
+                response = generate_response()
+                context_committed = True
+                return response
+            finally:
+                trace(
+                    "llm_provider",
+                    "cooperative_cleanup_complete",
+                    context_committed=context_committed,
+                )
+
         try:
-            response = run_stage(generate_response, self.llm, self.tts)
+            response = run_stage(generate_response_with_cleanup_signal, self.llm, self.tts)
         except _TurnInterrupted:
             return interrupted()
         except StageFailure as error:

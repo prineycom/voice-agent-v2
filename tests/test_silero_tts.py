@@ -86,6 +86,8 @@ class FakeProcess:
         }
 
     def stream(self, request: dict, _timeout_seconds: float):
+        if request.get("protocol_version") != "voice-agent.silero-worker.v1":
+            raise AssertionError("unexpected worker protocol")
         request_id = request["request_id"]
         key = request["key"]
         gate = self.coordinator.gates.get(request_id)
@@ -97,6 +99,7 @@ class FakeProcess:
             raise AdapterRequestError("injected")
         pcm = bytes([self.process.pid % 251, 0]) * 960
         yield {
+            "protocol_version": "voice-agent.silero-worker.v1",
             "event": "chunk",
             "request_id": request_id,
             "key": key,
@@ -105,6 +108,7 @@ class FakeProcess:
             "pcm_base64": __import__("base64").b64encode(pcm).decode("ascii"),
         }
         yield {
+            "protocol_version": "voice-agent.silero-worker.v1",
             "event": "final",
             "request_id": request_id,
             "key": key,
@@ -492,6 +496,40 @@ class SileroPoolTests(unittest.TestCase):
             )
             self.assertEqual(len(pool.process_ids), 1)
         finally:
+            pool.close()
+
+    def test_recovery_stays_unready_through_warmup_and_rejects_concurrent_recovery(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        warmup_release = threading.Event()
+        coordinator.gates["recovery-request-1"] = warmup_release
+        outcomes: list[dict[str, object]] = []
+        try:
+            pool.quarantine_worker_for_controlled_check("silero-1")
+            recovery = threading.Thread(target=lambda: outcomes.append(pool.recover()))
+            recovery.start()
+            worker_id, request_id = coordinator.entered.get(timeout=1)
+            self.assertEqual((worker_id, request_id), ("silero-1", "recovery-request-1"))
+            self.assertEqual(pool.ready_count, 1)
+            self.assertEqual(
+                next(slot for slot in pool.slots if slot["worker_id"] == "silero-1")[
+                    "state"
+                ],
+                "recovering",
+            )
+            with self.assertRaises(StageFailure) as concurrent:
+                pool.recover()
+            self.assertEqual(concurrent.exception.code, "silero_recovery_not_admissible")
+            self.assertEqual(len(coordinator.created), 3)
+
+            warmup_release.set()
+            recovery.join(1)
+            self.assertFalse(recovery.is_alive())
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(pool.ready_count, 2)
+            self.assertEqual(len([p for p in coordinator.created if p.process.poll() is None]), 2)
+        finally:
+            warmup_release.set()
             pool.close()
 
     def test_failure_has_no_retry_and_explicit_recovery_never_co_starts_third(self) -> None:

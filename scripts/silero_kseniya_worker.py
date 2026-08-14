@@ -14,7 +14,6 @@ import sys
 import time
 
 PROTOCOL_VERSION = "voice-agent.silero-worker.v1"
-TTS_VERSION = "voice-agent.tts.v2"
 MODEL_IDENTITY = "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru"
 MODEL_SIZE = 145_420_684
 MODEL_SHA256 = "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437"
@@ -23,7 +22,7 @@ SAMPLE_RATE = 48_000
 MAX_AUDIO_BYTES = 1_440_000
 CHUNK_BYTES = 49_152
 EXPECTED_REQUEST_KEYS = {
-    "schema_version", "command", "key", "request_id", "text", "text_format",
+    "protocol_version", "command", "key", "request_id", "text", "text_format",
     "normalization_version", "audio",
 }
 EXPECTED_CORRELATION_KEYS = {
@@ -32,6 +31,7 @@ EXPECTED_CORRELATION_KEYS = {
 
 
 def emit(document: dict[str, object]) -> None:
+    document = {"protocol_version": PROTOCOL_VERSION, **document}
     sys.stdout.write(json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
@@ -54,7 +54,10 @@ def deny_network(event: str, args: tuple[object, ...]) -> None:
 def validate_request(value: object) -> tuple[dict[str, object], str]:
     if not isinstance(value, dict) or set(value) != EXPECTED_REQUEST_KEYS:
         raise ValueError("invalid_request_shape")
-    if value.get("schema_version") != TTS_VERSION or value.get("command") != "synthesize":
+    if (
+        value.get("protocol_version") != PROTOCOL_VERSION
+        or value.get("command") != "synthesize"
+    ):
         raise ValueError("invalid_request_version")
     key = value.get("key")
     if not isinstance(key, dict) or set(key) != EXPECTED_CORRELATION_KEYS:

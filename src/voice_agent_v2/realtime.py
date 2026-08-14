@@ -5,7 +5,7 @@ from __future__ import annotations
 from array import array
 import asyncio
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
 import math
@@ -116,6 +116,8 @@ class TurnContext:
     media_publication_id: str | None = None
     internal_event_sequence: int = 0
     noncooperative_worker_drains: int = 0
+    cooperative_cleanup_complete: threading.Event = field(default_factory=threading.Event)
+    llm_context_committed: bool = False
 
 
 @dataclass(frozen=True)
@@ -691,7 +693,12 @@ class RealtimeSession:
                     await asyncio.to_thread(self.runner.cancel)
             except Exception as error:
                 cancel_error = error
-            awaited = context.task if wait_for_turn else None
+            detach_noncooperative_tts = (
+                wait_for_turn
+                and context.noncooperative_worker_drains > 0
+                and context.cooperative_cleanup_complete.is_set()
+            )
+            awaited = context.task if wait_for_turn and not detach_noncooperative_tts else None
             if awaited is not None and awaited is not asyncio.current_task():
                 try:
                     await awaited
@@ -699,7 +706,14 @@ class RealtimeSession:
                     cancel_error = cancel_error or error
             if not context.rollback_complete:
                 context.rollback_error = await self._rollback_context(
-                    context, restore_context=wait_for_turn
+                    context,
+                    restore_context=(
+                        wait_for_turn
+                        and (
+                            not detach_noncooperative_tts
+                            or context.llm_context_committed
+                        )
+                    ),
                 )
             if cancel_error is not None:
                 return "cancellation_cleanup_failed"
@@ -979,6 +993,9 @@ class RealtimeSession:
                     context.noncooperative_worker_drains = max(
                         0, context.noncooperative_worker_drains - 1
                     )
+                elif stage == "llm_provider" and event == "cooperative_cleanup_complete":
+                    context.llm_context_committed = bool(fields.get("context_committed"))
+                    context.cooperative_cleanup_complete.set()
                 self._trace(stage, event, turn_id=context.turn_id, **fields)
 
             runner_arguments["trace_observer"] = observe_trace
