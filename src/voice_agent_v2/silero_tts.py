@@ -431,7 +431,7 @@ class SileroWorkerPool:
                 if not self._is_fresh(key) or (cancellation is not None and cancellation.cancelled):
                     self.counters["stale_before_dispatch"] += 1
                     raise StageFailure("tts", "selected_tts_cancelled")
-                slot = self._acquire_slot(key)
+                slot = self._acquire_slot(key, cancellation)
                 try:
                     pcm, metadata = self._request_on_slot(slot, key, text)
                 except AdapterRequestError as error:
@@ -454,11 +454,20 @@ class SileroWorkerPool:
         finally:
             unregister()
 
-    def _acquire_slot(self, key: TTSRequestKey) -> _WorkerSlot:
+    def _acquire_slot(
+        self, key: TTSRequestKey, cancellation: CancellationToken | None
+    ) -> _WorkerSlot:
         deadline = time.monotonic() + self.capacity_wait_seconds
         turn_key = self._turn_key(key)
         with self._condition:
             while True:
+                if (
+                    key in self._invalid_keys
+                    or turn_key in self._invalid_turns
+                    or (cancellation is not None and cancellation.cancelled)
+                ):
+                    self.counters["stale_before_dispatch"] += 1
+                    raise StageFailure("tts", "selected_tts_cancelled")
                 self.require_ready()
                 idle = [slot for slot in self._slots if slot.state == "idle"]
                 if idle:

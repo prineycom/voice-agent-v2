@@ -178,7 +178,11 @@ class RussianSegmentationTests(unittest.TestCase):
         self.assertIn("Пи-Ди-Эф", first.synthesis_text)
         self.assertNotEqual(first.synthesis_text, visible)
         self.assertEqual(shape_russian_tts("Все готовы.").synthesis_text, "Все готовы.")
-        for tagged in ("<speak>Секрет.</speak>", "<тег>Секрет.</тег>"):
+        for tagged in (
+            "<speak>Секрет.</speak>",
+            "<тег>Секрет.</тег>",
+            "<незавершённый-тег",
+        ):
             with self.subTest(tagged=tagged), self.assertRaises(StageFailure) as failure:
                 shape_russian_tts(tagged)
             self.assertEqual(failure.exception.code, "tts_plain_text_required")
@@ -195,6 +199,16 @@ class RussianSegmentationTests(unittest.TestCase):
         with self.assertRaises(StageFailure) as unicode_failure:
             unicode_segmenter.feed("г>Секрет.</тег>")
         self.assertEqual(unicode_failure.exception.code, "tts_plain_text_required")
+
+        long_prefix = RussianTTSSegmenter()
+        unsafe = (
+            '<тег атрибут="Это достаточно длинное предложение внутри атрибута. '
+            'Оно не должно попасть на синтез до закрытия кавычки'
+        )
+        self.assertEqual(long_prefix.feed(unsafe), ())
+        with self.assertRaises(StageFailure) as delayed_failure:
+            long_prefix.feed('">Секрет.</тег>')
+        self.assertEqual(delayed_failure.exception.code, "tts_plain_text_required")
 
 
 class FakeSTT:
@@ -531,6 +545,54 @@ class SileroPoolTests(unittest.TestCase):
         finally:
             for gate in gates:
                 gate.set()
+            for worker in workers:
+                worker.join(1)
+            pool.close()
+
+    def test_cancelled_capacity_waiter_never_dispatches_to_released_worker(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        gates = [threading.Event(), threading.Event()]
+        coordinator.gates["request-00000001"] = gates[0]
+        coordinator.gates["request-00000002"] = gates[1]
+        worker_outcomes: list[object] = []
+        workers = [
+            threading.Thread(
+                target=lambda turn=turn: worker_outcomes.append(
+                    pool.synthesize(self.key(turn), f"Ответ {turn}.", None)
+                )
+            )
+            for turn in (1, 2)
+        ]
+        token = CancellationToken()
+        waiter_outcomes: list[str] = []
+
+        def wait_for_worker() -> None:
+            try:
+                pool.synthesize(self.key(3), "Отменённый ответ.", token)
+            except StageFailure as error:
+                waiter_outcomes.append(error.code)
+
+        waiter = threading.Thread(target=wait_for_worker)
+        try:
+            for worker in workers:
+                worker.start()
+                coordinator.entered.get(timeout=1)
+            waiter.start()
+            time.sleep(0.02)
+            token.cancel()
+            waiter.join(0.5)
+
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(waiter_outcomes, ["selected_tts_cancelled"])
+            self.assertEqual(pool.counters["requests"], 2)
+            with self.assertRaises(queue.Empty):
+                coordinator.entered.get(timeout=0.05)
+        finally:
+            token.cancel()
+            for gate in gates:
+                gate.set()
+            waiter.join(1)
             for worker in workers:
                 worker.join(1)
             pool.close()

@@ -35,6 +35,21 @@ def _reject_markup(text: str) -> None:
         raise StageFailure("tts", "tts_plain_text_required")
 
 
+def _looks_like_tag_prefix(text: str) -> bool:
+    return bool(
+        re.match(r"^<\s*(?:/?\s*(?:[^\W\d_]|[_:])|[!?])", text, re.UNICODE)
+        or re.fullmatch(r"<\s*/?\s*", text)
+    )
+
+
+def _unmatched_tag_start(text: str) -> int | None:
+    last_close = text.rfind(">")
+    for index in range(last_close + 1, len(text)):
+        if text[index] == "<" and _looks_like_tag_prefix(text[index:]):
+            return index
+    return None
+
+
 def _boundary_followed_by_space_or_end(text: str, end: int) -> bool:
     return end == len(text) or text[end].isspace()
 
@@ -109,12 +124,16 @@ class RussianTTSSegmenter:
             raise StageFailure("tts", "tts_text_out_of_bounds")
         validation_text = self._validation_tail + visible_piece
         _reject_markup(validation_text)
-        unmatched_open = validation_text.rfind("<")
-        unmatched_close = validation_text.rfind(">")
-        self._validation_tail = (
-            validation_text[unmatched_open:] if unmatched_open > unmatched_close else ""
-        )
-        piece = visible_piece.strip()
+        unmatched_tag = _unmatched_tag_start(validation_text)
+        if unmatched_tag is None:
+            self._validation_tail = ""
+            validated_piece = validation_text
+        else:
+            self._validation_tail = validation_text[unmatched_tag:]
+            validated_piece = validation_text[:unmatched_tag]
+            if final:
+                raise StageFailure("tts", "tts_plain_text_required")
+        piece = validated_piece.strip()
         if piece:
             if self._buffer and not self._buffer[-1].isspace():
                 self._buffer += " "
@@ -309,6 +328,8 @@ def shape_russian_tts(visible_text: str) -> ShapedTTS:
     if not isinstance(visible_text, str) or not visible_text.strip() or len(visible_text) > HARD_MAX_CHARS:
         raise StageFailure("tts", "tts_text_out_of_bounds")
     _reject_markup(visible_text)
+    if _unmatched_tag_start(visible_text) is not None:
+        raise StageFailure("tts", "tts_plain_text_required")
     text = visible_text.strip()
 
     abbreviations = {

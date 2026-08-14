@@ -16,6 +16,69 @@ from voice_agent_v2.tracer import CancellationToken
 
 
 class LiveTurnObservationTests(unittest.TestCase):
+    def test_segment_reservations_reach_the_real_controller_before_synthesis(self) -> None:
+        runtime = load_runtime()
+
+        class STT(FakeSTT):
+            def __init__(self) -> None:
+                self.observations: list[dict[str, object]] = []
+
+        class LLM(FakeVisibleLLM):
+            def __init__(self) -> None:
+                super().__init__((
+                    "Первое достаточно длинное русское предложение уже полностью готово. ",
+                    "Второе достаточно длинное русское предложение тоже полностью готово.",
+                ))
+                self.observations: list[dict[str, object]] = []
+
+            def snapshot_session(self, _session_id: str):
+                return ()
+
+        class TTS:
+            version = "voice-agent.tts.v2"
+            output_format = runtime.TTS_OUTPUT_AUDIO_FORMAT
+            capabilities = {"cooperative_cancel": False}
+
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+                self.observations: list[dict[str, object]] = []
+
+            def stream_synthesize(self, **arguments):
+                self.calls.append(arguments["segment_index"])
+                yield b"\0\0" * 2_880
+
+            def invalidate_turn(self, *_arguments) -> None:
+                return None
+
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.stt = STT()
+        runner.llm = LLM()
+        runner.tts = TTS()
+        runner.controller = runtime.RealTurnController(runner.stt, runner.llm, runner.tts)
+        runner._snapshots = {}
+        runner._turn_correlations = {}
+        starts: list[tuple[int, int]] = []
+        completions: list[tuple[int, bytes | None]] = []
+
+        result = runner.run_turn(
+            session_id="session-test",
+            turn_id="turn-test",
+            input_pcm=b"\0\0" * 320,
+            cancellation=CancellationToken(),
+            event_observer=lambda _event: None,
+            segment_started_observer=lambda index: starts.append(
+                (index, len(runner.tts.calls))
+            ),
+            segment_audio_observer=lambda index, pcm: completions.append((index, pcm)),
+            request_id="request-test",
+        )
+
+        self.assertEqual(result.terminal_event["type"], "turn.completed")
+        self.assertEqual(starts, [(0, 0), (1, 1)])
+        self.assertEqual(runner.tts.calls, [0, 1])
+        self.assertEqual([index for index, _pcm in completions], [0, 1])
+        self.assertTrue(all(pcm == b"\0\0" * 2_880 for _index, pcm in completions))
+
     def test_overlapping_turns_trace_only_their_own_tts_observations(self) -> None:
         runtime = load_runtime()
         coordinator = ProcessCoordinator()
