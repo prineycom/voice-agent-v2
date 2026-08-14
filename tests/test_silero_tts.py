@@ -142,7 +142,7 @@ class FakeProcess:
             "chunk_count": len(chunks),
             "audio_bytes": len(pcm),
             "samples": len(pcm) // 2,
-            "duration_ms": len(pcm) // 2 / 48_000 * 1_000,
+            "duration_ms": round(len(pcm) // 2 / 48_000 * 1_000, 3),
             "latency_ms": 1.0,
             "terminal_count": 1,
         }
@@ -599,6 +599,22 @@ class SileroPoolTests(unittest.TestCase):
             tts.release_turn("session-test", 1, "turn-00000001", 1)
             pool.close()
 
+    def test_worker_duration_accepts_exact_half_even_microsecond_rounding(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        coordinator.output_chunks = (b"\0\0" * 3,)
+        try:
+            chunks, metadata = pool.synthesize(
+                self.key(1), "Проверка округления длительности.", None
+            )
+
+            self.assertEqual(chunks, coordinator.output_chunks)
+            self.assertEqual(metadata["samples"], 3)
+            self.assertEqual(metadata["duration_ms"], 0.062)
+            self.assertEqual(pool.ready_count, 2)
+        finally:
+            pool.close()
+
     def test_worker_timing_must_match_samples_and_remain_finite(self) -> None:
         invalid_timings = (
             {"duration_ms": 1.0},
@@ -923,6 +939,7 @@ class SileroPoolTests(unittest.TestCase):
             pool.close()
 
     def test_invalid_worker_error_key_or_shape_quarantines_slot(self) -> None:
+        expected_key = self.key(1).as_dict()
         invalid_overrides = (
             {
                 "key": TTSRequestKey(
@@ -930,6 +947,9 @@ class SileroPoolTests(unittest.TestCase):
                     "request-00000001", 9,
                 ).as_dict(),
             },
+            {"key": {**expected_key, "stream_epoch": True}},
+            {"key": {**expected_key, "turn_generation": True}},
+            {"key": {**expected_key, "segment_index": False}},
             {"unexpected": "field"},
         )
         for override in invalid_overrides:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 import math
 from typing import Iterable, Protocol
 
@@ -24,6 +25,54 @@ CONTRACT_VERSIONS_V2 = {
 }
 
 
+def rounded_pcm_duration_microseconds(samples: int, sample_rate_hz: int) -> int:
+    if type(samples) is not int or samples < 1:
+        raise ValueError("samples must be a positive integer")
+    if type(sample_rate_hz) is not int or sample_rate_hz < 1:
+        raise ValueError("sample rate must be a positive integer")
+    whole, remainder = divmod(samples * 1_000_000, sample_rate_hz)
+    doubled = remainder * 2
+    if doubled > sample_rate_hz or (doubled == sample_rate_hz and whole % 2):
+        whole += 1
+    return whole
+
+
+def pcm_duration_ms_matches_samples(
+    duration_ms: object, samples: int, sample_rate_hz: int
+) -> bool:
+    if not (
+        type(duration_ms) is int
+        or type(duration_ms) is float and math.isfinite(duration_ms)
+    ):
+        return False
+    duration_microseconds = Decimal(str(duration_ms)) * 1_000
+    if duration_microseconds != duration_microseconds.to_integral_value():
+        return False
+    return int(duration_microseconds) == rounded_pcm_duration_microseconds(
+        samples, sample_rate_hz
+    )
+
+
+def _matches_pcm_audio_format(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "encoding",
+        "sample_rate_hz",
+        "channels",
+        "sample_width_bytes",
+    }:
+        return False
+    return (
+        type(value.get("encoding")) is str
+        and value["encoding"] == "pcm_s16le"
+        and type(value.get("sample_rate_hz")) is int
+        and value["sample_rate_hz"] == 48_000
+        and type(value.get("channels")) is int
+        and value["channels"] == 1
+        and type(value.get("sample_width_bytes")) is int
+        and value["sample_width_bytes"] == 2
+    )
+
+
 def validate_tts_v2_document(document: object) -> None:
     if not isinstance(document, dict) or document.get("schema_version") != TTS_V2_VERSION:
         raise ValueError("invalid TTS v2 document")
@@ -33,13 +82,9 @@ def validate_tts_v2_document(document: object) -> None:
         raise ValueError("invalid TTS v2 document")
     request_audio = request.get("audio")
     result_audio = result.get("audio")
-    expected_audio = {
-        "encoding": "pcm_s16le",
-        "sample_rate_hz": 48_000,
-        "channels": 1,
-        "sample_width_bytes": 2,
-    }
-    if request_audio != expected_audio or result_audio != expected_audio:
+    if not _matches_pcm_audio_format(request_audio) or not _matches_pcm_audio_format(
+        result_audio
+    ):
         raise ValueError("invalid TTS v2 audio format")
     chunks = result.get("chunks")
     chunk_count = result.get("chunk_count")
@@ -58,12 +103,14 @@ def validate_tts_v2_document(document: object) -> None:
         or isinstance(samples, bool)
         or not 2 <= audio_bytes <= 1_440_000
         or not 1 <= samples <= 720_000
-        or not isinstance(duration_ms, (int, float))
-        or isinstance(duration_ms, bool)
-        or not math.isfinite(duration_ms)
+        or not (
+            type(duration_ms) is int
+            or type(duration_ms) is float and math.isfinite(duration_ms)
+        )
         or not 0 < duration_ms <= 15_000
         or result.get("status") != "success"
-        or result.get("terminal_count") != 1
+        or type(result.get("terminal_count")) is not int
+        or result["terminal_count"] != 1
     ):
         raise ValueError("invalid TTS v2 result totals")
     total_bytes = 0
@@ -79,22 +126,15 @@ def validate_tts_v2_document(document: object) -> None:
             or not isinstance(byte_count, int)
             or isinstance(byte_count, bool)
             or not 0 < byte_count <= 65_536
-            or byte_count % expected_audio["sample_width_bytes"]
+            or byte_count % 2
         ):
             raise ValueError("invalid TTS v2 chunk")
         total_bytes += byte_count
-    expected_samples = total_bytes // (
-        expected_audio["channels"] * expected_audio["sample_width_bytes"]
-    )
-    expected_duration_ms = (
-        expected_samples / expected_audio["sample_rate_hz"] * 1_000
-    )
+    expected_samples = total_bytes // 2
     if (
         audio_bytes != total_bytes
         or samples != expected_samples
-        or not math.isclose(
-            float(duration_ms), expected_duration_ms, rel_tol=0.0, abs_tol=0.0005
-        )
+        or not pcm_duration_ms_matches_samples(duration_ms, expected_samples, 48_000)
     ):
         raise ValueError("inconsistent TTS v2 result totals")
 

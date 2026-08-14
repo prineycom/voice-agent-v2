@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import sys
 import time
@@ -28,6 +29,32 @@ EXPECTED_REQUEST_KEYS = {
 EXPECTED_CORRELATION_KEYS = {
     "session_id", "stream_epoch", "turn_id", "turn_generation", "request_id", "segment_index"
 }
+CORRELATION_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
+
+
+def rounded_duration_ms(samples: int) -> float:
+    whole, remainder = divmod(samples * 1_000_000, SAMPLE_RATE)
+    doubled = remainder * 2
+    if doubled > SAMPLE_RATE or (doubled == SAMPLE_RATE and whole % 2):
+        whole += 1
+    return whole / 1_000
+
+
+def matches_output_audio(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "encoding", "sample_rate_hz", "channels", "sample_width_bytes"
+    }:
+        return False
+    return (
+        type(value.get("encoding")) is str
+        and value["encoding"] == "pcm_s16le"
+        and type(value.get("sample_rate_hz")) is int
+        and value["sample_rate_hz"] == SAMPLE_RATE
+        and type(value.get("channels")) is int
+        and value["channels"] == 1
+        and type(value.get("sample_width_bytes")) is int
+        and value["sample_width_bytes"] == 2
+    )
 
 
 def emit(document: dict[str, object]) -> None:
@@ -64,7 +91,7 @@ def validate_request(value: object) -> tuple[dict[str, object], str]:
         raise ValueError("invalid_correlation")
     for name in ("session_id", "turn_id", "request_id"):
         field = key.get(name)
-        if not isinstance(field, str) or not 1 <= len(field) <= 64:
+        if type(field) is not str or CORRELATION_ID_PATTERN.fullmatch(field) is None:
             raise ValueError("invalid_correlation")
     if value.get("request_id") != key.get("request_id"):
         raise ValueError("invalid_correlation")
@@ -81,10 +108,7 @@ def validate_request(value: object) -> tuple[dict[str, object], str]:
         raise ValueError("text_out_of_bounds")
     if value.get("text_format") != "plain" or value.get("normalization_version") != "voice-agent.silero-ru-shaping.v1":
         raise ValueError("invalid_text_contract")
-    if value.get("audio") != {
-        "encoding": "pcm_s16le", "sample_rate_hz": SAMPLE_RATE,
-        "channels": 1, "sample_width_bytes": 2,
-    }:
+    if not matches_output_audio(value.get("audio")):
         raise ValueError("unsupported_audio_format")
     return key, text
 
@@ -185,7 +209,7 @@ def main() -> int:
                 "chunk_count": chunk_count,
                 "audio_bytes": len(pcm),
                 "samples": samples,
-                "duration_ms": round(samples / SAMPLE_RATE * 1_000, 3),
+                "duration_ms": rounded_duration_ms(samples),
                 "latency_ms": latency_ms,
                 "terminal_count": 1,
             })

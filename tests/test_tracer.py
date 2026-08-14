@@ -168,13 +168,47 @@ class ContractFixtureTests(unittest.TestCase):
         invalid_documents["samples"]["result"]["samples"] -= 1
         invalid_documents["duration"] = deepcopy(tts_v2)
         invalid_documents["duration"]["result"]["duration_ms"] = 999
+        invalid_documents["boolean terminal"] = deepcopy(tts_v2)
+        invalid_documents["boolean terminal"]["result"]["terminal_count"] = True
+        invalid_documents["boolean request channel"] = deepcopy(tts_v2)
+        invalid_documents["boolean request channel"]["request"]["audio"]["channels"] = True
+        invalid_documents["boolean result sample width"] = deepcopy(tts_v2)
+        invalid_documents["boolean result sample width"]["result"]["audio"][
+            "sample_width_bytes"
+        ] = True
         for case, invalid_document in invalid_documents.items():
             with self.subTest(semantic_case=case):
                 with self.assertRaises(ValueError):
                     validate_tts_v2_document(invalid_document)
+        for field_path in (
+            ("request", "audio", "channels"),
+            ("result", "audio", "sample_width_bytes"),
+            ("result", "terminal_count"),
+        ):
+            boolean_constant = deepcopy(tts_v2)
+            target = boolean_constant
+            for field in field_path[:-1]:
+                target = target[field]
+            target[field_path[-1]] = True
+            with self.subTest(boolean_constant=field_path), self.assertRaises(
+                SchemaViolation
+            ):
+                validate(boolean_constant, tts_v2_schema)
+
         fractional_duration = deepcopy(tts_v2)
         fractional_duration["result"]["duration_ms"] = 120.5
         validate(fractional_duration, tts_v2_schema)
+        half_step_duration = deepcopy(tts_v2)
+        half_step_duration["result"]["chunks"] = [{"sequence": 0, "byte_count": 6}]
+        half_step_duration["result"]["chunk_count"] = 1
+        half_step_duration["result"]["audio_bytes"] = 6
+        half_step_duration["result"]["samples"] = 3
+        half_step_duration["result"]["duration_ms"] = 0.062
+        validate_tts_v2_document(half_step_duration)
+        half_step_duration["result"]["duration_ms"] = 0.063
+        with self.assertRaises(ValueError):
+            validate_tts_v2_document(half_step_duration)
+
         zero_duration = deepcopy(tts_v2)
         zero_duration["result"]["duration_ms"] = 0
         with self.assertRaises(SchemaViolation):

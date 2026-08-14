@@ -20,7 +20,11 @@ from .v2_audio import (
     TTS_V2_OUTPUT_MEDIA_MAX_BYTES,
     TTS_V2_OUTPUT_MEDIA_MAX_SECONDS,
 )
-from .v2_contracts import TTSRequestKey, TTS_V2_VERSION
+from .v2_contracts import (
+    TTSRequestKey,
+    TTS_V2_VERSION,
+    pcm_duration_ms_matches_samples,
+)
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 from .tts_text import SHAPING_VERSION, shape_russian_tts
@@ -63,6 +67,71 @@ WORKER_REQUEST_ERROR_CLASSES = frozenset({
 WORKER_ERROR_EVENT_FIELDS = frozenset({
     "protocol_version", "event", "key", "request_id", "error_class",
 })
+WORKER_CORRELATION_FIELDS = frozenset({
+    "session_id",
+    "stream_epoch",
+    "turn_id",
+    "turn_generation",
+    "request_id",
+    "segment_index",
+})
+
+
+def _protocol_value_equal(left: object, right: object) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is bool and type(right) is bool and left == right
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        return (
+            type(left) is type(right)
+            and (type(left) is int or type(left) is float and math.isfinite(left))
+            and left == right
+        )
+    if isinstance(left, str) or isinstance(right, str):
+        return type(left) is str and type(right) is str and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(_protocol_value_equal(a, b) for a, b in zip(left, right))
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and set(left) == set(right)
+            and all(_protocol_value_equal(left[name], right[name]) for name in left)
+        )
+    if left is None or right is None:
+        return left is None and right is None
+    return False
+
+
+def _valid_worker_key(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != WORKER_CORRELATION_FIELDS:
+        return False
+    if any(
+        type(value.get(name)) is not str or not valid_correlation_id(value[name])
+        for name in ("session_id", "turn_id", "request_id")
+    ):
+        return False
+    return all(
+        type(value.get(name)) is int and minimum <= value[name] <= maximum
+        for name, minimum, maximum in (
+            ("stream_epoch", 1, 1_000_000_000),
+            ("turn_generation", 1, 1_000_000_000),
+            ("segment_index", 0, 4_095),
+        )
+    )
+
+
+def _worker_key_matches(value: object, expected: TTSRequestKey) -> bool:
+    expected_value = expected.as_dict()
+    return (
+        _valid_worker_key(value)
+        and _valid_worker_key(expected_value)
+        and _protocol_value_equal(value, expected_value)
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -364,11 +433,14 @@ class SileroWorkerPool:
             "intraop_threads": 2,
             "interop_threads": 1,
         }
-        if any(metadata.get(name) != value for name, value in expected.items()):
+        if any(
+            not _protocol_value_equal(metadata.get(name), value)
+            for name, value in expected.items()
+        ):
             process.close()
             raise StageFailure("tts", "silero_worker_identity_mismatch")
         pid = metadata.get("pid")
-        if not isinstance(pid, int) or pid <= 0:
+        if type(pid) is not int or pid <= 0:
             process.close()
             raise StageFailure("tts", "silero_worker_identity_mismatch")
         slot.process = process
@@ -443,6 +515,8 @@ class SileroWorkerPool:
         text: str,
         cancellation: CancellationToken | None,
     ) -> tuple[tuple[bytes, ...], dict[str, object]]:
+        if not _valid_worker_key(key.as_dict()):
+            raise StageFailure("tts", "invalid_correlation_id")
         self.require_ready()
         if not self._is_fresh(key) or (cancellation is not None and cancellation.cancelled):
             self.counters["stale_before_dispatch"] += 1
@@ -544,7 +618,8 @@ class SileroWorkerPool:
                 set(event) != WORKER_ERROR_EVENT_FIELDS
                 or event.get("protocol_version") != WORKER_PROTOCOL_VERSION
                 or event.get("event") != "error"
-                or event.get("key") != key.as_dict()
+                or not _worker_key_matches(event.get("key"), key)
+                or type(event.get("request_id")) is not str
                 or event.get("request_id") != key.request_id
                 or event.get("error_class") not in WORKER_REQUEST_ERROR_CLASSES
             ):
@@ -557,18 +632,26 @@ class SileroWorkerPool:
         ):
             if event.get("protocol_version") != WORKER_PROTOCOL_VERSION:
                 raise AdapterProcessError("Silero worker protocol mismatch")
-            if event.get("key") != key.as_dict():
+            if (
+                not _worker_key_matches(event.get("key"), key)
+                or type(event.get("request_id")) is not str
+                or event.get("request_id") != key.request_id
+            ):
                 raise AdapterProcessError("Silero correlation mismatch")
             kind = event.get("event")
             if kind == "chunk":
-                if event.get("sequence") != chunk_count:
+                if (
+                    type(event.get("sequence")) is not int
+                    or event.get("sequence") != chunk_count
+                ):
                     raise AdapterProcessError("Silero chunk sequence mismatch")
                 encoded = event.get("pcm_base64")
                 if not isinstance(encoded, str):
                     raise AdapterProcessError("Silero chunk encoding mismatch")
                 chunk = base64.b64decode(encoded, validate=True)
                 if (
-                    event.get("bytes") != len(chunk)
+                    type(event.get("bytes")) is not int
+                    or event.get("bytes") != len(chunk)
                     or not chunk
                     or len(chunk) % 2
                     or len(chunk) > 65_536
@@ -601,22 +684,26 @@ class SileroWorkerPool:
             "samples": len(pcm) // 2,
             "terminal_count": 1,
         }
-        if any(final.get(name) != value for name, value in expected.items()):
+        if any(
+            not _protocol_value_equal(final.get(name), value)
+            for name, value in expected.items()
+        ):
             raise AdapterProcessError("Silero terminal totals/identity mismatch")
         duration = final.get("duration_ms")
         latency = final.get("latency_ms")
-        expected_duration = len(pcm) // 2 / TTS_OUTPUT_AUDIO_FORMAT.sample_rate_hz * 1_000
         if (
-            not isinstance(duration, (int, float))
-            or isinstance(duration, bool)
-            or not math.isfinite(duration)
-            or not 0 < duration <= 15_000
-            or not math.isclose(
-                duration, expected_duration, rel_tol=0.0, abs_tol=0.0005
+            not (
+                type(duration) is int
+                or type(duration) is float and math.isfinite(duration)
             )
-            or not isinstance(latency, (int, float))
-            or isinstance(latency, bool)
-            or not math.isfinite(latency)
+            or not 0 < duration <= 15_000
+            or not pcm_duration_ms_matches_samples(
+                duration, len(pcm) // 2, TTS_OUTPUT_AUDIO_FORMAT.sample_rate_hz
+            )
+            or not (
+                type(latency) is int
+                or type(latency) is float and math.isfinite(latency)
+            )
             or latency < 0
         ):
             raise AdapterProcessError("Silero terminal timing mismatch")
