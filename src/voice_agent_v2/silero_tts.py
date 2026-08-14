@@ -6,6 +6,7 @@ import base64
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import threading
@@ -577,12 +578,18 @@ class SileroWorkerPool:
             raise AdapterProcessError("Silero terminal totals/identity mismatch")
         duration = final.get("duration_ms")
         latency = final.get("latency_ms")
+        expected_duration = len(pcm) // 2 / TTS_OUTPUT_AUDIO_FORMAT.sample_rate_hz * 1_000
         if (
             not isinstance(duration, (int, float))
             or isinstance(duration, bool)
+            or not math.isfinite(duration)
             or not 0 < duration <= 15_000
+            or not math.isclose(
+                duration, expected_duration, rel_tol=0.0, abs_tol=0.0005
+            )
             or not isinstance(latency, (int, float))
             or isinstance(latency, bool)
+            or not math.isfinite(latency)
             or latency < 0
         ):
             raise AdapterProcessError("Silero terminal timing mismatch")

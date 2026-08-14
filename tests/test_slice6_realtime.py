@@ -6,11 +6,13 @@ import time
 import unittest
 
 from tests.test_checkpoint_ab import (
+    CapacityAudio,
     CheckpointARealtimeTests,
     MemoryAudio,
     MemoryEvents,
     StreamingRunner,
 )
+from voice_agent_v2.audio import OUTPUT_DELIVERY_BLOCK_BYTES
 from voice_agent_v2.contracts import EventEnvelopeV2
 from voice_agent_v2.realtime import (
     CONTROL_EVENT_VERSION,
@@ -183,6 +185,119 @@ class ObsoleteCurrentOverlapTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(old_terminals), 1)
         self.assertEqual(old_terminals[0]["type"], "turn.interrupted")
+
+
+class CrossGenerationCapacityRunner(OverlapRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.replacement_first_started = threading.Event()
+        self.replacement_second_started = threading.Event()
+
+    def run_turn(
+        self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
+        audio_observer, stream_epoch, turn_generation, request_id,
+        trace_observer=None, retain_output=True, segment_started_observer=None,
+        segment_audio_observer=None,
+    ) -> TraceResult:
+        del input_pcm, audio_observer, retain_output
+        assert segment_started_observer is not None
+        assert segment_audio_observer is not None
+        if turn_generation == 1:
+            segment_started_observer(0)
+            if trace_observer is not None:
+                trace_observer(
+                    "llm_provider", "cooperative_cleanup_complete",
+                    {"context_committed": True},
+                )
+                trace_observer("tts", "noncooperative_worker_started", {})
+            self.old_started.set()
+            self.old_release.wait(2)
+            if trace_observer is not None:
+                trace_observer("tts", "noncooperative_worker_finished", {})
+            segment_audio_observer(0, None)
+            return TraceResult((), b"", b"")
+
+        events: list[dict[str, object]] = []
+
+        def emit(event_type: str, payload: dict[str, object], terminal: bool = False) -> None:
+            event = EventEnvelopeV2(
+                session_id=session_id,
+                turn_id=turn_id,
+                stream_epoch=stream_epoch,
+                turn_generation=turn_generation,
+                request_id=request_id,
+                sequence=len(events) + 1,
+                event_type=event_type,
+                payload=payload,
+                terminal=terminal,
+            ).as_dict()
+            events.append(event)
+            event_observer(event)
+
+        self.replacement_started.set()
+        emit("turn.transcribing", {"stage": "stt"})
+        emit("stt.final", {"transcript": "Тест."})
+        emit("turn.thinking", {"stage": "llm_provider"})
+        emit("llm.visible", {"response": "Новый ответ."})
+        emit("turn.speaking", {"stage": "tts"})
+        segment_started_observer(0)
+        self.replacement_first_started.set()
+        first = b"\0\0" * (OUTPUT_DELIVERY_BLOCK_BYTES * 4 // 2)
+        segment_audio_observer(0, first)
+        emit("tts.audio", {"chunk_index": 0, "byte_count": len(first)})
+        segment_started_observer(1)
+        self.replacement_second_started.set()
+        second = b"\0\0" * (OUTPUT_DELIVERY_BLOCK_BYTES // 2)
+        segment_audio_observer(1, second)
+        emit("tts.audio", {"chunk_index": 1, "byte_count": len(second)})
+        emit("llm.final", {"response": "Новый ответ."})
+        emit(
+            "turn.completed",
+            {"outcome": "completed", "output_bytes": len(first) + len(second)},
+            True,
+        )
+        return TraceResult(tuple(events), b"", b"")
+
+
+class CrossGenerationCapacityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_obsolete_and_replacement_share_two_segment_capacity(self) -> None:
+        runner = CrossGenerationCapacityRunner()
+        audio = CapacityAudio()
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-segment-capacity",
+            runner=runner,
+            event_sink=events,
+            audio_sink=audio,
+        )
+
+        first_turn = await session.submit_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(runner.old_started.wait, 0.5))
+        second_turn = await session.submit_utterance(b"\0\0" * 320)
+        try:
+            self.assertTrue(
+                await asyncio.to_thread(runner.replacement_first_started.wait, 0.5)
+            )
+            self.assertTrue(await asyncio.to_thread(audio.started[0].wait, 0.5))
+            await asyncio.sleep(0.05)
+            self.assertFalse(runner.replacement_second_started.is_set())
+
+            runner.old_release.set()
+            self.assertTrue(
+                await asyncio.to_thread(runner.replacement_second_started.wait, 0.5)
+            )
+        finally:
+            runner.old_release.set()
+            for release in audio.release:
+                release.set()
+            await asyncio.wait_for(session.wait_for_cleanup(), 1)
+
+        self.assertEqual(events.events[-1]["type"], "turn.completed")
+        self.assertEqual(events.events[-1]["turn_id"], second_turn)
+        self.assertIn(
+            "turn.interrupted",
+            [event["type"] for event in events.events if event["turn_id"] == first_turn],
+        )
 
 
 class FinalSegmentOverlapRunner(OverlapRunner):

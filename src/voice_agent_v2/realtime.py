@@ -308,6 +308,7 @@ class RealtimeSession:
         self._disconnect_complete = False
         self._lock = asyncio.Lock()
         self._runner_lock = asyncio.Lock()
+        self._segment_capacity = asyncio.Semaphore(2)
         self._reconnect_lock = asyncio.Lock()
         self._disconnect_lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[str | None]] = set()
@@ -807,12 +808,11 @@ class RealtimeSession:
         loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
         segment_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(maxsize=2)
-        segment_capacity = asyncio.Semaphore(2)
         pcm_queue: asyncio.Queue[PcmPumpItem | None] = asyncio.Queue(
             maxsize=PCM_PUMP_MAX_BLOCKS
         )
         pcm_capacity = asyncio.Semaphore(PCM_PUMP_MAX_BLOCKS)
-        outstanding_segments = 0
+        reserved_segments: set[int] = set()
         outstanding_pcm = 0
         pump_errors: list[BaseException] = []
         delivery_block_bytes = (
@@ -871,36 +871,41 @@ class RealtimeSession:
                 context.pcm_queue_high_water, outstanding_pcm
             )
 
-        async def reserve_segment() -> None:
-            nonlocal outstanding_segments
+        async def reserve_segment(segment_index: int) -> None:
             if not fresh():
                 raise StageFailure("tts", "selected_tts_cancelled")
-            await segment_capacity.acquire()
+            if segment_index in reserved_segments:
+                raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+            await self._segment_capacity.acquire()
             if not fresh():
-                segment_capacity.release()
+                self._segment_capacity.release()
                 raise StageFailure("tts", "selected_tts_cancelled")
-            outstanding_segments += 1
+            if segment_index in reserved_segments:
+                self._segment_capacity.release()
+                raise StageFailure("tts", "selected_tts_output_out_of_bounds")
+            reserved_segments.add(segment_index)
             context.segment_queue_high_water = max(
-                context.segment_queue_high_water, outstanding_segments
+                context.segment_queue_high_water, len(reserved_segments)
             )
 
-        async def release_segment() -> None:
-            nonlocal outstanding_segments
-            outstanding_segments -= 1
-            segment_capacity.release()
+        async def release_segment(segment_index: int) -> None:
+            if segment_index not in reserved_segments:
+                return
+            reserved_segments.remove(segment_index)
+            self._segment_capacity.release()
 
         async def enqueue_segment(
             chunk_index: int, chunk: bytes, *, reserved: bool = False
         ) -> None:
             if not reserved:
-                await reserve_segment()
+                await reserve_segment(chunk_index)
             if not fresh():
-                await release_segment()
+                await release_segment(chunk_index)
                 raise StageFailure("tts", "selected_tts_cancelled")
             try:
                 await segment_queue.put((chunk_index, chunk))
             except BaseException:
-                await release_segment()
+                await release_segment(chunk_index)
                 raise
 
         def wait_for_delivery(delivery) -> None:
@@ -936,27 +941,37 @@ class RealtimeSession:
             )
             wait_for_delivery(delivery)
 
-        def reserve_synthesis_segment(_segment_index: int) -> None:
-            wait_for_delivery(asyncio.run_coroutine_threadsafe(reserve_segment(), loop))
+        def reserve_synthesis_segment(segment_index: int) -> None:
+            wait_for_delivery(asyncio.run_coroutine_threadsafe(
+                reserve_segment(segment_index), loop
+            ))
 
         def observe_synthesis_segment(
             segment_index: int, chunk: bytes | None
         ) -> None:
             nonlocal expected_synthesis_segment
             if segment_index != expected_synthesis_segment:
-                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(
+                    release_segment(segment_index), loop
+                ))
                 raise StageFailure("tts", "selected_tts_output_out_of_bounds")
             expected_synthesis_segment += 1
             if chunk is None:
-                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(
+                    release_segment(segment_index), loop
+                ))
                 return
             if not chunk or len(chunk) % TTS_OUTPUT_AUDIO_FORMAT.sample_width_bytes:
-                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(
+                    release_segment(segment_index), loop
+                ))
                 raise StageFailure("tts", "selected_tts_output_out_of_bounds")
             try:
                 wait_for_event_barrier()
             except BaseException:
-                wait_for_delivery(asyncio.run_coroutine_threadsafe(release_segment(), loop))
+                wait_for_delivery(asyncio.run_coroutine_threadsafe(
+                    release_segment(segment_index), loop
+                ))
                 raise
             wait_for_delivery(asyncio.run_coroutine_threadsafe(
                 enqueue_segment(segment_index, bytes(chunk), reserved=True), loop
@@ -973,7 +988,6 @@ class RealtimeSession:
                     event_queue.task_done()
 
         async def consume_segments() -> None:
-            nonlocal outstanding_segments
             assembly = bytearray()
             block_sequence = 0
             while True:
@@ -999,7 +1013,7 @@ class RealtimeSession:
                         block_sequence += 1
                 finally:
                     if item is not None:
-                        await release_segment()
+                        await release_segment(item[0])
                     segment_queue.task_done()
 
         async def consume_pcm() -> None:
@@ -1096,9 +1110,13 @@ class RealtimeSession:
         finally:
             if context.worker is worker:
                 context.worker = None
-            for consumer in (event_consumer, segment_consumer, pcm_consumer):
+            consumers = (event_consumer, segment_consumer, pcm_consumer)
+            for consumer in consumers:
                 if not consumer.done():
                     consumer.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+            for segment_index in tuple(reserved_segments):
+                await release_segment(segment_index)
 
         if context.terminal or self._closed:
             return

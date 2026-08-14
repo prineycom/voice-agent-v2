@@ -55,6 +55,7 @@ class ProcessCoordinator:
         self.gates: dict[str, threading.Event] = {}
         self.entered: queue.Queue[tuple[str, str]] = queue.Queue()
         self.fail_requests: set[str] = set()
+        self.final_overrides: dict[str, object] = {}
         self._pid = 7000
 
     def factory(self, worker_id, _log_path, _environment):
@@ -111,7 +112,7 @@ class FakeProcess:
             "bytes": len(pcm),
             "pcm_base64": __import__("base64").b64encode(pcm).decode("ascii"),
         }
-        yield {
+        final = {
             "protocol_version": "voice-agent.silero-worker.v1",
             "event": "final",
             "request_id": request_id,
@@ -130,6 +131,8 @@ class FakeProcess:
             "latency_ms": 1.0,
             "terminal_count": 1,
         }
+        final.update(self.coordinator.final_overrides)
+        yield final
 
     def close(self) -> None:
         self.process.running = False
@@ -547,6 +550,26 @@ class SileroPoolTests(unittest.TestCase):
             )
         finally:
             pool.close()
+
+    def test_worker_timing_must_match_samples_and_remain_finite(self) -> None:
+        invalid_timings = (
+            {"duration_ms": 1.0},
+            {"duration_ms": float("nan")},
+            {"latency_ms": float("inf")},
+        )
+        for turn, override in enumerate(invalid_timings, start=1):
+            with self.subTest(override=override):
+                coordinator = ProcessCoordinator()
+                pool = self.pool(coordinator)
+                coordinator.final_overrides.update(override)
+                try:
+                    with self.assertRaises(StageFailure) as failure:
+                        pool.synthesize(self.key(turn), "Проверка времени.", None)
+                    self.assertEqual(failure.exception.code, "silero_worker_failed")
+                    self.assertEqual(pool.counters["requests"], 1)
+                    self.assertEqual(len(coordinator.created), 2)
+                finally:
+                    pool.close()
 
     def test_same_turn_is_serial_while_obsolete_and_current_overlap(self) -> None:
         coordinator = ProcessCoordinator()
