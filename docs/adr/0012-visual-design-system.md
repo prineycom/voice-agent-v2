@@ -1,6 +1,6 @@
 # ADR-0012: Visual design system — neon minimal cyberpunk
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-14
 - **Decision owner:** Voice Agent v2 project architecture
 

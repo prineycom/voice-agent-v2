@@ -353,9 +353,11 @@ This is a required design task, not an implementation slice. Run a dedicated `/s
 
 ## Slice 7 — Renderer-agnostic host and deterministic MVP eye
 
+> **Implementation checkpoint:** Issue #9 also owns the accepted Design Gate V full UI shell. Focused module/replay/state/microphone/reduced-motion tests and a headless portrait browser review are recorded in [`slice-7-ui-avatar.md`](evidence/slice-7-ui-avatar.md). Raspberry Pi 60-fps, physical real-session visual/audio, and second-client acceptance remain open measurements.
+
 ### User-visible outcome
 
-During the private LiveKit conversation, an original animated AI eye visibly listens, thinks, speaks, handles interruption, and returns smoothly to neutral. Its pupil uses bounded external targeting or bounded idle movement, it blinks, its outer ring/pattern pulses with actual speech, and its palette/pupil representation reflects state.
+During the private LiveKit conversation, an original animated AI eye visibly listens, thinks, speaks, handles interruption, and returns smoothly to neutral. Its pupil uses bounded external targeting or bounded idle movement, it blinks, its outer ring/pattern pulses with actual speech, and its palette/pupil representation reflects state. A portrait-first full-viewport shell keeps only compact connection, current speech, microphone, and menu overlays visible; history and detailed status remain in right-edge panels.
 
 ### Included scope
 
@@ -364,6 +366,8 @@ During the private LiveKit conversation, an original animated AI eye visibly lis
 - Bounded external pupil target input plus seeded deterministic idle movement when no valid target exists; the tracking producer itself is not included.
 - Deterministic blink, state-specific pupil behavior including a thinking loader, palette changes, actual-playout speech-envelope pulsing, interruption, return-to-neutral, reduced motion, and render health.
 - Offline fixture replay and real-conversation visual review.
+- The ADR-0011 full-viewport UI shell: four steady overlays, exact four-item menu, history panel, tabbed system/timeline status panel, startup/disconnect overlays, and real in-session microphone mute/unmute.
+- The ADR-0012 tokenized neon-minimal visual system and its independent system-level and persisted user-level reduced-motion behavior.
 
 ### Excluded scope
 
@@ -387,6 +391,9 @@ During the private LiveKit conversation, an original animated AI eye visibly lis
 - Reduced-motion mode avoids nonessential motion while preserving understandable state.
 - Human visual review accepts the original eye as deliberately simple, readable, and not a copy of another character.
 - Browser frame timing and host resource use stay within preregistered limits during a real voice session.
+- The UI shell remains renderer-agnostic, renders only the four intended steady overlays above the avatar, and exposes the exact menu/panel/startup/disconnect behavior accepted at Design Gate V.
+- Microphone mute/unmute changes the existing published capture track without disconnecting or stopping assistant playout, coalesces repeated intent, reports effective failure state, and preserves mute intent over transient reconnect.
+- System reduced motion removes ambient/panel/glow/scanline motion; the persisted UI toggle makes the avatar static while retaining understandable state color/representation.
 
 ### Validation method
 
@@ -398,6 +405,7 @@ Run module-contract bounds/property tests, seeded deterministic fixture replay, 
 - Asset/design provenance and approved visual captures.
 - Deterministic replay hash/normalized state report across tracking, idle, speech, palette, and lifecycle inputs.
 - Browser performance/resource results and interruption capture.
+- Portrait UI-shell capture, reduced-motion evidence, deployed review-stand commit/URL, and an explicit list of physical/full-stack gaps.
 
 ## Slice 8 — Failure semantics and privacy-safe observability
 

@@ -1,6 +1,6 @@
 # ADR-0011: UI shell architecture — full-screen avatar-first, panel overlays
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-14
 - **Decision owner:** Voice Agent v2 project architecture
 

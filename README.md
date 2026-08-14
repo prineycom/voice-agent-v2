@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**The private Silero/Kseniya native-48 test branch passes deterministic and focused exact-cache checks; Pasha's physical Firefox acceptance is still required, and the branch must remain open and unmerged.** Active Slice 6 composition is fixed directly to cache-local Silero `v5_5_ru`, speaker `kseniya`, behind TTS v2. There is no TTS selector, Qwen adapter, co-start, hot switch, fallback, or cross-adapter retry. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`. The local LFM2.5 Q4_K_M path remains fixed and cloud-free.
+**The private Silero/Kseniya native-48 path passes deterministic and focused exact-cache checks; Pasha's physical Firefox acceptance is still required. Slice 7 adds the bounded renderer-agnostic avatar host, original deterministic eye, and portrait-first UI shell, while physical Raspberry Pi/full-stack visual acceptance remains open.** Active Slice 6 composition is fixed directly to cache-local Silero `v5_5_ru`, speaker `kseniya`, behind TTS v2. There is no TTS selector, Qwen adapter, co-start, hot switch, fallback, or cross-adapter retry. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`. The local LFM2.5 Q4_K_M path remains fixed and cloud-free.
 
 Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
@@ -60,6 +60,27 @@ Start the foreground development stack with:
 
 Startup clears unrelated inherited `LITELLM_BASE_URL`/`LITELLM_TOKEN_FILE` before loading operator-owned `.env.slice6`; either forbidden name configured in that file still fails closed. It verifies the exact LFM and Silero identities before starting local llama.cpp, LiveKit, the gateway/controller, and Tailscale Serve. Exact existing HTTPS mappings to `127.0.0.1:8000`/`:7880` are treated as externally owned and survive shutdown; conflicts fail before mutation. Missing routes are created as foreground children one at a time, verified before the next launch, supervised, and removed only by stopping the children owned by that run. No global Serve reset is used, and unrelated handlers such as HTTPS `443` are untouched. The agent publishes one persistent 48-kHz LiveKit source; request/media generations determine when the browser may attach it. Microphone input remains explicitly 16 kHz. Shared services, firewall, and LiveKit server settings are not modified by setup or verification.
 
+### Slice 7 avatar/UI verification and review stand
+
+Run the intentionally focused browser boundary:
+
+```sh
+./verify-slice7
+```
+
+It covers host/module compatibility and fallback, deterministic replay/bounds, UI state mapping, decoded-playout envelope normalization, microphone mute/reconnect semantics, both reduced-motion levels, and a production build. The browser evidence and explicit physical/full-stack gaps are recorded in [`docs/evidence/slice-7-ui-avatar.md`](docs/evidence/slice-7-ui-avatar.md).
+
+A clean committed head can be deployed as an isolated static review fixture without starting inference or changing the existing HTTPS/443 service:
+
+```sh
+./run-review-stand start
+./run-review-stand status
+./run-review-stand restart
+./run-review-stand stop
+```
+
+The launcher prints the exact compiled commit and tailnet URL. The fixture is visibly labelled `REVIEW`; the complete commit is available in **STATUS → SYSTEM → BUILD**.
+
 ### Pasha physical acceptance and rollback
 
 Follow the authoritative acceptance and rollback checklist in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](docs/evidence/silero-kseniya-48k-private-evaluation.md). It owns the required Kseniya audibility/quality/join, repeated barge-in, tailnet, full-stack resource, evidence-handling, and rollback procedure. Do not merge this branch until physical acceptance, separate licensing, and legal review are all complete.
@@ -88,7 +109,7 @@ Microphone capture is bounded to 1–30 seconds. The command removes temporary m
 
 ## Deferred
 
-- The detailed avatar-module and visual-control contract requires a dedicated Grill/design task before MVP eye implementation.
+- Physical Raspberry Pi/full-stack acceptance of the implemented avatar-module/UI contract remains required; the contract itself is fixed by Design Gate V and `voice-agent.avatar-host.v1`.
 - Live2D and 3D remain possible later avatar modules; neither is an MVP renderer decision.
 - Optional wake-word activation, including any custom Russian wake model, begins only after the core MVP is reliable.
 - Production cloud identity/provenance, privacy/cost facts, and approval remain deferred. ADR-0006's private cloud testing permission is historical and superseded by the active local-only ADR-0008 path; every earlier provider failure and unknown remains explicit.

@@ -1,7 +1,7 @@
 # Domain glossary
 
 - **Agent response** — The assistant content produced for one voice turn, including response text and synthesized speech.
-- **Avatar control contract** — The future bounded, renderer-neutral interface by which validated session, speech, and optional semantic inputs reach an avatar module. Its detailed design is not yet decided.
+- **Avatar control contract** — The versioned `voice-agent.avatar-control.v1` renderer-neutral input validated by the avatar host: lifecycle, decoded-playout speech envelope, optional bounded tracking target, cancellation, idle seed, and reduced-motion preference. It contains no renderer or LLM frame data.
 - **Avatar host** — The renderer-agnostic component that loads one avatar module and routes validated inputs, lifecycle, cancellation, and failure state to it.
 - **Avatar module** — A replaceable visual implementation behind the avatar host boundary, such as the MVP eye or a later custom, Live2D, or 3D renderer.
 - **Barge-in** — A user interruption that occurs while an agent response is being delivered.
@@ -19,7 +19,7 @@
 - **Realtime session** — The bounded period in which a client and the agent share media, control events, and conversation state.
 - **Render state** — Renderer-internal values and frames owned exclusively by an avatar module, never supplied by an LLM.
 - **Soft dependency** — A capability whose loss permits an explicitly degraded but still correct experience.
-- **Speech envelope** — A bounded timing/amplitude signal derived from actual audio playout for deterministic speech-synchronous visual behavior.
+- **Speech envelope** — A bounded 30-Hz timing/amplitude observation derived from the browser's current decoded audio playout path for deterministic speech-synchronous visual behavior; it is not proof of physical audibility.
 - **Tailnet** — The private network formed by devices that are members of the project's Tailscale network.
 - **Tracer** — The smallest end-to-end path that crosses the intended boundaries with deterministic substitutes and produces inspectable evidence.
 - **Output media generation** — A monotonically increasing session-local identity that binds one current turn/request to the persistent agent audio publication; the browser may attach only the matching generation.
