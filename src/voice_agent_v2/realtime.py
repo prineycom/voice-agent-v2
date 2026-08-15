@@ -428,7 +428,7 @@ class RealtimeSession:
                     component.component,
                     "dead" if component.component == affected and force_dead else component.liveness,
                     "unready" if component.component == affected else component.readiness,
-                    False if component.component == affected else component.compatible,
+                    component.compatible,
                     component.identity,
                     component.contract_version,
                     failure_code if component.component == affected else component.reason_code,

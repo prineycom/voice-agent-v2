@@ -315,7 +315,7 @@ class LiveTurnRunner:
         lfm_runtime_ready = runtime_health.get("ready") is True
         if isinstance(self.llm, LocalLFMProvider):
             lfm_compatible = (
-                lfm_alive
+                isinstance(lfm_ready, dict)
                 and runtime_health.get("compatible") is True
                 and lfm_ready.get("provider_mode") == self.llm.provider_mode
                 and lfm_ready.get("provider_identity") == self.llm.provider_identity
@@ -325,8 +325,7 @@ class LiveTurnRunner:
             )
         else:
             lfm_compatible = (
-                lfm_alive
-                and getattr(self.llm, "version", None) == "voice-agent.llm-provider.v1"
+                getattr(self.llm, "version", None) == "voice-agent.llm-provider.v1"
                 and getattr(self.llm, "provider_mode", None) == "local"
                 and isinstance(warmup.get("lfm"), dict)
                 and warmup["lfm"].get("discarded") is True
@@ -374,9 +373,14 @@ class LiveTurnRunner:
                 self.llm.provider_identity,
                 self.llm.version,
                 None if lfm_alive and lfm_runtime_ready and lfm_compatible
-                else "local_lfm_unavailable" if not lfm_alive
-                else "local_lfm_incompatible" if not lfm_compatible
-                else str(runtime_health.get("reason_code") or "local_lfm_unready"),
+                else str(
+                    runtime_health.get("reason_code")
+                    or (
+                        "local_lfm_unavailable" if not lfm_alive
+                        else "local_lfm_incompatible" if not lfm_compatible
+                        else "local_lfm_unready"
+                    )
+                ),
             ),
             ComponentHealth(
                 "tts",

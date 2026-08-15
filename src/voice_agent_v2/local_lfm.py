@@ -35,6 +35,20 @@ MAX_TOKENS = 768
 REASONING_BUDGET = 384
 HANDOFF_CLEANUP_TIMEOUT_SECONDS = 6.0
 _UNSET = object()
+_TRANSPORT_FAILURE_CODES = frozenset({
+    "local_lfm_unavailable",
+    "local_lfm_transport_error",
+    "local_lfm_request_timeout",
+})
+_CONTRACT_FAILURE_CODES = frozenset({
+    "local_lfm_health_failed",
+    "selected_provider_identity_mismatch",
+    "selected_provider_protocol_error",
+    "selected_provider_output_out_of_bounds",
+    "local_lfm_incomplete_response",
+    "empty_selected_provider_response",
+    "forbidden_request_field",
+})
 ALLOWED_PAYLOAD_FIELDS = frozenset({
     "model", "messages", "stream", "stream_options", "temperature", "top_p",
     "top_k", "repeat_penalty", "max_tokens", "reasoning_format", "reasoning_budget",
@@ -177,15 +191,10 @@ class LocalLFMProvider:
             "transcript_out_of_bounds",
         }:
             return
-        transport_failure = code in {
-            "local_lfm_unavailable",
-            "local_lfm_transport_error",
-            "local_lfm_request_timeout",
-        }
         self._set_runtime_health(
-            live=False if transport_failure else None,
+            live=False if code in _TRANSPORT_FAILURE_CODES else None,
             ready=False,
-            compatible=False if code == "selected_provider_identity_mismatch" else None,
+            compatible=False if code in _CONTRACT_FAILURE_CODES else None,
             reason_code=code,
         )
 

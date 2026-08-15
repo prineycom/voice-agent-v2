@@ -38,8 +38,18 @@ _DIRECTORY_LOCK = threading.Lock()
 _CAPTURE_KINDS = frozenset({"raw-audio", "transcript", "prompt", "response"})
 
 
+def _uptime_seconds() -> float:
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is not None:
+        return time.clock_gettime(clock)
+    return time.monotonic()
+
+
 def _spawn_expiry_guardian(
-    path: Path, owner_nonce: str, expires_unix_seconds: float
+    path: Path,
+    owner_nonce: str,
+    expires_unix_seconds: float,
+    expires_uptime_seconds: float,
 ) -> None:
     process = subprocess.Popen(
         [
@@ -51,12 +61,15 @@ def _spawn_expiry_guardian(
             owner_nonce,
             "--expires-unix-seconds",
             str(expires_unix_seconds),
+            "--expires-uptime-seconds",
+            str(expires_uptime_seconds),
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
         close_fds=True,
+        env={"PYTHONUTF8": "1"},
     )
     threading.Thread(
         target=process.wait,
@@ -298,8 +311,9 @@ class DiagnosticContentCapture:
         timer_factory: Callable[
             [float, Callable[[], None]], threading.Timer
         ] = threading.Timer,
-        guardian_factory: Callable[[Path, str, float], None] = _spawn_expiry_guardian,
+        guardian_factory: Callable[[Path, str, float, float], None] = _spawn_expiry_guardian,
         runtime_root: Path | None = None,
+        uptime_now: Callable[[], float] = _uptime_seconds,
     ) -> None:
         if not opt_in:
             raise ValueError("diagnostic content capture requires explicit opt-in")
@@ -339,6 +353,7 @@ class DiagnosticContentCapture:
         self._now = now
         self._created = float(now())
         self._expires = self._created + ttl_seconds
+        self._expires_uptime = float(uptime_now()) + ttl_seconds
         self._owner_nonce = secrets.token_hex(16)
         self._files = 0
         self._bytes = 0
@@ -362,7 +377,12 @@ class DiagnosticContentCapture:
                 "manifest.json",
                 json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
             )
-            guardian_factory(self.path, self._owner_nonce, self._expires)
+            guardian_factory(
+                self.path,
+                self._owner_nonce,
+                self._expires,
+                self._expires_uptime,
+            )
             expiry_timer = timer_factory(ttl_seconds, self._expire_now)
             expiry_timer.daemon = True
             self._expiry_timer = expiry_timer

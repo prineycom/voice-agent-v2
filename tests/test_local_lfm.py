@@ -174,6 +174,32 @@ class LocalLFMProviderTests(unittest.TestCase):
             "reason_code": "selected_provider_identity_mismatch",
         })
 
+    def test_protocol_failure_preserves_liveness_but_drops_compatibility(self) -> None:
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        malformed = StubResponse([
+            {"model": MODEL_ALIAS, "choices": "invalid"},
+        ])
+        factory, _created = self.factory([health, malformed])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        provider.readiness()
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond(
+                session_id="session-protocol",
+                turn_id="turn-protocol",
+                transcript="Проверка.",
+            )
+
+        self.assertEqual(raised.exception.code, "selected_provider_protocol_error")
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": False,
+            "compatible": False,
+            "reason_code": "selected_provider_protocol_error",
+        })
+
     def test_payload_freezes_voice_sampling_reasoning_and_visible_bounds(self) -> None:
         provider = LocalLFMProvider(connection_factory=lambda *_a, **_k: None)
         payload = provider._payload("session-a", "Почему летом день длиннее?")
@@ -745,6 +771,7 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "local_lfm_request_timeout")
         self.assertFalse(provider.runtime_live)
         self.assertFalse(provider.runtime_health["ready"])
+        self.assertTrue(provider.runtime_health["compatible"])
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertTrue(created[0].closed)
 

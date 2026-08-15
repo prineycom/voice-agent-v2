@@ -238,7 +238,46 @@ class ResidentLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm_health.liveness, "alive")
         self.assertEqual(llm_health.readiness, "unready")
         self.assertFalse(llm_health.compatible)
-        self.assertEqual(llm_health.reason_code, "local_lfm_incompatible")
+        self.assertEqual(
+            llm_health.reason_code,
+            "selected_provider_identity_mismatch",
+        )
+        self.assertFalse(runner.ready_for_admission())
+
+    async def test_local_lfm_transport_loss_preserves_verified_compatibility(self) -> None:
+        runtime = load_runtime()
+        runner = object.__new__(runtime.LiveTurnRunner)
+        runner.stt = ResidentSTT(3101)
+        runner.llm = LocalLFMProvider(connection_factory=lambda *_args, **_kwargs: None)
+        runner.tts = ResidentTTS(3103)
+        runner.warmup_metadata = {
+            "stt": {"discarded": True},
+            "lfm_ready": {
+                "ready": True,
+                "provider_mode": runner.llm.provider_mode,
+                "provider_identity": runner.llm.provider_identity,
+                "selected_alias": MODEL_ALIAS,
+                "external_transfer": False,
+                "automatic_fallback": False,
+            },
+            "tts": {"discarded": True},
+        }
+        runner._started = True
+        runner.llm._set_runtime_health(
+            live=False,
+            ready=False,
+            compatible=True,
+            reason_code="local_lfm_transport_error",
+        )
+
+        llm_health = next(
+            component for component in runner.readiness_components()
+            if component.component == "selected_llm"
+        )
+        self.assertEqual(llm_health.liveness, "dead")
+        self.assertEqual(llm_health.readiness, "unready")
+        self.assertTrue(llm_health.compatible)
+        self.assertEqual(llm_health.reason_code, "local_lfm_transport_error")
         self.assertFalse(runner.ready_for_admission())
 
     async def test_cancelled_qwen_request_drains_without_stopping_resident_process(self) -> None:

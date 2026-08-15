@@ -434,7 +434,7 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(tts_health["liveness"], "dead")
         self.assertEqual(tts_health["readiness"], "unready")
-        self.assertFalse(tts_health["compatible"])
+        self.assertTrue(tts_health["compatible"])
         with self.assertRaisesRegex(RuntimeError, "session is closed"):
             await session.start_utterance()
 

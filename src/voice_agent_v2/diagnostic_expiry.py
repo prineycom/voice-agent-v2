@@ -15,20 +15,25 @@ else:
     from .diagnostics import DiagnosticContentCapture
 
 
+def _uptime_seconds() -> float:
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is not None:
+        return time.clock_gettime(clock)
+    return time.monotonic()
+
+
 def expire_capture(
     path: Path,
     owner_nonce: str,
     expires_unix_seconds: float,
+    expires_uptime_seconds: float,
     *,
-    now: Callable[[], float] = time.time,
+    uptime_now: Callable[[], float] = _uptime_seconds,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Wait until the absolute deadline, then delete only the same owned capture."""
-    remaining = expires_unix_seconds - float(now())
-    if remaining > 0:
+    """Wait until the monotonic deadline, then delete only the same owned capture."""
+    while (remaining := expires_uptime_seconds - float(uptime_now())) > 0:
         sleep(remaining)
-    if float(now()) < expires_unix_seconds:
-        return False
     try:
         return DiagnosticContentCapture.delete_path(
             path,
@@ -44,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--path", type=Path, required=True)
     parser.add_argument("--owner-nonce", required=True)
     parser.add_argument("--expires-unix-seconds", type=float, required=True)
+    parser.add_argument("--expires-uptime-seconds", type=float, required=True)
     return parser.parse_args()
 
 
@@ -53,6 +59,7 @@ def main() -> int:
         arguments.path,
         arguments.owner_nonce,
         arguments.expires_unix_seconds,
+        arguments.expires_uptime_seconds,
     )
     return 0
 

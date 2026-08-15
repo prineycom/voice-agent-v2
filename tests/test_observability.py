@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from voice_agent_v2.diagnostic_expiry import expire_capture
-from voice_agent_v2.diagnostics import DiagnosticContentCapture, PrivacySafeTrace, TraceIdentity
+from voice_agent_v2.diagnostics import (
+    DiagnosticContentCapture,
+    PrivacySafeTrace,
+    TraceIdentity,
+    _spawn_expiry_guardian,
+)
 from voice_agent_v2.observability import (
     COMPONENT_NAMES,
     FAILURE_MATRIX,
@@ -343,6 +350,7 @@ class CaptureAndResourceTests(unittest.TestCase):
             )
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             clock = [1000.0]
+            uptime = [500.0]
             scheduled: list[object] = []
 
             class ManualTimer:
@@ -363,23 +371,53 @@ class CaptureAndResourceTests(unittest.TestCase):
                     if not self.cancelled:
                         self.callback()
 
-            guardians: list[tuple[Path, str, float]] = []
+            guardians: list[tuple[Path, str, float, float]] = []
             capture = DiagnosticContentCapture(
                 Path(directory), "session-expiry", opt_in=True,
                 ttl_seconds=60, now=lambda: clock[0], timer_factory=ManualTimer,
                 guardian_factory=lambda *arguments: guardians.append(arguments),
-                runtime_root=Path(directory),
+                runtime_root=Path(directory), uptime_now=lambda: uptime[0],
             )
             capture.capture("prompt", "synthetic")
             self.assertEqual(guardians[0][0], capture.path)
-            self.assertEqual(guardians[0][2], 1060.0)
-            clock[0] = 1061.0
+            self.assertEqual(guardians[0][2:], (1060.0, 560.0))
+            clock[0] = 900.0
+            uptime[0] = 559.0
+            delays: list[float] = []
+
+            def sleep_early(delay: float) -> None:
+                delays.append(delay)
+                uptime[0] += min(delay, 0.4)
+
             self.assertTrue(expire_capture(
-                *guardians[0], now=lambda: clock[0],
-                sleep=lambda _delay: self.fail("expired guardian must not sleep"),
+                *guardians[0], uptime_now=lambda: uptime[0], sleep=sleep_early,
             ))
+            self.assertGreaterEqual(len(delays), 2)
             self.assertFalse(capture.path.exists())
             scheduled[0].fire()
+
+    def test_expiry_guardian_receives_only_minimal_environment(self) -> None:
+        class FinishedProcess:
+            pid = 1234
+
+            @staticmethod
+            def wait() -> int:
+                return 0
+
+        with patch.dict(os.environ, {"LIVEKIT_API_SECRET": "private-secret"}), patch(
+            "voice_agent_v2.diagnostics.subprocess.Popen",
+            return_value=FinishedProcess(),
+        ) as spawn:
+            _spawn_expiry_guardian(
+                Path("/private/capture-session"),
+                "a" * 32,
+                1060.0,
+                560.0,
+            )
+
+        environment = spawn.call_args.kwargs["env"]
+        self.assertEqual(environment, {"PYTHONUTF8": "1"})
+        self.assertNotIn("LIVEKIT_API_SECRET", environment)
 
     def test_detached_expiry_executable_deletes_after_backend_scope_ends(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
@@ -407,6 +445,8 @@ class CaptureAndResourceTests(unittest.TestCase):
                     nonce,
                     "--expires-unix-seconds",
                     str(expires),
+                    "--expires-uptime-seconds",
+                    str(time.monotonic() + 0.1),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
