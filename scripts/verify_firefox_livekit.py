@@ -610,6 +610,121 @@ async def main() -> int:
         ):
             raise AssertionError("microphone on replaced or failed to resume its publication")
 
+        capture_setup = driver.execute_script("""
+            const audio = document.querySelector('audio[data-voice-agent-audio="agent-response"]');
+            if (!(audio instanceof HTMLAudioElement)) return {ready: false, reason: 'missing audio'};
+            const attachedStream = audio.srcObject;
+            if (!(attachedStream instanceof MediaStream)) {
+                return {ready: false, reason: 'attached response stream missing'};
+            }
+            const capture = new MediaStream(attachedStream.getAudioTracks());
+            const mimeType = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus']
+                .find((candidate) => MediaRecorder.isTypeSupported(candidate));
+            if (mimeType === undefined) {
+                return {ready: false, reason: 'no supported recorder format'};
+            }
+            const recorder = new MediaRecorder(capture, {mimeType});
+            const chunks = [];
+            recorder.addEventListener('dataavailable', (event) => {
+                if (event.data.size > 0) chunks.push(event.data);
+            });
+            recorder.start(50);
+            window.__voiceAgentAttachedStreamCapture = {recorder, chunks, mimeType};
+            const track = capture.getAudioTracks()[0];
+            return {
+                ready: recorder.state === 'recording',
+                recorderState: recorder.state,
+                mimeType,
+                paused: audio.paused,
+                ended: audio.ended,
+                readyState: audio.readyState,
+                currentTime: audio.currentTime,
+                audioTrackCount: capture.getAudioTracks().length,
+                audioTrackReadyState: track?.readyState ?? null,
+            };
+        """)
+        if (
+            capture_setup.get("ready") is not True
+            or capture_setup.get("paused") is not False
+            or capture_setup.get("ended") is not False
+            or capture_setup.get("readyState", 0) < 2
+            or capture_setup.get("audioTrackCount") != 1
+            or capture_setup.get("audioTrackReadyState") != "live"
+        ):
+            raise AssertionError(f"attached browser response stream capture did not start: {capture_setup}")
+
+        first_turn = await session.submit_utterance(b"\0\0" * 320)
+        first_context = session._active
+        assert first_context is not None and first_context.task is not None
+        await asyncio.wait_for(first_context.task, 15)
+        await asyncio.sleep(1)
+        captured_playout = await asyncio.to_thread(
+            driver.execute_async_script,
+            """
+                const done = arguments[0];
+                const capture = window.__voiceAgentAttachedStreamCapture;
+                if (capture?.recorder === undefined) {
+                    done({ready: false, reason: 'recorder missing'});
+                    return;
+                }
+                const decodeCapture = async () => {
+                    try {
+                        const blob = new Blob(capture.chunks, {type: capture.mimeType});
+                        const encoded = await blob.arrayBuffer();
+                        const decoder = new OfflineAudioContext(1, 1, 48_000);
+                        const decoded = await decoder.decodeAudioData(encoded.slice(0));
+                        let squared = 0;
+                        let peak = 0;
+                        let sampleCount = 0;
+                        for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+                            const samples = decoded.getChannelData(channel);
+                            sampleCount += samples.length;
+                            for (const sample of samples) {
+                                squared += sample * sample;
+                                peak = Math.max(peak, Math.abs(sample));
+                            }
+                        }
+                        done({
+                            ready: true,
+                            encodedBytes: encoded.byteLength,
+                            decodedFrames: decoded.length,
+                            decodedSampleRate: decoded.sampleRate,
+                            decodedRms: sampleCount === 0 ? 0 : Math.sqrt(squared / sampleCount),
+                            decodedPeak: peak,
+                        });
+                    } catch (error) {
+                        done({ready: false, reason: String(error)});
+                    }
+                };
+                if (capture.recorder.state === 'recording') {
+                    capture.recorder.addEventListener('stop', decodeCapture, {once: true});
+                    capture.recorder.stop();
+                } else {
+                    void decodeCapture();
+                }
+            """,
+        )
+        if (
+            captured_playout.get("ready") is not True
+            or captured_playout.get("decodedFrames", 0) < 1_000
+            or captured_playout.get("decodedRms", 0) <= 0.01
+            or captured_playout.get("decodedPeak", 0) <= 0.05
+        ):
+            raise AssertionError(
+                "current-generation synthetic response PCM was absent from the stream "
+                f"attached at the browser playout boundary: {captured_playout}"
+            )
+        response_playout = {**capture_setup, "attachedStreamCapture": captured_playout}
+        if session._closed:
+            browser_state = await asyncio.to_thread(
+                driver.execute_script,
+                "return {body:document.body.innerText,localKeys:Object.keys(localStorage),sessionKeys:Object.keys(sessionStorage)}",
+            )
+            raise AssertionError(
+                "first full-stack turn closed the session: "
+                f"failures={failures}, events={[event['type'] for event in event_sink.events]}, "
+                f"browser={browser_state}"
+            )
         microphone_muted.clear()
         microphone_toggle = await wait_for_microphone_control(
             True, "React microphone control did not settle enabled before reconnect mute"
@@ -659,53 +774,6 @@ async def main() -> int:
         microphone_toggle = await wait_for_microphone_control(
             False, "React microphone control did not settle muted before reconnect resume"
         )
-        await asyncio.to_thread(
-            driver.execute_script,
-            """
-                const control = arguments[0];
-                control.addEventListener('click', () => {
-                    try {
-                        const audio = document.querySelector(
-                            'audio[data-voice-agent-audio="agent-response"]'
-                        );
-                        const stream = audio?.srcObject;
-                        if (!(stream instanceof MediaStream)) {
-                            window.__voiceAgentPcmProbe = {
-                                ready: false,
-                                reason: 'missing attached response stream',
-                            };
-                            return;
-                        }
-                        const context = new AudioContext();
-                        const analyser = context.createAnalyser();
-                        const silence = context.createGain();
-                        analyser.fftSize = 256;
-                        silence.gain.value = 0;
-                        context.createMediaStreamSource(stream)
-                            .connect(analyser)
-                            .connect(silence)
-                            .connect(context.destination);
-                        window.__voiceAgentPcmProbe = {
-                            ready: false,
-                            context,
-                            analyser,
-                            silence,
-                            samples: new Uint8Array(analyser.fftSize),
-                        };
-                        context.resume().then(
-                            () => { window.__voiceAgentPcmProbe.ready = context.state === 'running'; },
-                            () => { window.__voiceAgentPcmProbe.reason = 'resume rejected'; },
-                        );
-                    } catch (error) {
-                        window.__voiceAgentPcmProbe = {
-                            ready: false,
-                            reason: String(error),
-                        };
-                    }
-                }, {capture: true, once: true});
-            """,
-            microphone_toggle,
-        )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
         await wait_for(
@@ -713,94 +781,6 @@ async def main() -> int:
             "browser microphone did not cleanly resume after muted reconnect",
         )
 
-        def browser_probe_state():
-            return driver.execute_script("""
-                const probe = window.__voiceAgentPcmProbe;
-                return {
-                    ready: probe?.ready === true && probe?.context?.state === 'running',
-                    reason: probe?.reason ?? null,
-                    state: probe?.context?.state ?? null,
-                };
-            """)
-
-        probe_deadline = time.monotonic() + 5
-        probe_state = browser_probe_state()
-        while not probe_state["ready"] and time.monotonic() < probe_deadline:
-            await asyncio.sleep(0.05)
-            probe_state = browser_probe_state()
-        if not probe_state["ready"]:
-            raise AssertionError(
-                "browser response PCM probe created by the microphone gesture did not start: "
-                f"{probe_state}"
-            )
-
-        first_turn = await session.submit_utterance(b"\0\0" * 320)
-        first_context = session._active
-        assert first_context is not None and first_context.task is not None
-
-        def browser_playout_observation():
-            return driver.execute_script("""
-                const audio = document.querySelector('audio[data-voice-agent-audio="agent-response"]');
-                const stream = audio?.srcObject;
-                const tracks = stream instanceof MediaStream ? stream.getAudioTracks() : [];
-                const eyeEnvelope = Number.parseFloat(
-                    document.querySelector('.mvp-eye')?.style.getPropertyValue('--mvp-eye-envelope') || '0'
-                );
-                const probe = window.__voiceAgentPcmProbe;
-                let decodedEnvelope = 0;
-                if (probe?.context?.state === 'running') {
-                    probe.analyser.getByteTimeDomainData(probe.samples);
-                    let squared = 0;
-                    for (const sample of probe.samples) {
-                        const normalized = (sample - 128) / 128;
-                        squared += normalized * normalized;
-                    }
-                    decodedEnvelope = Math.sqrt(squared / probe.samples.length);
-                }
-                if (!(audio instanceof HTMLAudioElement)) return null;
-                return {
-                    paused: audio.paused,
-                    ended: audio.ended,
-                    readyState: audio.readyState,
-                    currentTime: audio.currentTime,
-                    audioTrackCount: tracks.length,
-                    audioTrackReadyState: tracks[0]?.readyState ?? null,
-                    decodedEnvelope,
-                    eyeEnvelope,
-                };
-            """)
-
-        response_playout = None
-        playout_deadline = time.monotonic() + 15
-        while time.monotonic() < playout_deadline:
-            response_playout = browser_playout_observation()
-            if (
-                response_playout is not None
-                and response_playout["paused"] is False
-                and response_playout["ended"] is False
-                and response_playout["readyState"] >= 2
-                and response_playout["audioTrackCount"] == 1
-                and response_playout["audioTrackReadyState"] == "live"
-                and response_playout["decodedEnvelope"] > 0.01
-            ):
-                break
-            await asyncio.sleep(0.02)
-        else:
-            raise AssertionError(
-                "current-generation synthetic response PCM did not reach active browser "
-                f"playout: {response_playout}"
-            )
-        await asyncio.wait_for(first_context.task, 15)
-        if session._closed:
-            browser_state = await asyncio.to_thread(
-                driver.execute_script,
-                "return {body:document.body.innerText,localKeys:Object.keys(localStorage),sessionKeys:Object.keys(sessionStorage)}",
-            )
-            raise AssertionError(
-                "first full-stack turn closed the session: "
-                f"failures={failures}, events={[event['type'] for event in event_sink.events]}, "
-                f"browser={browser_state}"
-            )
         second_turn = await session.submit_utterance(b"\0\0" * 320)
         second_context = session._active
         assert second_context is not None and second_context.task is not None
