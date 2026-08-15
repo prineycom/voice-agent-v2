@@ -217,6 +217,58 @@ describe('avatar host v1 boundary', () => {
     }
   })
 
+  it('replays the same interruption return across different frame schedules', () => {
+    const replayInterruption = (frameBeforeCancellation: number | null) => {
+      const scheduled: { frame: FrameRequestCallback | null } = { frame: null }
+      vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+        scheduled.frame = callback
+        return 1
+      }))
+      vi.stubGlobal('cancelAnimationFrame', vi.fn())
+      const renderer = new MvpEyeModule()
+      const container = document.createElement('div')
+
+      try {
+        renderer.mount(container)
+        const result = validateAvatarControl({
+          ...input(1_000),
+          lifecycle: 'idle',
+          motion: 'full',
+          trackingTarget: null,
+          speechEnvelope: null,
+        }, HOST_NOW_MS)
+        if (!result.accepted) throw new Error('valid control was rejected')
+        renderer.update(result.control)
+        if (frameBeforeCancellation !== null) {
+          const frame = scheduled.frame
+          if (frame === null) throw new Error('eye renderer did not schedule a frame')
+          frame(frameBeforeCancellation)
+        }
+
+        renderer.cancel(1_010)
+        const iris = container.querySelector<HTMLElement>('.mvp-eye__iris-group')
+        if (iris === null) throw new Error('eye renderer did not mount')
+        const transforms = [iris.style.transform]
+        for (const timeMs of [1_100, 1_190, 1_370]) {
+          const frame = scheduled.frame
+          if (frame === null) throw new Error('eye renderer did not reschedule a frame')
+          frame(timeMs)
+          transforms.push(iris.style.transform)
+        }
+        return transforms
+      } finally {
+        renderer.dispose()
+        vi.unstubAllGlobals()
+      }
+    }
+
+    const sparseReplay = replayInterruption(null)
+    const denseReplay = replayInterruption(1_008)
+
+    expect(denseReplay).toEqual(sparseReplay)
+    expect(new Set(sparseReplay).size).toBeGreaterThan(1)
+  })
+
   it('reports animation-frame draw failures instead of silently stopping its loop', () => {
     const scheduled: { frame: FrameRequestCallback | null } = { frame: null }
     const requestFrame = vi.fn((callback: FrameRequestCallback) => {

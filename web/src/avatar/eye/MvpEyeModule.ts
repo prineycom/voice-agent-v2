@@ -36,7 +36,6 @@ export class MvpEyeModule implements AvatarModuleV1 {
   private loader: SVGCircleElement | null = null
   private regularPupil: SVGCircleElement | null = null
   private control: ValidatedAvatarControlV1 | null = null
-  private lastPupilPosition: EyePupilPosition | null = null
   private interruptionOrigin: EyePupilPosition | null = null
   private animationFrame: number | null = null
   private failureHandler: AvatarModuleFailureHandlerV1 | null = null
@@ -114,7 +113,9 @@ export class MvpEyeModule implements AvatarModuleV1 {
   update(input: ValidatedAvatarControlV1): void {
     if (this.root === null) throw new Error('MVP eye is not mounted')
     if (input.lifecycle === 'interrupted' && this.control?.lifecycle !== 'interrupted') {
-      this.interruptionOrigin = this.lastPupilPosition
+      this.interruptionOrigin = this.control === null
+        ? null
+        : this.pupilPositionAt(this.control, input.timestampMs)
     } else if (input.lifecycle !== 'interrupted') {
       this.interruptionOrigin = null
     }
@@ -126,7 +127,7 @@ export class MvpEyeModule implements AvatarModuleV1 {
   cancel(timestampMs: number): void {
     if (this.control === null) return
     if (this.control.lifecycle !== 'interrupted') {
-      this.interruptionOrigin = this.lastPupilPosition
+      this.interruptionOrigin = this.pupilPositionAt(this.control, timestampMs)
     }
     this.control = {
       ...this.control,
@@ -149,7 +150,6 @@ export class MvpEyeModule implements AvatarModuleV1 {
     this.loader = null
     this.regularPupil = null
     this.control = null
-    this.lastPupilPosition = null
     this.interruptionOrigin = null
     this.failureHandler = null
   }
@@ -162,6 +162,14 @@ export class MvpEyeModule implements AvatarModuleV1 {
       this.animationFrame = null
       this.failureHandler?.({ kind: 'render-loop-failed' })
     }
+  }
+
+  private pupilPositionAt(
+    control: ValidatedAvatarControlV1,
+    timeMs: number,
+  ): EyePupilPosition {
+    const state = computeEyeRenderState(control, timeMs)
+    return { pupilX: state.pupilX, pupilY: state.pupilY }
   }
 
   private draw(timeMs: number): void {
@@ -181,7 +189,6 @@ export class MvpEyeModule implements AvatarModuleV1 {
     this.loader.style.opacity = thinking ? '1' : '0'
     this.regularPupil.style.opacity = thinking ? '0' : '1'
     this.root.style.setProperty('--mvp-eye-envelope', state.speechEnvelope.toFixed(4))
-    this.lastPupilPosition = { pupilX: state.pupilX, pupilY: state.pupilY }
   }
 }
 
