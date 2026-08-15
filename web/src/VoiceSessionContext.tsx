@@ -74,7 +74,7 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     try {
       await client.start()
     } catch (error) {
-      const microphoneFailed = microphoneLifecycleRef.current === 'error'
+      const microphoneFailed = (microphoneLifecycleRef.current as MicrophoneLifecycle) === 'error'
       try {
         await client.stop()
       } catch {}
