@@ -85,6 +85,23 @@ describe('voice reducer to UI domain mapping', () => {
     expect(label('error')).toBe('MIC ERROR')
   })
 
+  it('renders a late or duplicate control as a soft controller degradation', () => {
+    const model = mapVoiceStateToUi({
+      ...initialVoiceState,
+      connection: 'ready',
+      availability: 'degraded',
+      failureStage: 'controller',
+      failureCode: 'late_or_duplicate_event',
+      droppedEvents: 1,
+    }, avatarReady)
+
+    expect(model.connectionLabel).toBe('DEGRADED')
+    expect(model.components.find((component) => component.id === 'controller')).toMatchObject({
+      health: 'DEGRADED', reason: 'late_or_duplicate_event',
+    })
+    expect(model.droppedEvents).toBe(1)
+  })
+
   it('reports fallback health without changing the voice path state', () => {
     const model = mapVoiceStateToUi({
       ...initialVoiceState,

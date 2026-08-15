@@ -36,7 +36,7 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | PASS | 237 network-denied Python behavioral tests. |
+| `./verify` | PASS | 244 network-denied Python behavioral tests after follow-up regressions. |
 | `./verify-slice8` | PASS | Full matrix/privacy/readiness/capture/process/resource and focused browser gate. |
 | `./verify-slice7` | PASS | Avatar/UI tests/builds. |
 | `./verify-local-lfm` | PASS | Exact real local provider and cancellation/recovery. |
@@ -44,7 +44,20 @@
 | `./verify-slice6` | PASS | Installed runtime, all browser tests/builds and official LiveKit/Firefox synthetic regression; first programmatic signal correlation passes. |
 | Focused post-review Python/web tests and compile/typecheck | PASS | Selected-LLM liveness, avatar degradation, privacy normalization and no regressions. |
 
+## No-mistakes follow-up findings
+
+The first no-mistakes run found additional accepted-scope misses. Pipeline commit `364a276` fixed correlation extraction/refusal handling (`OBS-001`), fail-closed ready-report parsing before timer/reconnect state changes (`READY-001`), typed degraded-state preservation during transport cleanup (`FAIL-001`), and full automatic-purge ownership validation (`DATA-001`). It also added an in-process expiry timer, which did not by itself satisfy the independent hard-TTL boundary.
+
+The follow-up commit on top of the exact pipeline head closes every remaining review/document finding:
+
+| Finding | Final correction |
+| --- | --- |
+| `READY-002` | Local LFM now owns separate live/ready/compatible/reason state. Transport loss is dead/unready; identity/contract failure is alive/unready/incompatible; both block admission and success is the only compatibility recovery. |
+| `OBS-002` | `dependency_class` is a closed `hard|soft` observation scalar and a real failed-turn record reconstructs from emitted metadata. |
+| `PRIV-001` | Capture is restricted to the private user-owned `XDG_RUNTIME_DIR`; creation fails closed unless it launches a detached manifest-owner/absolute-deadline expiry process. The independent executable expiry path is tested, the in-process timer/purge remain defense in depth, and runtime tmpfs removes data over logout/reboot. |
+| `PERF-001` | `/proc`/`nvidia-smi` sampling is serialized off the asyncio event loop via background `to_thread` tasks; endpoint admission has a timing regression proving it does not wait for a slow sampler. |
+| `DOC-001` | Late/duplicate control now has the allowed `degraded` consequence: strict drop, visible/diagnostic count, no phase/media action, with new-session recovery. Executable mapper, reducer, System mapping, tests, architecture, and evidence agree. |
+
 ## Recommendations
 
-- Commit the reviewed slice on the feature branch, then use the required no-mistakes pipeline to push/open the unmerged PR and wait only for CI green.
 - Keep every exact physical/shared/destructive gap in the PR body; do not convert the one-turn synthetic report into a physical or percentile acceptance claim.

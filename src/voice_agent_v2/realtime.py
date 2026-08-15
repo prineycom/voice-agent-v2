@@ -136,6 +136,8 @@ class TurnContext:
     tts_first_audio_ms: float | None = None
     resource_endpoint: dict[str, object] = field(default_factory=dict)
     resource_terminal: dict[str, object] = field(default_factory=dict)
+    resource_endpoint_started: bool = False
+    resource_terminal_started: bool = False
 
 
 @dataclass(frozen=True)
@@ -342,6 +344,7 @@ class RealtimeSession:
         self._detached_cleanup_tasks: set[asyncio.Task[str | None]] = set()
         self._cleanup_error: str | None = None
         self._turn_tasks: set[asyncio.Task[None]] = set()
+        self._diagnostic_tasks: set[asyncio.Task[None]] = set()
         self.drop_counts = {"stale_event": 0, "client_control": 0}
         self.turn_counts = {
             "admitted": 0,
@@ -448,11 +451,12 @@ class RealtimeSession:
                 return reported
         return "tts", "tts_backend_not_ready"
 
-    def _sample_resources(self, context: TurnContext, phase: str) -> None:
+    async def _sample_resources(self, context: TurnContext, phase: str) -> None:
         if self.resource_sampler is None:
             return
         try:
-            fields = self.resource_sampler.sample().as_fields(phase=phase)
+            sample = await asyncio.to_thread(self.resource_sampler.sample)
+            fields = sample.as_fields(phase=phase)
             if phase == "endpoint":
                 context.resource_endpoint = fields
             else:
@@ -463,6 +467,23 @@ class RealtimeSession:
                 "resource", "sample_failed", turn_id=context.turn_id,
                 failure_class=type(error).__name__, failure_code="resource_sample_failed",
             )
+
+    def _schedule_resource_sample(self, context: TurnContext, phase: str) -> None:
+        if self.resource_sampler is None:
+            return
+        started_name = (
+            "resource_endpoint_started" if phase == "endpoint"
+            else "resource_terminal_started"
+        )
+        if getattr(context, started_name):
+            return
+        setattr(context, started_name, True)
+        task = asyncio.create_task(
+            self._sample_resources(context, phase),
+            name=f"resource-{phase}-{context.turn_id}",
+        )
+        self._diagnostic_tasks.add(task)
+        task.add_done_callback(self._diagnostic_tasks.discard)
 
     def _capture_content(self, kind: str, payload: bytes | str, turn_id: str) -> None:
         capture = self.diagnostic_capture
@@ -633,7 +654,7 @@ class RealtimeSession:
                 input_bytes=len(pcm),
                 duration_ms=round(len(pcm) / 2 / INPUT_AUDIO_FORMAT.sample_rate_hz * 1000, 3),
             )
-            self._sample_resources(context, "endpoint")
+            self._schedule_resource_sample(context, "endpoint")
             self._capture_content("raw-audio", pcm, context.turn_id)
             if not context.announced:
                 try:
@@ -1565,8 +1586,7 @@ class RealtimeSession:
             await self._emit(context.turn_id, "turn.completed", payload, terminal=True)
 
     def _add_metrics(self, context: TurnContext, payload: dict[str, object]) -> None:
-        if not context.resource_terminal:
-            self._sample_resources(context, "terminal")
+        self._schedule_resource_sample(context, "terminal")
         if context.first_visible_ms is not None:
             payload["endpoint_to_first_visible_ms"] = context.first_visible_ms
         if context.first_pcm_ms is not None:
@@ -1605,7 +1625,8 @@ class RealtimeSession:
         payload["cancellation_count"] = self.turn_counts["cancellations"]
         payload["stale_drop_count"] = self.drop_counts["stale_event"]
         payload["client_control_drop_count"] = self.drop_counts["client_control"]
-        for name, value in context.resource_terminal.items():
+        latest_resource = context.resource_terminal or context.resource_endpoint
+        for name, value in latest_resource.items():
             if name != "resource_phase":
                 payload[name] = value
 

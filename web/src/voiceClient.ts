@@ -448,6 +448,7 @@ export class VoiceClient {
       ) return
       const event = parseControlEvent(payload)
       if (event === null || this.controlGate === null || !this.controlGate.accept(event)) {
+        this.recordDiagnostic('control', 'late_or_duplicate_event_dropped')
         this.callbacks.onDrop()
         return
       }

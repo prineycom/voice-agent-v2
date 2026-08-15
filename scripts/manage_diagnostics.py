@@ -36,6 +36,8 @@ def safe_manifest(path: Path) -> dict[str, object]:
         or document.get("schema_version") != "voice-agent.diagnostic-content-capture.v1"
         or document.get("explicit_opt_in") is not True
         or resolved.name != f"capture-{document.get('session_id')}"
+        or not isinstance(document.get("owner_nonce"), str)
+        or len(document["owner_nonce"]) != 32
     ):
         raise ValueError("capture manifest is invalid")
     # Never enumerate or print captured content names.

@@ -282,6 +282,23 @@ describe('checkpoint A browser state', () => {
     expect(gate.accept(event(4, 'turn.thinking'))).toBe(false)
   })
 
+  it('surfaces a late or duplicate control as degraded without changing voice phase', () => {
+    let state = apply([
+      event(1, 'session.ready'),
+      event(2, 'turn.listening'),
+      event(3, 'turn.media-ready'),
+    ])
+    expect(state.phase).toBe('listening')
+
+    state = voiceReducer(state, { type: 'drop' })
+
+    expect(state.phase).toBe('listening')
+    expect(state.availability).toBe('degraded')
+    expect(state.failureStage).toBe('controller')
+    expect(state.failureCode).toBe('late_or_duplicate_event')
+    expect(state.droppedEvents).toBe(1)
+  })
+
   it('keeps effective microphone truth and bounded transition errors in UI state', () => {
     let state = configured()
     state = voiceReducer(state, { type: 'microphone-lifecycle', status: 'live' })

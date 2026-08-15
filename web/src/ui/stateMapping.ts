@@ -56,22 +56,26 @@ function observedServerComponent(
   label: string,
 ): UiSystemComponent {
   const observation = state.health?.components.find((candidate) => candidate.component === component)
+  const affected = state.failureStage === (
+    component === 'selected_llm' ? 'llm_provider' : component
+  )
   if (observation === undefined) {
     return {
       id: component,
       label,
-      health: voicePathHealth(state.connection),
+      health: affected && state.availability === 'degraded'
+        ? 'DEGRADED'
+        : voicePathHealth(state.connection),
       liveness: 'UNKNOWN',
       readiness: 'UNKNOWN',
       compatible: null,
-      reason: null,
+      reason: affected ? state.failureCode : null,
     }
   }
-  const affected = state.failureStage === (
-    component === 'selected_llm' ? 'llm_provider' : component
-  )
   const health: ComponentHealth = observation.readiness === 'ready' && observation.compatible
-    ? affected && state.availability !== 'available' ? 'UNAVAILABLE' : 'READY'
+    ? affected && state.availability !== 'available'
+      ? state.availability === 'degraded' ? 'DEGRADED' : 'UNAVAILABLE'
+      : 'READY'
     : observation.readiness === 'degraded' ? 'DEGRADED' : 'UNAVAILABLE'
   return {
     id: component,

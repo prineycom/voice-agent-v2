@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
+from voice_agent_v2.diagnostic_expiry import expire_capture
 from voice_agent_v2.diagnostics import DiagnosticContentCapture, PrivacySafeTrace, TraceIdentity
 from voice_agent_v2.observability import (
     COMPONENT_NAMES,
@@ -87,7 +91,11 @@ class ObservationContractTests(unittest.TestCase):
                     "provider_time_to_first_token_ms": 12.5,
                     "input_unit_count": 4,
                     "external_transfer": False,
+                    "dependency_class": "hard",
                 },
+            ))
+            self.assertFalse(trace.emit(
+                "control", "rejected", {"dependency_class": "private words"}
             ))
             serialized = path.read_text()
             for private_value in ("raw_audio", "transcript", "prompt", "response", "secret"):
@@ -95,7 +103,8 @@ class ObservationContractTests(unittest.TestCase):
             record = json.loads(serialized)
             self.assertEqual(record["record_sequence"], 1)
             self.assertEqual(record["schema_version"], "voice-agent.observation.v1")
-            self.assertEqual(trace.failure_counts["validation"], len(forbidden))
+            self.assertEqual(trace.failure_counts["validation"], len(forbidden) + 1)
+            self.assertEqual(record["fields"]["dependency_class"], "hard")
 
     def test_trace_observer_extracts_correlation_and_reports_refusal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -120,6 +129,28 @@ class ObservationContractTests(unittest.TestCase):
                 "control", "published", {"turn_id": "private turn identity"}
             ))
             self.assertEqual(trace.failure_counts["validation"], 1)
+
+    def test_failed_turn_reconstructs_from_emitted_dependency_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            trace = PrivacySafeTrace(path, TraceIdentity("session-failure"))
+            self.assertTrue(trace.observe(
+                "control",
+                "published",
+                {
+                    "turn_id": "turn-failure",
+                    "event_type": "turn.failed",
+                    "terminal": True,
+                    "outcome": "failed",
+                    "dependency_class": "hard",
+                    "failure_stage": "llm_provider",
+                    "failure_code": "local_lfm_transport_error",
+                },
+            ))
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            timelines = reconstruct_timelines(records)
+            self.assertEqual(timelines[0].terminal_outcome, "failed")
+            self.assertEqual(records[0]["fields"]["dependency_class"], "hard")
 
     def test_one_turn_and_percentiles_reconstruct_only_from_metadata(self) -> None:
         records = [
@@ -215,6 +246,9 @@ class ReadinessAndFailurePolicyTests(unittest.TestCase):
             failure_disposition("tts", "silero_pool_not_ready").user_state,
             "degraded",
         )
+        late_duplicate = failure_disposition("control", "late_or_duplicate_event")
+        self.assertEqual(late_duplicate.user_state, "degraded")
+        self.assertFalse(late_duplicate.operator_only)
         self.assertEqual(
             failure_disposition("llm_provider", "local_lfm_transport_error").user_state,
             "unavailable",
@@ -252,6 +286,17 @@ class CaptureAndResourceTests(unittest.TestCase):
                         **environment,
                         "VOICE_AGENT_DIAGNOSTIC_CAPTURE": "1",
                         "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT": str(project / "captures"),
+                        "XDG_RUNTIME_DIR": directory,
+                    },
+                    project_root=project,
+                )
+            with self.assertRaisesRegex(Slice6ConfigurationError, "private XDG runtime"):
+                Slice6Settings.from_environment(
+                    {
+                        **environment,
+                        "VOICE_AGENT_DIAGNOSTIC_CAPTURE": "1",
+                        "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT": "/var/tmp/voice-agent-private",
+                        "XDG_RUNTIME_DIR": directory,
                     },
                     project_root=project,
                 )
@@ -261,6 +306,7 @@ class CaptureAndResourceTests(unittest.TestCase):
                     "VOICE_AGENT_DIAGNOSTIC_CAPTURE": "1",
                     "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT": str(Path(directory) / "private"),
                     "VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS": "600",
+                    "XDG_RUNTIME_DIR": directory,
                 },
                 project_root=project,
             )
@@ -275,7 +321,12 @@ class CaptureAndResourceTests(unittest.TestCase):
                     root, "session-capture", opt_in=False
                 )
             capture = DiagnosticContentCapture(
-                root, "session-capture", opt_in=True, ttl_seconds=60
+                root,
+                "session-capture",
+                opt_in=True,
+                ttl_seconds=60,
+                guardian_factory=lambda *_arguments: None,
+                runtime_root=Path(directory),
             )
             transcript = capture.capture("transcript", "synthetic private diagnostic")
             raw = capture.capture("raw-audio", b"\0\1" * 10)
@@ -312,14 +363,61 @@ class CaptureAndResourceTests(unittest.TestCase):
                     if not self.cancelled:
                         self.callback()
 
+            guardians: list[tuple[Path, str, float]] = []
             capture = DiagnosticContentCapture(
                 Path(directory), "session-expiry", opt_in=True,
                 ttl_seconds=60, now=lambda: clock[0], timer_factory=ManualTimer,
+                guardian_factory=lambda *arguments: guardians.append(arguments),
+                runtime_root=Path(directory),
             )
             capture.capture("prompt", "synthetic")
+            self.assertEqual(guardians[0][0], capture.path)
+            self.assertEqual(guardians[0][2], 1060.0)
             clock[0] = 1061.0
-            scheduled[0].fire()
+            self.assertTrue(expire_capture(
+                *guardians[0], now=lambda: clock[0],
+                sleep=lambda _delay: self.fail("expired guardian must not sleep"),
+            ))
             self.assertFalse(capture.path.exists())
+            scheduled[0].fire()
+
+    def test_detached_expiry_executable_deletes_after_backend_scope_ends(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            capture = Path(directory) / "capture-independent"
+            capture.mkdir(mode=0o700)
+            nonce = "a" * 32
+            expires = time.time() + 0.1
+            (capture / "manifest.json").write_text(json.dumps({
+                "schema_version": "voice-agent.diagnostic-content-capture.v1",
+                "session_id": "independent",
+                "created_unix_seconds": expires - 1,
+                "expires_unix_seconds": expires,
+                "owner_nonce": nonce,
+                "max_files": 16,
+                "max_bytes": 1_048_576,
+                "explicit_opt_in": True,
+            }))
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(ROOT / "src" / "voice_agent_v2" / "diagnostic_expiry.py"),
+                    "--path",
+                    str(capture),
+                    "--owner-nonce",
+                    nonce,
+                    "--expires-unix-seconds",
+                    str(expires),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + 2
+            while capture.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(capture.exists())
+            self.assertEqual(process.wait(timeout=2), 0)
 
     def test_expiry_purge_refuses_unowned_capture_directories(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:

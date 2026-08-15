@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import threading
 import time
 from typing import Callable, Iterable, Mapping, Sequence
 
@@ -53,6 +54,7 @@ _SAFE_STRING_FIELD_KEYS = frozenset({
     "component",
     "contract_version",
     "decision",
+    "dependency_class",
     "event_type",
     "failure_class",
     "failure_code",
@@ -94,6 +96,7 @@ def safe_observation_scalar(value: object, *, key: str | None = None) -> bool:
         or len(value) > MAX_SAFE_STRING
         or "\n" in value
         or "\r" in value
+        or (key == "dependency_class" and value not in DEPENDENCY_CLASSES)
     ):
         return False
     return True
@@ -302,7 +305,7 @@ FAILURE_MATRIX: tuple[FailureMatrixCase, ...] = (
     FailureMatrixCase("client_disconnect", "Client disconnect", "client", "client_disconnected", FailureDisposition("client_disconnect", "hard", "interrupted", False, False, False), "controlled_transport_loss"),
     FailureMatrixCase("local_inference_crash", "GPU out of memory or local model process crash", "local_inference", "gpu_allocation_failed", FailureDisposition("local_inference_crash", "hard", "unavailable", False, False, False), "controlled_allocation_or_process_loss"),
     FailureMatrixCase("tailscale_unavailable", "Tailscale unavailable", "tailscale", "tailscale_unavailable", FailureDisposition("tailscale_unavailable", "soft", "degraded", True, True, True), "controlled_remote_path_loss"),
-    FailureMatrixCase("late_duplicate_event", "Late or duplicate event", "control", "late_or_duplicate_event", FailureDisposition("late_duplicate_event", "soft", "available", True, True, True, operator_only=True), "duplicate_event"),
+    FailureMatrixCase("late_duplicate_event", "Late or duplicate event", "control", "late_or_duplicate_event", FailureDisposition("late_duplicate_event", "soft", "degraded", True, True, True), "duplicate_event"),
 )
 
 _MATRIX_BY_ID = {case.matrix_id: case for case in FAILURE_MATRIX}
@@ -423,12 +426,17 @@ class ResourceSampler:
         self._proc_reader = proc_reader
         self._gpu_reader = gpu_reader
         self._last_cpu: tuple[int, int] | None = None
+        self._lock = threading.Lock()
 
     @staticmethod
     def _mib_from_kib(value: str) -> float:
         return round(float(value.split()[0]) / 1024, 3)
 
     def sample(self) -> ResourceSnapshot:
+        with self._lock:
+            return self._sample_locked()
+
+    def _sample_locked(self) -> ResourceSnapshot:
         cpu: float | None = None
         host_ram: float | None = None
         process_rss: float | None = None

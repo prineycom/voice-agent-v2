@@ -22,7 +22,7 @@ The active composition is unchanged: local LiveKit, Whisper large-v3-turbo, fixe
 
 The server report separates liveness, readiness, compatibility, identity, contract version, reason code, and bounded recovery attempts for LiveKit, controller, STT, selected LLM, and TTS. The browser System panel combines those five hard-capability records with the existing avatar-host health boundary, rendering separate avatar-host and active-module rows with the same distinctions.
 
-A controlled five-component server report with an alive selected-LLM process but wrong/incompatible model contract yields `liveness=alive`, `readiness=unready`, `compatible=false`, and overall `unready`. The browser rejects a report that relabels that same component set as ready. Actual resident readiness additionally checks warmed Whisper process custody, the exact local-LFM readiness identity/no-transfer/no-fallback record, and two live compatible Silero workers. A dead resident capability blocks admission; failure does not route to another provider/model/backend.
+A controlled five-component server report with an alive selected-LLM process but wrong/incompatible model contract yields `liveness=alive`, `readiness=unready`, `compatible=false`, and overall `unready`. The browser rejects a report that relabels that same component set as ready. Actual resident readiness additionally checks warmed Whisper process custody, the exact local-LFM readiness identity/no-transfer/no-fallback record, and two live compatible Silero workers. Local-LFM transport loss reports dead/unready; a responding process with an identity/contract failure remains alive but becomes unready/incompatible. Either blocks admission without routing to another provider/model/backend.
 
 ## Complete controlled fault matrix
 
@@ -43,7 +43,7 @@ The authoritative dispositions and admission/retry consequences are in [`archite
 | `client_disconnect` | Existing session disconnect cleanup case | Pass against §7.1. |
 | `local_inference_crash` | Controlled GPU failure mapping plus real disposable process loss | Pass against §7.1. |
 | `tailscale_unavailable` | Controlled remote-path loss policy | Pass against §7.1. |
-| `late_duplicate_event` | Strict gate replay | Pass against §7.1. |
+| `late_duplicate_event` | Strict gate replay plus reducer consequence | Pass against §7.1: degraded/count only, with no phase/media action. |
 
 A safe real-process case starts a task-owned disposable Python worker, kills it, observes lost liveness, permits exactly one test-only recovery, kills it again, and proves the second restart is blocked. It touches no shared service. The real product runtime is stricter in Slice 8: it performs zero automatic inference request retry and zero automatic service restart; service supervision remains Slice 9. This cannot form an admission/restart loop.
 
@@ -82,19 +82,19 @@ The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance
 
 Default metadata paths reject keys for raw audio/PCM, transcript, prompt, response/text/content, secrets/tokens, and content-bearing identifiers. Only specifically named count/timing fields such as provider time-to-first-token are allowlisted. Values must be bounded scalar JSON; browser error diagnostics keep a normalized class/code and never an exception message. Conversation text/history remains current-page memory and is not included in downloaded diagnostics.
 
-Content capture is off by default. Enabling it requires the exact flag and outside-Git root below. TTL defaults to 900 seconds; the third setting is an optional override within 60–3,600 seconds.
+Content capture is off by default. Enabling it requires the exact flag and an outside-Git root beneath the process's private `XDG_RUNTIME_DIR` below. TTL defaults to 900 seconds; the third setting is an optional override within 60–3,600 seconds.
 
 ```text
 VOICE_AGENT_DIAGNOSTIC_CAPTURE=1
-VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT=<absolute outside-Git path>
+VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT=<absolute path beneath XDG_RUNTIME_DIR>
 # Optional: VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS=<60..3600>
 ```
 
-One capture is capped at 16 content files / 1 MiB of content, plus its owned manifest/expiry; the directory mode is `0700` and every file mode is `0600`. The verifier captured only labelled synthetic raw bytes/transcript/prompt/response, invoked the public `./manage-diagnostics delete <capture-directory>` path, and proved the directory no longer existed. It also exercises expiry deletion and rejects a repository-local root. No capture or content was written to Git.
+One capture is capped at 16 content files / 1 MiB of content, plus its owned manifest/expiry; the directory mode is `0700` and every file mode is `0600`. Creation fails closed unless it can launch a detached expiry worker carrying the manifest's random owner nonce and absolute deadline. That worker survives backend exit/crash and deletes only the same manifest owner; an in-process timer is defense in depth, and private runtime tmpfs erases the root across logout/reboot. The verifier captured only labelled synthetic raw bytes/transcript/prompt/response, invoked the public `./manage-diagnostics delete <capture-directory>` path, and proved the directory no longer existed. It also executes the independent expiry worker boundary and rejects repository-local or outside-runtime roots. No capture or content was written to Git.
 
 ## Safe resource case
 
-The safe real resource case allocates exactly 16 MiB, applies about 100 ms bounded CPU work, and samples `/proc` plus read-only `nvidia-smi` metadata before/under pressure. The latest run observed the allocation/RSS change and returned finite host/GPU values; these transient numbers are intentionally not frozen as a capacity claim. It performs no RAM/VRAM exhaustion and makes no OOM result claim.
+The safe real resource case allocates exactly 16 MiB, applies about 100 ms bounded CPU work, and samples `/proc` plus read-only `nvidia-smi` metadata before/under pressure. Runtime sampling is serialized on a background thread boundary, so the bounded `nvidia-smi` timeout never blocks the asyncio event loop or turn admission; a missing/late sample remains optional metadata. The latest run observed the allocation/RSS change and returned finite host/GPU values; these transient numbers are intentionally not frozen as a capacity claim. It performs no RAM/VRAM exhaustion and makes no OOM result claim.
 
 ## Validation commands
 

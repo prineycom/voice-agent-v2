@@ -300,14 +300,23 @@ class LiveTurnRunner:
         stt_alive = getattr(self.stt, "process_id", None) is not None
         stt_warmed = isinstance(warmup.get("stt"), dict) and warmup["stt"].get("discarded") is True
         lfm_ready = warmup.get("lfm_ready")
+        runtime_health = getattr(self.llm, "runtime_health", None)
+        runtime_health = runtime_health if isinstance(runtime_health, dict) else {
+            "live": getattr(self.llm, "runtime_live", True),
+            "ready": True,
+            "compatible": True,
+            "reason_code": None,
+        }
         lfm_alive = (
             isinstance(lfm_ready, dict)
             and lfm_ready.get("ready") is True
-            and bool(getattr(self.llm, "runtime_live", True))
+            and runtime_health.get("live") is True
         )
+        lfm_runtime_ready = runtime_health.get("ready") is True
         if isinstance(self.llm, LocalLFMProvider):
             lfm_compatible = (
                 lfm_alive
+                and runtime_health.get("compatible") is True
                 and lfm_ready.get("provider_mode") == self.llm.provider_mode
                 and lfm_ready.get("provider_identity") == self.llm.provider_identity
                 and lfm_ready.get("selected_alias") == MODEL_ALIAS
@@ -360,12 +369,14 @@ class LiveTurnRunner:
             ComponentHealth(
                 "selected_llm",
                 "alive" if lfm_alive else "dead",
-                "ready" if lfm_alive and lfm_compatible else "unready",
+                "ready" if lfm_alive and lfm_runtime_ready and lfm_compatible else "unready",
                 bool(lfm_compatible),
                 self.llm.provider_identity,
                 self.llm.version,
-                None if lfm_alive and lfm_compatible
-                else "local_lfm_incompatible" if lfm_alive else "local_lfm_unavailable",
+                None if lfm_alive and lfm_runtime_ready and lfm_compatible
+                else "local_lfm_unavailable" if not lfm_alive
+                else "local_lfm_incompatible" if not lfm_compatible
+                else str(runtime_health.get("reason_code") or "local_lfm_unready"),
             ),
             ComponentHealth(
                 "tts",

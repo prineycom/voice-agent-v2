@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from typing import Callable, Mapping
@@ -33,6 +36,33 @@ MIN_CAPTURE_TTL_SECONDS = 60
 MAX_CAPTURE_TTL_SECONDS = 60 * 60
 _DIRECTORY_LOCK = threading.Lock()
 _CAPTURE_KINDS = frozenset({"raw-audio", "transcript", "prompt", "response"})
+
+
+def _spawn_expiry_guardian(
+    path: Path, owner_nonce: str, expires_unix_seconds: float
+) -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("diagnostic_expiry.py")),
+            "--path",
+            str(path),
+            "--owner-nonce",
+            owner_nonce,
+            "--expires-unix-seconds",
+            str(expires_unix_seconds),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    threading.Thread(
+        target=process.wait,
+        name=f"capture-expiry-reaper-{process.pid}",
+        daemon=True,
+    ).start()
 
 
 @dataclass(frozen=True)
@@ -246,6 +276,14 @@ def _inside_git_worktree(path: Path) -> bool:
     return False
 
 
+def _inside_directory(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 class DiagnosticContentCapture:
     """Explicit opt-in, short-lived content capture outside every Git worktree."""
 
@@ -260,6 +298,8 @@ class DiagnosticContentCapture:
         timer_factory: Callable[
             [float, Callable[[], None]], threading.Timer
         ] = threading.Timer,
+        guardian_factory: Callable[[Path, str, float], None] = _spawn_expiry_guardian,
+        runtime_root: Path | None = None,
     ) -> None:
         if not opt_in:
             raise ValueError("diagnostic content capture requires explicit opt-in")
@@ -268,14 +308,38 @@ class DiagnosticContentCapture:
         if type(ttl_seconds) is not int or not MIN_CAPTURE_TTL_SECONDS <= ttl_seconds <= MAX_CAPTURE_TTL_SECONDS:
             raise ValueError("diagnostic capture TTL is outside bounds")
         resolved = root.expanduser().resolve()
-        if not resolved.is_absolute() or _inside_git_worktree(resolved):
-            raise ValueError("diagnostic content capture must remain outside Git")
+        configured_runtime_root = runtime_root or (
+            Path(value) if (value := os.environ.get("XDG_RUNTIME_DIR")) else None
+        )
+        if configured_runtime_root is None:
+            raise ValueError("diagnostic content capture requires a private runtime root")
+        resolved_runtime_root = configured_runtime_root.expanduser().resolve()
+        try:
+            runtime_status = resolved_runtime_root.stat()
+        except OSError as error:
+            raise ValueError("diagnostic runtime root is unavailable") from error
+        if (
+            not resolved_runtime_root.is_dir()
+            or runtime_status.st_uid != os.getuid()
+            or runtime_status.st_mode & 0o077
+        ):
+            raise ValueError("diagnostic runtime root must be private and user-owned")
+        if (
+            not resolved.is_absolute()
+            or _inside_git_worktree(resolved)
+            or not _inside_directory(resolved, resolved_runtime_root)
+        ):
+            raise ValueError(
+                "diagnostic content capture must remain outside Git in the private runtime root"
+            )
         self.root = resolved
         self.session_id = session_id
         self.path = resolved / f"capture-{session_id}"
         self.ttl_seconds = ttl_seconds
         self._now = now
         self._created = float(now())
+        self._expires = self._created + ttl_seconds
+        self._owner_nonce = secrets.token_hex(16)
         self._files = 0
         self._bytes = 0
         self._lock = threading.RLock()
@@ -288,7 +352,8 @@ class DiagnosticContentCapture:
                 "schema_version": "voice-agent.diagnostic-content-capture.v1",
                 "session_id": session_id,
                 "created_unix_seconds": self._created,
-                "expires_unix_seconds": self._created + ttl_seconds,
+                "expires_unix_seconds": self._expires,
+                "owner_nonce": self._owner_nonce,
                 "max_files": MAX_CAPTURE_FILES,
                 "max_bytes": MAX_CAPTURE_BYTES,
                 "explicit_opt_in": True,
@@ -297,6 +362,7 @@ class DiagnosticContentCapture:
                 "manifest.json",
                 json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
             )
+            guardian_factory(self.path, self._owner_nonce, self._expires)
             expiry_timer = timer_factory(ttl_seconds, self._expire_now)
             expiry_timer.daemon = True
             self._expiry_timer = expiry_timer
@@ -319,7 +385,7 @@ class DiagnosticContentCapture:
 
     @property
     def expired(self) -> bool:
-        return self._now() >= self._created + self.ttl_seconds
+        return self._now() >= self._expires
 
     def capture(self, kind: str, payload: bytes | str) -> Path:
         if kind not in _CAPTURE_KINDS:
@@ -356,12 +422,21 @@ class DiagnosticContentCapture:
             if not self.path.exists():
                 return False
             try:
-                return self.delete_path(self.path)
+                return self.delete_path(
+                    self.path,
+                    expected_owner_nonce=self._owner_nonce,
+                    expected_expires_unix_seconds=self._expires,
+                )
             except ValueError as error:
                 raise RuntimeError("diagnostic capture deletion guard failed") from error
 
     @staticmethod
-    def delete_path(path: Path) -> bool:
+    def delete_path(
+        path: Path,
+        *,
+        expected_owner_nonce: str | None = None,
+        expected_expires_unix_seconds: float | None = None,
+    ) -> bool:
         expanded = path.expanduser()
         if expanded.is_symlink():
             raise ValueError("path is not an owned outside-Git diagnostic capture")
@@ -381,6 +456,16 @@ class DiagnosticContentCapture:
             or document.get("schema_version") != "voice-agent.diagnostic-content-capture.v1"
             or document.get("explicit_opt_in") is not True
             or resolved.name != f"capture-{document.get('session_id')}"
+            or not isinstance(document.get("owner_nonce"), str)
+            or len(document["owner_nonce"]) != 32
+            or (
+                expected_owner_nonce is not None
+                and document["owner_nonce"] != expected_owner_nonce
+            )
+            or (
+                expected_expires_unix_seconds is not None
+                and document.get("expires_unix_seconds") != expected_expires_unix_seconds
+            )
         ):
             raise ValueError("diagnostic capture manifest does not own this path")
         shutil.rmtree(resolved)

@@ -488,7 +488,14 @@ export function parseCapability(value: unknown): SessionCapability | null {
 }
 
 function drop(state: VoiceState): VoiceState {
-  return { ...state, droppedEvents: state.droppedEvents + 1 }
+  const readySession = state.connection === 'ready'
+  return {
+    ...state,
+    availability: readySession ? 'degraded' : state.availability,
+    failureStage: readySession ? 'controller' : state.failureStage,
+    failureCode: readySession ? 'late_or_duplicate_event' : state.failureCode,
+    droppedEvents: state.droppedEvents + 1,
+  }
 }
 
 function validTurnTransition(previous: ControlEventType | null, next: ControlEventType): boolean {

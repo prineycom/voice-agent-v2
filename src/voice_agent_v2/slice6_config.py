@@ -151,9 +151,33 @@ class Slice6Settings:
                     "explicit diagnostic capture requires an outside-Git root"
                 )
             diagnostic_capture_root = Path(capture_root_value).expanduser().resolve()
+            runtime_root_value = values.get("XDG_RUNTIME_DIR")
+            if runtime_root_value is None or not runtime_root_value.strip():
+                raise Slice6ConfigurationError(
+                    "diagnostic capture requires the private XDG runtime root"
+                )
+            runtime_root = Path(runtime_root_value).expanduser().resolve()
+            try:
+                runtime_status = runtime_root.stat()
+            except OSError as error:
+                raise Slice6ConfigurationError(
+                    "private XDG runtime root is unavailable"
+                ) from error
+            if (
+                not runtime_root.is_dir()
+                or runtime_status.st_uid != os.getuid()
+                or runtime_status.st_mode & 0o077
+            ):
+                raise Slice6ConfigurationError(
+                    "private XDG runtime root must be user-owned with no group/other access"
+                )
             if diagnostic_capture_root.is_relative_to(root):
                 raise Slice6ConfigurationError(
                     "diagnostic capture root must remain outside the project worktree"
+                )
+            if not diagnostic_capture_root.is_relative_to(runtime_root):
+                raise Slice6ConfigurationError(
+                    "diagnostic capture root must remain in the private XDG runtime root"
                 )
             ttl_value = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS", "900")
             try:

@@ -12,6 +12,7 @@ from tests.test_checkpoint_ab import (
     MemoryEvents,
     StreamingRunner,
 )
+from voice_agent_v2.observability import ResourceSnapshot
 from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES
 from voice_agent_v2.v2_contracts import EventEnvelopeV2
 from voice_agent_v2.realtime import (
@@ -34,6 +35,26 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         )
         session._trace("control", "published", turn_id="turn-test")
         self.assertEqual(session.diagnostic_failure_counts["observer"], 1)
+
+    async def test_resource_sampling_never_blocks_endpoint_admission(self) -> None:
+        class SlowSampler:
+            def sample(self) -> ResourceSnapshot:
+                time.sleep(0.25)
+                return ResourceSnapshot(None, 1.0, 1.0, None, None)
+
+        session = RealtimeSession(
+            session_id="session-resource",
+            runner=StreamingRunner(),
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+            resource_sampler=SlowSampler(),
+        )
+        await session.start_utterance(announce=False)
+        started = time.monotonic()
+        await session.finish_utterance(b"\0\0" * 320)
+        self.assertLess(time.monotonic() - started, 0.1)
+        await asyncio.sleep(0.6)
+        self.assertFalse(session._diagnostic_tasks)
 
     async def test_abandoned_vad_candidate_emits_no_user_turn(self) -> None:
         events = MemoryEvents()

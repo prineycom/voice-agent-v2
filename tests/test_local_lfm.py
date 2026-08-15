@@ -143,9 +143,11 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertEqual(readiness["parallel_slots"], 2)
         self.assertEqual(readiness["context_tokens_per_slot"], 32768)
         self.assertTrue(provider.runtime_live)
+        self.assertTrue(provider.runtime_health["ready"])
+        self.assertTrue(provider.runtime_health["compatible"])
         self.assertEqual(created_response[0].requests[0][:2], ("GET", "/health"))
 
-    def test_provider_failure_drops_liveness_after_a_successful_readiness_probe(self) -> None:
+    def test_identity_failure_preserves_liveness_but_drops_readiness_and_compatibility(self) -> None:
         health = StubResponse([])
         health._body = b'{"status":"ok"}'
         health.read = lambda limit=None: health._body
@@ -164,7 +166,13 @@ class LocalLFMProviderTests(unittest.TestCase):
                 turn_id="turn-liveness",
                 transcript="Проверка.",
             )
-        self.assertFalse(provider.runtime_live)
+        self.assertTrue(provider.runtime_live)
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": False,
+            "compatible": False,
+            "reason_code": "selected_provider_identity_mismatch",
+        })
 
     def test_payload_freezes_voice_sampling_reasoning_and_visible_bounds(self) -> None:
         provider = LocalLFMProvider(connection_factory=lambda *_a, **_k: None)
@@ -735,6 +743,8 @@ class LocalLFMProviderTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "local_lfm_request_timeout")
+        self.assertFalse(provider.runtime_live)
+        self.assertFalse(provider.runtime_health["ready"])
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertTrue(created[0].closed)
 

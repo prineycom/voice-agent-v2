@@ -166,6 +166,8 @@ def metadata_timeline_and_capture_evidence() -> dict[str, object]:
             "session-slice8-capture",
             opt_in=True,
             ttl_seconds=60,
+            guardian_factory=lambda *_arguments: None,
+            runtime_root=root,
         )
         capture.capture("transcript", "synthetic private transcript")
         capture.capture("prompt", "synthetic private prompt")
