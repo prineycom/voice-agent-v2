@@ -659,6 +659,53 @@ async def main() -> int:
         microphone_toggle = await wait_for_microphone_control(
             False, "React microphone control did not settle muted before reconnect resume"
         )
+        await asyncio.to_thread(
+            driver.execute_script,
+            """
+                const control = arguments[0];
+                control.addEventListener('click', () => {
+                    try {
+                        const audio = document.querySelector(
+                            'audio[data-voice-agent-audio="agent-response"]'
+                        );
+                        const stream = audio?.srcObject;
+                        if (!(stream instanceof MediaStream)) {
+                            window.__voiceAgentPcmProbe = {
+                                ready: false,
+                                reason: 'missing attached response stream',
+                            };
+                            return;
+                        }
+                        const context = new AudioContext();
+                        const analyser = context.createAnalyser();
+                        const silence = context.createGain();
+                        analyser.fftSize = 256;
+                        silence.gain.value = 0;
+                        context.createMediaStreamSource(stream)
+                            .connect(analyser)
+                            .connect(silence)
+                            .connect(context.destination);
+                        window.__voiceAgentPcmProbe = {
+                            ready: false,
+                            context,
+                            analyser,
+                            silence,
+                            samples: new Uint8Array(analyser.fftSize),
+                        };
+                        context.resume().then(
+                            () => { window.__voiceAgentPcmProbe.ready = context.state === 'running'; },
+                            () => { window.__voiceAgentPcmProbe.reason = 'resume rejected'; },
+                        );
+                    } catch (error) {
+                        window.__voiceAgentPcmProbe = {
+                            ready: false,
+                            reason: String(error),
+                        };
+                    }
+                }, {capture: true, once: true});
+            """,
+            microphone_toggle,
+        )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
         await wait_for(
@@ -666,49 +713,26 @@ async def main() -> int:
             "browser microphone did not cleanly resume after muted reconnect",
         )
 
-        probe_state = await asyncio.to_thread(
-            driver.execute_async_script,
-            """
-                const done = arguments[0];
-                const audio = document.querySelector('audio[data-voice-agent-audio="agent-response"]');
-                const stream = audio?.srcObject;
-                if (!(stream instanceof MediaStream)) {
-                    done({ready: false, reason: 'missing attached response stream'});
-                    return;
-                }
-                const context = new AudioContext();
-                const analyser = context.createAnalyser();
-                analyser.fftSize = 256;
-                context.createMediaStreamSource(stream).connect(analyser);
-                let settled = false;
-                const finish = (result) => {
-                    if (settled) return;
-                    settled = true;
-                    done(result);
+        def browser_probe_state():
+            return driver.execute_script("""
+                const probe = window.__voiceAgentPcmProbe;
+                return {
+                    ready: probe?.ready === true && probe?.context?.state === 'running',
+                    reason: probe?.reason ?? null,
+                    state: probe?.context?.state ?? null,
                 };
-                const timeout = setTimeout(
-                    () => finish({ready: false, reason: 'resume timeout', state: context.state}),
-                    2_000,
-                );
-                context.resume().then(
-                    () => {
-                        clearTimeout(timeout);
-                        window.__voiceAgentPcmProbe = {
-                            context,
-                            analyser,
-                            samples: new Uint8Array(analyser.fftSize),
-                        };
-                        finish({ready: context.state === 'running', state: context.state});
-                    },
-                    () => {
-                        clearTimeout(timeout);
-                        finish({ready: false, state: context.state});
-                    },
-                );
-            """,
-        )
-        if probe_state.get("ready") is not True:
-            raise AssertionError(f"browser response PCM probe did not start: {probe_state}")
+            """)
+
+        probe_deadline = time.monotonic() + 5
+        probe_state = browser_probe_state()
+        while not probe_state["ready"] and time.monotonic() < probe_deadline:
+            await asyncio.sleep(0.05)
+            probe_state = browser_probe_state()
+        if not probe_state["ready"]:
+            raise AssertionError(
+                "browser response PCM probe created by the microphone gesture did not start: "
+                f"{probe_state}"
+            )
 
         first_turn = await session.submit_utterance(b"\0\0" * 320)
         first_context = session._active
