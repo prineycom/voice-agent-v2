@@ -83,6 +83,7 @@ export class VoiceClient {
   private streamEpoch = 0
   private microphoneEnabled = false
   private microphoneRequested = true
+  private microphoneFailureActive = false
   private microphoneTransition: Promise<void> | null = null
   private readonly diagnostics: VoiceDiagnosticRecord[] = []
 
@@ -152,10 +153,12 @@ export class VoiceClient {
       await this.ensureRoomStarting(room, microphone)
       this.microphoneEnabled = !microphone.isMuted
       this.microphoneRequested = this.microphoneEnabled
+      this.microphoneFailureActive = false
       this.callbacks.onMicrophoneLifecycle(this.microphoneEnabled ? 'live' : 'muted')
       this.callbacks.onMicrophoneState(this.microphoneEnabled, false)
     } catch (error) {
       if (startupStage === 'microphone' || startupStage === 'microphone_publication') {
+        this.microphoneFailureActive = true
         this.callbacks.onMicrophoneLifecycle('error')
       }
       this.recordDiagnostic(
@@ -214,12 +217,15 @@ export class VoiceClient {
   async stop(): Promise<void> {
     this.stopping = true
     this.startAbort?.abort()
-    return this.beginResourceRelease(true)
+    return this.beginResourceRelease(true, this.microphoneFailureActive)
   }
 
-  private beginResourceRelease(notifyClosed: boolean): Promise<void> {
+  private beginResourceRelease(
+    notifyClosed: boolean,
+    preserveMicrophoneError = false,
+  ): Promise<void> {
     if (this.stopPromise !== null) return this.stopPromise
-    const cleanup = this.releaseResources(notifyClosed)
+    const cleanup = this.releaseResources(notifyClosed, preserveMicrophoneError)
     const tracked = cleanup.finally(() => {
       if (this.stopPromise === tracked) this.stopPromise = null
     })
@@ -227,7 +233,10 @@ export class VoiceClient {
     return tracked
   }
 
-  private async releaseResources(notifyClosed: boolean): Promise<void> {
+  private async releaseResources(
+    notifyClosed: boolean,
+    preserveMicrophoneError: boolean,
+  ): Promise<void> {
     this.clearReconnectTimers()
     this.clearInitialReadyTimer()
     this.capability = null
@@ -240,16 +249,25 @@ export class VoiceClient {
     this.streamEpoch = 0
     const errors: unknown[] = []
     const microphone = this.microphone
+    let microphoneCleanupFailed = false
     if (microphone !== null) {
+      if (this.microphone === microphone) this.microphone = null
+      this.microphoneEnabled = false
+      this.microphoneRequested = true
       try {
-        if (this.microphone === microphone) this.microphone = null
         microphone.stop()
-        this.microphoneEnabled = false
-        this.microphoneRequested = true
       } catch (error) {
+        microphoneCleanupFailed = true
         errors.push(error)
       }
+    } else {
+      this.microphoneEnabled = false
+      this.microphoneRequested = true
     }
+    const microphoneFailed = preserveMicrophoneError || microphoneCleanupFailed
+    this.microphoneFailureActive = microphoneFailed
+    this.callbacks.onMicrophoneState(false, false)
+    this.callbacks.onMicrophoneLifecycle(microphoneFailed ? 'error' : 'disconnected')
     try {
       await this.playback.dispose()
     } catch (error) {
@@ -275,10 +293,7 @@ export class VoiceClient {
       }
       throw cleanupError
     }
-    if (notifyClosed) {
-      this.callbacks.onMicrophoneLifecycle('disconnected')
-      this.callbacks.onConnection('closed')
-    }
+    if (notifyClosed) this.callbacks.onConnection('closed')
   }
 
   private ensureStarting(): void {
@@ -469,6 +484,12 @@ export class VoiceClient {
             }
           }
         }
+      } else if (event.type === 'turn.completed' || event.type === 'turn.failed') {
+        const desired = this.desiredMedia
+        if (desired !== null && desired.mediaGeneration === event.media_generation) {
+          this.playback.finishGeneration(event.media_generation)
+          this.recordDiagnostic('playback', 'generation_drain_started')
+        }
       } else if (event.type === 'session.ready') {
         this.clearInitialReadyTimer()
         this.clearReconnectTimers()
@@ -524,8 +545,9 @@ export class VoiceClient {
       }
     })
     room.on(RoomEvent.MediaDevicesError, () => {
+      this.microphoneFailureActive = true
       this.callbacks.onMicrophoneLifecycle('error')
-      void this.failSession('Микрофон недоступен')
+      void this.failSession('Микрофон недоступен', 'microphone_device_failed', undefined, true)
     })
   }
 
@@ -640,12 +662,17 @@ export class VoiceClient {
     this.callbacks.onDiagnostic?.(record)
   }
 
-  private async failSession(message: string, code = 'client_failure', cause?: unknown): Promise<void> {
+  private async failSession(
+    message: string,
+    code = 'client_failure',
+    cause?: unknown,
+    preserveMicrophoneError = false,
+  ): Promise<void> {
     if (this.stopping) return
     this.recordDiagnostic('client', 'failed', undefined, code, cause ?? message)
     this.stopping = true
     this.startAbort?.abort()
-    const cleanup = this.beginResourceRelease(false)
+    const cleanup = this.beginResourceRelease(false, preserveMicrophoneError)
     let failure = message
     try {
       await cleanup

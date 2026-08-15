@@ -156,6 +156,7 @@ beforeEach(() => {
   })
   vi.spyOn(AudioPlaybackBoundary.prototype, 'setTrack').mockImplementation(() => undefined)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'reset').mockImplementation(() => undefined)
+  vi.spyOn(AudioPlaybackBoundary.prototype, 'finishGeneration').mockImplementation(() => true)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'suspend').mockImplementation(() => true)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'dispose').mockResolvedValue(undefined)
 })
@@ -193,6 +194,7 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     emitControl(room, 'turn.completed', 8, { outcome: 'completed' }, true)
 
     expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenCalledWith(1)
     expect(room.localParticipant.publishData).not.toHaveBeenCalled()
     expect(observed.onControl).toHaveBeenCalledTimes(8)
     expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
@@ -466,6 +468,52 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
     expect(livekit.rooms[0].localParticipant.publishTrack).not.toHaveBeenCalled()
     await client.stop()
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false)
+  })
+
+  it('publishes disconnected microphone truth when a non-device session failure releases capture', async () => {
+    const track = {
+      isMuted: false,
+      mute: vi.fn().mockResolvedValue(undefined),
+      unmute: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+
+    livekit.rooms[0].emit('disconnected')
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenCalledWith(
+      'failed', 'Соединение с голосовой сессией потеряно',
+    ))
+
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('disconnected')
+  })
+
+  it('preserves microphone error while device-failure cleanup publishes disabled truth', async () => {
+    const track = {
+      isMuted: false,
+      mute: vi.fn().mockResolvedValue(undefined),
+      unmute: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+
+    livekit.rooms[0].emit('mediaDevicesError')
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenCalledWith(
+      'failed', 'Микрофон недоступен',
+    ))
+
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
   })
 
   it('coalesces rapid microphone toggles to the final requested state', async () => {

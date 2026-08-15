@@ -418,6 +418,57 @@ describe('persistent playback observation', () => {
     expect(current.detach).toHaveBeenCalledTimes(1)
   })
 
+  it('drains a completed persistent generation without waiting for media ended', async () => {
+    vi.useFakeTimers()
+    const observations: Array<{ level: number; playoutActive: boolean }> = []
+    let firstElement!: HTMLMediaElement
+    const first: AttachableAudioTrack = {
+      attach: vi.fn((element: HTMLMediaElement) => {
+        firstElement = element
+        element.play = vi.fn().mockResolvedValue(undefined)
+        element.pause = vi.fn()
+        element.load = vi.fn()
+        return element
+      }),
+      detach: vi.fn((element) => element === undefined ? [] : [element]),
+    }
+    const boundary = new AudioPlaybackBoundary(
+      document.createElement('div'),
+      vi.fn(),
+      (observation) => observations.push(observation),
+    )
+
+    boundary.setTrack(first, 1)
+    firstElement.dispatchEvent(new Event('playing'))
+    expect(observations.at(-1)).toMatchObject({ playoutActive: true })
+    expect(boundary.finishGeneration(99)).toBe(false)
+    expect(boundary.finishGeneration(1)).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(199)
+    expect(observations.at(-1)).toMatchObject({ playoutActive: true })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(observations.at(-1)).toMatchObject({ level: 0, playoutActive: false })
+
+    let secondElement!: HTMLMediaElement
+    const second: AttachableAudioTrack = {
+      attach: vi.fn((element: HTMLMediaElement) => {
+        secondElement = element
+        element.play = vi.fn().mockResolvedValue(undefined)
+        element.pause = vi.fn()
+        element.load = vi.fn()
+        return element
+      }),
+      detach: vi.fn((element) => element === undefined ? [] : [element]),
+    }
+    boundary.setTrack(second, 2)
+    secondElement.dispatchEvent(new Event('playing'))
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(observations.at(-1)).toMatchObject({ playoutActive: true })
+
+    boundary.suspend(2)
+    expect(observations.at(-1)).toMatchObject({ playoutActive: false })
+  })
+
   it('reattaches the same track on a distinct explicit element after suspension', () => {
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const remote = track(vi.fn().mockResolvedValue(undefined))
