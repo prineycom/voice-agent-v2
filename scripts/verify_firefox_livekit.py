@@ -433,6 +433,35 @@ async def main() -> int:
             lambda: not driver.find_elements("css selector", ".connection-overlay"),
             "Slice 7 READY startup overlay did not clear",
         )
+
+        def settled_microphone_controls(enabled: bool):
+            pressed = str(enabled).lower()
+            return [
+                control
+                for control in driver.find_elements(
+                    "css selector", f".microphone-button[aria-pressed='{pressed}']"
+                )
+                if control.is_displayed()
+                and control.is_enabled()
+                and control.get_attribute("aria-busy") == "false"
+            ]
+
+        async def wait_for_microphone_control(
+            enabled: bool, message: str, timeout: float = 15
+        ):
+            await wait_for(
+                lambda: (
+                    len(settled_microphone_controls(enabled)) == 1
+                    and not driver.find_elements("css selector", ".connection-overlay")
+                ),
+                message,
+                timeout,
+            )
+            controls = settled_microphone_controls(enabled)
+            if len(controls) != 1:
+                raise AssertionError(message)
+            return controls[0]
+
         await wait_for(
             lambda: len(session.started_utterances) == 1,
             "official LiveKit microphone track did not reach the controller VAD boundary",
@@ -456,16 +485,13 @@ async def main() -> int:
         browser_microphone_publication_id = initial_publications[0].sid
         stale_candidate_turn = session.started_utterances[0]
         microphone_events_before_off = len(event_sink.events)
-        microphone_toggle = driver.find_element(
-            "css selector", ".microphone-button[aria-pressed='true']"
+        microphone_toggle = await wait_for_microphone_control(
+            True, "React microphone control did not settle enabled before mute"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_muted.wait(), 15)
-        await wait_for(
-            lambda: driver.find_element(
-                "xpath", "//button[@aria-label='Unmute microphone']"
-            ).get_attribute("aria-pressed") == "false",
-            "React microphone control did not report effective muted state",
+        await wait_for_microphone_control(
+            False, "React microphone control did not report effective muted state"
         )
         await wait_for(
             lambda: session.abandoned_utterances == [stale_candidate_turn],
@@ -487,11 +513,14 @@ async def main() -> int:
             raise AssertionError("microphone off replaced or failed to mute its publication")
 
         microphone_unmuted.clear()
-        microphone_toggle = driver.find_element(
-            "xpath", "//button[@aria-label='Unmute microphone']"
+        microphone_toggle = await wait_for_microphone_control(
+            False, "React microphone control did not settle muted before unmute"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
+        await wait_for_microphone_control(
+            True, "React microphone control did not report effective unmuted state"
+        )
         await wait_for(
             lambda: len(session.started_utterances) == 2,
             "fresh unmuted microphone frames did not reach a new VAD generation",
@@ -516,8 +545,8 @@ async def main() -> int:
             raise AssertionError("microphone on replaced or failed to resume its publication")
 
         microphone_muted.clear()
-        microphone_toggle = driver.find_element(
-            "css selector", ".microphone-button[aria-pressed='true']"
+        microphone_toggle = await wait_for_microphone_control(
+            True, "React microphone control did not settle enabled before reconnect mute"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_muted.wait(), 15)
@@ -533,6 +562,11 @@ async def main() -> int:
         finally:
             livekit.send_signal(signal.SIGCONT)
         await asyncio.wait_for(agent_reconnected.wait(), 30)
+        await wait_for_microphone_control(
+            False,
+            "browser UI did not settle muted after the transient LiveKit reconnect",
+            timeout=30,
+        )
         await asyncio.sleep(0.5)
         reconnect_publications = microphone_publications()
         if (
@@ -540,9 +574,6 @@ async def main() -> int:
             or len(reconnect_publications) != 1
             or reconnect_publications[0].sid != browser_microphone_publication_id
             or not reconnect_publications[0].muted
-            or driver.find_element(
-                "xpath", "//button[@aria-label='Unmute microphone']"
-            ).get_attribute("aria-pressed") != "false"
         ):
             raise AssertionError("transient LiveKit reconnect did not preserve microphone off")
         if reconnect_vad_counts != (
@@ -554,8 +585,8 @@ async def main() -> int:
             raise AssertionError("microphone toggle or reconnect rotated the browser publication")
 
         microphone_unmuted.clear()
-        microphone_toggle = driver.find_element(
-            "xpath", "//button[@aria-label='Unmute microphone']"
+        microphone_toggle = await wait_for_microphone_control(
+            False, "React microphone control did not settle muted before reconnect resume"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
