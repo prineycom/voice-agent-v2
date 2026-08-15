@@ -432,6 +432,49 @@ describe('Slice 7 modular shell', () => {
     expect(document.querySelector('.voice-shell')?.getAttribute('data-system-reduced-motion')).toBe('true')
   })
 
+  it.each(['user', 'system'] as const)(
+    'keeps a completed response readable with %s reduced motion',
+    (preference) => {
+      if (preference === 'user') localStorage.setItem(REDUCE_MOTION_STORAGE_KEY, 'true')
+      else {
+        vi.mocked(window.matchMedia).mockReturnValue({
+          matches: true,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        } as unknown as MediaQueryList)
+      }
+      const audioContainerRef = createRef<HTMLDivElement>()
+      render(
+        <VoiceShell
+          state={{
+            ...initialVoiceState,
+            connection: 'ready',
+            currentTurnTerminal: true,
+            lastTurnEvent: 'turn.completed',
+            response: 'Completed response remains readable.',
+          }}
+          avatarHost={testAvatarHost()}
+          buildVersion="build-test"
+          connectAttempted
+          audioContainerRef={audioContainerRef}
+          subscribeSpeechEnvelope={() => () => undefined}
+          onConnect={() => undefined}
+          onDisconnect={() => undefined}
+          onResumeAudio={() => undefined}
+          onToggleMicrophone={() => undefined}
+          onDownloadDiagnostics={() => undefined}
+        />,
+      )
+
+      const response = screen.getByText('Completed response remains readable.')
+      const overlay = response.closest('.speech-overlay') as HTMLElement
+      const style = getComputedStyle(overlay)
+      expect(style.opacity).toBe('1')
+      expect(style.animationName).toBe('none')
+      expect(style.transitionDuration).toBe('0s')
+    },
+  )
+
   it('shows speech-envelope degradation without reporting the avatar ready', async () => {
     const user = userEvent.setup()
     const audioContainerRef = createRef<HTMLDivElement>()

@@ -264,11 +264,14 @@ button:focus-visible { outline: 1px solid var(--accent-cyan); outline-offset: 3p
 @keyframes speech-fade { to { opacity: 0; transform: translateY(6px); } }
 @keyframes ready-overlay { 0%, 56% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
 
-.voice-shell[data-user-reduced-motion="true"]::after { display: none; }
-.voice-shell[data-user-reduced-motion="true"] .speech-overlay--complete { opacity: 0; }
+.voice-shell[data-user-reduced-motion="true"]::after,
+.voice-shell[data-system-reduced-motion="true"]::after { display: none; }
 .voice-shell[data-user-reduced-motion="true"] *,
 .voice-shell[data-user-reduced-motion="true"] *::before,
-.voice-shell[data-user-reduced-motion="true"] *::after {
+.voice-shell[data-user-reduced-motion="true"] *::after,
+.voice-shell[data-system-reduced-motion="true"] *,
+.voice-shell[data-system-reduced-motion="true"] *::before,
+.voice-shell[data-system-reduced-motion="true"] *::after {
   scroll-behavior: auto !important;
   transition: none !important;
   animation: none !important;
@@ -276,7 +279,6 @@ button:focus-visible { outline: 1px solid var(--accent-cyan); outline-offset: 3p
 
 @media (prefers-reduced-motion: reduce) {
   .voice-shell::after { display: none; }
-  .voice-shell .speech-overlay--complete { opacity: 0; }
   .voice-shell *, .voice-shell *::before, .voice-shell *::after {
     scroll-behavior: auto !important;
     transition: none !important;
