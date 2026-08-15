@@ -436,6 +436,7 @@ async def main() -> int:
         options.set_preference("media.navigator.streams.fake", True)
         options.set_preference("media.navigator.permission.disabled", True)
         options.set_preference("media.autoplay.default", 0)
+        options.set_preference("media.autoplay.block-webaudio", False)
         download_root = EVIDENCE_ROOT / "firefox-downloads"
         download_root.mkdir(parents=True, exist_ok=True)
         for old in download_root.glob("voice-agent-diagnostic-*.jsonl"):
@@ -679,16 +680,30 @@ async def main() -> int:
                 const analyser = context.createAnalyser();
                 analyser.fftSize = 256;
                 context.createMediaStreamSource(stream).connect(analyser);
+                let settled = false;
+                const finish = (result) => {
+                    if (settled) return;
+                    settled = true;
+                    done(result);
+                };
+                const timeout = setTimeout(
+                    () => finish({ready: false, reason: 'resume timeout', state: context.state}),
+                    2_000,
+                );
                 context.resume().then(
                     () => {
+                        clearTimeout(timeout);
                         window.__voiceAgentPcmProbe = {
                             context,
                             analyser,
                             samples: new Uint8Array(analyser.fftSize),
                         };
-                        done({ready: context.state === 'running', state: context.state});
+                        finish({ready: context.state === 'running', state: context.state});
                     },
-                    () => done({ready: false, state: context.state}),
+                    () => {
+                        clearTimeout(timeout);
+                        finish({ready: false, state: context.state});
+                    },
                 );
             """,
         )
