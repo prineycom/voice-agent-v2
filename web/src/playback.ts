@@ -36,6 +36,7 @@ export class AudioPlaybackBoundary {
   private envelopeFrame: number | null = null
   private lastEnvelopeAtMs = -Infinity
   private playbackActive = false
+  private envelopeGraphDisabled = false
   private playbackListeners: Array<{
     element: HTMLMediaElement
     type: string
@@ -58,6 +59,7 @@ export class AudioPlaybackBoundary {
     this.clear()
     this.publicationGeneration = publicationGeneration
     this.track = track
+    this.envelopeGraphDisabled = false
     this.attachFresh()
   }
 
@@ -81,6 +83,7 @@ export class AudioPlaybackBoundary {
   reset(): void {
     if (this.track === null) return
     this.detachElement()
+    this.envelopeGraphDisabled = false
     this.attachFresh()
   }
 
@@ -223,42 +226,67 @@ export class AudioPlaybackBoundary {
 
   private startEnvelopeObservation(): void {
     const element = this.element
-    if (!this.playbackActive || element === null) return
+    if (!this.playbackActive || element === null || this.envelopeGraphDisabled) return
     if (typeof AudioContext === 'undefined') return
-    try {
-      if (this.audioContext === null) {
-        const context = new AudioContext()
-        const analyser = context.createAnalyser()
+    if (this.audioContext === null) {
+      let context: AudioContext | null = null
+      let analyser: AnalyserNode | null = null
+      let source: MediaElementAudioSourceNode | null = null
+      let elementWasRerouted = false
+      try {
+        context = new AudioContext()
+        analyser = context.createAnalyser()
         analyser.fftSize = 256
         analyser.smoothingTimeConstant = 0.45
-        const source = context.createMediaElementSource(element)
+        source = context.createMediaElementSource(element)
+        elementWasRerouted = true
         source.connect(analyser)
         analyser.connect(context.destination)
         this.audioContext = context
         this.analyserSource = source
         this.analyser = analyser
         this.analyserSamples = new Uint8Array(analyser.fftSize)
+      } catch {
+        try {
+          source?.disconnect()
+        } catch {}
+        try {
+          analyser?.disconnect()
+        } catch {}
+        if (context !== null) void context.close().catch(() => undefined)
+        this.envelopeGraphDisabled = true
+        if (elementWasRerouted) this.restoreDirectPlayback(element)
+        return
       }
-      const context = this.audioContext
-      void context.resume().then(
-        () => {
-          if (
-            this.audioContext === context && this.playbackActive
-            && this.element === element && this.envelopeFrame === null
-          ) {
-            this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
-          }
-        },
-        () => {
-          if (this.audioContext === context && this.element === element) {
-            this.deactivatePlayback()
-            this.elementBlocked = true
-            this.reportBlocked()
-          }
-        },
-      )
+    }
+    const context = this.audioContext
+    void context.resume().then(
+      () => {
+        if (
+          this.audioContext === context && this.playbackActive
+          && this.element === element && this.envelopeFrame === null
+        ) {
+          this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
+        }
+      },
+      () => {
+        if (this.audioContext === context && this.element === element) {
+          this.envelopeGraphDisabled = true
+          this.restoreDirectPlayback(element)
+        }
+      },
+    )
+  }
+
+  private restoreDirectPlayback(element: HTMLMediaElement): void {
+    if (this.element !== element) return
+    try {
+      this.detachElement()
+      this.elementBlocked = false
+      this.attachFresh()
     } catch {
-      this.stopEnvelopeObservation()
+      this.elementBlocked = true
+      this.reportBlocked()
     }
   }
 

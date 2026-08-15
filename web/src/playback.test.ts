@@ -119,6 +119,71 @@ describe('persistent playback observation', () => {
     expect(context.close).toHaveBeenCalledTimes(1)
   })
 
+  it('restores direct playout when media-element analyser routing fails', async () => {
+    const source = {
+      connect: vi.fn(() => {
+        throw new Error('routing failed')
+      }),
+      disconnect: vi.fn(),
+    }
+    const analyser = {
+      fftSize: 0,
+      smoothingTimeConstant: 0,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    }
+    const context = {
+      destination: {},
+      createAnalyser: vi.fn(() => analyser),
+      createMediaElementSource: vi.fn(() => source),
+      resume: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    }
+    class FakeAudioContext {
+      destination = context.destination
+      createAnalyser = context.createAnalyser
+      createMediaElementSource = context.createMediaElementSource
+      resume = context.resume
+      close = context.close
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+
+    const elements: HTMLAudioElement[] = []
+    const remote: AttachableAudioTrack = {
+      attach: vi.fn(() => {
+        const element = document.createElement('audio')
+        Object.defineProperties(element, {
+          paused: { configurable: true, get: () => false },
+          ended: { configurable: true, get: () => false },
+          readyState: { configurable: true, get: () => 4 },
+          error: { configurable: true, get: () => null },
+        })
+        element.play = vi.fn().mockResolvedValue(undefined)
+        element.pause = vi.fn()
+        element.load = vi.fn()
+        elements.push(element)
+        return element
+      }),
+      detach: vi.fn((element) => element === undefined ? [] : [element]),
+    }
+    const container = document.createElement('div')
+    const blocked = vi.fn()
+    const boundary = new AudioPlaybackBoundary(container, blocked)
+
+    boundary.setTrack(remote)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(remote.attach).toHaveBeenCalledTimes(2)
+    expect(remote.detach).toHaveBeenCalledWith(elements[0])
+    expect(container.firstElementChild).toBe(elements[1])
+    expect(elements[1].play).toHaveBeenCalledTimes(1)
+    expect(source.disconnect).toHaveBeenCalledTimes(1)
+    expect(context.close).toHaveBeenCalledTimes(1)
+    expect(blocked).toHaveBeenLastCalledWith(false)
+  })
+
   it('attaches one persistent track and reports autoplay failure without throwing', async () => {
     const blocked = vi.fn()
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), blocked)
