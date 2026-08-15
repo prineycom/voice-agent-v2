@@ -20,33 +20,30 @@ The active composition is unchanged: local LiveKit, Whisper large-v3-turbo, fixe
 
 ## Readiness compatibility report
 
-The report separates for each of LiveKit, controller, STT, selected LLM, TTS, avatar host, and active module:
+The server report separates liveness, readiness, compatibility, identity, contract version, reason code, and bounded recovery attempts for LiveKit, controller, STT, selected LLM, and TTS. The browser System panel combines those five hard-capability records with the existing avatar-host health boundary, rendering separate avatar-host and active-module rows with the same distinctions.
 
-- process/component **liveness** (`alive`, `dead`, or `unknown`);
-- capability **readiness** (`ready`, `unready`, `degraded`, or `unknown`);
-- contract/artifact/module compatibility;
-- identity, contract version, reason code, and bounded recovery attempts.
-
-A controlled report with an alive selected-LLM process but wrong/incompatible model contract yields `liveness=alive`, `readiness=unready`, `compatible=false`, and overall `unready`. The browser rejects a report that relabels that same component set as ready. Actual resident readiness additionally checks warmed Whisper process custody, the exact local-LFM readiness identity/no-transfer/no-fallback record, and two live compatible Silero workers. A dead resident capability blocks admission; failure does not route to another provider/model/backend.
+A controlled five-component server report with an alive selected-LLM process but wrong/incompatible model contract yields `liveness=alive`, `readiness=unready`, `compatible=false`, and overall `unready`. The browser rejects a report that relabels that same component set as ready. Actual resident readiness additionally checks warmed Whisper process custody, the exact local-LFM readiness identity/no-transfer/no-fallback record, and two live compatible Silero workers. A dead resident capability blocks admission; failure does not route to another provider/model/backend.
 
 ## Complete controlled fault matrix
 
 Run `./verify-slice8`. Every row invokes the executable failure mapper and asserts its public consequence, retry/admission bound, and unchanged provider/privacy/auth/wake/avatar-selection facts. Existing controller/adapter/avatar/browser suites exercise the corresponding turn, cancellation, malformed-input, render-failure, disconnect, and duplicate-event behavior.
 
-| Architecture failure row | Injection/validation | Public consequence | Retry/admission result |
-| --- | --- | --- | --- |
-| LiveKit unavailable | Controlled transport/control loss plus bounded reconnect reducer/client timer | `retrying`, then `unavailable` | At most 10 reconnect publications inside the 5-second acknowledgement window; no inference admission. |
-| Microphone capture/cleanup failure | Existing recorder/stream/setup/cleanup failure seams | `unavailable` | Zero inference admission/retry; retention truth remains explicit. |
-| STT unavailable/temp-input failure | Controlled adapter/process failure | `unavailable` for the turn | No fabricated transcript/downstream work; dead readiness blocks later admission. |
-| Selected LLM failure | Controlled selected-provider transport/identity/terminal failure | `unavailable` | No answer/fallback; visible accepted prefix semantics remain non-retractable. |
-| Cloud credential/allowlist/privacy invalid | Controlled inactive-cloud configuration case | `unavailable` | Not applicable to the fixed active local mode; no credential was sought and local was not selected as a failure fallback. |
-| TTS unavailable/fails | Controlled pool/readiness/synthesis/late-failure cases | `degraded` | Valid text/accepted PCM prefix remains; spoken completion fails; zero retry/fallback. |
-| Avatar input malformed/missing/late/stale | Bounded host contract cases | `degraded` | Safe deterministic input/state and rejection count; voice continues. |
-| Avatar module/render failure | Controlled render-loop failure callback | `degraded` | Voice/text continue; runaway motion stops; only configured static safety representation, not another selected avatar. |
-| Client disconnect | Existing session disconnect cleanup case | `interrupted` | In-flight delivery terminalized; no orphan work/admission. |
-| GPU allocation/model process crash | Controlled GPU failure mapping plus real disposable process loss | `unavailable` | Readiness drops; zero inference request retry/provider switch. |
-| Tailscale unavailable | Controlled remote-path loss policy | product `degraded`, remote path unavailable | Loopback may continue; no public exposure appears. |
-| Late/duplicate event | Strict gate replay | User state unchanged (`available`); operator drop count | No retry, UI, media, or inference action. |
+The authoritative dispositions and admission/retry consequences are in [`architecture.md` §7.1](../architecture.md#71-executable-user-state-mapping); this evidence records only how every owned matrix row was exercised.
+
+| Matrix row | Injection/validation | Result |
+| --- | --- | --- |
+| `livekit_unavailable` | Controlled transport/control loss plus bounded reconnect reducer/client timer | Pass against §7.1. |
+| `microphone_capture_failure` | Existing recorder/stream/setup/cleanup failure seams | Pass against §7.1; retention truth remains explicit. |
+| `stt_unavailable` | Controlled adapter/process failure | Pass against §7.1. |
+| `selected_llm_failure` | Controlled selected-provider transport/identity/terminal failure | Pass against §7.1. |
+| `cloud_configuration_invalid` | Controlled inactive-cloud configuration case | Pass against §7.1; no credential was sought in fixed local mode. |
+| `tts_failure` | Controlled pool/readiness/synthesis/late-failure cases | Pass against §7.1. |
+| `avatar_input_invalid` | Bounded host contract cases | Pass against §7.1. |
+| `avatar_runtime_failure` | Controlled render-loop failure callback | Pass against §7.1. |
+| `client_disconnect` | Existing session disconnect cleanup case | Pass against §7.1. |
+| `local_inference_crash` | Controlled GPU failure mapping plus real disposable process loss | Pass against §7.1. |
+| `tailscale_unavailable` | Controlled remote-path loss policy | Pass against §7.1. |
+| `late_duplicate_event` | Strict gate replay | Pass against §7.1. |
 
 A safe real-process case starts a task-owned disposable Python worker, kills it, observes lost liveness, permits exactly one test-only recovery, kills it again, and proves the second restart is blocked. It touches no shared service. The real product runtime is stricter in Slice 8: it performs zero automatic inference request retry and zero automatic service restart; service supervision remains Slice 9. This cannot form an admission/restart loop.
 
@@ -79,21 +76,21 @@ The bounded verifier emits one synthetic metadata-only turn and reconstructs, wi
 }
 ```
 
-The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance-percentile claim. The same report reconstructs provider mode/identity, `external_transfer=false`, usage-unit counts when the local runtime supplies them, terminal outcome, PCM/segment queue high-water marks, cancellation/stale/control-drop counts, and endpoint/terminal resource samples. Runtime-level content-free model `loaded`/`unloaded` events are recorded separately.
+The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance-percentile claim. The same correlated metadata stream also carries provider mode/identity, `external_transfer=false`, usage-unit counts when the local runtime supplies them, terminal outcome, PCM/segment queue high-water marks, cancellation/stale/control-drop counts, and endpoint/terminal resource samples; the public terminal control exposes these fields to the browser Timeline. The percentile report itself contains the reconstructed timing timeline and timing/resource percentiles. Runtime-level content-free model `loaded`/`unloaded` events are recorded separately.
 
 ## Default-log privacy review and capture deletion
 
 Default metadata paths reject keys for raw audio/PCM, transcript, prompt, response/text/content, secrets/tokens, and content-bearing identifiers. Only specifically named count/timing fields such as provider time-to-first-token are allowlisted. Values must be bounded scalar JSON; browser error diagnostics keep a normalized class/code and never an exception message. Conversation text/history remains current-page memory and is not included in downloaded diagnostics.
 
-Content capture is off by default. Enabling it requires all of:
+Content capture is off by default. Enabling it requires the exact flag and outside-Git root below. TTL defaults to 900 seconds; the third setting is an optional override within 60–3,600 seconds.
 
 ```text
 VOICE_AGENT_DIAGNOSTIC_CAPTURE=1
 VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT=<absolute outside-Git path>
-VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS=<60..3600>
+# Optional: VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS=<60..3600>
 ```
 
-One capture is capped at 16 files / 1 MiB, directory mode `0700`, file mode `0600`, and has an owned manifest/expiry. The verifier captured only labelled synthetic raw bytes/transcript/prompt/response, invoked the public `./manage-diagnostics delete <capture-directory>` path, and proved the directory no longer existed. It also exercises expiry deletion and rejects a repository-local root. No capture or content was written to Git.
+One capture is capped at 16 content files / 1 MiB of content, plus its owned manifest/expiry; the directory mode is `0700` and every file mode is `0600`. The verifier captured only labelled synthetic raw bytes/transcript/prompt/response, invoked the public `./manage-diagnostics delete <capture-directory>` path, and proved the directory no longer existed. It also exercises expiry deletion and rejects a repository-local root. No capture or content was written to Git.
 
 ## Safe resource case
 

@@ -25,7 +25,7 @@
 | No silent provider/model/cloud STT/TTS/auth/wake/avatar change | ✅ | Every disposition closes six change flags false; health contract fixes local mode/transfer/fallback/STT/TTS/auth/wake/avatar facts; existing active composition unchanged. |
 | Bounded retry/recovery; no admission/restart loop | ✅ | Browser reconnect publications bounded by 5-second/10-attempt window; inference request retry and product automatic service restart are zero. Disposable real process permits one test-only recovery and blocks a second restart. |
 | Preregistered latency/resource percentiles and slow stage computable | ✅ diagnostic | `config/observability-v1.json`; nearest-rank p50/p95/p99 report with sample count. A one-turn example is diagnostic only; 20-turn acceptance claim remains open. |
-| Content capture off by default, bounded/outside Git, deletion exercised | ✅ | Explicit three-variable opt-in, 16 files/1 MiB, 60–3,600 seconds, `0700`/`0600`; public CLI deletion executed and expiry/project-root refusal tested. |
+| Content capture off by default, bounded/outside Git, deletion exercised | ✅ | Exact enable flag plus outside-Git root, 900-second TTL default with a 60–3,600-second override bound, 16 content files/1 MiB of content plus the owned manifest, and `0700`/`0600`; public CLI deletion executed and expiry/project-root refusal tested. |
 | Safe real process/resource validation | ✅ bounded | Two disposable process losses, one bounded recovery, second blocked; exact 16-MiB/100-ms safe pressure with `/proc`/read-only GPU samples. Shared service and destructive exhaustion untouched. |
 
 ## Validation
