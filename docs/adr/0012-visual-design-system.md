@@ -88,7 +88,7 @@ Both levels can be active simultaneously. The UI toggle is persistent across ses
 ### Positive
 
 - Cyberpunk identity without visual clutter — neon + monospace + glow is immediately readable as cyberpunk.
-- CSS-only effects = no performance concern from UI chrome.
+- CSS-only effects keep the UI chrome surface bounded and reduce its performance risk; Raspberry Pi frame performance still requires measurement.
 - Two-level reduced motion covers both accessibility and user preference.
 - Palette is tokenized — easy to adjust or theme later.
 - Monospace labels are compact and fit the minimalist screen.

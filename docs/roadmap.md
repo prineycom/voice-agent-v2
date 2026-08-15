@@ -334,7 +334,7 @@ Run network-denied deterministic headless media tests, then selected-provider re
 
 ## Design Gate V — Grill the avatar module and MVP eye
 
-This is a required design task, not an implementation slice. Run a dedicated `/skill:grill-docs` session after Slice 6 evidence is available and before Slice 7 starts.
+> **Completed 2026-08-14:** the dedicated `/skill:grill-docs` session fixed the avatar/module and full UI-shell design before Slice 7 implementation. The accepted protocol is recorded in [`design/gate-v-grill-results.md`](design/gate-v-grill-results.md).
 
 ### Required decisions
 

@@ -623,6 +623,28 @@ async def main() -> int:
             lambda: "SILERO / kseniya / 48 KHZ" in driver.find_element("tag name", "body").text,
             "React status system tab omitted the active TTS configuration",
         )
+        await wait_for(
+            lambda: driver.execute_script("""
+                const shell = document.querySelector('.voice-shell');
+                const panel = document.querySelector('.status-panel.slide-panel--open');
+                if (!(shell instanceof HTMLElement) || !(panel instanceof HTMLElement)) return false;
+                const rect = panel.getBoundingClientRect();
+                return shell.scrollLeft === 0
+                    && Math.abs(rect.right - window.innerWidth) < 1
+                    && document.querySelectorAll('.slide-panel--open').length === 1;
+            """),
+            "React status panel did not settle at the right edge without shifting the shell",
+        )
+        status_panel_layout = driver.execute_script("""
+            const shell = document.querySelector('.voice-shell');
+            const panel = document.querySelector('.status-panel').getBoundingClientRect();
+            return {
+                shell_scroll_left: shell.scrollLeft,
+                panel_right: panel.right,
+                viewport_width: window.innerWidth,
+                open_panel_count: document.querySelectorAll('.slide-panel--open').length,
+            };
+        """)
         timeline = driver.find_element("xpath", "//button[normalize-space()='TIMELINE']")
         await asyncio.to_thread(timeline.click)
         await wait_for(
@@ -686,6 +708,7 @@ async def main() -> int:
             "fresh_vad_turn_after_unmute": resumed_turn,
             "resident_vad_reset_count": vad_model.reset_calls,
             "microphone_off_preserved_across_reconnect": True,
+            "status_panel_layout": status_panel_layout,
             "browser_storage": storage_state,
             "downloaded_diagnostic": str(diagnostic_path),
             "audibility_claimed": False,
