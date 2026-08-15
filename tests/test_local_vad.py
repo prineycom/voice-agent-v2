@@ -4,10 +4,15 @@ import math
 import os
 from pathlib import Path
 import struct
+import tempfile
 import unittest
 import wave
 
-from voice_agent_v2.local_vad import SileroOnnxModel, SileroSpeechEndpoint
+from voice_agent_v2.local_vad import (
+    SILERO_MODEL_SIZE,
+    SileroOnnxModel,
+    SileroSpeechEndpoint,
+)
 
 
 class SequenceModel:
@@ -43,13 +48,58 @@ class SileroSpeechEndpointTests(unittest.TestCase):
         self.assertNotIn("speech_started", {row["decision"] for row in telemetry})
         self.assertNotIn("payload", str(telemetry).lower())
 
-    def test_confirmed_speech_starts_and_ends_with_bounded_pcm(self) -> None:
+    def test_confirmed_speech_keeps_decision_silence_out_of_stt_input(self) -> None:
         values = [0.05] * 4 + [0.91] * 12 + [0.10] * 24
-        signals, _telemetry = self.decisions(values, [frame(1200)] * 64)
+        signals, telemetry = self.decisions(values, [frame(1200)] * 64)
         self.assertEqual([signal.kind for signal in signals], ["speech_started", "utterance"])
-        utterance = signals[-1].payload
-        self.assertIsNotNone(utterance)
-        self.assertGreater(len(utterance or b""), 0)
+        utterance = signals[-1].payload or b""
+        # Endpointing still waits for 640 ms, but Whisper receives only the
+        # explicit 160 ms final-phoneme tail rather than the whole decision tail.
+        self.assertEqual(len(utterance), (4 * 32 + 12 * 32 + 160) * 32)
+        submitted = next(row for row in telemetry if row["decision"] == "utterance")
+        self.assertEqual(submitted["silence_duration_ms"], 640)
+        self.assertEqual(submitted["submitted_post_speech_ms"], 160)
+
+    def test_pre_onset_custody_freezes_before_speech_confirmation(self) -> None:
+        endpoint = SileroSpeechEndpoint(SequenceModel([0.05] * 9 + [0.9] * 20))
+        signals = []
+        pcm = b"".join(struct.pack("<h", sample) for sample in range(9_000))
+        for offset in range(0, len(pcm), 640):
+            item = pcm[offset:offset + 640]
+            if len(item) == 640:
+                signals.extend(endpoint.feed(item))
+            if any(signal.kind == "speech_started" for signal in signals):
+                break
+        signals.extend(endpoint.flush())
+
+        payload = signals[-1].payload or b""
+        self.assertEqual(struct.unpack_from("<h", payload)[0], 512)
+        self.assertEqual(
+            struct.unpack_from("<h", payload, endpoint.pre_roll_bytes)[0],
+            4_608,
+        )
+        self.assertEqual(endpoint.pre_roll_bytes, 256 * 32)
+
+    def test_maximum_utterance_payload_never_exceeds_configured_bound(self) -> None:
+        model = SequenceModel([0.9] * 30 + [0.05] * 30)
+        endpoint = SileroSpeechEndpoint(model, max_utterance_ms=400)
+        signals = []
+        for item in [frame(1000)] * 40:
+            signals.extend(endpoint.feed(item))
+            if any(signal.kind == "utterance" for signal in signals):
+                break
+
+        payload = signals[-1].payload or b""
+        self.assertEqual([signal.kind for signal in signals], ["speech_started", "utterance"])
+        self.assertLessEqual(len(payload), 400 * 32)
+        self.assertGreaterEqual(model.reset_count, 1)
+
+    def test_same_size_substituted_model_is_rejected_before_runtime_import(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "silero.onnx"
+            model.write_bytes(b"x" * SILERO_MODEL_SIZE)
+            with self.assertRaisesRegex(RuntimeError, "model identity"):
+                SileroOnnxModel(model)
 
     def test_rejected_noise_candidate_never_emits_public_start(self) -> None:
         values = [0.75, 0.74, 0.05] * 20

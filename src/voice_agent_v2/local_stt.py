@@ -224,7 +224,9 @@ class WhisperSTT:
             self._finish_request(generation)
             _cleanup_temporary_audio(path)
         transcript = response.get("hypothesis")
-        if not isinstance(transcript, str) or not transcript.strip():
+        if not isinstance(transcript, str):
+            raise StageFailure("stt", "invalid_stt_result")
+        if not transcript.strip():
             raise StageFailure("stt", "empty_transcript")
         self.observations.append({
             "session_id_present": bool(session_id), "turn_id_present": bool(turn_id),
