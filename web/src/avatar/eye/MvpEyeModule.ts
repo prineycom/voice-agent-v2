@@ -5,7 +5,7 @@ import {
   type AvatarModuleV1,
   type ValidatedAvatarControlV1,
 } from '../contract'
-import { computeEyeRenderState } from './eyeModel'
+import { computeEyeRenderState, type EyePupilPosition } from './eyeModel'
 import './mvpEye.css'
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
@@ -36,6 +36,8 @@ export class MvpEyeModule implements AvatarModuleV1 {
   private loader: SVGCircleElement | null = null
   private regularPupil: SVGCircleElement | null = null
   private control: ValidatedAvatarControlV1 | null = null
+  private lastPupilPosition: EyePupilPosition | null = null
+  private interruptionOrigin: EyePupilPosition | null = null
   private animationFrame: number | null = null
   private failureHandler: AvatarModuleFailureHandlerV1 | null = null
 
@@ -111,6 +113,11 @@ export class MvpEyeModule implements AvatarModuleV1 {
 
   update(input: ValidatedAvatarControlV1): void {
     if (this.root === null) throw new Error('MVP eye is not mounted')
+    if (input.lifecycle === 'interrupted' && this.control?.lifecycle !== 'interrupted') {
+      this.interruptionOrigin = this.lastPupilPosition
+    } else if (input.lifecycle !== 'interrupted') {
+      this.interruptionOrigin = null
+    }
     this.control = input
     this.root.dataset.motion = input.motion
     this.draw(input.timestampMs)
@@ -118,6 +125,9 @@ export class MvpEyeModule implements AvatarModuleV1 {
 
   cancel(timestampMs: number): void {
     if (this.control === null) return
+    if (this.control.lifecycle !== 'interrupted') {
+      this.interruptionOrigin = this.lastPupilPosition
+    }
     this.control = {
       ...this.control,
       timestampMs,
@@ -139,6 +149,8 @@ export class MvpEyeModule implements AvatarModuleV1 {
     this.loader = null
     this.regularPupil = null
     this.control = null
+    this.lastPupilPosition = null
+    this.interruptionOrigin = null
     this.failureHandler = null
   }
 
@@ -158,7 +170,7 @@ export class MvpEyeModule implements AvatarModuleV1 {
       || this.irisGroup === null || this.outerGroup === null
       || this.loader === null || this.regularPupil === null
     ) return
-    const state = computeEyeRenderState(this.control, timeMs)
+    const state = computeEyeRenderState(this.control, timeMs, this.interruptionOrigin)
     this.root.dataset.state = state.lifecycle
     this.root.setAttribute('aria-label', `AI eye avatar: ${state.lifecycle}`)
     this.eyeGroup.style.transform = `scaleY(${Math.max(0.035, 1 - state.blinkClosure * 0.965)})`
@@ -169,6 +181,7 @@ export class MvpEyeModule implements AvatarModuleV1 {
     this.loader.style.opacity = thinking ? '1' : '0'
     this.regularPupil.style.opacity = thinking ? '0' : '1'
     this.root.style.setProperty('--mvp-eye-envelope', state.speechEnvelope.toFixed(4))
+    this.lastPupilPosition = { pupilX: state.pupilX, pupilY: state.pupilY }
   }
 }
 

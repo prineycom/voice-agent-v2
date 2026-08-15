@@ -7,6 +7,12 @@ import {
 
 export const EYE_PUPIL_BOUND_X = 0.38
 export const EYE_PUPIL_BOUND_Y = 0.28
+export const INTERRUPTION_RETURN_MS = 360
+
+export interface EyePupilPosition {
+  pupilX: number
+  pupilY: number
+}
 
 export interface EyeRenderState {
   lifecycle: AvatarLifecycleState
@@ -43,7 +49,7 @@ function effectiveLifecycle(
   lifecycle: AvatarLifecycleState,
   elapsedMs: number,
 ): AvatarLifecycleState {
-  return lifecycle === 'interrupted' && elapsedMs >= 360 ? 'idle' : lifecycle
+  return lifecycle === 'interrupted' && elapsedMs >= INTERRUPTION_RETURN_MS ? 'idle' : lifecycle
 }
 
 function observationIsFresh(observedAtMs: number, timeMs: number, maximumAgeMs: number): boolean {
@@ -55,6 +61,7 @@ function observationIsFresh(observedAtMs: number, timeMs: number, maximumAgeMs: 
 export function computeEyeRenderState(
   control: ValidatedAvatarControlV1,
   timeMs: number,
+  interruptionOrigin: EyePupilPosition | null = null,
 ): EyeRenderState {
   const safeTimeMs = Number.isFinite(timeMs) ? Math.max(control.timestampMs, timeMs) : control.timestampMs
   const elapsedMs = safeTimeMs - control.timestampMs
@@ -69,7 +76,7 @@ export function computeEyeRenderState(
     ? control.trackingTarget
     : null
   if (!staticFrame && lifecycle !== 'thinking') {
-    if (trackingTarget !== null) {
+    if (trackingTarget !== null && lifecycle !== 'interrupted') {
       const confidence = trackingTarget.confidence
       pupilX = trackingTarget.x * EYE_PUPIL_BOUND_X * confidence
       pupilY = trackingTarget.y * EYE_PUPIL_BOUND_Y * confidence
@@ -79,6 +86,12 @@ export function computeEyeRenderState(
       pupilX = Math.sin((safeTimeMs / 2_900) + xPhase) * EYE_PUPIL_BOUND_X * 0.68
       pupilY = Math.sin((safeTimeMs / 3_700) + yPhase) * EYE_PUPIL_BOUND_Y * 0.62
     }
+  }
+  if (lifecycle === 'interrupted' && interruptionOrigin !== null && !staticFrame) {
+    const progress = clamp(elapsedMs / INTERRUPTION_RETURN_MS, 0, 1)
+    const easedProgress = progress * progress * (3 - 2 * progress)
+    pupilX = interruptionOrigin.pupilX + (pupilX - interruptionOrigin.pupilX) * easedProgress
+    pupilY = interruptionOrigin.pupilY + (pupilY - interruptionOrigin.pupilY) * easedProgress
   }
 
   const blinkClosure = ambientEnabled && !staticFrame ? blinkAt(safeTimeMs, control.idleSeed) : 0

@@ -173,6 +173,50 @@ describe('avatar host v1 boundary', () => {
     expect(onHealth).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the last rendered target at cancellation and eases it back to neutral', () => {
+    let scheduledFrame: FrameRequestCallback | null = null
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      scheduledFrame = callback
+      return 1
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    const renderer = new MvpEyeModule()
+    const container = document.createElement('div')
+
+    try {
+      renderer.mount(container)
+      const result = validateAvatarControl({
+        ...input(1_000),
+        motion: 'ambient-reduced',
+        trackingTarget: { x: 1, y: 0, confidence: 1, observedAtMs: 1_000 },
+      }, 1_000)
+      if (!result.accepted) throw new Error('valid control was rejected')
+      renderer.update(result.control)
+      const iris = container.querySelector<HTMLElement>('.mvp-eye__iris-group')
+      if (iris === null) throw new Error('eye renderer did not mount')
+      const trackedTransform = iris.style.transform
+
+      renderer.cancel(1_010)
+      expect(iris.style.transform).toBe(trackedTransform)
+
+      const middleFrame = scheduledFrame
+      if (middleFrame === null) throw new Error('eye renderer did not schedule a frame')
+      middleFrame(1_190)
+      const middleX = Number.parseFloat(iris.style.transform.match(/translate\(([-\d.]+)px/)?.[1] ?? 'NaN')
+      expect(middleX).toBeGreaterThan(0)
+      expect(middleX).toBeLessThan(0.38 * 112)
+
+      const finalFrame = scheduledFrame
+      if (finalFrame === null) throw new Error('eye renderer did not reschedule a frame')
+      finalFrame(1_370)
+      expect(iris.style.transform).toBe('translate(0px, 0px)')
+      expect(container.querySelector<HTMLElement>('.mvp-eye')?.dataset.state).toBe('idle')
+    } finally {
+      renderer.dispose()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('reports animation-frame draw failures instead of silently stopping its loop', () => {
     const scheduled: { frame: FrameRequestCallback | null } = { frame: null }
     const requestFrame = vi.fn((callback: FrameRequestCallback) => {

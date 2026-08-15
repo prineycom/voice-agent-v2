@@ -7,6 +7,7 @@ import {
 import {
   EYE_PUPIL_BOUND_X,
   EYE_PUPIL_BOUND_Y,
+  INTERRUPTION_RETURN_MS,
   computeEyeRenderState,
   normalizeEyeRenderState,
 } from './eyeModel'
@@ -21,7 +22,7 @@ function control(overrides: Partial<AvatarControlInputV1> = {}) {
     trackingTarget: null,
     speechEnvelope: null,
     ...overrides,
-  })
+  }, 1_000)
   if (!result.accepted) throw new Error('test control was rejected')
   return result.control
 }
@@ -76,6 +77,26 @@ describe('deterministic MVP eye model', () => {
     const interrupted = control({ lifecycle: 'interrupted' })
     expect(computeEyeRenderState(interrupted, 1_359).lifecycle).toBe('interrupted')
     expect(computeEyeRenderState(interrupted, 1_360).lifecycle).toBe('idle')
+  })
+
+  it('returns deterministically from the last rendered target without jumping', () => {
+    const interrupted = control({ lifecycle: 'interrupted', motion: 'ambient-reduced' })
+    const origin = { pupilX: EYE_PUPIL_BOUND_X, pupilY: -EYE_PUPIL_BOUND_Y }
+    const start = computeEyeRenderState(interrupted, 1_000, origin)
+    const middle = computeEyeRenderState(
+      interrupted,
+      1_000 + INTERRUPTION_RETURN_MS / 2,
+      origin,
+    )
+    const end = computeEyeRenderState(interrupted, 1_000 + INTERRUPTION_RETURN_MS, origin)
+
+    expect(start).toMatchObject(origin)
+    expect(middle.pupilX).toBeGreaterThan(0)
+    expect(middle.pupilX).toBeLessThan(origin.pupilX)
+    expect(middle.pupilY).toBeLessThan(0)
+    expect(middle.pupilY).toBeGreaterThan(origin.pupilY)
+    expect(end).toMatchObject({ lifecycle: 'idle', pupilX: 0, pupilY: 0 })
+    expect(computeEyeRenderState(interrupted, 1_180, origin)).toEqual(middle)
   })
 
   it('pulses only speaking state from a fresh validated decoded-playout envelope', () => {

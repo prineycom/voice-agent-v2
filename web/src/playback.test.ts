@@ -27,7 +27,7 @@ describe('persistent playback observation', () => {
     expect(speechEnvelopeFromTimeDomain(new Uint8Array([64, 192, 64, 192]))).toBe(speech)
   })
 
-  it('observes decoded current-track samples only after playback and clears them on suspension', async () => {
+  it('observes only active decoded media-element output and clears stalled or paused playout', async () => {
     let animationFrame: FrameRequestCallback | null = null
     const analyser = {
       fftSize: 0,
@@ -39,34 +39,44 @@ describe('persistent playback observation', () => {
       }),
     }
     const source = { connect: vi.fn(), disconnect: vi.fn() }
-    const sink = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }
     const context = {
       destination: {},
       createAnalyser: vi.fn(() => analyser),
-      createMediaStreamSource: vi.fn(() => source),
-      createGain: vi.fn(() => sink),
+      createMediaElementSource: vi.fn(() => source),
       resume: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
     }
     class FakeAudioContext {
       destination = context.destination
       createAnalyser = context.createAnalyser
-      createMediaStreamSource = context.createMediaStreamSource
-      createGain = context.createGain
+      createMediaElementSource = context.createMediaElementSource
       resume = context.resume
       close = context.close
     }
-    class FakeMediaStream {}
     vi.stubGlobal('AudioContext', FakeAudioContext)
-    vi.stubGlobal('MediaStream', FakeMediaStream)
     vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
       animationFrame = callback
       return 1
     }))
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
     const element = document.createElement('audio')
-    element.play = vi.fn().mockResolvedValue(undefined)
-    element.pause = vi.fn()
+    let paused = true
+    let ended = false
+    Object.defineProperties(element, {
+      paused: { configurable: true, get: () => paused },
+      ended: { configurable: true, get: () => ended },
+      readyState: { configurable: true, get: () => 4 },
+      error: { configurable: true, get: () => null },
+    })
+    element.play = vi.fn(() => {
+      paused = false
+      element.dispatchEvent(new Event('playing'))
+      return Promise.resolve()
+    })
+    element.pause = vi.fn(() => {
+      paused = true
+      element.dispatchEvent(new Event('pause'))
+    })
     element.load = vi.fn()
     const observations: number[] = []
     const boundary = new AudioPlaybackBoundary(
@@ -79,9 +89,30 @@ describe('persistent playback observation', () => {
     })
     await Promise.resolve()
     await Promise.resolve()
+    expect(context.createMediaElementSource).toHaveBeenCalledWith(element)
+    expect(source.connect).toHaveBeenCalledWith(analyser)
+    expect(analyser.connect).toHaveBeenCalledWith(context.destination)
     expect(animationFrame).not.toBeNull()
     ;(animationFrame as unknown as FrameRequestCallback)(40)
     expect(observations.at(-1)).toBeGreaterThan(0)
+
+    element.dispatchEvent(new Event('stalled'))
+    expect(observations.at(-1)).toBe(0)
+    const stalledObservationCount = observations.length
+    ;(animationFrame as unknown as FrameRequestCallback)(80)
+    expect(observations).toHaveLength(stalledObservationCount)
+
+    element.dispatchEvent(new Event('playing'))
+    ;(animationFrame as unknown as FrameRequestCallback)(120)
+    expect(observations.at(-1)).toBeGreaterThan(0)
+    element.pause()
+    expect(observations.at(-1)).toBe(0)
+
+    paused = false
+    ended = true
+    element.dispatchEvent(new Event('playing'))
+    ;(animationFrame as unknown as FrameRequestCallback)(160)
+    expect(observations.at(-1)).toBe(0)
 
     boundary.suspend()
     expect(observations.at(-1)).toBe(0)
