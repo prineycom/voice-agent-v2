@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-10
+- **Amended:** 2026-08-14 (Design Gate V)
 - **Decision owner:** Voice Agent v2 project architecture
 
 ## Context
@@ -10,7 +11,7 @@ The legacy repository explored Live2D, A2F/A2E-driven facial motion, and a later
 
 V2 still needs a recognizable visual presence, but choosing Live2D or 3D for the MVP would be premature. The desired initial visual is a deliberately simple original AI eye. Future custom, Live2D, or 3D visuals should be replaceable modules rather than reasons to rewrite session control.
 
-Language generation is neither predictable nor timely enough to control frames. The detailed visual states, input precedence, module contract, and any future semantic LLM contribution need a separate Grill/design task before implementation.
+Language generation is neither predictable nor timely enough to control frames. Design Gate V subsequently fixed the detailed visual states, input precedence, module contract, and treatment of any future semantic LLM contribution before Slice 7 implementation; the accepted protocol is recorded in [`../design/gate-v-grill-results.md`](../design/gate-v-grill-results.md).
 
 ## Decision
 
@@ -27,7 +28,7 @@ The MVP module is a custom deterministic animated AI eye. Its required behavior 
 
 “Random” idle behavior must be bounded and reproducible under a fixed seed for validation. The external tracking producer—for example, future camera-based tracking—is outside the MVP eye renderer.
 
-A dedicated future Grill/design task must define the detailed avatar-module and visual-control contract before the MVP eye slice starts. The MVP does not require visual instructions from the LLM. If a later design admits LLM-provided semantics, they must be bounded, validated, renderer-neutral, and coarse; an LLM must never emit renderer parameters, keyframes, shaders, executable content, or per-frame data.
+Design Gate V defined the detailed avatar-module and visual-control contract before the MVP eye slice started. The active versioned boundary and precedence rules are owned by [`../architecture.md`](../architecture.md#52-avatar-boundary-constraints). The MVP does not require visual instructions from the LLM. If a later design admits LLM-provided semantics, they must be bounded, validated, renderer-neutral, and coarse; an LLM must never emit renderer parameters, keyframes, shaders, executable content, or per-frame data.
 
 Live2D and 3D are optional later avatar modules, not active MVP renderer paths. A2F and A2E remain historical experiments outside the active V2 architecture.
 
@@ -39,13 +40,12 @@ Live2D and 3D are optional later avatar modules, not active MVP renderer paths. 
 - The MVP visual can be small, original, deterministic, and synchronized to actual audio playout.
 - Later custom, Live2D, or 3D work can target one module boundary instead of changing inference and turn control.
 - Render behavior remains reproducible when model output is late, invalid, or absent.
-- The design task can resolve visual priorities with evidence rather than freezing a speculative schema here.
+- The completed design task resolved visual priorities before the versioned implementation boundary was frozen.
 
 ### Costs and risks
 
-- A stable module boundary and fallback semantics must be designed before the eye implementation.
-- Pluggability adds a small adapter/capability surface even though the MVP ships one module.
-- External tracking and audio-derived pulsing need precedence and accessibility rules.
+- The stable module boundary and explicit fallback semantics add a small adapter/capability surface even though the MVP ships one selected renderer plus its static fallback.
+- External tracking and audio-derived pulsing require the fixed precedence, staleness, and accessibility rules to remain compatible.
 - Live2D/3D modules receive no implied compatibility until they pass their own later slice.
 
 ## Alternatives considered

@@ -20,7 +20,7 @@ from .v2_audio import (
     TTS_OUTPUT_AUDIO_FORMAT,
 )
 from .diagnostics import PrivacySafeTrace, TraceIdentity
-from .local_lfm import LocalLFMProvider
+from .local_lfm import MODEL_ALIAS, LocalLFMProvider
 from .local_stt import WhisperSTT
 from .real_turn import RealTurnController
 from .silero_tts import SileroKseniyaTTS, SileroVoiceProfile
@@ -84,6 +84,25 @@ class LiveTurnRunner:
                 "tts": tts_warmup,
             }
             self._started = True
+
+    def public_llm_profile(self) -> dict[str, str]:
+        readiness = (
+            self.warmup_metadata.get("lfm_ready")
+            if self._started and isinstance(self.warmup_metadata, dict)
+            else None
+        )
+        if (
+            not isinstance(readiness, dict)
+            or readiness.get("ready") is not True
+            or readiness.get("provider_mode") != self.llm.provider_mode
+            or readiness.get("provider_identity") != self.llm.provider_identity
+            or readiness.get("selected_alias") != MODEL_ALIAS
+        ):
+            raise RuntimeError("verified local LLM identity is unavailable")
+        return {
+            "provider_mode": self.llm.provider_mode,
+            "model_identity": self.llm.provider_identity,
+        }
 
     def cancel_startup(self) -> None:
         self._startup_cancellation.cancel()
@@ -1188,6 +1207,7 @@ class SessionRegistry:
             self._controllers[session_id] = controller
         try:
             await controller.start()
+            llm_profile = self.runner.public_llm_profile()
             controller.arm_browser_join_timeout()
         except BaseException:
             await controller.close(notify=False)
@@ -1205,6 +1225,7 @@ class SessionRegistry:
                 self.settings.room_token_ttl_seconds,
             ) * 1_000,
             "control_version": "voice-agent.realtime-control.v2",
+            "llm_profile": llm_profile,
             "tts_profile": self.runner.tts_profile.public_metadata(),
         }
 

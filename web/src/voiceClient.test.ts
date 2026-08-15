@@ -57,6 +57,7 @@ vi.mock('livekit-client', () => ({
 }))
 
 import { AudioPlaybackBoundary } from './playback'
+import { ACTIVE_LLM_MODEL_IDENTITY } from './state'
 import { VoiceClient, type VoiceClientCallbacks } from './voiceClient'
 
 function capabilityResponse(): Response {
@@ -70,6 +71,9 @@ function capabilityResponse(): Response {
       expires_in_seconds: 30,
       admission_timeout_ms: 30_000,
       control_version: 'voice-agent.realtime-control.v2',
+      llm_profile: {
+        provider_mode: 'local', model_identity: ACTIVE_LLM_MODEL_IDENTITY,
+      },
       tts_profile: {
         profile: 'silero-kseniya', backend: 'silero', speaker: 'kseniya',
         output_sample_rate_hz: 48_000, native_sample_rate_hz: 48_000,
@@ -100,6 +104,9 @@ function callbacks(): VoiceClientCallbacks {
     onControl: vi.fn(),
     onDrop: vi.fn(),
     onAudioBlocked: vi.fn(),
+    onSpeechEnvelope: vi.fn(),
+    onSpeechEnvelopeStatus: vi.fn(),
+    onMicrophoneLifecycle: vi.fn(),
     onMicrophoneState: vi.fn(),
     onDiagnostic: vi.fn(),
   }
@@ -149,6 +156,7 @@ beforeEach(() => {
   })
   vi.spyOn(AudioPlaybackBoundary.prototype, 'setTrack').mockImplementation(() => undefined)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'reset').mockImplementation(() => undefined)
+  vi.spyOn(AudioPlaybackBoundary.prototype, 'finishGeneration').mockImplementation(() => true)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'suspend').mockImplementation(() => true)
   vi.spyOn(AudioPlaybackBoundary.prototype, 'dispose').mockResolvedValue(undefined)
 })
@@ -186,8 +194,41 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     emitControl(room, 'turn.completed', 8, { outcome: 'completed' }, true)
 
     expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenCalledWith(1)
     expect(room.localParticipant.publishData).not.toHaveBeenCalled()
     expect(observed.onControl).toHaveBeenCalledTimes(8)
+    expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
+  })
+
+  it('starts a retained terminal drain when the announced track subscribes late', async () => {
+    vi.mocked(AudioPlaybackBoundary.prototype.finishGeneration)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    emitControl(room, 'stt.final', 4, { transcript: 'Вопрос.' })
+    emitControl(room, 'turn.thinking', 5)
+    emitControl(room, 'llm.visible', 6, { response: 'Ответ.' })
+    emitControl(room, 'turn.completed', 7, { outcome: 'completed' }, true)
+
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.setTrack).not.toHaveBeenCalled()
+
+    const track = { kind: 'audio' }
+    room.emit(
+      'trackSubscribed', track, { trackSid: 'publication-test' },
+      { identity: 'agent-session-test-0001' },
+    )
+
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledWith(track, 1)
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenCalledTimes(2)
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenLastCalledWith(1)
     expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
   })
 
@@ -431,16 +472,80 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     await client.start()
     const room = livekit.rooms[0]
 
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(1, 'requesting-permission')
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(2, 'publishing')
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(3, 'live')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(true, false)
     await client.setMicrophoneEnabled(false)
     expect(track.mute).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('muted')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false, undefined)
 
     await client.setMicrophoneEnabled(true)
     expect(track.unmute).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('live')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(true, false, undefined)
     expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1)
     expect(room.localParticipant.publishData).not.toHaveBeenCalled()
+  })
+
+  it('reports a permission failure before publication without inventing an active microphone', async () => {
+    livekit.createLocalAudioTrack.mockRejectedValueOnce(new DOMException('denied', 'NotAllowedError'))
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+
+    await expect(client.start()).rejects.toThrow('denied')
+
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(1, 'requesting-permission')
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
+    expect(livekit.rooms[0].localParticipant.publishTrack).not.toHaveBeenCalled()
+    await client.stop()
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false)
+  })
+
+  it('publishes disconnected microphone truth when a non-device session failure releases capture', async () => {
+    const track = {
+      isMuted: false,
+      mute: vi.fn().mockResolvedValue(undefined),
+      unmute: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+
+    livekit.rooms[0].emit('disconnected')
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenCalledWith(
+      'failed', 'Соединение с голосовой сессией потеряно',
+    ))
+
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('disconnected')
+  })
+
+  it('preserves microphone error while device-failure cleanup publishes disabled truth', async () => {
+    const track = {
+      isMuted: false,
+      mute: vi.fn().mockResolvedValue(undefined),
+      unmute: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    }
+    livekit.createLocalAudioTrack.mockResolvedValueOnce(track)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+
+    livekit.rooms[0].emit('mediaDevicesError')
+    await vi.waitFor(() => expect(observed.onConnection).toHaveBeenCalledWith(
+      'failed', 'Микрофон недоступен',
+    ))
+
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
   })
 
   it('coalesces rapid microphone toggles to the final requested state', async () => {
@@ -511,11 +616,13 @@ describe('VoiceClient checkpoint A+B protocol', () => {
 
     await client.setMicrophoneEnabled(false)
 
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(
       true,
       false,
       'Не удалось выключить микрофон. Повторите попытку.',
     )
     expect(livekit.rooms[0].localParticipant.publishData).not.toHaveBeenCalled()
+    expect(AudioPlaybackBoundary.prototype.suspend).not.toHaveBeenCalled()
   })
 })

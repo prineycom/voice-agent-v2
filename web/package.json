@@ -1,10 +1,11 @@
 {
-  "name": "voice-agent-v2-slice6-web",
+  "name": "voice-agent-v2-web",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "build": "tsc -b && vite build",
+    "build:review": "tsc -b && vite build --mode review",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false"
   },

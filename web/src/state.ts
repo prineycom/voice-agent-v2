@@ -1,13 +1,17 @@
+import type { SpeechEnvelopeStatus } from './playback'
+
 export const CONTROL_VERSION = 'voice-agent.realtime-control.v2'
 export const CLIENT_CONTROL_VERSION = 'voice-agent.client-control.v1'
 export const CONTROL_TOPIC = 'voice-agent.control.v2'
 export const CLIENT_CONTROL_TOPIC = 'voice-agent.client-control.v1'
+export const ACTIVE_LLM_MODEL_IDENTITY = 'LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M'
 
 const MAX_CONTROL_BYTES = 65_536
 const MAX_SEQUENCE = 1_000_000_000
 const CORRELATION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 export type ConnectionState = 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'closed' | 'failed'
+export type MicrophoneLifecycle = 'disconnected' | 'requesting-permission' | 'publishing' | 'live' | 'muted' | 'error'
 export type TurnPhase = 'idle' | 'listening' | 'thinking' | 'speaking'
 export type TurnOutcome = 'completed' | 'interrupted' | 'failed'
 export type ControlEventType =
@@ -65,6 +69,11 @@ export interface TTSProfile {
   private_noncommercial_only: boolean
 }
 
+export interface LLMProfile {
+  provider_mode: 'local'
+  model_identity: typeof ACTIVE_LLM_MODEL_IDENTITY
+}
+
 export interface SessionCapability {
   session_id: string
   stream_epoch: number
@@ -73,6 +82,7 @@ export interface SessionCapability {
   expires_in_seconds: number
   admission_timeout_ms: number
   control_version: typeof CONTROL_VERSION
+  llm_profile: LLMProfile
   tts_profile: TTSProfile
 }
 
@@ -104,10 +114,13 @@ export interface VoiceState {
   error: string | null
   droppedEvents: number
   audioBlocked: boolean
+  speechEnvelopeStatus: SpeechEnvelopeStatus
+  microphoneStatus: MicrophoneLifecycle
   microphoneAvailable: boolean
   microphoneEnabled: boolean
   microphoneTransitioning: boolean
   microphoneError: string | null
+  llmProfile: LLMProfile | null
   ttsProfile: TTSProfile | null
 }
 
@@ -129,10 +142,13 @@ export const initialVoiceState: VoiceState = {
   error: null,
   droppedEvents: 0,
   audioBlocked: false,
+  speechEnvelopeStatus: 'unknown',
+  microphoneStatus: 'disconnected',
   microphoneAvailable: false,
   microphoneEnabled: false,
   microphoneTransitioning: false,
   microphoneError: null,
+  llmProfile: null,
   ttsProfile: null,
 }
 
@@ -142,6 +158,8 @@ export type VoiceAction =
   | { type: 'control'; event: ControlEvent }
   | { type: 'drop' }
   | { type: 'audio-blocked'; blocked: boolean }
+  | { type: 'speech-envelope-status'; status: SpeechEnvelopeStatus }
+  | { type: 'microphone-lifecycle'; status: MicrophoneLifecycle }
   | { type: 'microphone'; enabled: boolean; transitioning: boolean; error?: string }
   | { type: 'reset' }
 
@@ -309,10 +327,19 @@ function parseTTSProfile(value: unknown): TTSProfile | null {
   return value as unknown as TTSProfile
 }
 
+function parseLLMProfile(value: unknown): LLMProfile | null {
+  if (!ownObject(value)) return null
+  const keys = Object.keys(value).sort()
+  const expected = ['model_identity', 'provider_mode']
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
+  if (value.provider_mode !== 'local' || value.model_identity !== ACTIVE_LLM_MODEL_IDENTITY) return null
+  return value as unknown as LLMProfile
+}
+
 export function parseCapability(value: unknown): SessionCapability | null {
   if (!ownObject(value)) return null
   const keys = Object.keys(value).sort()
-  const expected = ['admission_timeout_ms', 'control_version', 'expires_in_seconds', 'livekit_url', 'session_id', 'stream_epoch', 'token', 'tts_profile']
+  const expected = ['admission_timeout_ms', 'control_version', 'expires_in_seconds', 'livekit_url', 'llm_profile', 'session_id', 'stream_epoch', 'token', 'tts_profile']
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
   if (
     typeof value.session_id !== 'string' || !CORRELATION_ID.test(value.session_id)
@@ -323,6 +350,7 @@ export function parseCapability(value: unknown): SessionCapability | null {
     || !Number.isSafeInteger(value.admission_timeout_ms) || (value.admission_timeout_ms as number) < 1_000 || (value.admission_timeout_ms as number) > 60_000
     || (value.admission_timeout_ms as number) > (value.expires_in_seconds as number) * 1_000
     || value.control_version !== CONTROL_VERSION
+    || parseLLMProfile(value.llm_profile) === null
     || parseTTSProfile(value.tts_profile) === null
   ) return null
   return value as unknown as SessionCapability
@@ -369,10 +397,21 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   if (action.type === 'reset') return initialVoiceState
   if (action.type === 'drop') return drop(state)
   if (action.type === 'audio-blocked') return { ...state, audioBlocked: action.blocked }
+  if (action.type === 'speech-envelope-status') {
+    return { ...state, speechEnvelopeStatus: action.status }
+  }
+  if (action.type === 'microphone-lifecycle') {
+    return {
+      ...state,
+      microphoneStatus: action.status,
+      microphoneAvailable: action.status === 'error'
+        ? state.microphoneAvailable
+        : action.status === 'live' || action.status === 'muted',
+    }
+  }
   if (action.type === 'microphone') {
     return {
       ...state,
-      microphoneAvailable: true,
       microphoneEnabled: action.enabled,
       microphoneTransitioning: action.transitioning,
       microphoneError: action.error ?? null,
@@ -384,6 +423,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       connection: 'connecting',
       sessionId: action.capability.session_id,
       streamEpoch: action.capability.stream_epoch,
+      llmProfile: action.capability.llm_profile,
       ttsProfile: action.capability.tts_profile,
     }
   }

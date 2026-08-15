@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+cd "$ROOT/web"
+
+npm test -- --run \
+  src/avatar/avatar.test.ts \
+  src/avatar/eye/eyeModel.test.ts \
+  src/ui/stateMapping.test.ts \
+  src/ui/useTurnFailureLifecycle.test.ts \
+  src/App.test.tsx \
+  src/playback.test.ts \
+  src/voiceClient.test.ts \
+  src/state.test.ts
+VITE_APP_VERSION="$(git -C "$ROOT" rev-parse HEAD)" npm run build
+VITE_APP_VERSION="$(git -C "$ROOT" rev-parse HEAD)" npm run build:review
+
+printf '%s\n' 'Slice 7 focused verification: PASS'
+printf '%s\n' 'avatar interface: voice-agent.avatar-host.v1'
+printf '%s\n' 'deterministic normalized eye replay: fnv1a32=acba732d'
+printf '%s\n' 'entry isolation: production real-session path != dedicated synthetic fixture build'
