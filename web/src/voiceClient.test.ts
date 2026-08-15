@@ -106,6 +106,7 @@ function callbacks(): VoiceClientCallbacks {
     onAudioBlocked: vi.fn(),
     onSpeechEnvelope: vi.fn(),
     onSpeechEnvelopeStatus: vi.fn(),
+    onMicrophoneLifecycle: vi.fn(),
     onMicrophoneState: vi.fn(),
     onDiagnostic: vi.fn(),
   }
@@ -437,16 +438,34 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     await client.start()
     const room = livekit.rooms[0]
 
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(1, 'requesting-permission')
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(2, 'publishing')
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(3, 'live')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(true, false)
     await client.setMicrophoneEnabled(false)
     expect(track.mute).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('muted')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(false, false, undefined)
 
     await client.setMicrophoneEnabled(true)
     expect(track.unmute).toHaveBeenCalledTimes(1)
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('live')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(true, false, undefined)
     expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1)
     expect(room.localParticipant.publishData).not.toHaveBeenCalled()
+  })
+
+  it('reports a permission failure before publication without inventing an active microphone', async () => {
+    livekit.createLocalAudioTrack.mockRejectedValueOnce(new DOMException('denied', 'NotAllowedError'))
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+
+    await expect(client.start()).rejects.toThrow('denied')
+
+    expect(observed.onMicrophoneLifecycle).toHaveBeenNthCalledWith(1, 'requesting-permission')
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
+    expect(livekit.rooms[0].localParticipant.publishTrack).not.toHaveBeenCalled()
+    await client.stop()
   })
 
   it('coalesces rapid microphone toggles to the final requested state', async () => {
@@ -517,6 +536,7 @@ describe('VoiceClient checkpoint A+B protocol', () => {
 
     await client.setMicrophoneEnabled(false)
 
+    expect(observed.onMicrophoneLifecycle).toHaveBeenLastCalledWith('error')
     expect(observed.onMicrophoneState).toHaveBeenLastCalledWith(
       true,
       false,

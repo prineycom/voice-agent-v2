@@ -227,9 +227,11 @@ describe('checkpoint A browser state', () => {
 
   it('keeps effective microphone truth and bounded transition errors in UI state', () => {
     let state = configured()
+    state = voiceReducer(state, { type: 'microphone-lifecycle', status: 'live' })
     state = voiceReducer(state, {
       type: 'microphone', enabled: true, transitioning: false,
     })
+    state = voiceReducer(state, { type: 'microphone-lifecycle', status: 'error' })
     state = voiceReducer(state, {
       type: 'microphone',
       enabled: true,
@@ -237,6 +239,7 @@ describe('checkpoint A browser state', () => {
       error: 'Не удалось выключить микрофон. Повторите попытку.',
     })
 
+    expect(state.microphoneStatus).toBe('error')
     expect(state.microphoneAvailable).toBe(true)
     expect(state.microphoneEnabled).toBe(true)
     expect(state.microphoneTransitioning).toBe(false)

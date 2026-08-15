@@ -27,7 +27,7 @@ Overlay elements on the main screen:
 
 ### Startup and disconnect overlays
 
-- **Startup overlay**: minimal — only connection status ("CONNECTING…", then "READY"). Disappears on ready. Full-screen, cyberpunk-styled, but no progress indicators or extra text.
+- **Startup overlay**: minimal and explicit — initial `DISCONNECTED` plus one `CONNECT` action. Only that user gesture starts capability admission and microphone permission. It then shows `CONNECTING…`, then `READY`, and disappears. Full-screen, cyberpunk-styled, with no synthetic session/history state.
 - **Disconnect overlay**: "CONNECTION LOST" + reconnect button. Full-screen, replaces the main screen.
 
 ### Menu structure

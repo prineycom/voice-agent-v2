@@ -186,12 +186,17 @@ class ControllerRecordingSession(RealtimeSession):
         return await super().handle_client_control(payload)
 
 
-def handler_for(root: Path, capability: dict[str, object]):
+def handler_for(
+    root: Path,
+    capability: dict[str, object],
+    session_requests: list[str],
+):
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(root), **kwargs)
 
         def do_POST(self) -> None:
+            session_requests.append(self.path)
             if self.path != "/api/session":
                 self.send_error(404)
                 return
@@ -267,6 +272,7 @@ async def main() -> int:
     agent_reconnected = asyncio.Event()
     microphone_publication_ids: set[str] = set()
     browser_controls: list[dict[str, object]] = []
+    session_requests: list[str] = []
     vad_model = DeterministicVadModel()
     try:
         await wait_port(livekit_port, livekit)
@@ -401,7 +407,7 @@ async def main() -> int:
             },
         }
         server = ThreadingHTTPServer(
-            ("127.0.0.1", web_port), handler_for(dist, capability)
+            ("127.0.0.1", web_port), handler_for(dist, capability, session_requests)
         )
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
@@ -423,7 +429,22 @@ async def main() -> int:
         driver = webdriver.Firefox(options=options, service=service)
         await asyncio.to_thread(driver.set_window_size, 1440, 1000)
         await asyncio.to_thread(driver.get, f"http://127.0.0.1:{web_port}/")
-        # Slice 7 starts the private session from its minimal startup overlay.
+        connect = driver.find_element("xpath", "//button[normalize-space()='CONNECT']")
+        initial_surface = driver.execute_script("""
+            return {
+                historyItems: document.querySelectorAll('.history-item').length,
+                microphoneState: document.querySelector('.microphone-status-label')?.textContent,
+            };
+        """)
+        if session_requests or microphone_subscribed.is_set():
+            raise AssertionError("real browser path started a session before explicit CONNECT")
+        if initial_surface != {"historyItems": 0, "microphoneState": "MIC DISCONNECTED"}:
+            raise AssertionError(f"real browser path leaked fixture/session state: {initial_surface}")
+        await asyncio.to_thread(connect.click)
+        await wait_for(
+            lambda: session_requests == ["/api/session"],
+            "CONNECT did not request the same-origin session capability",
+        )
         await asyncio.wait_for(microphone_subscribed.wait(), 15)
         await wait_for(
             lambda: driver.find_elements("css selector", ".connection-overlay--ready"),
@@ -432,6 +453,10 @@ async def main() -> int:
         await wait_for(
             lambda: not driver.find_elements("css selector", ".connection-overlay"),
             "Slice 7 READY startup overlay did not clear",
+        )
+        await wait_for(
+            lambda: driver.find_element("css selector", ".microphone-status-label").text == "MIC LIVE",
+            "published microphone did not expose an unambiguous live state",
         )
 
         def settled_microphone_controls(enabled: bool):
@@ -494,6 +519,10 @@ async def main() -> int:
             False, "React microphone control did not report effective muted state"
         )
         await wait_for(
+            lambda: driver.find_element("css selector", ".microphone-status-label").text == "MIC MUTED",
+            "React microphone status did not expose muted publication state",
+        )
+        await wait_for(
             lambda: session.abandoned_utterances == [stale_candidate_turn],
             "controller did not discard the pre-mute VAD candidate",
         )
@@ -520,6 +549,10 @@ async def main() -> int:
         await asyncio.wait_for(microphone_unmuted.wait(), 15)
         await wait_for_microphone_control(
             True, "React microphone control did not report effective unmuted state"
+        )
+        await wait_for(
+            lambda: driver.find_element("css selector", ".microphone-status-label").text == "MIC LIVE",
+            "React microphone status did not expose resumed live publication",
         )
         await wait_for(
             lambda: len(session.started_utterances) == 2,
@@ -565,6 +598,11 @@ async def main() -> int:
         await wait_for_microphone_control(
             False,
             "browser UI did not settle muted after the transient LiveKit reconnect",
+            timeout=30,
+        )
+        await wait_for(
+            lambda: driver.find_element("css selector", ".microphone-status-label").text == "MIC MUTED",
+            "muted reconnect lost the explicit microphone status",
             timeout=30,
         )
         await asyncio.sleep(0.5)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import type { AvatarHostV1 } from './avatar/AvatarHost'
 import { useVoiceSession } from './VoiceSessionContext'
 import { VoiceShell } from './ui/VoiceShell'
@@ -28,10 +28,10 @@ export default function App({ avatarHost, buildVersion }: AppProps) {
     void connect()
   }, [connect])
 
-  useEffect(() => {
-    const timer = window.setTimeout(beginConnect, 0)
-    return () => window.clearTimeout(timer)
-  }, [beginConnect])
+  const endSession = useCallback(() => {
+    setConnectAttempted(false)
+    void disconnect()
+  }, [disconnect])
 
   return (
     <VoiceShell
@@ -42,7 +42,7 @@ export default function App({ avatarHost, buildVersion }: AppProps) {
       audioContainerRef={audioContainerRef}
       subscribeSpeechEnvelope={subscribeSpeechEnvelope}
       onConnect={beginConnect}
-      onDisconnect={() => void disconnect()}
+      onDisconnect={endSession}
       onResumeAudio={() => void resumeAudio()}
       onToggleMicrophone={() => void toggleMicrophone()}
       onDownloadDiagnostics={downloadDiagnostics}

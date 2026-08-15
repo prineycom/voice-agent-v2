@@ -63,7 +63,22 @@ export function FullscreenConnectionOverlay({
       >READY</div>
     )
   }
-  if (connection === 'connecting' || (connection === 'idle' && !connectAttempted)) {
+  if (connection === 'idle' && !connectAttempted) {
+    return (
+      <div
+        ref={overlayRef}
+        className="connection-overlay connection-overlay--disconnected"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Voice session disconnected"
+        tabIndex={-1}
+      >
+        <p>DISCONNECTED</p>
+        <button type="button" className="neon-action" onClick={onReconnect}>CONNECT</button>
+      </div>
+    )
+  }
+  if (connection === 'connecting' || (connection === 'idle' && connectAttempted)) {
     return (
       <div
         ref={overlayRef}

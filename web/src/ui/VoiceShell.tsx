@@ -167,6 +167,7 @@ export function VoiceShell({
       <SpeechOverlay text={model.response} complete={model.responseComplete} />
       <MicrophoneButton
         visualState={model.microphoneVisual}
+        statusLabel={model.microphoneStatusLabel}
         pressed={model.microphoneEnabled}
         available={model.microphoneAvailable && ['connecting', 'ready', 'reconnecting'].includes(model.connection)}
         transitioning={model.microphoneTransitioning}

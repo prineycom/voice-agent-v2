@@ -70,7 +70,7 @@ Run the intentionally focused browser boundary:
 
 It covers host/module compatibility and fallback, deterministic replay/bounds, UI state mapping, decoded-playout envelope normalization, microphone mute/reconnect semantics, both reduced-motion levels, the production build, and the separate review-fixture build. The browser evidence and explicit physical/full-stack gaps are recorded in [`docs/evidence/slice-7-ui-avatar.md`](docs/evidence/slice-7-ui-avatar.md).
 
-A clean committed head can be deployed as an isolated static review fixture without starting inference or changing the existing HTTPS/443 service:
+A clean committed head can be deployed for physical acceptance through the existing safe local runtime. The stable stand builds the ordinary production entry, starts local LFM, LiveKit, gateway/controller, STT/TTS, and owns only its explicit foreground Tailscale routes; it does not change HTTPS/443 or firewalld:
 
 ```sh
 ./run-review-stand start
@@ -79,7 +79,7 @@ A clean committed head can be deployed as an isolated static review fixture with
 ./run-review-stand stop
 ```
 
-The launcher prints the exact compiled commit and tailnet URL. The fixture is visibly labelled `REVIEW`; the complete commit is available in **STATUS → SYSTEM → BUILD**.
+The launcher prints the exact compiled commit and stable tailnet URL. The first page is deliberately disconnected: select **CONNECT** to request microphone permission, mint a same-origin room capability, join LiveKit, and publish the microphone. Conversation history remains empty until genuine server events arrive. The synthetic `ReviewStand` is built only by `npm run build:review` under `web/review/dist`; it is never served by this launcher.
 
 ### Pasha physical acceptance and rollback
 

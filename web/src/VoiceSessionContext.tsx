@@ -8,7 +8,12 @@ import {
   useRef,
   type ReactNode,
 } from 'react'
-import { initialVoiceState, voiceReducer, type VoiceState } from './state'
+import {
+  initialVoiceState,
+  voiceReducer,
+  type MicrophoneLifecycle,
+  type VoiceState,
+} from './state'
 import type { SpeechEnvelopeObservation } from './playback'
 import { VoiceClient } from './voiceClient'
 
@@ -29,6 +34,7 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(voiceReducer, initialVoiceState)
   const audioContainerRef = useRef<HTMLDivElement>(null)
   const clientRef = useRef<VoiceClient | null>(null)
+  const microphoneLifecycleRef = useRef<MicrophoneLifecycle>('disconnected')
   const envelopeListenersRef = useRef(new Set<(observation: SpeechEnvelopeObservation) => void>())
 
   const disconnect = useCallback(async () => {
@@ -55,6 +61,10 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
         for (const listener of envelopeListenersRef.current) listener(observation)
       },
       onSpeechEnvelopeStatus: (status) => dispatch({ type: 'speech-envelope-status', status }),
+      onMicrophoneLifecycle: (status) => {
+        microphoneLifecycleRef.current = status
+        dispatch({ type: 'microphone-lifecycle', status })
+      },
       onMicrophoneState: (enabled, transitioning, error) => {
         dispatch({ type: 'microphone', enabled, transitioning, error })
       },
@@ -63,10 +73,15 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     try {
       await client.start()
     } catch (error) {
+      const microphoneFailed = microphoneLifecycleRef.current === 'error'
       try {
         await client.stop()
       } catch {}
       if (clientRef.current === client) {
+        if (microphoneFailed) {
+          microphoneLifecycleRef.current = 'error'
+          dispatch({ type: 'microphone-lifecycle', status: 'error' })
+        }
         dispatch({
           type: 'connection',
           connection: 'failed',

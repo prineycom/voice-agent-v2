@@ -11,6 +11,7 @@ const MAX_SEQUENCE = 1_000_000_000
 const CORRELATION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 export type ConnectionState = 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'closed' | 'failed'
+export type MicrophoneLifecycle = 'disconnected' | 'requesting-permission' | 'publishing' | 'live' | 'muted' | 'error'
 export type TurnPhase = 'idle' | 'listening' | 'thinking' | 'speaking'
 export type TurnOutcome = 'completed' | 'interrupted' | 'failed'
 export type ControlEventType =
@@ -114,6 +115,7 @@ export interface VoiceState {
   droppedEvents: number
   audioBlocked: boolean
   speechEnvelopeStatus: SpeechEnvelopeStatus
+  microphoneStatus: MicrophoneLifecycle
   microphoneAvailable: boolean
   microphoneEnabled: boolean
   microphoneTransitioning: boolean
@@ -141,6 +143,7 @@ export const initialVoiceState: VoiceState = {
   droppedEvents: 0,
   audioBlocked: false,
   speechEnvelopeStatus: 'unknown',
+  microphoneStatus: 'disconnected',
   microphoneAvailable: false,
   microphoneEnabled: false,
   microphoneTransitioning: false,
@@ -156,6 +159,7 @@ export type VoiceAction =
   | { type: 'drop' }
   | { type: 'audio-blocked'; blocked: boolean }
   | { type: 'speech-envelope-status'; status: SpeechEnvelopeStatus }
+  | { type: 'microphone-lifecycle'; status: MicrophoneLifecycle }
   | { type: 'microphone'; enabled: boolean; transitioning: boolean; error?: string }
   | { type: 'reset' }
 
@@ -396,10 +400,18 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   if (action.type === 'speech-envelope-status') {
     return { ...state, speechEnvelopeStatus: action.status }
   }
+  if (action.type === 'microphone-lifecycle') {
+    return {
+      ...state,
+      microphoneStatus: action.status,
+      microphoneAvailable: action.status === 'error'
+        ? state.microphoneAvailable
+        : action.status === 'live' || action.status === 'muted',
+    }
+  }
   if (action.type === 'microphone') {
     return {
       ...state,
-      microphoneAvailable: true,
       microphoneEnabled: action.enabled,
       microphoneTransitioning: action.transitioning,
       microphoneError: action.error ?? null,

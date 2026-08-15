@@ -16,6 +16,7 @@ export interface VoiceUiModel {
   connectionLabel: string
   avatarLifecycle: AvatarLifecycleState
   microphoneVisual: MicrophoneVisualState
+  microphoneStatusLabel: string
   microphoneEnabled: boolean
   microphoneAvailable: boolean
   microphoneTransitioning: boolean
@@ -52,7 +53,8 @@ export function mapVoiceStateToUi(
       : state.currentTurnTerminal && state.lastTurnEvent === 'turn.interrupted'
         ? 'interrupted'
         : state.phase
-  const microphoneVisual: MicrophoneVisualState = state.microphoneError !== null
+  const microphoneVisual: MicrophoneVisualState = state.microphoneStatus === 'error'
+    || state.microphoneError !== null
     || state.connection === 'failed'
     ? 'error'
     : !state.microphoneEnabled
@@ -60,6 +62,19 @@ export function mapVoiceStateToUi(
       : state.phase === 'listening'
         ? 'listening'
         : 'idle'
+  const microphoneStatusLabel = state.microphoneStatus === 'requesting-permission'
+    ? 'MIC PERMISSION'
+    : state.microphoneStatus === 'publishing'
+      ? 'MIC PUBLISHING'
+      : state.microphoneStatus === 'error'
+        ? 'MIC ERROR'
+        : state.microphoneTransitioning
+          ? 'MIC UPDATING'
+          : state.microphoneStatus === 'live'
+            ? (state.phase === 'listening' ? 'MIC LISTENING' : 'MIC LIVE')
+            : state.microphoneStatus === 'muted'
+              ? 'MIC MUTED'
+              : 'MIC DISCONNECTED'
   const connectionLabel: Record<ConnectionState, string> = {
     idle: 'OFFLINE',
     connecting: 'CONNECTING',
@@ -80,6 +95,7 @@ export function mapVoiceStateToUi(
     connectionLabel: connectionLabel[state.connection],
     avatarLifecycle,
     microphoneVisual,
+    microphoneStatusLabel,
     microphoneEnabled: state.microphoneEnabled,
     microphoneAvailable: state.microphoneAvailable,
     microphoneTransitioning: state.microphoneTransitioning,

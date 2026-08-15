@@ -118,11 +118,30 @@ button.connection-indicator--action { color: var(--accent-amber); }
 .speech-overlay--complete { animation: speech-fade .35s ease 2.8s forwards; }
 .speech-overlay p { margin: 0; font-family: var(--dialogue-sans); font-size: clamp(.95rem, 3.7vw, 1.12rem); line-height: 1.5; }
 
-.microphone-button {
+.microphone-control {
   position: absolute;
   z-index: 14;
-  bottom: max(24px, env(safe-area-inset-bottom));
+  bottom: max(20px, env(safe-area-inset-bottom));
   left: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  transform: translateX(-50%);
+}
+
+.microphone-status-label {
+  color: var(--text-secondary);
+  font-size: .64rem;
+  letter-spacing: .12em;
+  text-shadow: 0 0 12px rgba(0, 240, 255, .2);
+  white-space: nowrap;
+}
+.microphone-control--listening .microphone-status-label,
+.microphone-control--idle .microphone-status-label { color: var(--accent-cyan); }
+.microphone-control--error .microphone-status-label { color: var(--accent-red); }
+
+.microphone-button {
   display: grid;
   place-items: center;
   width: 64px;
@@ -130,7 +149,6 @@ button.connection-indicator--action { color: var(--accent-amber); }
   padding: 0;
   border-radius: 50%;
   color: color-mix(in srgb, var(--accent-cyan) 62%, var(--text-secondary));
-  transform: translateX(-50%);
   box-shadow: 0 0 18px rgba(0, 240, 255, .15);
 }
 

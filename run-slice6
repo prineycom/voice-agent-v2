@@ -3,6 +3,8 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 CONFIG=$ROOT/.env.slice6
+APP_PUBLIC_URL_OVERRIDE=${VOICE_AGENT_APP_PUBLIC_URL_OVERRIDE:-}
+APP_HTTPS_PORT_OVERRIDE=${VOICE_AGENT_APP_HTTPS_PORT_OVERRIDE:-}
 [ -f "$CONFIG" ] || {
   echo "Missing required untracked server configuration: $CONFIG" >&2
   echo "Copy .env.slice6.example to .env.slice6 and set every required value." >&2
@@ -16,6 +18,17 @@ set -a
 # This file is explicit operator-owned server configuration and must remain untracked.
 . "$CONFIG"
 set +a
+
+if [ -n "$APP_PUBLIC_URL_OVERRIDE" ] || [ -n "$APP_HTTPS_PORT_OVERRIDE" ]; then
+  [ -n "$APP_PUBLIC_URL_OVERRIDE" ] && [ -n "$APP_HTTPS_PORT_OVERRIDE" ] || {
+    echo "Both VOICE_AGENT_APP_PUBLIC_URL_OVERRIDE and VOICE_AGENT_APP_HTTPS_PORT_OVERRIDE are required." >&2
+    exit 2
+  }
+  SLICE6_APP_PUBLIC_URL=$APP_PUBLIC_URL_OVERRIDE
+  SLICE6_APP_HTTPS_PORT=$APP_HTTPS_PORT_OVERRIDE
+  export SLICE6_APP_PUBLIC_URL SLICE6_APP_HTTPS_PORT
+fi
+unset VOICE_AGENT_APP_PUBLIC_URL_OVERRIDE VOICE_AGENT_APP_HTTPS_PORT_OVERRIDE
 
 CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
 PYTHON=$CACHE/runtime/venv/bin/python

@@ -115,3 +115,7 @@ The grill results define the design boundary for Slice 7 implementation:
 - State mapping: existing `VoiceState` + `voiceReducer` drive UI transitions
 - Reduced motion: two-level (system + UI toggle)
 - Mobile-first portrait layout, no separate desktop design
+
+## Manual-acceptance amendment — explicit real-session admission
+
+Pasha's PR #20 manual test showed that a synthetic review entry at the stable URL could falsely appear ready while bypassing microphone permission, LiveKit, and genuine history. The live entry therefore starts `DISCONNECTED` with one `CONNECT` action; only that gesture may request the capability/microphone and advance through `CONNECTING` to `READY`. Synthetic fixture data remains test-build-only and is never served as the manual acceptance stand. This amendment supersedes D5's automatic startup transition for the live product without changing its minimal overlay language.

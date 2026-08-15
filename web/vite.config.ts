@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
     build: {
       target: 'es2022',
       sourcemap: false,
-      outDir: reviewBuild ? '../dist' : 'dist',
+      outDir: 'dist',
       emptyOutDir: true,
     },
     test: {

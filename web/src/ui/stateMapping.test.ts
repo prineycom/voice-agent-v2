@@ -17,6 +17,7 @@ describe('voice reducer to UI domain mapping', () => {
       ...initialVoiceState,
       connection: 'ready',
       phase: 'listening',
+      microphoneStatus: 'live',
       microphoneAvailable: true,
       microphoneEnabled: true,
       response: 'Ответ.',
@@ -27,6 +28,7 @@ describe('voice reducer to UI domain mapping', () => {
       connectionLabel: 'READY',
       avatarLifecycle: 'listening',
       microphoneVisual: 'listening',
+      microphoneStatusLabel: 'MIC LISTENING',
       response: 'Ответ.',
       llmProviderSummary: 'UNAVAILABLE',
       llmModelSummary: 'UNAVAILABLE',
@@ -59,10 +61,27 @@ describe('voice reducer to UI domain mapping', () => {
     expect(mapVoiceStateToUi({
       ...initialVoiceState,
       connection: 'ready',
+      microphoneStatus: 'error',
       microphoneAvailable: true,
       microphoneEnabled: true,
       microphoneError: 'transition failed',
     }, avatarReady).microphoneVisual).toBe('error')
+  })
+
+  it('exposes permission, publication, live, muted, and error microphone states without ambiguity', () => {
+    const label = (microphoneStatus: typeof initialVoiceState.microphoneStatus) => mapVoiceStateToUi({
+      ...initialVoiceState,
+      connection: 'connecting',
+      microphoneStatus,
+      microphoneEnabled: microphoneStatus === 'live',
+    }, avatarReady).microphoneStatusLabel
+
+    expect(label('disconnected')).toBe('MIC DISCONNECTED')
+    expect(label('requesting-permission')).toBe('MIC PERMISSION')
+    expect(label('publishing')).toBe('MIC PUBLISHING')
+    expect(label('live')).toBe('MIC LIVE')
+    expect(label('muted')).toBe('MIC MUTED')
+    expect(label('error')).toBe('MIC ERROR')
   })
 
   it('reports fallback health without changing the voice path state', () => {

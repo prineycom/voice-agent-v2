@@ -1,7 +1,8 @@
 import { createRef } from 'react'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import App from './App'
 import { AvatarHostV1 } from './avatar/AvatarHost'
 import {
   AVATAR_HOST_INTERFACE_VERSION,
@@ -9,6 +10,7 @@ import {
   type AvatarModuleV1,
 } from './avatar/contract'
 import { ReviewStand } from './ReviewStand'
+import { VoiceSessionProvider } from './VoiceSessionContext'
 import { ACTIVE_LLM_MODEL_IDENTITY, initialVoiceState, type VoiceState } from './state'
 import { AvatarViewport } from './ui/AvatarViewport'
 import { VoiceShell } from './ui/VoiceShell'
@@ -40,6 +42,8 @@ function testAvatarHost(onUpdate = vi.fn(), onCancel = vi.fn()): AvatarHostV1 {
   }])
 }
 
+afterEach(() => vi.unstubAllGlobals())
+
 beforeEach(() => {
   localStorage.clear()
   Object.defineProperty(window, 'matchMedia', {
@@ -63,6 +67,28 @@ describe('Slice 7 modular shell', () => {
       endpointToFirstVisibleMs: null,
       endpointToFirstAcceptedPcmMs: null,
     })).toBe('Speech was not recognized.')
+  })
+
+  it('starts the real application disconnected with no fixture history and requests a session only after CONNECT', async () => {
+    const user = userEvent.setup()
+    const fetch = vi.fn().mockResolvedValue({ ok: false, status: 503 })
+    vi.stubGlobal('fetch', fetch)
+    const { container } = render(
+      <VoiceSessionProvider>
+        <App avatarHost={testAvatarHost()} buildVersion="real-build" />
+      </VoiceSessionProvider>,
+    )
+
+    expect(screen.getByRole('dialog', { name: 'Voice session disconnected' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'CONNECT' })).toBeTruthy()
+    expect(screen.getByText('MIC DISCONNECTED')).toBeTruthy()
+    expect(container.querySelectorAll('.history-item')).toHaveLength(0)
+    expect(screen.queryByText('Расскажи, что ты видишь.')).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'CONNECT' }))
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch).toHaveBeenCalledWith('/api/session', expect.objectContaining({ method: 'POST' }))
   })
 
   it('renders the avatar viewport and only the four intended steady-state overlay responsibilities', () => {

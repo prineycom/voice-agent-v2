@@ -36,6 +36,7 @@ function reviewState(): VoiceState {
       endpointToFirstVisibleMs: 418,
       endpointToFirstAcceptedPcmMs: 672,
     }],
+    microphoneStatus: 'live',
     microphoneAvailable: true,
     microphoneEnabled: true,
     llmProfile: {
@@ -87,11 +88,15 @@ export function ReviewStand({ avatarHost, buildVersion }: {
       onConnect={reconnect}
       onDisconnect={disconnect}
       onResumeAudio={() => undefined}
-      onToggleMicrophone={() => setState((current) => ({
-        ...current,
-        microphoneEnabled: !current.microphoneEnabled,
-        microphoneError: null,
-      }))}
+      onToggleMicrophone={() => setState((current) => {
+        const enabled = !current.microphoneEnabled
+        return {
+          ...current,
+          microphoneStatus: enabled ? 'live' : 'muted',
+          microphoneEnabled: enabled,
+          microphoneError: null,
+        }
+      })}
       onDownloadDiagnostics={downloadDiagnostics}
     />
   )

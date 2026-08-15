@@ -20,6 +20,7 @@ import {
   parseControlEvent,
   type ConnectionState,
   type ControlEvent,
+  type MicrophoneLifecycle,
   type SessionCapability,
 } from './state'
 
@@ -48,6 +49,7 @@ export interface VoiceClientCallbacks {
   onAudioBlocked(blocked: boolean): void
   onSpeechEnvelope(observation: SpeechEnvelopeObservation): void
   onSpeechEnvelopeStatus(status: SpeechEnvelopeStatus): void
+  onMicrophoneLifecycle(status: MicrophoneLifecycle): void
   onMicrophoneState(enabled: boolean, transitioning: boolean, error?: string): void
   onDiagnostic?(record: VoiceDiagnosticRecord): void
 }
@@ -131,6 +133,7 @@ export class VoiceClient {
       if (!this.hasExpectedAgent(room)) throw new Error('voice session agent is unavailable')
 
       startupStage = 'microphone'
+      this.callbacks.onMicrophoneLifecycle('requesting-permission')
       const microphone = await createLocalAudioTrack({
         channelCount: 1,
         echoCancellation: true,
@@ -138,6 +141,7 @@ export class VoiceClient {
         autoGainControl: true,
       })
       this.microphone = microphone
+      this.callbacks.onMicrophoneLifecycle('publishing')
       await this.ensureRoomStarting(room, microphone)
       startupStage = 'microphone_publication'
       await room.localParticipant.publishTrack(microphone, {
@@ -148,8 +152,12 @@ export class VoiceClient {
       await this.ensureRoomStarting(room, microphone)
       this.microphoneEnabled = !microphone.isMuted
       this.microphoneRequested = this.microphoneEnabled
+      this.callbacks.onMicrophoneLifecycle(this.microphoneEnabled ? 'live' : 'muted')
       this.callbacks.onMicrophoneState(this.microphoneEnabled, false)
     } catch (error) {
+      if (startupStage === 'microphone' || startupStage === 'microphone_publication') {
+        this.callbacks.onMicrophoneLifecycle('error')
+      }
       this.recordDiagnostic(
         startupStage,
         'failed',
@@ -183,6 +191,7 @@ export class VoiceClient {
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
     if (this.microphone === null || this.stopping) return
     this.microphoneRequested = enabled
+    this.callbacks.onMicrophoneLifecycle(this.microphoneEnabled ? 'live' : 'muted')
     this.callbacks.onMicrophoneState(this.microphoneEnabled, true)
     if (this.microphoneTransition !== null) return this.microphoneTransition
     const transition = this.runMicrophoneTransitions()
@@ -266,7 +275,10 @@ export class VoiceClient {
       }
       throw cleanupError
     }
-    if (notifyClosed) this.callbacks.onConnection('closed')
+    if (notifyClosed) {
+      this.callbacks.onMicrophoneLifecycle('disconnected')
+      this.callbacks.onConnection('closed')
+    }
   }
 
   private ensureStarting(): void {
@@ -323,6 +335,9 @@ export class VoiceClient {
       )
     }
     if (!this.stopping && this.microphone !== null) {
+      this.callbacks.onMicrophoneLifecycle(
+        transitionError === undefined ? (this.microphoneEnabled ? 'live' : 'muted') : 'error',
+      )
       this.callbacks.onMicrophoneState(this.microphoneEnabled, false, transitionError)
     }
   }
@@ -509,6 +524,7 @@ export class VoiceClient {
       }
     })
     room.on(RoomEvent.MediaDevicesError, () => {
+      this.callbacks.onMicrophoneLifecycle('error')
       void this.failSession('Микрофон недоступен')
     })
   }

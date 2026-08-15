@@ -4,7 +4,8 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PID_FILE="$ROOT/tmp/review-stand.pid"
 LOG_FILE="$ROOT/tmp/review-stand.log"
-LOOPBACK_URL='http://127.0.0.1:4177/?review=1'
+LOOPBACK_URL='http://127.0.0.1:8000/'
+LOOPBACK_STATUS='http://127.0.0.1:8000/api/status'
 TAILNET_PORT=8447
 
 hostname() {
@@ -22,12 +23,12 @@ running() {
   PID=$(cat "$PID_FILE")
   [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null || return 1
   [ -r "/proc/$PID/cmdline" ] || return 1
-  tr '\000' ' ' < "/proc/$PID/cmdline" | grep -F "$ROOT/scripts/review_stand.py serve" >/dev/null
+  tr '\000' ' ' < "/proc/$PID/cmdline" | grep -F "$ROOT/scripts/run_slice6.py" >/dev/null
 }
 
 start() {
   if running; then
-    echo "Review stand is already running (PID $(cat "$PID_FILE"))"
+    echo "Live review stand is already running (PID $(cat "$PID_FILE"))"
     status
     return
   fi
@@ -36,33 +37,48 @@ start() {
     echo "Refusing to deploy a dirty worktree; commit the exact review head first." >&2
     exit 2
   fi
+  [ -s "$ROOT/.env.slice6" ] || {
+    echo "Missing non-empty operator-owned .env.slice6 runtime configuration." >&2
+    exit 2
+  }
   BUILD=$(git -C "$ROOT" rev-parse HEAD)
+  HOSTNAME=$(hostname)
+  TAILNET_URL="https://$HOSTNAME:$TAILNET_PORT/"
   mkdir -p "$ROOT/tmp"
   (
     cd "$ROOT/web"
-    VITE_APP_VERSION="$BUILD" npm run build:review
+    VITE_APP_VERSION="$BUILD" npm run build
   )
-  nohup python3 "$ROOT/scripts/review_stand.py" serve >"$LOG_FILE" 2>&1 &
+  grep -R -F "$BUILD" "$ROOT/web/dist/assets"/*.js >/dev/null || {
+    echo "Production bundle does not contain the exact review head." >&2
+    exit 2
+  }
+  nohup env \
+    VOICE_AGENT_APP_PUBLIC_URL_OVERRIDE="$TAILNET_URL" \
+    VOICE_AGENT_APP_HTTPS_PORT_OVERRIDE="$TAILNET_PORT" \
+    "$ROOT/run-slice6" >"$LOG_FILE" 2>&1 &
   PID=$!
   printf '%s\n' "$PID" > "$PID_FILE"
-  TAILNET_URL="https://$(hostname):$TAILNET_PORT/?review=1"
-  for _attempt in $(seq 1 80); do
+  for _attempt in $(seq 1 600); do
     if ! kill -0 "$PID" 2>/dev/null; then
       cat "$LOG_FILE" >&2
       rm -f "$PID_FILE"
       exit 1
     fi
     if curl --fail --silent --show-error "$LOOPBACK_URL" >/dev/null \
-      && curl --fail --silent --show-error "$TAILNET_URL" >/dev/null; then
-      echo "Review stand started"
+      && curl --fail --silent --show-error "$LOOPBACK_STATUS" >/dev/null \
+      && curl --fail --silent --show-error "$TAILNET_URL" >/dev/null \
+      && curl --fail --silent --show-error "${TAILNET_URL}api/status" >/dev/null; then
+      echo "Live review stand started"
       echo "commit: $BUILD"
       echo "loopback: $LOOPBACK_URL"
       echo "tailnet: $TAILNET_URL"
+      echo "runtime log: $LOG_FILE"
       return
     fi
-    sleep .25
+    sleep .5
   done
-  echo "Review stand did not become reachable" >&2
+  echo "Live review stand did not become reachable within 300 seconds" >&2
   stop || true
   exit 1
 }
@@ -70,34 +86,35 @@ start() {
 stop() {
   if ! running; then
     rm -f "$PID_FILE"
-    echo "Review stand is not running"
+    echo "Live review stand is not running"
     return
   fi
   PID=$(cat "$PID_FILE")
   kill "$PID"
-  for _attempt in $(seq 1 50); do
+  for _attempt in $(seq 1 1200); do
     kill -0 "$PID" 2>/dev/null || break
     sleep .1
   done
   if kill -0 "$PID" 2>/dev/null; then
-    echo "Review stand did not stop within 5 seconds" >&2
+    echo "Live review stand did not stop within 120 seconds" >&2
     exit 1
   fi
   rm -f "$PID_FILE"
-  echo "Review stand stopped"
+  echo "Live review stand stopped"
 }
 
 status() {
-  TAILNET_URL="https://$(hostname):$TAILNET_PORT/?review=1"
+  HOSTNAME=$(hostname)
+  TAILNET_URL="https://$HOSTNAME:$TAILNET_PORT/"
   if running; then
     PID=$(cat "$PID_FILE")
-    if curl --fail --silent --show-error "$LOOPBACK_URL" >/dev/null \
-      && curl --fail --silent --show-error "$TAILNET_URL" >/dev/null; then
+    if curl --fail --silent --show-error "$LOOPBACK_STATUS" >/dev/null \
+      && curl --fail --silent --show-error "${TAILNET_URL}api/status" >/dev/null; then
       echo "running: PID $PID"
       echo "tailnet: $TAILNET_URL"
       return
     fi
-    echo "degraded: PID $PID is alive but an endpoint is unreachable" >&2
+    echo "degraded: PID $PID is alive but the application API is unreachable" >&2
     exit 1
   fi
   echo "stopped"
