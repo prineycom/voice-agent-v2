@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -108,7 +109,12 @@ class DeterministicRunner:
         emit("turn.speaking", {"stage": "tts"})
         if audio_observer is None:
             raise AssertionError("realtime controller did not request streaming audio")
-        pcm = b"\0\0" * 3_200
+        pcm = b"".join(
+            round(12_000 * math.sin(2 * math.pi * 440 * sample / 48_000)).to_bytes(
+                2, "little", signed=True
+            )
+            for sample in range(36_000)
+        )
         audio_observer(0, pcm)
         if cancellation.cancelled:
             emit("turn.interrupted", {"outcome": "interrupted"}, True)
@@ -230,18 +236,20 @@ async def wait_for(predicate, message: str, timeout: float = 15) -> None:
 
 async def main() -> int:
     dist = ROOT / "web/dist"
+    review_dist = ROOT / "web/review/dist"
     missing = [
         name for name, present in (
             ("Firefox", FIREFOX is not None),
             ("pinned LiveKit", LIVEKIT.is_file()),
             ("built React app", (dist / "index.html").is_file()),
+            ("built review fixture", (review_dist / "index.html").is_file()),
         ) if not present
     ]
     if missing:
         raise RuntimeError("required Firefox regression tooling is absent: " + ", ".join(missing))
 
     api_key, api_secret = "firefox-test-key", "s" * 32
-    livekit_port, web_port = free_port(), free_port()
+    livekit_port, web_port, review_port = free_port(), free_port(), free_port()
     session_id = "session-firefox-test"
     room_name = "firefox-deterministic-room"
     browser_identity = f"browser-{session_id}"
@@ -265,6 +273,8 @@ async def main() -> int:
     driver = None
     server: ThreadingHTTPServer | None = None
     server_thread: threading.Thread | None = None
+    review_server: ThreadingHTTPServer | None = None
+    review_server_thread: threading.Thread | None = None
     microphone_subscribed = asyncio.Event()
     microphone_muted = asyncio.Event()
     microphone_unmuted = asyncio.Event()
@@ -273,6 +283,7 @@ async def main() -> int:
     microphone_publication_ids: set[str] = set()
     browser_controls: list[dict[str, object]] = []
     session_requests: list[str] = []
+    review_session_requests: list[str] = []
     vad_model = DeterministicVadModel()
     try:
         await wait_port(livekit_port, livekit)
@@ -411,6 +422,14 @@ async def main() -> int:
         )
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
+        review_server = ThreadingHTTPServer(
+            ("127.0.0.1", review_port),
+            handler_for(review_dist, capability, review_session_requests),
+        )
+        review_server_thread = threading.Thread(
+            target=review_server.serve_forever, daemon=True
+        )
+        review_server_thread.start()
 
         options = Options()
         options.add_argument("-headless")
@@ -633,9 +652,92 @@ async def main() -> int:
             "browser microphone did not cleanly resume after muted reconnect",
         )
 
+        probe_state = await asyncio.to_thread(
+            driver.execute_async_script,
+            """
+                const done = arguments[0];
+                const audio = document.querySelector('audio[data-voice-agent-audio="agent-response"]');
+                const stream = audio?.srcObject;
+                if (!(stream instanceof MediaStream)) {
+                    done({ready: false, reason: 'missing attached response stream'});
+                    return;
+                }
+                const context = new AudioContext();
+                const analyser = context.createAnalyser();
+                analyser.fftSize = 256;
+                context.createMediaStreamSource(stream).connect(analyser);
+                context.resume().then(
+                    () => {
+                        window.__voiceAgentPcmProbe = {
+                            context,
+                            analyser,
+                            samples: new Uint8Array(analyser.fftSize),
+                        };
+                        done({ready: context.state === 'running', state: context.state});
+                    },
+                    () => done({ready: false, state: context.state}),
+                );
+            """,
+        )
+        if probe_state.get("ready") is not True:
+            raise AssertionError(f"browser response PCM probe did not start: {probe_state}")
+
         first_turn = await session.submit_utterance(b"\0\0" * 320)
         first_context = session._active
         assert first_context is not None and first_context.task is not None
+
+        def browser_playout_observation():
+            return driver.execute_script("""
+                const audio = document.querySelector('audio[data-voice-agent-audio="agent-response"]');
+                const stream = audio?.srcObject;
+                const tracks = stream instanceof MediaStream ? stream.getAudioTracks() : [];
+                const eyeEnvelope = Number.parseFloat(
+                    document.querySelector('.mvp-eye')?.style.getPropertyValue('--mvp-eye-envelope') || '0'
+                );
+                const probe = window.__voiceAgentPcmProbe;
+                let decodedEnvelope = 0;
+                if (probe?.context?.state === 'running') {
+                    probe.analyser.getByteTimeDomainData(probe.samples);
+                    let squared = 0;
+                    for (const sample of probe.samples) {
+                        const normalized = (sample - 128) / 128;
+                        squared += normalized * normalized;
+                    }
+                    decodedEnvelope = Math.sqrt(squared / probe.samples.length);
+                }
+                if (!(audio instanceof HTMLAudioElement)) return null;
+                return {
+                    paused: audio.paused,
+                    ended: audio.ended,
+                    readyState: audio.readyState,
+                    currentTime: audio.currentTime,
+                    audioTrackCount: tracks.length,
+                    audioTrackReadyState: tracks[0]?.readyState ?? null,
+                    decodedEnvelope,
+                    eyeEnvelope,
+                };
+            """)
+
+        response_playout = None
+        playout_deadline = time.monotonic() + 15
+        while time.monotonic() < playout_deadline:
+            response_playout = browser_playout_observation()
+            if (
+                response_playout is not None
+                and response_playout["paused"] is False
+                and response_playout["ended"] is False
+                and response_playout["readyState"] >= 2
+                and response_playout["audioTrackCount"] == 1
+                and response_playout["audioTrackReadyState"] == "live"
+                and response_playout["decodedEnvelope"] > 0.01
+            ):
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError(
+                "current-generation synthetic response PCM did not reach active browser "
+                f"playout: {response_playout}"
+            )
         await asyncio.wait_for(first_context.task, 15)
         if session._closed:
             browser_state = await asyncio.to_thread(
@@ -765,6 +867,36 @@ async def main() -> int:
         result_path = EVIDENCE_ROOT / "checkpoint-ab-firefox.json"
         await asyncio.to_thread(driver.execute_script, "window.scrollTo(0, 0)")
         await asyncio.to_thread(driver.save_screenshot, str(screenshot_path))
+
+        await asyncio.to_thread(driver.get, f"http://127.0.0.1:{review_port}/")
+
+        def generated_review_surface():
+            return driver.execute_script("""
+                return {
+                    connectActions: [...document.querySelectorAll('button')]
+                        .filter((button) => button.textContent.trim() === 'CONNECT').length,
+                    historyItems: document.querySelectorAll('.history-item').length,
+                    microphoneState: document.querySelector('.microphone-status-label')?.textContent,
+                    reviewLabel: document.querySelector('.connection-indicator__build')?.textContent ?? '',
+                };
+            """)
+
+        await wait_for(
+            lambda: (
+                (surface := generated_review_surface())["historyItems"] == 2
+                and surface["microphoneState"] == "MIC LIVE"
+                and surface["reviewLabel"].startswith("REVIEW ")
+            ),
+            "dedicated review entry did not execute its isolated fixture",
+        )
+        review_surface = generated_review_surface()
+        if review_surface["connectActions"] != 0:
+            raise AssertionError(
+                f"generated review entry exposed real admission: {review_surface}"
+            )
+        if review_session_requests or session_requests != ["/api/session"]:
+            raise AssertionError("review entry performed real session admission")
+
         result_path.write_text(json.dumps({
             "browser_surface": body,
             "server_event_types": event_types,
@@ -777,6 +909,8 @@ async def main() -> int:
             "fresh_vad_turn_after_unmute": resumed_turn,
             "resident_vad_reset_count": vad_model.reset_calls,
             "microphone_off_preserved_across_reconnect": True,
+            "response_pcm_browser_playout": response_playout,
+            "generated_review_entry": review_surface,
             "status_panel_layout": status_panel_layout,
             "browser_storage": storage_state,
             "downloaded_diagnostic": str(diagnostic_path),
@@ -785,7 +919,7 @@ async def main() -> int:
         print("Firefox/React/official LiveKit deterministic full-stack regression: PASS")
         print(f"Screenshot: {screenshot_path}")
         print(f"Result: {result_path}")
-        print("Evidence: fake inference data, publication lifecycle, and downloadable normalized error; audibility not claimed")
+        print("Evidence: synthetic PCM reached the browser playout boundary; audibility not claimed")
     finally:
         controller_tasks: list[asyncio.Task[None]] = []
         if controller is not None:
@@ -821,6 +955,11 @@ async def main() -> int:
             server.server_close()
         if server_thread is not None:
             server_thread.join(timeout=3)
+        if review_server is not None:
+            review_server.shutdown()
+            review_server.server_close()
+        if review_server_thread is not None:
+            review_server_thread.join(timeout=3)
         livekit.terminate()
         try:
             livekit.wait(timeout=3)

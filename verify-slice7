@@ -15,28 +15,6 @@ npm test -- --run \
   src/state.test.ts
 VITE_APP_VERSION="$(git -C "$ROOT" rev-parse HEAD)" npm run build
 VITE_APP_VERSION="$(git -C "$ROOT" rev-parse HEAD)" npm run build:review
-python3 - <<'PY'
-from pathlib import Path
-import re
-
-web = Path.cwd()
-
-def bundle(root: Path) -> tuple[str, str]:
-    index = (root / "index.html").read_text()
-    match = re.search(r'src="([^"]+\.js)"', index)
-    if match is None:
-        raise AssertionError(f"missing built entry in {root}")
-    return index, (root / match.group(1).lstrip("/")).read_text()
-
-production_index, production_js = bundle(web / "dist")
-review_index, review_js = bundle(web / "review" / "dist")
-if "Voice Agent v2 Review" in production_index or "review-stand" in production_js:
-    raise AssertionError("synthetic fixture leaked into the production entry")
-if "/api/session" not in production_js or "CONNECT" not in production_js:
-    raise AssertionError("production entry lost explicit real-session admission")
-if "Voice Agent v2 Review" not in review_index or "review-stand" not in review_js:
-    raise AssertionError("dedicated synthetic review build is not isolated")
-PY
 
 printf '%s\n' 'Slice 7 focused verification: PASS'
 printf '%s\n' 'avatar interface: voice-agent.avatar-host.v1'

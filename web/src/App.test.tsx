@@ -69,11 +69,11 @@ describe('Slice 7 modular shell', () => {
     })).toBe('Speech was not recognized.')
   })
 
-  it('starts the real application disconnected with no fixture history and requests a session only after CONNECT', async () => {
+  it('keeps the production App behavior distinct from the isolated ReviewStand fixture', async () => {
     const user = userEvent.setup()
     const fetch = vi.fn().mockResolvedValue({ ok: false, status: 503 })
     vi.stubGlobal('fetch', fetch)
-    const { container } = render(
+    const production = render(
       <VoiceSessionProvider>
         <App avatarHost={testAvatarHost()} buildVersion="real-build" />
       </VoiceSessionProvider>,
@@ -82,13 +82,21 @@ describe('Slice 7 modular shell', () => {
     expect(screen.getByRole('dialog', { name: 'Voice session disconnected' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'CONNECT' })).toBeTruthy()
     expect(screen.getByText('MIC DISCONNECTED')).toBeTruthy()
-    expect(container.querySelectorAll('.history-item')).toHaveLength(0)
+    expect(production.container.querySelectorAll('.history-item')).toHaveLength(0)
     expect(screen.queryByText('Расскажи, что ты видишь.')).toBeNull()
     expect(fetch).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('button', { name: 'CONNECT' }))
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch).toHaveBeenCalledWith('/api/session', expect.objectContaining({ method: 'POST' }))
+    production.unmount()
+
+    render(<ReviewStand avatarHost={testAvatarHost()} buildVersion="review-build" />)
+    expect(screen.queryByRole('button', { name: 'CONNECT' })).toBeNull()
+    expect(screen.getByText('MIC LIVE')).toBeTruthy()
+    expect(screen.getByText('Расскажи, что ты видишь.')).toBeTruthy()
+    expect(document.querySelectorAll('.history-item')).toHaveLength(2)
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 
   it('renders the avatar viewport and only the four intended steady-state overlay responsibilities', () => {
