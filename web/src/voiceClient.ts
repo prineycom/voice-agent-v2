@@ -569,7 +569,19 @@ export class VoiceClient {
       } catch {
         terminalFailure ??= 'Не удалось применить состояние голосовой сессии'
       }
-      if (terminalFailure !== null) void this.failSession(terminalFailure)
+      if (terminalFailure !== null) {
+        if (event.type === 'session.degraded') {
+          void this.failSession(
+            terminalFailure,
+            serverCode,
+            undefined,
+            false,
+            false,
+          )
+        } else {
+          void this.failSession(terminalFailure)
+        }
+      }
     })
     room.on(RoomEvent.Reconnecting, () => {
       if (this.reconnecting) return
@@ -757,6 +769,7 @@ export class VoiceClient {
     code = 'client_failure',
     cause?: unknown,
     preserveMicrophoneError = false,
+    notifyConnectionFailure = true,
   ): Promise<void> {
     if (this.stopping) return
     this.recordDiagnostic('client', 'failed', undefined, code, cause ?? message)
@@ -769,7 +782,7 @@ export class VoiceClient {
     } catch {
       failure = `${message} (не удалось полностью освободить транспорт)`
     } finally {
-      this.callbacks.onConnection('failed', failure)
+      if (notifyConnectionFailure) this.callbacks.onConnection('failed', failure)
     }
   }
 }

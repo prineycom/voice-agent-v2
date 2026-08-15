@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import threading
 import time
-from typing import Mapping
+from typing import Callable, Mapping
 
 from .contracts import valid_correlation_id
 from .observability import (
@@ -139,8 +139,8 @@ class PrivacySafeTrace:
         turn_id: str | None = None,
         stream_epoch: int | None = None,
     ) -> bool:
-        effective_turn = turn_id or self.identity.turn_id
-        effective_epoch = stream_epoch or self.identity.stream_epoch
+        effective_turn = self.identity.turn_id if turn_id is None else turn_id
+        effective_epoch = self.identity.stream_epoch if stream_epoch is None else stream_epoch
         try:
             values = dict(fields or {})
             if (
@@ -217,6 +217,25 @@ class PrivacySafeTrace:
             self._state.byte_count += len(encoded)
             return True
 
+    def observe(
+        self,
+        stage: str,
+        event: str,
+        fields: Mapping[str, object],
+        *,
+        stream_epoch: int | None = None,
+    ) -> bool:
+        values = dict(fields)
+        turn_id = values.pop("turn_id", self.identity.turn_id)
+        correlated_epoch = values.pop("stream_epoch", stream_epoch)
+        return self.emit(
+            stage,
+            event,
+            values,
+            turn_id=turn_id,
+            stream_epoch=correlated_epoch,
+        )
+
 
 def _inside_git_worktree(path: Path) -> bool:
     current = path.resolve()
@@ -237,7 +256,10 @@ class DiagnosticContentCapture:
         *,
         opt_in: bool,
         ttl_seconds: int = 15 * 60,
-        now: callable = time.time,
+        now: Callable[[], float] = time.time,
+        timer_factory: Callable[
+            [float, Callable[[], None]], threading.Timer
+        ] = threading.Timer,
     ) -> None:
         if not opt_in:
             raise ValueError("diagnostic content capture requires explicit opt-in")
@@ -257,6 +279,7 @@ class DiagnosticContentCapture:
         self._files = 0
         self._bytes = 0
         self._lock = threading.RLock()
+        self._expiry_timer: threading.Timer | None = None
         self.purge_expired(resolved, now=now)
         self.path.mkdir(parents=True, exist_ok=False, mode=0o700)
         try:
@@ -274,10 +297,13 @@ class DiagnosticContentCapture:
                 "manifest.json",
                 json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
             )
+            expiry_timer = timer_factory(ttl_seconds, self._expire_now)
+            expiry_timer.daemon = True
+            self._expiry_timer = expiry_timer
+            expiry_timer.start()
         except BaseException:
             shutil.rmtree(self.path, ignore_errors=True)
             raise
-        # The manifest is retention metadata, not one of the bounded content files.
         self._files = 0
         self._bytes = 0
 
@@ -315,8 +341,18 @@ class DiagnosticContentCapture:
             self._bytes += len(encoded)
             return self.path / name
 
+    def _expire_now(self) -> None:
+        try:
+            self.delete()
+        except RuntimeError:
+            pass
+
     def delete(self) -> bool:
         with self._lock:
+            timer = self._expiry_timer
+            self._expiry_timer = None
+            if timer is not None:
+                timer.cancel()
             if not self.path.exists():
                 return False
             try:
@@ -351,7 +387,9 @@ class DiagnosticContentCapture:
         return True
 
     @staticmethod
-    def purge_expired(root: Path, *, now: callable = time.time) -> int:
+    def purge_expired(
+        root: Path, *, now: Callable[[], float] = time.time
+    ) -> int:
         resolved = root.expanduser().resolve()
         if _inside_git_worktree(resolved) or not resolved.exists():
             return 0
@@ -368,6 +406,9 @@ class DiagnosticContentCapture:
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 continue
             if explicitly_enabled and expires <= current_time:
-                shutil.rmtree(directory)
+                try:
+                    DiagnosticContentCapture.delete_path(directory)
+                except (OSError, ValueError):
+                    continue
                 removed += 1
         return removed

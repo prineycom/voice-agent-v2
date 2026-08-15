@@ -92,7 +92,7 @@ class TurnRunner(Protocol):
         input_pcm: bytes,
         cancellation: CancellationToken,
         event_observer: Callable[[dict[str, object]], None],
-        trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
+        trace_observer: Callable[[str, str, dict[str, object]], bool | None] | None = None,
     ) -> TraceResult: ...
 
     def cancel(self) -> None: ...
@@ -301,7 +301,7 @@ class RealtimeSession:
         event_sink: EventSink,
         audio_sink: AudioSink,
         failure_handler: Callable[[str, str], None] | None = None,
-        trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
+        trace_observer: Callable[[str, str, dict[str, object]], bool | None] | None = None,
         reconnect_reset_handler: Callable[[], Awaitable[None]] | None = None,
         resource_sampler: ResourceSampler | None = None,
         diagnostic_capture: object | None = None,
@@ -356,7 +356,12 @@ class RealtimeSession:
         if self.trace_observer is None:
             return
         try:
-            self.trace_observer(stage, event, fields)
+            accepted = self.trace_observer(stage, event, fields)
+            if accepted is False:
+                self.diagnostic_failure_counts["observer"] = min(
+                    self.diagnostic_failure_counts["observer"] + 1,
+                    MAX_DIAGNOSTIC_FAILURES,
+                )
         except Exception as error:
             if isinstance(error, OSError):
                 kind = "write"

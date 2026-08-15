@@ -788,9 +788,10 @@ class LiveKitRoomController:
             event_sink=LiveKitEventSink(self.room, browser_identity),
             audio_sink=self.audio_sink,
             failure_handler=self._session_failed,
-            trace_observer=lambda stage, event, fields: self.trace.emit(
-                stage, event, fields,
-                turn_id=str(fields.get("turn_id", "session")),
+            trace_observer=lambda stage, event, fields: self.trace.observe(
+                stage,
+                event,
+                fields,
                 stream_epoch=self.session.stream_epoch if hasattr(self, "session") else 1,
             ),
             reconnect_reset_handler=self._invalidate_microphone_for_reconnect,

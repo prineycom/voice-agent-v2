@@ -335,6 +335,14 @@ export function parseControlEvent(payload: Uint8Array | string): ControlEvent | 
     || typeof value.terminal !== 'boolean' || value.terminal !== TERMINAL_TYPES.has(eventType as ControlEventType)
     || !ownObject(value.payload) || !boundedValue(value.payload)
   ) return null
+  if (eventType === 'session.ready' || eventType === 'session.degraded') {
+    const health = parseHealthReadinessReport(value.payload.health)
+    if (
+      health === null
+      || eventType === 'session.ready' && health.overall_readiness !== 'ready'
+      || eventType === 'session.degraded' && health.overall_readiness !== 'unready'
+    ) return null
+  }
   return value as unknown as ControlEvent
 }
 
@@ -590,7 +598,9 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       ...state,
       connection: action.connection,
       availability: action.connection === 'failed'
-        ? 'unavailable'
+        ? state.availability === 'degraded' || state.availability === 'interrupted'
+          ? state.availability
+          : 'unavailable'
         : action.connection === 'ready'
           ? 'available'
           : state.availability,

@@ -57,7 +57,12 @@ vi.mock('livekit-client', () => ({
 }))
 
 import { AudioPlaybackBoundary } from './playback'
-import { ACTIVE_LLM_MODEL_IDENTITY } from './state'
+import {
+  ACTIVE_LLM_MODEL_IDENTITY,
+  CONTROL_VERSION,
+  type ComponentHealthObservation,
+  type HealthReadinessReport,
+} from './state'
 import { VoiceClient, type VoiceClientCallbacks } from './voiceClient'
 
 function capabilityResponse(): Response {
@@ -97,6 +102,27 @@ function mediaReadyPayload() {
   }
 }
 
+const readyComponents: ComponentHealthObservation[] = [
+  ['livekit', 'livekit-server-1.13.5', CONTROL_VERSION],
+  ['controller', 'voice-agent-v2-controller', CONTROL_VERSION],
+  ['stt', 'whisper-large-v3-turbo', 'voice-agent.stt.v1'],
+  ['selected_llm', ACTIVE_LLM_MODEL_IDENTITY, 'voice-agent.llm-provider.v1'],
+  ['tts', 'silero-kseniya', 'voice-agent.tts.v2'],
+].map(([component, identity, contract_version]) => ({
+  component: component as ComponentHealthObservation['component'],
+  liveness: 'alive', readiness: 'ready', compatible: true,
+  identity, contract_version, reason_code: null, retry_count: 0, retry_limit: 0,
+}))
+
+const readyHealth: HealthReadinessReport = {
+  schema_version: 'voice-agent.health-readiness.v1',
+  overall_readiness: 'ready',
+  components: readyComponents,
+  provider_mode: 'local', external_transfer: false, automatic_fallback: false,
+  stt_location: 'local', tts_location: 'local', auth_boundary: 'tailnet',
+  wake_enabled: false, selected_avatar_module: 'mvp-eye-svg-v1',
+}
+
 function callbacks(): VoiceClientCallbacks {
   return {
     onSession: vi.fn(),
@@ -123,6 +149,9 @@ function emitControl(
   mediaGeneration = turnGeneration,
   turnId = 'turn-00000001',
 ): void {
+  const effectivePayload = type === 'session.ready'
+    ? { state: 'ready', user_state: 'available', health: readyHealth, ...payload }
+    : payload
   room.emit(
     'dataReceived',
     new TextEncoder().encode(JSON.stringify({
@@ -136,7 +165,7 @@ function emitControl(
       sequence,
       type,
       terminal,
-      payload,
+      payload: effectivePayload,
     })),
     { identity: 'agent-session-test-0001' },
     undefined,
@@ -229,6 +258,58 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledWith(track, 1)
     expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenCalledTimes(2)
     expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenLastCalledWith(1)
+    expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
+  })
+
+  it('keeps the admission timeout armed after an incompatible ready event', async () => {
+    vi.useFakeTimers()
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    emitControl(room, 'session.ready', 1, {
+      health: { ...readyHealth, overall_readiness: 'unready' },
+    })
+    expect(observed.onDrop).toHaveBeenCalledTimes(1)
+    expect(observed.onControl).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(30_100)
+    await Promise.resolve()
+    expect(observed.onConnection).toHaveBeenCalledWith(
+      'failed', 'Сервер не подтвердил готовность голосовой сессии',
+    )
+  })
+
+  it('releases a degraded session without erasing its typed consequence', async () => {
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+    emitControl(room, 'session.ready', 1)
+    const degradedHealth: HealthReadinessReport = {
+      ...readyHealth,
+      overall_readiness: 'unready',
+      components: readyComponents.map((component) => component.component === 'tts'
+        ? {
+          ...component,
+          liveness: 'dead', readiness: 'unready', compatible: false,
+          reason_code: 'silero_pool_not_ready',
+        }
+        : component),
+    }
+
+    emitControl(room, 'session.degraded', 2, {
+      state: 'degraded', user_state: 'degraded', stage: 'tts',
+      code: 'silero_pool_not_ready', retry_count: 0, retry_limit: 0,
+      health: degradedHealth,
+    })
+    await vi.waitFor(() => expect(room.disconnect).toHaveBeenCalled())
+
+    expect(observed.onControl).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'session.degraded',
+      payload: expect.objectContaining({ user_state: 'degraded' }),
+    }))
     expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
   })
 

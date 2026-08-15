@@ -24,6 +24,17 @@ from voice_agent_v2.tracer import TraceResult
 
 
 class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trace_observer_refusal_is_counted(self) -> None:
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=StreamingRunner(),
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda _stage, _event, _fields: False,
+        )
+        session._trace("control", "published", turn_id="turn-test")
+        self.assertEqual(session.diagnostic_failure_counts["observer"], 1)
+
     async def test_abandoned_vad_candidate_emits_no_user_turn(self) -> None:
         events = MemoryEvents()
         session = RealtimeSession(

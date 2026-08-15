@@ -199,7 +199,7 @@ describe('checkpoint A browser state', () => {
   })
 
   it('retains visible text and marks only the item when TTS fails', () => {
-    const state = apply([
+    let state = apply([
       event(1, 'session.ready'),
       event(2, 'turn.listening'),
       event(3, 'turn.media-ready'),
@@ -221,6 +221,10 @@ describe('checkpoint A browser state', () => {
       audioUnavailable: true,
       userState: 'degraded',
     })
+    state = voiceReducer(state, {
+      type: 'connection', connection: 'failed', error: 'transport released',
+    })
+    expect(state.availability).toBe('degraded')
   })
 
   it('keeps speaking while later visible text arrives', () => {

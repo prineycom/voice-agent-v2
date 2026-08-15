@@ -97,6 +97,30 @@ class ObservationContractTests(unittest.TestCase):
             self.assertEqual(record["schema_version"], "voice-agent.observation.v1")
             self.assertEqual(trace.failure_counts["validation"], len(forbidden))
 
+    def test_trace_observer_extracts_correlation_and_reports_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            trace = PrivacySafeTrace(path, TraceIdentity("session-observer"))
+            self.assertTrue(trace.observe(
+                "control",
+                "published",
+                {
+                    "turn_id": "turn-observer",
+                    "stream_epoch": 2,
+                    "event_type": "turn.completed",
+                    "terminal": True,
+                },
+            ))
+            record = json.loads(path.read_text())
+            self.assertEqual(record["turn_id"], "turn-observer")
+            self.assertEqual(record["stream_epoch"], 2)
+            self.assertNotIn("turn_id", record["fields"])
+            self.assertNotIn("stream_epoch", record["fields"])
+            self.assertFalse(trace.observe(
+                "control", "published", {"turn_id": "private turn identity"}
+            ))
+            self.assertEqual(trace.failure_counts["validation"], 1)
+
     def test_one_turn_and_percentiles_reconstruct_only_from_metadata(self) -> None:
         records = [
             observation(1, 100.0, "turn.listening"),
@@ -268,15 +292,59 @@ class CaptureAndResourceTests(unittest.TestCase):
             )
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             clock = [1000.0]
+            scheduled: list[object] = []
+
+            class ManualTimer:
+                daemon = False
+
+                def __init__(self, _delay: float, callback) -> None:
+                    self.callback = callback
+                    self.cancelled = False
+                    scheduled.append(self)
+
+                def start(self) -> None:
+                    pass
+
+                def cancel(self) -> None:
+                    self.cancelled = True
+
+                def fire(self) -> None:
+                    if not self.cancelled:
+                        self.callback()
+
             capture = DiagnosticContentCapture(
                 Path(directory), "session-expiry", opt_in=True,
-                ttl_seconds=60, now=lambda: clock[0],
+                ttl_seconds=60, now=lambda: clock[0], timer_factory=ManualTimer,
             )
             capture.capture("prompt", "synthetic")
             clock[0] = 1061.0
-            with self.assertRaisesRegex(RuntimeError, "expired"):
-                capture.capture("response", "synthetic")
+            scheduled[0].fire()
             self.assertFalse(capture.path.exists())
+
+    def test_expiry_purge_refuses_unowned_capture_directories(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            root = Path(directory)
+            foreign = root / "capture-foreign"
+            foreign.mkdir()
+            (foreign / "manifest.json").write_text(json.dumps({
+                "schema_version": "foreign.capture.v1",
+                "session_id": "foreign",
+                "expires_unix_seconds": 1,
+                "explicit_opt_in": True,
+            }))
+            mismatched = root / "capture-mismatched"
+            mismatched.mkdir()
+            (mismatched / "manifest.json").write_text(json.dumps({
+                "schema_version": "voice-agent.diagnostic-content-capture.v1",
+                "session_id": "different",
+                "expires_unix_seconds": 1,
+                "explicit_opt_in": True,
+            }))
+            self.assertEqual(
+                DiagnosticContentCapture.purge_expired(root, now=lambda: 2), 0
+            )
+            self.assertTrue(foreign.exists())
+            self.assertTrue(mismatched.exists())
 
     def test_deterministic_resource_sampler_reports_safe_numeric_metadata(self) -> None:
         files = {
