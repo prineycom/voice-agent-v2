@@ -79,9 +79,10 @@ describe('Slice 7 modular shell', () => {
       </VoiceSessionProvider>,
     )
 
-    expect(screen.getByRole('dialog', { name: 'Voice session disconnected' })).toBeTruthy()
+    const disconnectedDialog = screen.getByRole('dialog', { name: 'Voice session disconnected' })
+    expect(disconnectedDialog).toBeTruthy()
     expect(screen.getByRole('button', { name: 'CONNECT' })).toBeTruthy()
-    expect(screen.getByText('MIC DISCONNECTED')).toBeTruthy()
+    expect(within(disconnectedDialog).getByText('MIC DISCONNECTED')).toBeTruthy()
     expect(production.container.querySelectorAll('.history-item')).toHaveLength(0)
     expect(screen.queryByText('Расскажи, что ты видишь.')).toBeNull()
     expect(fetch).not.toHaveBeenCalled()
@@ -97,6 +98,54 @@ describe('Slice 7 modular shell', () => {
     expect(screen.getByText('Расскажи, что ты видишь.')).toBeTruthy()
     expect(document.querySelectorAll('.history-item')).toHaveLength(2)
     expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps microphone lifecycle text visible inside blocking connection overlays', () => {
+    const audioContainerRef = createRef<HTMLDivElement>()
+    const shell = (state: VoiceState, connectAttempted = true) => (
+      <VoiceShell
+        state={state}
+        avatarHost={testAvatarHost()}
+        buildVersion="build-test"
+        connectAttempted={connectAttempted}
+        audioContainerRef={audioContainerRef}
+        subscribeSpeechEnvelope={() => () => undefined}
+        onConnect={() => undefined}
+        onDisconnect={() => undefined}
+        onResumeAudio={() => undefined}
+        onToggleMicrophone={() => undefined}
+        onDownloadDiagnostics={() => undefined}
+      />
+    )
+    const { rerender } = render(shell(initialVoiceState, false))
+
+    expect(within(screen.getByRole('dialog', { name: 'Voice session disconnected' }))
+      .getByRole('status').textContent).toBe('MIC DISCONNECTED')
+
+    rerender(shell({
+      ...initialVoiceState,
+      connection: 'connecting',
+      microphoneStatus: 'requesting-permission',
+    }))
+    expect(within(screen.getByRole('dialog', { name: 'Connecting' }))
+      .getByRole('status').textContent).toBe('MIC PERMISSION')
+
+    rerender(shell({
+      ...initialVoiceState,
+      connection: 'connecting',
+      microphoneStatus: 'publishing',
+    }))
+    expect(within(screen.getByRole('dialog', { name: 'Connecting' }))
+      .getByRole('status').textContent).toBe('MIC PUBLISHING')
+
+    rerender(shell({
+      ...initialVoiceState,
+      connection: 'failed',
+      microphoneStatus: 'error',
+      microphoneError: 'permission denied',
+    }))
+    expect(within(screen.getByRole('alertdialog', { name: 'Connection lost' }))
+      .getByRole('status').textContent).toBe('MIC ERROR')
   })
 
   it('renders the avatar viewport and only the four intended steady-state overlay responsibilities', () => {

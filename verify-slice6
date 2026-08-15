@@ -20,6 +20,7 @@ PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_slice6_runtime.py"
   npm run typecheck
   npm test
   npm run build
+  npm run build:review
 )
 PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_firefox_livekit.py"
 printf '%s\n' 'Slice 6 TTS-v2/input16/native48 generation-aware media/browser verification: PASS'

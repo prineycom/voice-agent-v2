@@ -450,15 +450,28 @@ async def main() -> int:
         await asyncio.to_thread(driver.get, f"http://127.0.0.1:{web_port}/")
         connect = driver.find_element("xpath", "//button[normalize-space()='CONNECT']")
         initial_surface = driver.execute_script("""
+            const overlayMicrophone = document.querySelector(
+                '.connection-overlay__microphone-status'
+            );
             return {
                 historyItems: document.querySelectorAll('.history-item').length,
                 microphoneState: document.querySelector('.microphone-status-label')?.textContent,
+                overlayMicrophoneState: overlayMicrophone?.textContent,
+                overlayMicrophoneVisible: overlayMicrophone instanceof HTMLElement
+                    && overlayMicrophone.getClientRects().length > 0,
             };
         """)
         if session_requests or microphone_subscribed.is_set():
             raise AssertionError("real browser path started a session before explicit CONNECT")
-        if initial_surface != {"historyItems": 0, "microphoneState": "MIC DISCONNECTED"}:
-            raise AssertionError(f"real browser path leaked fixture/session state: {initial_surface}")
+        if initial_surface != {
+            "historyItems": 0,
+            "microphoneState": "MIC DISCONNECTED",
+            "overlayMicrophoneState": "MIC DISCONNECTED",
+            "overlayMicrophoneVisible": True,
+        }:
+            raise AssertionError(
+                f"real browser path hid microphone lifecycle or leaked fixture/session state: {initial_surface}"
+            )
         await asyncio.to_thread(connect.click)
         await wait_for(
             lambda: session_requests == ["/api/session"],

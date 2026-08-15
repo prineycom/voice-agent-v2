@@ -41,12 +41,14 @@ export function FullscreenConnectionOverlay({
   connection,
   readyFlash,
   connectAttempted,
+  microphoneStatusLabel,
   onReconnect,
   overlayRef,
 }: {
   connection: ConnectionState
   readyFlash: boolean
   connectAttempted: boolean
+  microphoneStatusLabel: string
   onReconnect(): void
   overlayRef: RefObject<HTMLDivElement | null>
 }) {
@@ -74,6 +76,7 @@ export function FullscreenConnectionOverlay({
         tabIndex={-1}
       >
         <p>DISCONNECTED</p>
+        <p className="connection-overlay__microphone-status" role="status" aria-live="polite">{microphoneStatusLabel}</p>
         <button type="button" className="neon-action" onClick={onReconnect}>CONNECT</button>
       </div>
     )
@@ -87,7 +90,10 @@ export function FullscreenConnectionOverlay({
         aria-modal="true"
         aria-label="Connecting"
         tabIndex={-1}
-      >CONNECTING…</div>
+      >
+        <p>CONNECTING…</p>
+        <p className="connection-overlay__microphone-status" role="status" aria-live="polite">{microphoneStatusLabel}</p>
+      </div>
     )
   }
   if (connection === 'reconnecting') {
@@ -99,7 +105,10 @@ export function FullscreenConnectionOverlay({
         aria-modal="true"
         aria-label="Reconnecting"
         tabIndex={-1}
-      >RECONNECTING…</div>
+      >
+        <p>RECONNECTING…</p>
+        <p className="connection-overlay__microphone-status" role="status" aria-live="polite">{microphoneStatusLabel}</p>
+      </div>
     )
   }
   return (
@@ -112,6 +121,7 @@ export function FullscreenConnectionOverlay({
       tabIndex={-1}
     >
       <p>CONNECTION LOST</p>
+      <p className="connection-overlay__microphone-status" role="status" aria-live="polite">{microphoneStatusLabel}</p>
       <button type="button" className="neon-action" onClick={onReconnect}>RECONNECT</button>
     </div>
   )
