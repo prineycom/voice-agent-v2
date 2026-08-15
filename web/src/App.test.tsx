@@ -1,3 +1,4 @@
+import { createRef } from 'react'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,7 +9,9 @@ import {
   type AvatarModuleV1,
 } from './avatar/contract'
 import { ReviewStand } from './ReviewStand'
+import { initialVoiceState, type VoiceState } from './state'
 import { AvatarViewport } from './ui/AvatarViewport'
+import { VoiceShell } from './ui/VoiceShell'
 import { historyUserText } from './ui/panels/HistoryPanel'
 import { REDUCE_MOTION_STORAGE_KEY } from './ui/useReducedMotion'
 
@@ -113,6 +116,64 @@ describe('Slice 7 modular shell', () => {
     expect(screen.getByText('SERVER-ACCEPTED PCM')).toBeTruthy()
     expect(screen.queryByText('LLM FIRST TOKEN')).toBeNull()
     expect(screen.queryByText('TTS FIRST AUDIO')).toBeNull()
+  })
+
+  it('scopes Timeline turn selection to the active session', async () => {
+    const user = userEvent.setup()
+    const avatarHost = testAvatarHost()
+    const audioContainerRef = createRef<HTMLDivElement>()
+    const reusedHistory = [{
+      turnId: 'turn-00000001',
+      user: 'First turn',
+      assistant: 'First answer',
+      outcome: 'completed' as const,
+      audioUnavailable: false,
+      endpointToFirstVisibleMs: 100,
+      endpointToFirstAcceptedPcmMs: 200,
+    }, {
+      turnId: 'turn-00000002',
+      user: 'Latest turn',
+      assistant: 'Latest answer',
+      outcome: 'completed' as const,
+      audioUnavailable: false,
+      endpointToFirstVisibleMs: 300,
+      endpointToFirstAcceptedPcmMs: 400,
+    }]
+    const stateFor = (sessionId: string): VoiceState => ({
+      ...initialVoiceState,
+      connection: 'ready',
+      sessionId,
+      history: reusedHistory,
+    })
+    const shell = (state: VoiceState) => (
+      <VoiceShell
+        state={state}
+        avatarHost={avatarHost}
+        buildVersion="build-test"
+        connectAttempted
+        audioContainerRef={audioContainerRef}
+        subscribeSpeechEnvelope={() => () => undefined}
+        onConnect={() => undefined}
+        onDisconnect={() => undefined}
+        onResumeAudio={() => undefined}
+        onToggleMicrophone={() => undefined}
+        onDownloadDiagnostics={() => undefined}
+      />
+    )
+    const { rerender } = render(shell(stateFor('session-one')))
+
+    await user.click(screen.getByRole('button', { name: 'Open menu' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: /HISTORY/ }))
+    await user.click(screen.getByRole('button', { name: 'Select turn turn-00000001' }))
+    await user.click(screen.getByRole('button', { name: 'Close history' }))
+    await user.click(screen.getByRole('button', { name: 'Open menu' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: /STATUS/ }))
+    await user.click(screen.getByRole('tab', { name: 'TIMELINE' }))
+    expect(screen.getByText('TURN turn-00000001')).toBeTruthy()
+
+    rerender(shell(stateFor('session-two')))
+
+    expect(screen.getByText('TURN turn-00000002')).toBeTruthy()
   })
 
   it('uses the menu disconnect action and actionable full-screen reconnect overlay', async () => {

@@ -54,7 +54,7 @@ export function VoiceShell({
   const [avatarHealth, setAvatarHealth] = useState<AvatarHealthV1>(INITIAL_AVATAR_HEALTH)
   const [menuOpen, setMenuOpen] = useState(false)
   const [activePanel, setActivePanel] = useState<'history' | 'status' | null>(null)
-  const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null)
+  const [selectedTurn, setSelectedTurn] = useState<{ sessionId: string | null; turnId: string } | null>(null)
   const [readyFlash, setReadyFlash] = useState(false)
   const swipeStartRef = useRef<{ x: number; panelOpen: boolean } | null>(null)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
@@ -77,9 +77,9 @@ export function VoiceShell({
     : systemReducedMotion
       ? 'ambient-reduced'
       : 'full'
-  const effectiveSelectedTurnId = selectedTurnId !== null
-    && model.history.some((item) => item.turnId === selectedTurnId)
-    ? selectedTurnId
+  const effectiveSelectedTurnId = selectedTurn?.sessionId === state.sessionId
+    && model.history.some((item) => item.turnId === selectedTurn.turnId)
+    ? selectedTurn.turnId
     : model.history.at(-1)?.turnId ?? null
   const connectionOverlayActive = model.connection !== 'ready' || readyFlash
   const onAvatarHealth = useCallback((health: AvatarHealthV1) => setAvatarHealth(health), [])
@@ -189,7 +189,7 @@ export function VoiceShell({
         open={activePanel === 'history'}
         history={model.history}
         selectedTurnId={effectiveSelectedTurnId}
-        onSelectTurn={setSelectedTurnId}
+        onSelectTurn={(turnId) => setSelectedTurn({ sessionId: state.sessionId, turnId })}
         onClose={() => setActivePanel(null)}
       />
       <StatusPanel

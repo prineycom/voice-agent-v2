@@ -622,7 +622,7 @@ async def main() -> int:
         timeline = driver.find_element("xpath", "//button[normalize-space()='TIMELINE']")
         await asyncio.to_thread(timeline.click)
         await wait_for(
-            lambda: "LLM FIRST TOKEN" in driver.find_element("tag name", "body").text,
+            lambda: "FIRST VISIBLE RESPONSE" in driver.find_element("tag name", "body").text,
             "React status timeline tab did not render",
         )
         download = driver.find_element("xpath", "//button[contains(., 'DOWNLOAD DIAGNOSTICS')]")
