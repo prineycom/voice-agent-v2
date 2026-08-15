@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 project architecture
 >
-> **Last updated:** 2026-08-15
+> **Last updated:** 2026-08-16
 
 This document defines the active target architecture. It records user-approved candidate identities and endpoints only at their evidence gate; a gateway investigation is not a passing provider/model selection.
 
@@ -259,7 +259,7 @@ No failure silently switches LLM provider, moves another inference capability to
 | LiveKit unavailable | `retrying`, then `unavailable` on bounded failure | Reconnect acknowledgement attempts are bounded to 10 in 5 seconds; no inference admission. |
 | Microphone capture/cleanup failure | `unavailable` | No turn or inference admission; zero retry. |
 | STT unavailable/temporary-input failure | `unavailable` for the turn | No downstream inference or transcript fabrication; a dead/unready resident capability blocks later admission. |
-| Selected LLM failure | `unavailable` for the response | No fallback or fabricated answer; a dead/incompatible resident capability blocks later admission. |
+| Selected LLM failure | `unavailable` for the response | No fallback or fabricated answer. Transport loss is dead/unready while retaining the separately verified compatibility fact; a responding identity/contract failure is alive/unready/incompatible. Either blocks later admission. |
 | Invalid cloud credential/allowlist/privacy facts | `unavailable` | Controlled inactive-cloud validation only in the fixed local deployment; local is not selected as fallback because it is already the configured mode. |
 | TTS failure | `degraded` | Valid text/accepted prefix is salvageable; spoken completion fails, with zero request retry/fallback. |
 | Invalid/stale avatar input | `degraded` | Deterministic safe state, count increment, voice admission continues. |
@@ -294,7 +294,7 @@ Every turn must be diagnosable without recording its private content by default.
 
 Raw recordings, transcripts, prompts, responses, model artifacts, tokens, content-bearing identifiers, and environment values are not committed or written by default diagnostics. `voice-agent.observation.v1` rejects content-bearing field names and non-scalar/unbounded values before JSONL storage; browser diagnostic errors retain only a normalized class/code, never an exception message. Temporary input cleanup must fail closed and report whether input may remain; it cannot silently admit downstream inference.
 
-Content capture is off unless ignored server configuration sets exact `VOICE_AGENT_DIAGNOSTIC_CAPTURE=1` and an absolute `VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT` outside every Git worktree **and beneath the process's private `XDG_RUNTIME_DIR`**. TTL defaults to 900 seconds; `VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS` may override it only within 60–3,600 seconds. One capture is limited to 16 content files / 1 MiB of content, plus its owned manifest, with `0700` directory and `0600` files. Creation fails closed unless an owner-nonce-guarded detached expiry process is launched for the absolute deadline; it survives backend exit/crash and can delete only the same manifest instance. The in-process timer/purge are defense in depth, while runtime tmpfs erases captures across logout/reboot. Content never enters the browser download. `./manage-diagnostics status|delete` validates the owned manifest without enumerating content and the explicit deletion path remains executable. This boundary still does not authorize a durable conversation-history store.
+Content capture is off unless ignored server configuration sets exact `VOICE_AGENT_DIAGNOSTIC_CAPTURE=1` and an absolute `VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT` outside every Git worktree **and beneath the process's private `XDG_RUNTIME_DIR`**. TTL defaults to 900 seconds; `VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS` may override it only within 60–3,600 seconds. One capture is limited to 16 content files / 1 MiB of content, plus its owned manifest, with `0700` directory and `0600` files. Creation fails closed unless an owner-nonce-guarded detached expiry process is launched with paired wall-clock manifest expiry and boot-time monotonic deadline; it survives backend exit/crash, remains bounded if the wall clock moves backward, and can delete only the same manifest instance. The guardian inherits no application environment or secrets. The in-process timer/purge are defense in depth, while runtime tmpfs erases captures across logout/reboot. Content never enters the browser download. `./manage-diagnostics status|delete` validates the owned manifest without enumerating content and the explicit deletion path remains executable. This boundary still does not authorize a durable conversation-history store.
 
 ## 9. Configuration, artifacts, and secrets
 

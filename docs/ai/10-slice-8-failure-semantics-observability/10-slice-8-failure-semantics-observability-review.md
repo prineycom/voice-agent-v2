@@ -7,7 +7,7 @@
 
 | Severity | Evidence | Acceptance impact | Recommendation | Fix status |
 | --- | --- | --- | --- | --- |
-| Important | `livekit_runtime.py` initially derived selected-LLM liveness only from the startup snapshot. A llama.cpp crash after warm-up could admit another turn after the first failed request. | Process crash readiness/no-loop criterion. | Make the fixed provider own current liveness, drop it on non-cancellation failure, and let terminal cleanup publish unready/degraded health before later admission. | Fixed. |
+| Important | `livekit_runtime.py` initially derived selected-LLM liveness only from the startup snapshot. A llama.cpp crash after warm-up could admit another turn after the first failed request. | Process crash readiness/no-loop criterion. | Make the fixed provider own current liveness/readiness and publish unready health before later admission, while preserving liveness for a responding contract failure. | Fixed. |
 | Important | `AvatarHostV1` counted malformed/stale input but continued to report `ready`; only the detailed numeric count changed. | Malformed avatar input needed a user-visible degraded state. | Report transient input degradation until a fully valid monotonic update/cancel and surface visual degradation in the steady indicator/System rows. | Fixed. |
 | Important | Browser diagnostics originally normalized exception messages but accepted arbitrary server `stage`/`code` strings. A content-shaped value in those generic payload slots could be downloaded. | Default-log privacy criterion. | Close failure stage/code to bounded identifier syntax and normalize invalid values before reducer/diagnostic use. | Fixed. |
 | Important | Initial timing coverage omitted cancellation latency and did not explicitly correlate the first programmatic browser signal. | Architecture §8 timing completeness. | Add cancellation latency to public/diagnostic/preregistered reports and emit one request/media-correlated browser signal observation; require it in the deterministic Firefox run. | Fixed. |
@@ -17,7 +17,7 @@
 
 | Finding | Files changed | Evidence |
 | --- | --- | --- |
-| Live selected-LLM readiness | `local_lfm.py`, `livekit_runtime.py`, `test_local_lfm.py` | Readiness becomes live after probe/success, false after selected-provider failure, and runner admission reports dead/unready without retry/fallback. |
+| Live selected-LLM readiness | `local_lfm.py`, `livekit_runtime.py`, `test_local_lfm.py` | The initial fix established runtime-owned health and blocked admission after provider failure; the final `READY-002` row below owns the corrected transport-versus-contract split. |
 | Avatar degraded consequence | `AvatarHost.ts`, avatar/state-mapping tests | Malformed input reports degraded/rejected count; the next valid input restores ready; the steady label shows DEGRADED. |
 | Diagnostic string normalization | `voiceClient.ts`, `state.ts`, browser tests, observation scalar allowlist tests | Content-shaped stage/code/note values are absent from downloaded/default JSON. |
 | Missing timing observations | `realtime.py`, `observability.py`, config, Timeline UI, `voiceClient.ts`, Firefox verifier | Cancellation metric is preregistered/reconstructable; deterministic Firefox requires correlated first signal without claiming audibility. |
@@ -54,7 +54,7 @@ The follow-up commit on top of the exact pipeline head closes every remaining re
 | --- | --- |
 | `READY-002` | Local LFM now owns separate live/ready/compatible/reason state. Transport loss is dead/unready; identity/contract failure is alive/unready/incompatible; both block admission and success is the only compatibility recovery. |
 | `OBS-002` | `dependency_class` is a closed `hard|soft` observation scalar and a real failed-turn record reconstructs from emitted metadata. |
-| `PRIV-001` | Capture is restricted to the private user-owned `XDG_RUNTIME_DIR`; creation fails closed unless it launches a detached manifest-owner/absolute-deadline expiry process. The independent executable expiry path is tested, the in-process timer/purge remain defense in depth, and runtime tmpfs removes data over logout/reboot. |
+| `PRIV-001` | Capture is restricted to the private user-owned `XDG_RUNTIME_DIR`; creation fails closed unless it launches a detached manifest-owner expiry process with wall-clock manifest metadata and a boot-time monotonic deadline. The guardian receives only a minimal non-secret environment, the independent executable/clock-rollback paths are tested, the in-process timer/purge remain defense in depth, and runtime tmpfs removes data over logout/reboot. |
 | `PERF-001` | `/proc`/`nvidia-smi` sampling is serialized off the asyncio event loop via background `to_thread` tasks; endpoint admission has a timing regression proving it does not wait for a slow sampler. |
 | `DOC-001` | Late/duplicate control now has the allowed `degraded` consequence: strict drop, visible/diagnostic count, no phase/media action, with new-session recovery. Executable mapper, reducer, System mapping, tests, architecture, and evidence agree. |
 
