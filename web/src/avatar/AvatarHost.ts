@@ -1,10 +1,12 @@
 import {
+  avatarMotionPreferenceIsValid,
   avatarTimestampIsAdmissible,
   manifestIsCompatible,
   validateAvatarControl,
   type AvatarHealthV1,
   type AvatarModuleFactoryV1,
   type AvatarModuleV1,
+  type AvatarMotionPreference,
   type ValidatedAvatarControlV1,
 } from './contract'
 
@@ -12,7 +14,7 @@ export type AvatarHealthListener = (health: AvatarHealthV1) => void
 
 type AvatarCommand =
   | { kind: 'update'; control: ValidatedAvatarControlV1 }
-  | { kind: 'cancel'; timestampMs: number }
+  | { kind: 'cancel'; timestampMs: number; motion: AvatarMotionPreference }
 
 /**
  * Owns module compatibility, input validation, lifecycle and an explicitly
@@ -78,10 +80,11 @@ export class AvatarHostV1 {
     this.publishHealth()
   }
 
-  cancel(timestampMs: number): void {
+  cancel(timestampMs: number, motion: AvatarMotionPreference): void {
     if (
       this.activeModule === null
       || !avatarTimestampIsAdmissible(timestampMs, this.now())
+      || !avatarMotionPreferenceIsValid(motion)
       || timestampMs < this.lastTimestampMs
     ) {
       this.rejectedInputs += 1
@@ -89,12 +92,12 @@ export class AvatarHostV1 {
       return
     }
     this.lastTimestampMs = timestampMs
-    this.lastCommand = { kind: 'cancel', timestampMs }
+    this.lastCommand = { kind: 'cancel', timestampMs, motion }
     try {
-      this.activeModule.cancel(timestampMs)
+      this.activeModule.cancel(timestampMs, motion)
     } catch {
       this.renderFailures += 1
-      this.failOverCancellation(timestampMs)
+      this.failOverCancellation(timestampMs, motion)
     }
     this.publishHealth()
   }
@@ -146,10 +149,10 @@ export class AvatarHostV1 {
     }
   }
 
-  private failOverCancellation(timestampMs: number): void {
+  private failOverCancellation(timestampMs: number, motion: AvatarMotionPreference): void {
     const fallback = this.switchToNextModule()
     try {
-      fallback?.cancel(timestampMs)
+      fallback?.cancel(timestampMs, motion)
     } catch {
       this.disableFailedFallback(fallback)
     }
@@ -161,7 +164,9 @@ export class AvatarHostV1 {
     const fallback = this.switchToNextModule()
     try {
       if (this.lastCommand?.kind === 'update') fallback?.update(this.lastCommand.control)
-      if (this.lastCommand?.kind === 'cancel') fallback?.cancel(this.lastCommand.timestampMs)
+      if (this.lastCommand?.kind === 'cancel') {
+        fallback?.cancel(this.lastCommand.timestampMs, this.lastCommand.motion)
+      }
     } catch {
       this.disableFailedFallback(fallback)
     }

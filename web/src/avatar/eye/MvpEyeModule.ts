@@ -3,6 +3,7 @@ import {
   AVATAR_REQUIRED_CAPABILITIES,
   type AvatarModuleFailureHandlerV1,
   type AvatarModuleV1,
+  type AvatarMotionPreference,
   type ValidatedAvatarControlV1,
 } from '../contract'
 import { computeEyeRenderState, type EyePupilPosition } from './eyeModel'
@@ -124,18 +125,23 @@ export class MvpEyeModule implements AvatarModuleV1 {
     this.draw(input.timestampMs)
   }
 
-  cancel(timestampMs: number): void {
+  cancel(timestampMs: number, motion: AvatarMotionPreference): void {
     if (this.control === null) return
+    const interruptionTimestampMs = this.control.lifecycle === 'interrupted'
+      ? this.control.timestampMs
+      : timestampMs
     if (this.control.lifecycle !== 'interrupted') {
       this.interruptionOrigin = this.pupilPositionAt(this.control, timestampMs)
     }
     this.control = {
       ...this.control,
-      timestampMs,
+      timestampMs: interruptionTimestampMs,
       lifecycle: 'interrupted',
+      motion,
       trackingTarget: null,
       speechEnvelope: null,
     }
+    if (this.root !== null) this.root.dataset.motion = motion
     this.draw(timestampMs)
   }
 

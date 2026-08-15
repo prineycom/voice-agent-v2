@@ -33,6 +33,7 @@ export function AvatarViewport({
   const motionRef = useRef(motion)
   const targetRef = useRef(trackingTarget)
   const envelopeRef = useRef<SpeechEnvelopeObservation | null>(null)
+  const interruptionActiveRef = useRef(false)
 
   lifecycleRef.current = lifecycle
   motionRef.current = motion
@@ -49,10 +50,12 @@ export function AvatarViewport({
   useEffect(() => {
     const now = performance.now()
     if (lifecycle === 'interrupted') {
-      envelopeRef.current = null
-      host.cancel(now)
+      if (!interruptionActiveRef.current) envelopeRef.current = null
+      interruptionActiveRef.current = true
+      host.cancel(now, motion)
       return
     }
+    interruptionActiveRef.current = false
     host.update({
       schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,
       timestampMs: now,
@@ -68,8 +71,8 @@ export function AvatarViewport({
   }, [host, idleSeed, lifecycle, motion, trackingTarget])
 
   useEffect(() => subscribeSpeechEnvelope((observation) => {
-    if (lifecycleRef.current === 'interrupted') return
     envelopeRef.current = observation
+    if (lifecycleRef.current !== 'speaking') return
     const now = performance.now()
     host.update({
       schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,

@@ -16,7 +16,10 @@ function track(play: () => Promise<void>): AttachableAudioTrack {
   }
 }
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
 
 describe('persistent playback observation', () => {
   it('derives a bounded deterministic envelope from decoded time-domain samples', () => {
@@ -47,6 +50,7 @@ describe('persistent playback observation', () => {
       close: vi.fn().mockResolvedValue(undefined),
     }
     class FakeAudioContext {
+      state = 'running' as AudioContextState
       destination = context.destination
       createAnalyser = context.createAnalyser
       createMediaElementSource = context.createMediaElementSource
@@ -140,6 +144,7 @@ describe('persistent playback observation', () => {
       close: vi.fn().mockResolvedValue(undefined),
     }
     class FakeAudioContext {
+      state = 'running' as AudioContextState
       destination = context.destination
       createAnalyser = context.createAnalyser
       createMediaElementSource = context.createMediaElementSource
@@ -187,6 +192,61 @@ describe('persistent playback observation', () => {
     expect(elements[1].play).toHaveBeenCalledTimes(1)
     expect(source.disconnect).toHaveBeenCalledTimes(1)
     expect(context.close).toHaveBeenCalledTimes(1)
+    expect(blocked).toHaveBeenLastCalledWith(false)
+    expect(envelopeStatus).toHaveBeenLastCalledWith('unavailable')
+  })
+
+  it('preserves direct playout when a suspended audio context cannot start promptly', async () => {
+    vi.useFakeTimers()
+    const createMediaElementSource = vi.fn()
+    const close = vi.fn().mockResolvedValue(undefined)
+    class SuspendedAudioContext {
+      state = 'suspended' as AudioContextState
+      destination = {}
+      createAnalyser = vi.fn()
+      createMediaElementSource = createMediaElementSource
+      resume = vi.fn(() => new Promise<void>(() => undefined))
+      close = close
+    }
+    vi.stubGlobal('AudioContext', SuspendedAudioContext)
+
+    const element = document.createElement('audio')
+    Object.defineProperties(element, {
+      paused: { configurable: true, get: () => false },
+      ended: { configurable: true, get: () => false },
+      readyState: { configurable: true, get: () => 4 },
+      error: { configurable: true, get: () => null },
+    })
+    element.play = vi.fn().mockResolvedValue(undefined)
+    element.pause = vi.fn()
+    element.load = vi.fn()
+    const remote: AttachableAudioTrack = {
+      attach: vi.fn(() => element),
+      detach: vi.fn(() => [element]),
+    }
+    const container = document.createElement('div')
+    const blocked = vi.fn()
+    const envelopeStatus = vi.fn()
+    const boundary = new AudioPlaybackBoundary(
+      container,
+      blocked,
+      () => undefined,
+      envelopeStatus,
+    )
+
+    boundary.setTrack(remote)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(createMediaElementSource).not.toHaveBeenCalled()
+    expect(container.firstElementChild).toBe(element)
+
+    await vi.advanceTimersByTimeAsync(251)
+
+    expect(createMediaElementSource).not.toHaveBeenCalled()
+    expect(remote.attach).toHaveBeenCalledTimes(1)
+    expect(remote.detach).not.toHaveBeenCalled()
+    expect(element.play).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
     expect(blocked).toHaveBeenLastCalledWith(false)
     expect(envelopeStatus).toHaveBeenLastCalledWith('unavailable')
   })

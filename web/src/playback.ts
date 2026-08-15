@@ -23,6 +23,7 @@ export function speechEnvelopeFromTimeDomain(samples: Uint8Array): number {
 }
 
 const ENVELOPE_INTERVAL_MS = 33
+const ENVELOPE_CONTEXT_START_TIMEOUT_MS = 250
 
 export class AudioPlaybackBoundary {
   private track: AttachableAudioTrack | null = null
@@ -32,6 +33,8 @@ export class AudioPlaybackBoundary {
   private publicationGeneration = 0
   private elementBlocked = false
   private audioContext: AudioContext | null = null
+  private pendingAudioContext: AudioContext | null = null
+  private envelopeSetupGeneration = 0
   private analyserSource: MediaElementAudioSourceNode | null = null
   private analyser: AnalyserNode | null = null
   private analyserSamples: Uint8Array<ArrayBuffer> | null = null
@@ -245,13 +248,49 @@ export class AudioPlaybackBoundary {
       this.reportEnvelopeStatus('unavailable')
       return
     }
-    if (this.audioContext === null) {
-      let context: AudioContext | null = null
+    if (this.audioContext !== null) {
+      if (this.envelopeFrame === null) {
+        this.reportEnvelopeStatus('available')
+        this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
+      }
+      return
+    }
+    if (this.pendingAudioContext !== null) return
+
+    let context: AudioContext
+    try {
+      context = new AudioContext()
+    } catch {
+      this.envelopeGraphDisabled = true
+      this.reportEnvelopeStatus('unavailable')
+      return
+    }
+    const setupGeneration = ++this.envelopeSetupGeneration
+    this.pendingAudioContext = context
+    void this.waitForRunningContext(context).then((running) => {
+      if (
+        setupGeneration !== this.envelopeSetupGeneration
+        || this.pendingAudioContext !== context
+      ) {
+        void context.close().catch(() => undefined)
+        return
+      }
+      this.pendingAudioContext = null
+      if (!running) {
+        this.envelopeGraphDisabled = true
+        this.reportEnvelopeStatus('unavailable')
+        void context.close().catch(() => undefined)
+        return
+      }
+      if (!this.playbackActive || this.element !== element) {
+        void context.close().catch(() => undefined)
+        return
+      }
+
       let analyser: AnalyserNode | null = null
       let source: MediaElementAudioSourceNode | null = null
       let elementWasRerouted = false
       try {
-        context = new AudioContext()
         analyser = context.createAnalyser()
         analyser.fftSize = 256
         analyser.smoothingTimeConstant = 0.45
@@ -263,6 +302,8 @@ export class AudioPlaybackBoundary {
         this.analyserSource = source
         this.analyser = analyser
         this.analyserSamples = new Uint8Array(analyser.fftSize)
+        this.reportEnvelopeStatus('available')
+        this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
       } catch {
         try {
           source?.disconnect()
@@ -270,32 +311,29 @@ export class AudioPlaybackBoundary {
         try {
           analyser?.disconnect()
         } catch {}
-        if (context !== null) void context.close().catch(() => undefined)
+        void context.close().catch(() => undefined)
         this.envelopeGraphDisabled = true
         this.reportEnvelopeStatus('unavailable')
         if (elementWasRerouted) this.restoreDirectPlayback(element)
-        return
       }
+    })
+  }
+
+  private async waitForRunningContext(context: AudioContext): Promise<boolean> {
+    if (context.state === 'running') return true
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    try {
+      return await Promise.race([
+        context.resume().then(() => context.state === 'running', () => false),
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => resolve(false), ENVELOPE_CONTEXT_START_TIMEOUT_MS)
+        }),
+      ])
+    } catch {
+      return false
+    } finally {
+      if (timeout !== null) clearTimeout(timeout)
     }
-    const context = this.audioContext
-    void context.resume().then(
-      () => {
-        if (
-          this.audioContext === context && this.playbackActive
-          && this.element === element && this.envelopeFrame === null
-        ) {
-          this.reportEnvelopeStatus('available')
-          this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
-        }
-      },
-      () => {
-        if (this.audioContext === context && this.element === element) {
-          this.envelopeGraphDisabled = true
-          this.reportEnvelopeStatus('unavailable')
-          this.restoreDirectPlayback(element)
-        }
-      },
-    )
   }
 
   private restoreDirectPlayback(element: HTMLMediaElement): void {
@@ -337,6 +375,10 @@ export class AudioPlaybackBoundary {
     this.envelopeFrame = null
     this.lastEnvelopeAtMs = -Infinity
     this.playbackActive = false
+    this.envelopeSetupGeneration += 1
+    const pendingContext = this.pendingAudioContext
+    this.pendingAudioContext = null
+    if (pendingContext !== null) void pendingContext.close().catch(() => undefined)
     try {
       this.analyserSource?.disconnect()
     } catch {}

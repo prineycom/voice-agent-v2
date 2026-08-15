@@ -97,13 +97,13 @@ describe('avatar host v1 boundary', () => {
     const host = new AvatarHostV1([() => renderer], undefined, now)
     host.mount(document.createElement('div'))
     host.update(input(1_000))
-    host.cancel(999)
-    host.cancel(1_010)
+    host.cancel(999, 'full')
+    host.cancel(1_010, 'static')
     host.update(input(1_005))
 
     expect(renderer.update).toHaveBeenCalledTimes(1)
     expect(renderer.cancel).toHaveBeenCalledTimes(1)
-    expect(renderer.cancel).toHaveBeenCalledWith(1_010)
+    expect(renderer.cancel).toHaveBeenCalledWith(1_010, 'static')
     expect(host.health().rejectedInputs).toBe(2)
   })
 
@@ -113,12 +113,12 @@ describe('avatar host v1 boundary', () => {
     host.mount(document.createElement('div'))
 
     host.update(input(1e308))
-    host.cancel(1e308)
+    host.cancel(1e308, 'full')
     host.update(input(1_000))
-    host.cancel(1_010)
+    host.cancel(1_010, 'full')
 
     expect(renderer.update).toHaveBeenCalledTimes(1)
-    expect(renderer.cancel).toHaveBeenCalledWith(1_010)
+    expect(renderer.cancel).toHaveBeenCalledWith(1_010, 'full')
     expect(host.health().rejectedInputs).toBe(2)
   })
 
@@ -128,10 +128,10 @@ describe('avatar host v1 boundary', () => {
     const host = new AvatarHostV1([() => primary, () => fallback], undefined, now)
     host.mount(document.createElement('div'))
     host.update(input(1_000))
-    host.cancel(1_010)
+    host.cancel(1_010, 'ambient-reduced')
 
     expect(fallback.update).not.toHaveBeenCalled()
-    expect(fallback.cancel).toHaveBeenCalledWith(1_010)
+    expect(fallback.cancel).toHaveBeenCalledWith(1_010, 'ambient-reduced')
     expect(host.health()).toMatchObject({
       status: 'degraded', activeModuleId: 'fallback', usingFallback: true, renderFailures: 1,
     })
@@ -187,7 +187,7 @@ describe('avatar host v1 boundary', () => {
       renderer.mount(container)
       const result = validateAvatarControl({
         ...input(1_000),
-        motion: 'ambient-reduced',
+        motion: 'full',
         trackingTarget: { x: 1, y: 0, confidence: 1, observedAtMs: 1_000 },
       }, 1_000)
       if (!result.accepted) throw new Error('valid control was rejected')
@@ -196,8 +196,9 @@ describe('avatar host v1 boundary', () => {
       if (iris === null) throw new Error('eye renderer did not mount')
       const trackedTransform = iris.style.transform
 
-      renderer.cancel(1_010)
+      renderer.cancel(1_010, 'ambient-reduced')
       expect(iris.style.transform).toBe(trackedTransform)
+      expect(container.querySelector<HTMLElement>('.mvp-eye')?.dataset.motion).toBe('ambient-reduced')
 
       const middleFrame = scheduled.frame
       if (middleFrame === null) throw new Error('eye renderer did not schedule a frame')
@@ -245,7 +246,7 @@ describe('avatar host v1 boundary', () => {
           frame(frameBeforeCancellation)
         }
 
-        renderer.cancel(1_010)
+        renderer.cancel(1_010, 'full')
         const iris = container.querySelector<HTMLElement>('.mvp-eye__iris-group')
         if (iris === null) throw new Error('eye renderer did not mount')
         const transforms = [iris.style.transform]

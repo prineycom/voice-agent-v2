@@ -227,6 +227,7 @@ describe('Slice 7 modular shell', () => {
       />,
     )
     expect(cancel).toHaveBeenCalledTimes(1)
+    expect(cancel).toHaveBeenLastCalledWith(expect.any(Number), 'full')
     expect(update).toHaveBeenCalledTimes(updatesBeforeCancel)
     envelopeSubscription.listener?.({ level: 0.8, observedAtMs: performance.now() })
     expect(update).toHaveBeenCalledTimes(updatesBeforeCancel)
@@ -234,15 +235,44 @@ describe('Slice 7 modular shell', () => {
     rerender(
       <AvatarViewport
         host={host}
+        lifecycle="interrupted"
+        motion="static"
+        subscribeSpeechEnvelope={subscribeSpeechEnvelope}
+        onHealth={onHealth}
+      />,
+    )
+    expect(cancel).toHaveBeenLastCalledWith(expect.any(Number), 'static')
+
+    rerender(
+      <AvatarViewport
+        host={host}
         lifecycle="idle"
-        motion="full"
+        motion="static"
         subscribeSpeechEnvelope={subscribeSpeechEnvelope}
         onHealth={onHealth}
       />,
     )
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
       lifecycle: 'idle',
-      speechEnvelope: null,
+      motion: 'static',
+      speechEnvelope: expect.objectContaining({ level: 0.8 }),
+    }))
+    const updatesWhileIdle = update.mock.calls.length
+    envelopeSubscription.listener?.({ level: 0.4, observedAtMs: performance.now() })
+    expect(update).toHaveBeenCalledTimes(updatesWhileIdle)
+
+    rerender(
+      <AvatarViewport
+        host={host}
+        lifecycle="speaking"
+        motion="static"
+        subscribeSpeechEnvelope={subscribeSpeechEnvelope}
+        onHealth={onHealth}
+      />,
+    )
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      lifecycle: 'speaking',
+      speechEnvelope: expect.objectContaining({ level: 0.4 }),
     }))
   })
 

@@ -86,7 +86,7 @@ export interface AvatarModuleV1 {
   setFailureHandler(handler: AvatarModuleFailureHandlerV1 | null): void
   mount(container: HTMLElement): void
   update(input: ValidatedAvatarControlV1): void
-  cancel(timestampMs: number): void
+  cancel(timestampMs: number, motion: AvatarMotionPreference): void
   dispose(): void
 }
 
@@ -106,6 +106,10 @@ const LIFECYCLES = new Set<AvatarLifecycleState>([
 const MOTION_PREFERENCES = new Set<AvatarMotionPreference>([
   'full', 'ambient-reduced', 'static',
 ])
+
+export function avatarMotionPreferenceIsValid(value: unknown): value is AvatarMotionPreference {
+  return MOTION_PREFERENCES.has(value as AvatarMotionPreference)
+}
 export const MAX_TARGET_AGE_MS = 750
 export const MAX_ENVELOPE_AGE_MS = 250
 export const MAX_FUTURE_SKEW_MS = 100
@@ -161,7 +165,7 @@ export function validateAvatarControl(
       || !Number.isSafeInteger(value.idleSeed) || (value.idleSeed as number) < 0
       || (value.idleSeed as number) > MAX_IDLE_SEED
       || !LIFECYCLES.has(value.lifecycle as AvatarLifecycleState)
-      || !MOTION_PREFERENCES.has(value.motion as AvatarMotionPreference)
+      || !avatarMotionPreferenceIsValid(value.motion)
     ) return invalidControl()
 
     const timestampMs = value.timestampMs
