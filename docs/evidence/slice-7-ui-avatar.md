@@ -15,7 +15,7 @@ The focused command covers:
 - `voice-agent.avatar-host.v1` capability/compatibility, monotonic input, cancellation, explicit degraded fallback, and bounded invalid-signal behavior;
 - deterministic eye replay, pupil/blink/ring bounds, thinking loader, tracking/idle precedence, decoded-playout-only speech pulsing, interruption-to-neutral, and both motion levels;
 - reducer-to-UI state mapping and exactly four steady overlay responsibilities;
-- exact four-item menu, history/status panels, icon-only microphone state, and persisted reduced-motion choice;
+- exact four-item menu, history/status panels, icon microphone control with a visible lifecycle label, and persisted reduced-motion choice;
 - actual published-track microphone mute/unmute, rapid-toggle coalescing, effective failure state, assistant-playback independence, and muted transient reconnect;
 - decoded PCM time-domain envelope normalization plus the existing reconnect/interruption/playback contract tests;
 - explicit disconnected/CONNECT admission, empty pre-session history, microphone permission/publication lifecycle, and separated production/test-fixture builds;
@@ -44,7 +44,7 @@ The committed historical capture is [`slice-7-review-portrait.png`](slice-7-revi
 
 The launcher builds the current clean commit's ordinary production entry, verifies its embedded SHA, copies it to an immutable ignored per-run directory, then reuses the safe Slice 6 foreground runtime: local LFM, LiveKit, gateway/controller, STT/TTS, loopback gateway `8000`, and explicit owned Tailscale Serve routes. The stable application route overrides only the configured application origin/port to HTTPS `8447`; LiveKit's public signaling URL remains operator-configured and is returned through the typed capability. It does not change HTTPS/443, firewalld, public exposure, or unrelated services.
 
-The page starts `DISCONNECTED`; **CONNECT** is the user gesture that requests the same-origin session capability, microphone permission, LiveKit join, and microphone publication. History is empty until genuine server control events. The microphone overlay reports permission, publication, live/listening, muted, or error state explicitly.
+The page starts `DISCONNECTED`; **CONNECT** is the user gesture that requests the same-origin session capability, joins the capability's validated public LiveKit endpoint, requests microphone permission, and publishes the microphone. History is empty until genuine server control events. The microphone overlay reports disconnected, permission, publication, live/listening, muted, or error state explicitly.
 
 ```sh
 ./run-review-stand start

@@ -79,7 +79,7 @@ A clean committed head can be deployed for physical acceptance through the exist
 ./run-review-stand stop
 ```
 
-The launcher prints the exact compiled commit and stable tailnet URL. The first page is deliberately disconnected: select **CONNECT** to request microphone permission, mint a same-origin room capability, join LiveKit, and publish the microphone. Conversation history remains empty until genuine server events arrive. The synthetic `ReviewStand` is built only by `npm run build:review` under `web/review/dist`; it is never served by this launcher.
+The launcher prints the exact compiled commit and stable tailnet URL. The first page is deliberately disconnected: select **CONNECT** to mint a same-origin room capability, join its validated public LiveKit endpoint, request microphone permission, and publish the microphone. Conversation history remains empty until genuine server events arrive, and the compact control visibly reports the real microphone lifecycle throughout admission, listening, mute, and failure. The synthetic `ReviewStand` is built only by `npm run build:review` under `web/review/dist`; it is never served by this launcher.
 
 ### Pasha physical acceptance and rollback
 

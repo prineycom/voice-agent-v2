@@ -37,15 +37,15 @@ Grill session expanded the original avatar-only Design Gate V scope to cover the
 
 ### D5 — Connection status overlay behavior
 
-**Decision:** Minimal. Startup: only connection status ("CONNECTING…" → "READY" → disappears). Disconnect: "CONNECTION LOST" + reconnect button. Compact corner indicator only when connected and healthy.
+**Decision:** Superseded for the live product by the [manual-acceptance amendment](#manual-acceptance-amendment--explicit-real-session-admission); ADR-0011 owns the current overlay contract.
 
-**Rationale:** No clutter. Startup is transient, disconnect is actionable. Corner indicator is the steady-state.
+**Rationale:** The original automatic startup transition did not prove that a real session had been admitted.
 
 ### D6 — Microphone button
 
-**Decision:** Icon-only floating button, bottom-center. State by color and pulse: neutral=idle, cyan-pulse=listening, dimmed=muted, red-flicker=error. No text label.
+**Decision:** Superseded in part by the [manual-acceptance amendment](#manual-acceptance-amendment--explicit-real-session-admission); ADR-0011 owns the current icon-button plus visible lifecycle-label contract.
 
-**Rationale:** Minimalist. State conveyed visually. Natural touch target. No text = less screen space.
+**Rationale:** Color and motion remain useful secondary cues, but the real microphone lifecycle must not be ambiguous.
 
 ### D7 — Menu structure
 
@@ -118,4 +118,4 @@ The grill results define the design boundary for Slice 7 implementation:
 
 ## Manual-acceptance amendment — explicit real-session admission
 
-Pasha's PR #20 manual test showed that a synthetic review entry at the stable URL could falsely appear ready while bypassing microphone permission, LiveKit, and genuine history. The live entry therefore starts `DISCONNECTED` with one `CONNECT` action; only that gesture may request the capability/microphone and advance through `CONNECTING` to `READY`. Synthetic fixture data remains test-build-only and is never served as the manual acceptance stand. This amendment supersedes D5's automatic startup transition for the live product without changing its minimal overlay language.
+Pasha's PR #20 manual test showed that a synthetic review entry at the stable URL could falsely appear ready while bypassing microphone permission, LiveKit, and genuine history. The live entry therefore starts `DISCONNECTED` with one `CONNECT` action; only that gesture may request the capability/microphone and advance through `CONNECTING` to `READY`. Synthetic fixture data remains test-build-only and is never served as the manual acceptance stand. This amendment supersedes D5's automatic startup transition and D6's no-text microphone state; ADR-0011 owns the resulting live overlay and visible microphone-lifecycle contract.

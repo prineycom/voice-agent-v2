@@ -27,7 +27,7 @@ Cyberpunk expressed through neon accents, glow, and monospace typography — not
 | `--accent-cyan` | `#00f0ff` | Primary accent: ready, listening, active states |
 | `--accent-magenta` | `#ff00aa` | Secondary accent: thinking, processing |
 | `--accent-amber` | `#ffd166` | Warning: connecting, reconnecting |
-| `--accent-red` | `#ff3b5c` | Error: failed, disconnected, muted |
+| `--accent-red` | `#ff3b5c` | Error: failed, microphone error, connection lost |
 | `--accent-green` | `#49d79c` | Success: ready, connected |
 | `--border-subtle` | `rgba(0, 240, 255, 0.15)` | Thin dividers, panel edges |
 | `--glow-cyan` | `0 0 20px rgba(0, 240, 255, 0.4)` | Glow for active elements |
@@ -58,13 +58,15 @@ Cyberpunk expressed through neon accents, glow, and monospace typography — not
 | reconnecting | `--accent-amber` | amber glow | pulse (medium, 1.5s) |
 | degraded | `--accent-amber` | amber glow (dim) | none |
 
-#### Microphone button visual states
+#### Microphone control visual states
 
-| State | Color | Motion |
+The icon button retains four bounded visual states, while its adjacent monospace label exposes the finer permission/publication lifecycle defined by ADR-0011.
+
+| Button state | Color | Motion |
 | --- | --- | --- |
 | idle (mic on, not listening) | `--accent-cyan` (dim) | none |
 | listening | `--accent-cyan` | pulsing glow |
-| muted | `--text-secondary` | none, icon dimmed |
+| muted or disconnected | `--text-secondary` | none, icon dimmed |
 | error | `--accent-red` | short flicker |
 
 ### Performance budget

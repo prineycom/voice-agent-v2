@@ -34,7 +34,7 @@ The ordinary production entry (`web/src/main.tsx`) mounts `VoiceSessionProvider`
 
 - Stable review URL: synthetic static review entry → exact-head production bundle served by the real gateway/controller/LiveKit/local-inference runtime.
 - Startup: automatic/synthetic READY → modal `DISCONNECTED` with explicit `CONNECT`.
-- Admission: no API/media work before a user gesture; `CONNECT` requests the same-origin capability and then the microphone/LiveKit path.
+- Admission: no API/media work before a user gesture; `CONNECT` requests the same-origin capability, joins its validated public LiveKit endpoint, then requests and publishes the microphone.
 - History: fixture messages → empty until accepted server control events.
 - Microphone: ambiguous icon state → explicit `MIC DISCONNECTED`, `MIC PERMISSION`, `MIC PUBLISHING`, `MIC LIVE`/`MIC LISTENING`, `MIC MUTED`, or `MIC ERROR` state alongside the icon-only control.
 - Fixture build: overwrote `web/dist` and was tailnet-routed → separate `web/review/dist` test-only build, never used by the live stand.
@@ -55,7 +55,7 @@ The ordinary production entry (`web/src/main.tsx`) mounts `VoiceSessionProvider`
 
 | Command/check | Result | Notes |
 | --- | --- | --- |
-| `./verify-slice7` | PASS | 67 focused tests; production and isolated fixture builds; generated entry divergence. |
+| `./verify-slice7` | PASS | Focused browser/unit checks; production and isolated fixture builds; generated entry divergence. |
 | `./verify-slice6` | PASS | Existing deterministic controller plus Firefox/official-LiveKit microphone/VAD, control events, reconnect, response PCM/playout, history/status, and diagnostics. Uses synthetic microphone/audio and deterministic inference; no physical audibility claim. |
 | Stable URL pre-CONNECT functional check | PASS | Production title/entry, explicit CONNECT, empty history, `MIC DISCONNECTED`, permission `prompt`, and no pre-connect API/LiveKit request. No aesthetic visual judgment. |
 | Stable API/runtime check | PASS | HTTPS 200; exact candidate bundle; gateway/status available; scoped capability returned public `wss://priney-arch.darter-smoot.ts.net:7443`, verified LLM/TTS identities, and a token without exposing it; unjoined capacity recovered. |

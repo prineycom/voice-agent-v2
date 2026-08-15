@@ -22,7 +22,7 @@ Overlay elements on the main screen:
 
 - **Connection status indicator** — compact dot or short text in a top corner. Only visible when connected (ready). Replaced by full-screen overlay on startup and disconnect.
 - **Agent speech output** — the full current turn response text, displayed as a semi-transparent bottom overlay. Scrolls if long. Fades out when the turn completes. Not the full conversation history — only the current turn.
-- **Microphone button** — icon-only floating button, bottom-center. No text label. State conveyed by color and pulse: neutral=idle, pulsing-cyan=listening, dimmed=muted, red-flicker=error.
+- **Microphone control** — icon-only floating button, bottom-center, with a compact visible lifecycle label. The label distinguishes `MIC DISCONNECTED`, `MIC PERMISSION`, `MIC PUBLISHING`, `MIC LIVE`/`MIC LISTENING`, `MIC MUTED`, and `MIC ERROR`; button color and motion remain secondary cues.
 - **Menu button** — icon (hamburger) in top corner. Opens a minimal dropdown.
 
 ### Startup and disconnect overlays
@@ -70,6 +70,7 @@ Control events from `realtime-control.v2` map to UI state transitions through th
 - `state.response` → bottom overlay text (current turn response)
 - `state.history` → history panel content
 - `state.connection` → startup overlay / corner indicator / disconnect overlay
+- microphone permission/publication/track lifecycle → visible microphone status + button state
 - Per-turn metrics from `TurnHistoryItem` → timeline tab in status panel
 - Component health (forward-looking from Slice 8) → system tab in status panel
 
