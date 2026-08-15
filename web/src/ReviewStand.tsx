@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import type { AvatarHostV1 } from './avatar/AvatarHost'
-import { CONTROL_VERSION, initialVoiceState, type VoiceState } from './state'
+import { ACTIVE_LLM_MODEL_IDENTITY, CONTROL_VERSION, initialVoiceState, type VoiceState } from './state'
 import { VoiceShell } from './ui/VoiceShell'
 
 function reviewState(): VoiceState {
@@ -38,6 +38,10 @@ function reviewState(): VoiceState {
     }],
     microphoneAvailable: true,
     microphoneEnabled: true,
+    llmProfile: {
+      provider_mode: 'local',
+      model_identity: ACTIVE_LLM_MODEL_IDENTITY,
+    },
     ttsProfile: {
       profile: 'silero-kseniya',
       backend: 'silero',

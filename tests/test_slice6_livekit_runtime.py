@@ -4,6 +4,7 @@ import asyncio
 import threading
 import types
 import unittest
+from unittest.mock import patch
 
 from tests.test_checkpoint_ab import (
     CheckpointBLiveKitTests,
@@ -15,6 +16,67 @@ from tests.test_checkpoint_ab import (
 from tests.test_silero_tts import FakeSTT, FakeVisibleLLM, ProcessCoordinator
 from voice_agent_v2.silero_tts import SileroKseniyaTTS, SileroWorkerPool
 from voice_agent_v2.tracer import CancellationToken
+
+
+class PublishedLLMProfileTests(unittest.TestCase):
+    def test_publishes_only_the_warmed_verified_model_identity(self) -> None:
+        runtime = load_runtime()
+        identity = "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M"
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner._started = True
+        runner.llm = types.SimpleNamespace(
+            provider_mode="local",
+            provider_identity=identity,
+        )
+        runner.warmup_metadata = {
+            "lfm_ready": {
+                "ready": True,
+                "provider_mode": "local",
+                "provider_identity": identity,
+                "selected_alias": "lfm2.5-2.6b-q4-k-m",
+            }
+        }
+
+        self.assertEqual(runner.public_llm_profile(), {
+            "provider_mode": "local",
+            "model_identity": identity,
+        })
+
+        runner.warmup_metadata["lfm_ready"]["selected_alias"] = "unverified-model"
+        with self.assertRaisesRegex(RuntimeError, "verified local LLM identity is unavailable"):
+            runner.public_llm_profile()
+
+
+class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_includes_the_verified_profile_in_the_session_capability(self) -> None:
+        runtime = load_runtime()
+        identity = "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M"
+        llm_profile = {"provider_mode": "local", "model_identity": identity}
+        runner = types.SimpleNamespace(
+            public_llm_profile=lambda: llm_profile,
+            tts_profile=types.SimpleNamespace(public_metadata=lambda: {"profile": "test"}),
+        )
+        settings = types.SimpleNamespace(
+            max_sessions=1,
+            livekit_public_url="wss://voice.test.ts.net:7443",
+            room_token_ttl_seconds=300,
+            browser_join_timeout_seconds=30,
+        )
+        registry = runtime.SessionRegistry.__new__(runtime.SessionRegistry)
+        registry.settings = settings
+        registry.runner = runner
+        registry._controllers = {}
+        registry._lock = asyncio.Lock()
+        controller = types.SimpleNamespace(
+            start=lambda: asyncio.sleep(0),
+            arm_browser_join_timeout=lambda: None,
+            browser_token=lambda: "room-token",
+        )
+
+        with patch.object(runtime, "LiveKitRoomController", return_value=controller):
+            capability = await registry.create()
+
+        self.assertEqual(capability["llm_profile"], llm_profile)
 
 
 class LiveTurnObservationTests(unittest.TestCase):

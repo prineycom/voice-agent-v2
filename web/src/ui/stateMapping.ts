@@ -24,6 +24,8 @@ export interface VoiceUiModel {
   responseComplete: boolean
   history: TurnHistoryItem[]
   components: UiSystemComponent[]
+  llmProviderSummary: string
+  llmModelSummary: string
   ttsSummary: string
   droppedEvents: number
   audioBlocked: boolean
@@ -92,6 +94,10 @@ export function mapVoiceStateToUi(
       { id: 'tts', label: 'TTS', health: commonHealth },
       { id: 'avatar', label: 'AVATAR', health: avatarComponentHealth },
     ],
+    llmProviderSummary: state.llmProfile === null
+      ? 'UNAVAILABLE'
+      : `${state.llmProfile.provider_mode.toUpperCase()} / SERVER-VERIFIED`,
+    llmModelSummary: state.llmProfile?.model_identity ?? 'UNAVAILABLE',
     ttsSummary: state.ttsProfile === null
       ? 'UNAVAILABLE'
       : `${state.ttsProfile.backend.toUpperCase()} / ${state.ttsProfile.speaker} / ${state.ttsProfile.output_sample_rate_hz / 1000} KHZ`,

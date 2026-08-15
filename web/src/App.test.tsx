@@ -9,7 +9,7 @@ import {
   type AvatarModuleV1,
 } from './avatar/contract'
 import { ReviewStand } from './ReviewStand'
-import { initialVoiceState, type VoiceState } from './state'
+import { ACTIVE_LLM_MODEL_IDENTITY, initialVoiceState, type VoiceState } from './state'
 import { AvatarViewport } from './ui/AvatarViewport'
 import { VoiceShell } from './ui/VoiceShell'
 import { historyUserText } from './ui/panels/HistoryPanel'
@@ -110,6 +110,8 @@ describe('Slice 7 modular shell', () => {
     expect(statusPanel.hasAttribute('inert')).toBe(false)
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close status' }))
     expect(screen.getByRole('tab', { name: 'SYSTEM' })).toBeTruthy()
+    expect(screen.getByText('LOCAL / SERVER-VERIFIED')).toBeTruthy()
+    expect(screen.getByText(ACTIVE_LLM_MODEL_IDENTITY)).toBeTruthy()
     await user.click(screen.getByRole('tab', { name: 'TIMELINE' }))
     expect(screen.getByText('TURN turn-review-0000')).toBeTruthy()
     expect(screen.getByText('FIRST VISIBLE RESPONSE')).toBeTruthy()

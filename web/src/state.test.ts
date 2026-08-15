@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ACTIVE_LLM_MODEL_IDENTITY,
   CONTROL_VERSION,
   RealtimeControlGate,
   initialVoiceState,
@@ -18,6 +19,9 @@ const capability: SessionCapability = {
   expires_in_seconds: 300,
   admission_timeout_ms: 30_000,
   control_version: CONTROL_VERSION,
+  llm_profile: {
+    provider_mode: 'local', model_identity: ACTIVE_LLM_MODEL_IDENTITY,
+  },
   tts_profile: {
     profile: 'silero-kseniya', backend: 'silero', speaker: 'kseniya',
     output_sample_rate_hz: 48_000, native_sample_rate_hz: 48_000,
@@ -85,8 +89,22 @@ function completedTurn(startSequence: number, turnId: string, user: string, assi
 }
 
 describe('checkpoint A browser state', () => {
-  it('accepts only the fixed validated Silero/Kseniya native-48 capability', () => {
-    expect(parseCapability(capability)?.tts_profile.profile).toBe('silero-kseniya')
+  it('accepts only the fixed validated LLM and Silero capability', () => {
+    expect(parseCapability(capability)).toMatchObject({
+      llm_profile: {
+        provider_mode: 'local',
+        model_identity: ACTIVE_LLM_MODEL_IDENTITY,
+      },
+      tts_profile: { profile: 'silero-kseniya' },
+    })
+    expect(parseCapability({
+      ...capability,
+      llm_profile: { ...capability.llm_profile, model_identity: 'unverified-model' },
+    })).toBeNull()
+    expect(parseCapability({
+      ...capability,
+      llm_profile: { ...capability.llm_profile, provider_mode: 'cloud' },
+    })).toBeNull()
     expect(parseCapability({
       ...capability,
       tts_profile: { ...capability.tts_profile, profile: 'qwen-ryan' },

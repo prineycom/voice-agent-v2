@@ -28,6 +28,8 @@ describe('voice reducer to UI domain mapping', () => {
       avatarLifecycle: 'listening',
       microphoneVisual: 'listening',
       response: 'Ответ.',
+      llmProviderSummary: 'UNAVAILABLE',
+      llmModelSummary: 'UNAVAILABLE',
     })
     expect(model.components.every((component) => component.health === 'READY')).toBe(true)
   })

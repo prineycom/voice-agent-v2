@@ -386,6 +386,10 @@ async def main() -> int:
             "expires_in_seconds": 60,
             "admission_timeout_ms": 30_000,
             "control_version": "voice-agent.realtime-control.v2",
+            "llm_profile": {
+                "provider_mode": "local",
+                "model_identity": "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M",
+            },
             "tts_profile": {
                 "profile": "silero-kseniya",
                 "backend": "silero",

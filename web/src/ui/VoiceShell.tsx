@@ -195,6 +195,8 @@ export function VoiceShell({
       <StatusPanel
         open={activePanel === 'status'}
         components={model.components}
+        llmProviderSummary={model.llmProviderSummary}
+        llmModelSummary={model.llmModelSummary}
         ttsSummary={model.ttsSummary}
         history={model.history}
         selectedTurnId={effectiveSelectedTurnId}

@@ -12,12 +12,16 @@ function milliseconds(value: number | null): string {
 
 function SystemTab({
   components,
+  llmProviderSummary,
+  llmModelSummary,
   ttsSummary,
   avatarHealth,
   speechEnvelopeStatus,
   buildVersion,
 }: {
   components: UiSystemComponent[]
+  llmProviderSummary: string
+  llmModelSummary: string
   ttsSummary: string
   avatarHealth: AvatarHealthV1
   speechEnvelopeStatus: SpeechEnvelopeStatus
@@ -34,7 +38,8 @@ function SystemTab({
         ))}
       </ul>
       <dl className="configuration-list">
-        <div><dt>PROVIDER</dt><dd>LOCAL / SERVER-VERIFIED</dd></div>
+        <div><dt>PROVIDER</dt><dd>{llmProviderSummary}</dd></div>
+        <div><dt>MODEL</dt><dd>{llmModelSummary}</dd></div>
         <div><dt>VOICE</dt><dd>{ttsSummary}</dd></div>
         <div><dt>AVATAR MODULE</dt><dd>{avatarHealth.activeModuleId ?? 'UNAVAILABLE'}</dd></div>
         <div><dt>AVATAR INPUT DROPS</dt><dd>{avatarHealth.rejectedInputs}</dd></div>
@@ -81,6 +86,8 @@ function TimelineTab({
 export function StatusPanel({
   open,
   components,
+  llmProviderSummary,
+  llmModelSummary,
   ttsSummary,
   history,
   selectedTurnId,
@@ -93,6 +100,8 @@ export function StatusPanel({
 }: {
   open: boolean
   components: UiSystemComponent[]
+  llmProviderSummary: string
+  llmModelSummary: string
   ttsSummary: string
   history: TurnHistoryItem[]
   selectedTurnId: string | null
@@ -139,6 +148,8 @@ export function StatusPanel({
         {tab === 'system' ? (
           <SystemTab
             components={components}
+            llmProviderSummary={llmProviderSummary}
+            llmModelSummary={llmModelSummary}
             ttsSummary={ttsSummary}
             avatarHealth={avatarHealth}
             speechEnvelopeStatus={speechEnvelopeStatus}

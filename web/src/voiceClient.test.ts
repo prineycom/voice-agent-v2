@@ -57,6 +57,7 @@ vi.mock('livekit-client', () => ({
 }))
 
 import { AudioPlaybackBoundary } from './playback'
+import { ACTIVE_LLM_MODEL_IDENTITY } from './state'
 import { VoiceClient, type VoiceClientCallbacks } from './voiceClient'
 
 function capabilityResponse(): Response {
@@ -70,6 +71,9 @@ function capabilityResponse(): Response {
       expires_in_seconds: 30,
       admission_timeout_ms: 30_000,
       control_version: 'voice-agent.realtime-control.v2',
+      llm_profile: {
+        provider_mode: 'local', model_identity: ACTIVE_LLM_MODEL_IDENTITY,
+      },
       tts_profile: {
         profile: 'silero-kseniya', backend: 'silero', speaker: 'kseniya',
         output_sample_rate_hz: 48_000, native_sample_rate_hz: 48_000,
