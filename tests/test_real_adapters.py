@@ -1100,6 +1100,46 @@ class RealTurnControllerTests(unittest.TestCase):
 
 
 class LocalSTTContractTests(unittest.TestCase):
+    def test_warmup_accepts_only_a_structurally_valid_empty_result(self) -> None:
+        class WarmupProcess(StubProcess):
+            class Child:
+                pid = 5100
+
+                @staticmethod
+                def poll():
+                    return None
+
+            process = Child()
+
+            def __init__(self, response: dict[str, object]) -> None:
+                self.response = response
+                self.requests = 0
+
+            def request(self, value: dict, timeout: float) -> dict:
+                super().request(value, timeout)
+                self.requests += 1
+                return {"event": "final", "request_id": value["request_id"], **self.response}
+
+        for response, expected_error in (({"hypothesis": ""}, None), ({}, "invalid_stt_result")):
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as directory:
+                stt = WhisperSTT()
+                process = WarmupProcess(response)
+                stt._process = process
+                stt.ready_metadata = {"event": "ready"}
+                with patch("voice_agent_v2.local_stt.TEMP", Path(directory)):
+                    if expected_error is None:
+                        self.assertEqual(
+                            stt.warmup(),
+                            {"process_id": 5100, "discarded": True},
+                        )
+                    else:
+                        with self.assertRaises(StageFailure) as raised:
+                            stt.warmup()
+                        self.assertEqual(raised.exception.code, expected_error)
+                self.assertEqual(process.requests, 1)
+                self.assertFalse(list(Path(directory).iterdir()))
+                self.assertEqual(stt.observations, [])
+
     def test_cancelled_transcription_drains_without_stopping_resident_process(self) -> None:
         token = CancellationToken()
 

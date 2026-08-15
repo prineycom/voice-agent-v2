@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from array import array
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import math
 import sys
 from typing import Callable, Protocol
@@ -28,16 +28,33 @@ class SpeechProbabilityModel(Protocol):
     def reset(self) -> None: ...
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class SileroOnnxModel:
     """One CPU-only recurrent Silero v6 stream; accepts exact 512-sample windows."""
 
     def __init__(self, model_path: Path = DEFAULT_MODEL_PATH) -> None:
+        path = model_path.resolve()
+        try:
+            valid_identity = (
+                path.is_file()
+                and path.stat().st_size == SILERO_MODEL_SIZE
+                and _sha256_file(path) == SILERO_MODEL_SHA256
+            )
+        except OSError:
+            valid_identity = False
+        if not valid_identity:
+            raise RuntimeError("pinned Silero VAD model identity is unavailable")
+
         import numpy as np
         import onnxruntime
 
-        path = model_path.resolve()
-        if not path.is_file() or path.stat().st_size != SILERO_MODEL_SIZE:
-            raise RuntimeError("pinned Silero VAD model is unavailable")
         self._np = np
         options = onnxruntime.SessionOptions()
         options.inter_op_num_threads = 1
@@ -92,13 +109,16 @@ class SileroSpeechEndpoint:
         end_silence_ms: int = 640,
         min_speech_ms: int = 192,
         pre_roll_ms: int = 256,
+        post_speech_ms: int = 160,
         max_utterance_ms: int = 15_000,
     ) -> None:
         if input_frame_ms != 20:
             raise ValueError("Slice 6 microphone frames must remain 20 ms")
         if not 0 < continue_probability < start_probability < 1:
             raise ValueError("VAD probability thresholds are invalid")
-        for duration in (start_ms, end_silence_ms, min_speech_ms, pre_roll_ms):
+        for duration in (
+            start_ms, end_silence_ms, min_speech_ms, pre_roll_ms, post_speech_ms,
+        ):
             if duration <= 0 or duration % 32:
                 raise ValueError("VAD durations must be positive 32 ms window multiples")
         if max_utterance_ms <= 0:
@@ -113,17 +133,26 @@ class SileroSpeechEndpoint:
         self.end_windows = end_silence_ms // 32
         self.min_speech_windows = min_speech_ms // 32
         self.admission_windows = max(self.start_windows, self.min_speech_windows)
-        self.max_input_frames = max_utterance_ms // input_frame_ms
-        self._pre_roll: deque[bytes] = deque(maxlen=pre_roll_ms // input_frame_ms)
+        self.pre_roll_bytes = SAMPLE_RATE_HZ * SAMPLE_WIDTH_BYTES * pre_roll_ms // 1000
+        self.post_speech_ms = post_speech_ms
+        self.post_speech_bytes = (
+            SAMPLE_RATE_HZ * SAMPLE_WIDTH_BYTES * post_speech_ms // 1000
+        )
+        self.max_utterance_bytes = (
+            SAMPLE_RATE_HZ * SAMPLE_WIDTH_BYTES * max_utterance_ms // 1000
+        )
+        self._history = bytearray()
         self._pending = bytearray()
+        self._candidate_pre_onset = b""
         self._candidate_windows: list[bytes] = []
         self._candidate_voiced = 0
         self._speaking = False
-        self._utterance: list[bytes] = []
+        self._utterance = bytearray()
+        self._processed_utterance_bytes = 0
+        self._last_speech_end_bytes = 0
         self._speech_windows = 0
         self._silence_windows = 0
         self._window_index = 0
-        self._utterance_input_frames = 0
 
     @staticmethod
     def _rms(pcm: bytes) -> int:
@@ -137,6 +166,12 @@ class SileroSpeechEndpoint:
     @staticmethod
     def _bucket(value: float) -> float:
         return round(min(1.0, max(0.0, value)), 3)
+
+    def _extend_history(self, pcm: bytes) -> None:
+        self._history.extend(pcm)
+        overflow = len(self._history) - self.pre_roll_bytes
+        if overflow > 0:
+            del self._history[:overflow]
 
     def _observe(self, decision: str, probability: float, pcm: bytes) -> None:
         if self.telemetry is None:
@@ -152,15 +187,14 @@ class SileroSpeechEndpoint:
             "candidate_duration_ms": len(self._candidate_windows) * 32,
             "speech_duration_ms": self._speech_windows * 32,
             "silence_duration_ms": self._silence_windows * 32,
+            "submitted_post_speech_ms": self.post_speech_ms,
         })
 
     def feed(self, pcm: bytes) -> list[VADSignal]:
         if len(pcm) != self.input_frame_bytes:
             raise ValueError("endpoint frame must be 20 ms of 16 kHz mono s16le PCM")
-        self._pre_roll.append(pcm)
         if self._speaking:
-            self._utterance.append(pcm)
-            self._utterance_input_frames += 1
+            self._utterance.extend(pcm)
         self._pending.extend(pcm)
         signals: list[VADSignal] = []
         while len(self._pending) >= self.window_bytes:
@@ -170,42 +204,62 @@ class SileroSpeechEndpoint:
             probability = self.model.infer(window)
             if not self._speaking:
                 if probability >= self.start_probability:
+                    if not self._candidate_windows:
+                        # Freeze the pre-onset samples before confirmation can
+                        # rotate them out of the bounded custody window.
+                        self._candidate_pre_onset = bytes(self._history)
                     self._candidate_windows.append(window)
                     self._candidate_voiced += 1
                     self._observe("candidate", probability, window)
                 else:
                     if self._candidate_windows:
                         self._observe("candidate_rejected", probability, window)
+                        self._extend_history(b"".join(self._candidate_windows))
+                    self._candidate_pre_onset = b""
                     self._candidate_windows.clear()
                     self._candidate_voiced = 0
+                    self._extend_history(window)
                     self._observe("noise", probability, window)
                 if self._candidate_voiced >= self.admission_windows:
+                    candidate = b"".join(self._candidate_windows)
                     self._speaking = True
-                    self._utterance = list(self._pre_roll)
-                    self._utterance_input_frames = len(self._utterance)
+                    self._utterance = bytearray(
+                        self._candidate_pre_onset + candidate + bytes(self._pending)
+                    )
+                    self._processed_utterance_bytes = (
+                        len(self._candidate_pre_onset) + len(candidate)
+                    )
+                    self._last_speech_end_bytes = self._processed_utterance_bytes
                     self._speech_windows = self._candidate_voiced
                     self._silence_windows = 0
+                    self._candidate_pre_onset = b""
                     self._candidate_windows.clear()
                     self._candidate_voiced = 0
                     self._observe("speech_started", probability, window)
                     signals.append(VADSignal("speech_started"))
                 continue
 
+            self._processed_utterance_bytes += self.window_bytes
             if probability >= self.continue_probability:
                 self._speech_windows += 1
                 self._silence_windows = 0
+                self._last_speech_end_bytes = self._processed_utterance_bytes
                 self._observe("speech", probability, window)
             else:
                 self._silence_windows += 1
                 self._observe("silence", probability, window)
             if (
                 self._silence_windows >= self.end_windows
-                or self._utterance_input_frames >= self.max_input_frames
+                or len(self._utterance) >= self.max_utterance_bytes
             ):
                 if self._speech_windows >= self.min_speech_windows:
-                    payload = b"".join(self._utterance)
+                    payload_end = min(
+                        len(self._utterance),
+                        self.max_utterance_bytes,
+                        self._last_speech_end_bytes + self.post_speech_bytes,
+                    )
                     self._observe("utterance", probability, window)
-                    signals.append(VADSignal("utterance", payload))
+                    signals.append(VADSignal("utterance", bytes(self._utterance[:payload_end])))
                 else:
                     self._observe("speech_discarded", probability, window)
                     signals.append(VADSignal("speech_discarded"))
@@ -220,18 +274,25 @@ class SileroSpeechEndpoint:
         if self._speech_windows < self.min_speech_windows:
             self.reset()
             return [VADSignal("speech_discarded")]
-        payload = b"".join(self._utterance)
+        payload_end = min(
+            len(self._utterance),
+            self.max_utterance_bytes,
+            self._last_speech_end_bytes + self.post_speech_bytes,
+        )
+        payload = bytes(self._utterance[:payload_end])
         self.reset()
         return [VADSignal("utterance", payload)]
 
     def reset(self) -> None:
         self.model.reset()
-        self._pre_roll.clear()
+        self._history.clear()
         self._pending.clear()
+        self._candidate_pre_onset = b""
         self._candidate_windows.clear()
         self._candidate_voiced = 0
         self._speaking = False
-        self._utterance = []
+        self._utterance = bytearray()
+        self._processed_utterance_bytes = 0
+        self._last_speech_end_bytes = 0
         self._speech_windows = 0
         self._silence_windows = 0
-        self._utterance_input_frames = 0
