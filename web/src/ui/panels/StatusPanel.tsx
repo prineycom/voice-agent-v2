@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AvatarHealthV1 } from '../../avatar/contract'
+import type { SpeechEnvelopeStatus } from '../../playback'
 import type { TurnHistoryItem } from '../../state'
 import type { UiSystemComponent } from '../stateMapping'
 
@@ -13,11 +14,13 @@ function SystemTab({
   components,
   ttsSummary,
   avatarHealth,
+  speechEnvelopeStatus,
   buildVersion,
 }: {
   components: UiSystemComponent[]
   ttsSummary: string
   avatarHealth: AvatarHealthV1
+  speechEnvelopeStatus: SpeechEnvelopeStatus
   buildVersion: string
 }) {
   return (
@@ -35,6 +38,7 @@ function SystemTab({
         <div><dt>VOICE</dt><dd>{ttsSummary}</dd></div>
         <div><dt>AVATAR MODULE</dt><dd>{avatarHealth.activeModuleId ?? 'UNAVAILABLE'}</dd></div>
         <div><dt>AVATAR INPUT DROPS</dt><dd>{avatarHealth.rejectedInputs}</dd></div>
+        <div><dt>SPEECH ENVELOPE</dt><dd>{speechEnvelopeStatus.toUpperCase()}</dd></div>
         <div><dt>BUILD</dt><dd className="build-version">{buildVersion}</dd></div>
       </dl>
     </div>
@@ -82,6 +86,7 @@ export function StatusPanel({
   selectedTurnId,
   droppedEvents,
   avatarHealth,
+  speechEnvelopeStatus,
   buildVersion,
   onDownloadDiagnostics,
   onClose,
@@ -93,6 +98,7 @@ export function StatusPanel({
   selectedTurnId: string | null
   droppedEvents: number
   avatarHealth: AvatarHealthV1
+  speechEnvelopeStatus: SpeechEnvelopeStatus
   buildVersion: string
   onDownloadDiagnostics(): void
   onClose(): void
@@ -135,6 +141,7 @@ export function StatusPanel({
             components={components}
             ttsSummary={ttsSummary}
             avatarHealth={avatarHealth}
+            speechEnvelopeStatus={speechEnvelopeStatus}
             buildVersion={buildVersion}
           />
         ) : (

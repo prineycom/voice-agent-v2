@@ -9,6 +9,8 @@ export interface SpeechEnvelopeObservation {
   observedAtMs: number
 }
 
+export type SpeechEnvelopeStatus = 'unknown' | 'available' | 'unavailable'
+
 /** Converts decoded signed-around-128 time-domain samples into a bounded RMS envelope. */
 export function speechEnvelopeFromTimeDomain(samples: Uint8Array): number {
   if (samples.length === 0) return 0
@@ -37,6 +39,7 @@ export class AudioPlaybackBoundary {
   private lastEnvelopeAtMs = -Infinity
   private playbackActive = false
   private envelopeGraphDisabled = false
+  private envelopeStatus: SpeechEnvelopeStatus = 'unknown'
   private playbackListeners: Array<{
     element: HTMLMediaElement
     type: string
@@ -47,6 +50,7 @@ export class AudioPlaybackBoundary {
     private readonly container: HTMLElement,
     private readonly onBlocked: (blocked: boolean) => void,
     private readonly onSpeechEnvelope: (observation: SpeechEnvelopeObservation) => void = () => undefined,
+    private readonly onSpeechEnvelopeStatus: (status: SpeechEnvelopeStatus) => void = () => undefined,
   ) {}
 
   setTrack(track: AttachableAudioTrack, publicationGeneration = this.publicationGeneration + 1): void {
@@ -60,6 +64,7 @@ export class AudioPlaybackBoundary {
     this.publicationGeneration = publicationGeneration
     this.track = track
     this.envelopeGraphDisabled = false
+    this.reportEnvelopeStatus('unknown')
     this.attachFresh()
   }
 
@@ -84,6 +89,7 @@ export class AudioPlaybackBoundary {
     if (this.track === null) return
     this.detachElement()
     this.envelopeGraphDisabled = false
+    this.reportEnvelopeStatus('unknown')
     this.attachFresh()
   }
 
@@ -108,6 +114,7 @@ export class AudioPlaybackBoundary {
     this.element = null
     this.elementBlocked = false
     this.stopEnvelopeObservation()
+    this.reportEnvelopeStatus('unknown')
     this.reportBlocked()
     if (errors.length === 0) {
       this.track = null
@@ -152,6 +159,12 @@ export class AudioPlaybackBoundary {
 
   private reportBlocked(): void {
     this.onBlocked(this.elementBlocked)
+  }
+
+  private reportEnvelopeStatus(status: SpeechEnvelopeStatus): void {
+    if (this.envelopeStatus === status) return
+    this.envelopeStatus = status
+    this.onSpeechEnvelopeStatus(status)
   }
 
   private detachElement(): void {
@@ -227,7 +240,11 @@ export class AudioPlaybackBoundary {
   private startEnvelopeObservation(): void {
     const element = this.element
     if (!this.playbackActive || element === null || this.envelopeGraphDisabled) return
-    if (typeof AudioContext === 'undefined') return
+    if (typeof AudioContext === 'undefined') {
+      this.envelopeGraphDisabled = true
+      this.reportEnvelopeStatus('unavailable')
+      return
+    }
     if (this.audioContext === null) {
       let context: AudioContext | null = null
       let analyser: AnalyserNode | null = null
@@ -255,6 +272,7 @@ export class AudioPlaybackBoundary {
         } catch {}
         if (context !== null) void context.close().catch(() => undefined)
         this.envelopeGraphDisabled = true
+        this.reportEnvelopeStatus('unavailable')
         if (elementWasRerouted) this.restoreDirectPlayback(element)
         return
       }
@@ -266,12 +284,14 @@ export class AudioPlaybackBoundary {
           this.audioContext === context && this.playbackActive
           && this.element === element && this.envelopeFrame === null
         ) {
+          this.reportEnvelopeStatus('available')
           this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
         }
       },
       () => {
         if (this.audioContext === context && this.element === element) {
           this.envelopeGraphDisabled = true
+          this.reportEnvelopeStatus('unavailable')
           this.restoreDirectPlayback(element)
         }
       },

@@ -72,4 +72,16 @@ describe('voice reducer to UI domain mapping', () => {
     expect(model.connection).toBe('ready')
     expect(model.components.find((component) => component.id === 'avatar')?.health).toBe('DEGRADED')
   })
+
+  it('reports unavailable speech-envelope analysis as avatar degradation', () => {
+    const model = mapVoiceStateToUi({
+      ...initialVoiceState,
+      connection: 'ready',
+      speechEnvelopeStatus: 'unavailable',
+    }, avatarReady)
+
+    expect(model.audioBlocked).toBe(false)
+    expect(model.speechEnvelopeStatus).toBe('unavailable')
+    expect(model.components.find((component) => component.id === 'avatar')?.health).toBe('DEGRADED')
+  })
 })

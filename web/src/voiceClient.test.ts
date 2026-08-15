@@ -101,6 +101,7 @@ function callbacks(): VoiceClientCallbacks {
     onDrop: vi.fn(),
     onAudioBlocked: vi.fn(),
     onSpeechEnvelope: vi.fn(),
+    onSpeechEnvelopeStatus: vi.fn(),
     onMicrophoneState: vi.fn(),
     onDiagnostic: vi.fn(),
   }

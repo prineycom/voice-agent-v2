@@ -1,4 +1,5 @@
 import type { AvatarHealthV1, AvatarLifecycleState } from '../avatar/contract'
+import type { SpeechEnvelopeStatus } from '../playback'
 import type { ConnectionState, TurnHistoryItem, VoiceState } from '../state'
 
 export type MicrophoneVisualState = 'idle' | 'listening' | 'muted' | 'error'
@@ -26,6 +27,7 @@ export interface VoiceUiModel {
   ttsSummary: string
   droppedEvents: number
   audioBlocked: boolean
+  speechEnvelopeStatus: SpeechEnvelopeStatus
 }
 
 function voicePathHealth(connection: ConnectionState): ComponentHealth {
@@ -65,11 +67,11 @@ export function mapVoiceStateToUi(
     failed: 'CONNECTION LOST',
   }
   const commonHealth = voicePathHealth(state.connection)
-  const avatarComponentHealth: ComponentHealth = avatarHealth.status === 'ready'
-    ? 'READY'
-    : avatarHealth.status === 'degraded'
+  const avatarComponentHealth: ComponentHealth = avatarHealth.status === 'failed'
+    ? 'FAILED'
+    : avatarHealth.status === 'degraded' || state.speechEnvelopeStatus === 'unavailable'
       ? 'DEGRADED'
-      : 'FAILED'
+      : 'READY'
 
   return {
     connection: state.connection,
@@ -95,5 +97,6 @@ export function mapVoiceStateToUi(
       : `${state.ttsProfile.backend.toUpperCase()} / ${state.ttsProfile.speaker} / ${state.ttsProfile.output_sample_rate_hz / 1000} KHZ`,
     droppedEvents: state.droppedEvents,
     audioBlocked: state.audioBlocked,
+    speechEnvelopeStatus: state.speechEnvelopeStatus,
   }
 }

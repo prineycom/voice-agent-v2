@@ -200,6 +200,7 @@ export function VoiceShell({
         selectedTurnId={effectiveSelectedTurnId}
         droppedEvents={model.droppedEvents}
         avatarHealth={avatarHealth}
+        speechEnvelopeStatus={model.speechEnvelopeStatus}
         buildVersion={buildVersion}
         onDownloadDiagnostics={onDownloadDiagnostics}
         onClose={() => setActivePanel(null)}

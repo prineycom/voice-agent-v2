@@ -168,7 +168,13 @@ describe('persistent playback observation', () => {
     }
     const container = document.createElement('div')
     const blocked = vi.fn()
-    const boundary = new AudioPlaybackBoundary(container, blocked)
+    const envelopeStatus = vi.fn()
+    const boundary = new AudioPlaybackBoundary(
+      container,
+      blocked,
+      () => undefined,
+      envelopeStatus,
+    )
 
     boundary.setTrack(remote)
     await Promise.resolve()
@@ -182,6 +188,7 @@ describe('persistent playback observation', () => {
     expect(source.disconnect).toHaveBeenCalledTimes(1)
     expect(context.close).toHaveBeenCalledTimes(1)
     expect(blocked).toHaveBeenLastCalledWith(false)
+    expect(envelopeStatus).toHaveBeenLastCalledWith('unavailable')
   })
 
   it('attaches one persistent track and reports autoplay failure without throwing', async () => {

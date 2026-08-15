@@ -174,9 +174,9 @@ describe('avatar host v1 boundary', () => {
   })
 
   it('keeps the last rendered target at cancellation and eases it back to neutral', () => {
-    let scheduledFrame: FrameRequestCallback | null = null
+    const scheduled: { frame: FrameRequestCallback | null } = { frame: null }
     vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
-      scheduledFrame = callback
+      scheduled.frame = callback
       return 1
     }))
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
@@ -199,14 +199,14 @@ describe('avatar host v1 boundary', () => {
       renderer.cancel(1_010)
       expect(iris.style.transform).toBe(trackedTransform)
 
-      const middleFrame = scheduledFrame
+      const middleFrame = scheduled.frame
       if (middleFrame === null) throw new Error('eye renderer did not schedule a frame')
       middleFrame(1_190)
       const middleX = Number.parseFloat(iris.style.transform.match(/translate\(([-\d.]+)px/)?.[1] ?? 'NaN')
       expect(middleX).toBeGreaterThan(0)
       expect(middleX).toBeLessThan(0.38 * 112)
 
-      const finalFrame = scheduledFrame
+      const finalFrame = scheduled.frame
       if (finalFrame === null) throw new Error('eye renderer did not reschedule a frame')
       finalFrame(1_370)
       expect(iris.style.transform).toBe('translate(0px, 0px)')

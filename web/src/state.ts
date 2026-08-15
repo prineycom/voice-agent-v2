@@ -1,3 +1,5 @@
+import type { SpeechEnvelopeStatus } from './playback'
+
 export const CONTROL_VERSION = 'voice-agent.realtime-control.v2'
 export const CLIENT_CONTROL_VERSION = 'voice-agent.client-control.v1'
 export const CONTROL_TOPIC = 'voice-agent.control.v2'
@@ -104,6 +106,7 @@ export interface VoiceState {
   error: string | null
   droppedEvents: number
   audioBlocked: boolean
+  speechEnvelopeStatus: SpeechEnvelopeStatus
   microphoneAvailable: boolean
   microphoneEnabled: boolean
   microphoneTransitioning: boolean
@@ -129,6 +132,7 @@ export const initialVoiceState: VoiceState = {
   error: null,
   droppedEvents: 0,
   audioBlocked: false,
+  speechEnvelopeStatus: 'unknown',
   microphoneAvailable: false,
   microphoneEnabled: false,
   microphoneTransitioning: false,
@@ -142,6 +146,7 @@ export type VoiceAction =
   | { type: 'control'; event: ControlEvent }
   | { type: 'drop' }
   | { type: 'audio-blocked'; blocked: boolean }
+  | { type: 'speech-envelope-status'; status: SpeechEnvelopeStatus }
   | { type: 'microphone'; enabled: boolean; transitioning: boolean; error?: string }
   | { type: 'reset' }
 
@@ -369,6 +374,9 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   if (action.type === 'reset') return initialVoiceState
   if (action.type === 'drop') return drop(state)
   if (action.type === 'audio-blocked') return { ...state, audioBlocked: action.blocked }
+  if (action.type === 'speech-envelope-status') {
+    return { ...state, speechEnvelopeStatus: action.status }
+  }
   if (action.type === 'microphone') {
     return {
       ...state,

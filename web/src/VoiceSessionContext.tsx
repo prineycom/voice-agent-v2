@@ -54,6 +54,7 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
       onSpeechEnvelope: (observation) => {
         for (const listener of envelopeListenersRef.current) listener(observation)
       },
+      onSpeechEnvelopeStatus: (status) => dispatch({ type: 'speech-envelope-status', status }),
       onMicrophoneState: (enabled, transitioning, error) => {
         dispatch({ type: 'microphone', enabled, transitioning, error })
       },

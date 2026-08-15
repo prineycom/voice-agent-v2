@@ -261,6 +261,37 @@ describe('Slice 7 modular shell', () => {
     expect(document.querySelector('.voice-shell')?.getAttribute('data-system-reduced-motion')).toBe('true')
   })
 
+  it('shows speech-envelope degradation without reporting the avatar ready', async () => {
+    const user = userEvent.setup()
+    const audioContainerRef = createRef<HTMLDivElement>()
+    render(
+      <VoiceShell
+        state={{
+          ...initialVoiceState,
+          connection: 'ready',
+          sessionId: 'session-envelope-test',
+          speechEnvelopeStatus: 'unavailable',
+        }}
+        avatarHost={testAvatarHost()}
+        buildVersion="build-test"
+        connectAttempted
+        audioContainerRef={audioContainerRef}
+        subscribeSpeechEnvelope={() => () => undefined}
+        onConnect={() => undefined}
+        onDisconnect={() => undefined}
+        onResumeAudio={() => undefined}
+        onToggleMicrophone={() => undefined}
+        onDownloadDiagnostics={() => undefined}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Open menu' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: /STATUS/ }))
+
+    expect(screen.getByText('SPEECH ENVELOPE').nextElementSibling?.textContent).toBe('UNAVAILABLE')
+    expect(screen.getByText('AVATAR').nextElementSibling?.textContent).toBe('DEGRADED')
+  })
+
   it('keeps the icon-only microphone control coherent and persists reduced motion', async () => {
     const user = userEvent.setup()
     render(<ReviewStand avatarHost={testAvatarHost()} buildVersion="build-test" />)
