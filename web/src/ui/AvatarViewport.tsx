@@ -33,6 +33,7 @@ export function AvatarViewport({
   const motionRef = useRef(motion)
   const targetRef = useRef(trackingTarget)
   const envelopeRef = useRef<SpeechEnvelopeObservation | null>(null)
+  const playoutActiveRef = useRef(false)
   const interruptionActiveRef = useRef(false)
 
   lifecycleRef.current = lifecycle
@@ -50,39 +51,53 @@ export function AvatarViewport({
   useEffect(() => {
     const now = performance.now()
     if (lifecycle === 'interrupted') {
-      if (!interruptionActiveRef.current) envelopeRef.current = null
+      if (!interruptionActiveRef.current) {
+        envelopeRef.current = null
+        playoutActiveRef.current = false
+      }
       interruptionActiveRef.current = true
       host.cancel(now, motion)
       return
     }
     interruptionActiveRef.current = false
+    const presentationLifecycle = playoutActiveRef.current
+      && (lifecycle === 'idle' || lifecycle === 'speaking')
+      ? 'speaking'
+      : lifecycle
     host.update({
       schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,
       timestampMs: now,
       idleSeed,
-      lifecycle,
+      lifecycle: presentationLifecycle,
       motion,
       trackingTarget,
       speechEnvelope: envelopeRef.current === null ? null : {
-        ...envelopeRef.current,
+        level: envelopeRef.current.level,
+        observedAtMs: envelopeRef.current.observedAtMs,
         source: 'decoded-playout',
       },
     })
   }, [host, idleSeed, lifecycle, motion, trackingTarget])
 
   useEffect(() => subscribeSpeechEnvelope((observation) => {
-    envelopeRef.current = observation
-    if (lifecycleRef.current !== 'speaking') return
+    if (lifecycleRef.current === 'interrupted') return
+    playoutActiveRef.current = observation.playoutActive
+    envelopeRef.current = observation.playoutActive ? observation : null
+    const presentationLifecycle = observation.playoutActive
+      && (lifecycleRef.current === 'idle' || lifecycleRef.current === 'speaking')
+      ? 'speaking'
+      : lifecycleRef.current
     const now = performance.now()
     host.update({
       schemaVersion: AVATAR_CONTROL_SCHEMA_VERSION,
       timestampMs: now,
       idleSeed,
-      lifecycle: lifecycleRef.current,
+      lifecycle: presentationLifecycle,
       motion: motionRef.current,
       trackingTarget: targetRef.current,
-      speechEnvelope: {
-        ...observation,
+      speechEnvelope: envelopeRef.current === null ? null : {
+        level: envelopeRef.current.level,
+        observedAtMs: envelopeRef.current.observedAtMs,
         source: 'decoded-playout',
       },
     })

@@ -11,6 +11,7 @@ import {
 } from './avatar/contract'
 import { ReviewStand } from './ReviewStand'
 import { VoiceSessionProvider } from './VoiceSessionContext'
+import type { SpeechEnvelopeObservation } from './playback'
 import { ACTIVE_LLM_MODEL_IDENTITY, initialVoiceState, type VoiceState } from './state'
 import { AvatarViewport } from './ui/AvatarViewport'
 import { VoiceShell } from './ui/VoiceShell'
@@ -284,9 +285,9 @@ describe('Slice 7 modular shell', () => {
     const cancel = vi.fn()
     const host = testAvatarHost(update, cancel)
     const envelopeSubscription: {
-      listener: ((observation: { level: number; observedAtMs: number }) => void) | null
+      listener: ((observation: SpeechEnvelopeObservation) => void) | null
     } = { listener: null }
-    const subscribeSpeechEnvelope = (listener: (observation: { level: number; observedAtMs: number }) => void) => {
+    const subscribeSpeechEnvelope = (listener: (observation: SpeechEnvelopeObservation) => void) => {
       envelopeSubscription.listener = listener
       return () => { envelopeSubscription.listener = null }
     }
@@ -314,7 +315,11 @@ describe('Slice 7 modular shell', () => {
     expect(cancel).toHaveBeenCalledTimes(1)
     expect(cancel).toHaveBeenLastCalledWith(expect.any(Number), 'full')
     expect(update).toHaveBeenCalledTimes(updatesBeforeCancel)
-    envelopeSubscription.listener?.({ level: 0.8, observedAtMs: performance.now() })
+    envelopeSubscription.listener?.({
+      level: 0.8,
+      observedAtMs: performance.now(),
+      playoutActive: true,
+    })
     expect(update).toHaveBeenCalledTimes(updatesBeforeCancel)
 
     rerender(
@@ -340,11 +345,8 @@ describe('Slice 7 modular shell', () => {
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
       lifecycle: 'idle',
       motion: 'static',
-      speechEnvelope: expect.objectContaining({ level: 0.8 }),
+      speechEnvelope: null,
     }))
-    const updatesWhileIdle = update.mock.calls.length
-    envelopeSubscription.listener?.({ level: 0.4, observedAtMs: performance.now() })
-    expect(update).toHaveBeenCalledTimes(updatesWhileIdle)
 
     rerender(
       <AvatarViewport
@@ -355,9 +357,63 @@ describe('Slice 7 modular shell', () => {
         onHealth={onHealth}
       />,
     )
+    envelopeSubscription.listener?.({
+      level: 0.4,
+      observedAtMs: performance.now(),
+      playoutActive: true,
+    })
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
       lifecycle: 'speaking',
       speechEnvelope: expect.objectContaining({ level: 0.4 }),
+    }))
+  })
+
+  it('keeps current playout active when turn completion precedes media ended', () => {
+    const update = vi.fn()
+    const envelopeSubscription: {
+      listener: ((observation: SpeechEnvelopeObservation) => void) | null
+    } = { listener: null }
+    const subscribeSpeechEnvelope = (listener: (observation: SpeechEnvelopeObservation) => void) => {
+      envelopeSubscription.listener = listener
+      return () => { envelopeSubscription.listener = null }
+    }
+    const props = {
+      host: testAvatarHost(update),
+      motion: 'full' as const,
+      subscribeSpeechEnvelope,
+      onHealth: vi.fn(),
+    }
+    const { rerender } = render(<AvatarViewport {...props} lifecycle="speaking" />)
+
+    envelopeSubscription.listener?.({
+      level: 0.8,
+      observedAtMs: performance.now(),
+      playoutActive: true,
+    })
+    rerender(<AvatarViewport {...props} lifecycle="idle" />)
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      lifecycle: 'speaking',
+      speechEnvelope: expect.objectContaining({ level: 0.8 }),
+    }))
+
+    envelopeSubscription.listener?.({
+      level: 0.4,
+      observedAtMs: performance.now(),
+      playoutActive: true,
+    })
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      lifecycle: 'speaking',
+      speechEnvelope: expect.objectContaining({ level: 0.4 }),
+    }))
+
+    envelopeSubscription.listener?.({
+      level: 0,
+      observedAtMs: performance.now(),
+      playoutActive: false,
+    })
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      lifecycle: 'idle',
+      speechEnvelope: null,
     }))
   })
 

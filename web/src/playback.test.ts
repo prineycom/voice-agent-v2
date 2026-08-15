@@ -67,9 +67,9 @@ describe('persistent playback observation', () => {
     let element!: HTMLMediaElement
     let paused = true
     let ended = false
-    const observations: number[] = []
+    const observations: Array<{ level: number; playoutActive: boolean }> = []
     const boundary = new AudioPlaybackBoundary(
-      document.createElement('div'), vi.fn(), ({ level }) => observations.push(level),
+      document.createElement('div'), vi.fn(), (observation) => observations.push(observation),
     )
     boundary.setTrack({
       attach: (requestedElement) => {
@@ -102,28 +102,30 @@ describe('persistent playback observation', () => {
     expect(analyser.connect).toHaveBeenCalledWith(context.destination)
     expect(animationFrame).not.toBeNull()
     ;(animationFrame as unknown as FrameRequestCallback)(40)
-    expect(observations.at(-1)).toBeGreaterThan(0)
+    expect(observations.at(-1)?.level).toBeGreaterThan(0)
+    expect(observations.at(-1)?.playoutActive).toBe(true)
 
     element.dispatchEvent(new Event('stalled'))
-    expect(observations.at(-1)).toBe(0)
+    expect(observations.at(-1)).toMatchObject({ level: 0, playoutActive: false })
     const stalledObservationCount = observations.length
     ;(animationFrame as unknown as FrameRequestCallback)(80)
     expect(observations).toHaveLength(stalledObservationCount)
 
     element.dispatchEvent(new Event('playing'))
     ;(animationFrame as unknown as FrameRequestCallback)(120)
-    expect(observations.at(-1)).toBeGreaterThan(0)
+    expect(observations.at(-1)?.level).toBeGreaterThan(0)
+    expect(observations.at(-1)?.playoutActive).toBe(true)
     element.pause()
-    expect(observations.at(-1)).toBe(0)
+    expect(observations.at(-1)).toMatchObject({ level: 0, playoutActive: false })
 
     paused = false
     ended = true
     element.dispatchEvent(new Event('playing'))
     ;(animationFrame as unknown as FrameRequestCallback)(160)
-    expect(observations.at(-1)).toBe(0)
+    expect(observations.at(-1)).toMatchObject({ level: 0, playoutActive: false })
 
     boundary.suspend()
-    expect(observations.at(-1)).toBe(0)
+    expect(observations.at(-1)).toMatchObject({ level: 0, playoutActive: false })
     expect(context.close).toHaveBeenCalledTimes(1)
   })
 

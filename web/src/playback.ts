@@ -7,6 +7,7 @@ export interface AttachableAudioTrack {
 export interface SpeechEnvelopeObservation {
   level: number
   observedAtMs: number
+  playoutActive: boolean
 }
 
 export type SpeechEnvelopeStatus = 'unknown' | 'available' | 'unavailable'
@@ -78,7 +79,7 @@ export class AudioPlaybackBoundary {
     try {
       await element.play()
       this.elementBlocked = false
-      if (this.elementCanProduceOutput(element)) this.playbackActive = true
+      if (this.elementCanProduceOutput(element)) this.activatePlayback()
       this.startEnvelopeObservation()
     } catch (error) {
       this.deactivatePlayback()
@@ -155,7 +156,7 @@ export class AudioPlaybackBoundary {
       () => {
         if (generation === this.attachmentGeneration) {
           this.elementBlocked = false
-          if (this.elementCanProduceOutput(element)) this.playbackActive = true
+          if (this.elementCanProduceOutput(element)) this.activatePlayback()
           this.startEnvelopeObservation()
           this.reportBlocked()
         }
@@ -220,7 +221,7 @@ export class AudioPlaybackBoundary {
     }
     add('playing', () => {
       if (generation !== this.attachmentGeneration || this.element !== element) return
-      this.playbackActive = true
+      this.activatePlayback()
       this.startEnvelopeObservation()
     })
     const deactivate = (): void => {
@@ -244,10 +245,16 @@ export class AudioPlaybackBoundary {
     return !element.paused && !element.ended && element.readyState >= 2 && element.error === null
   }
 
+  private activatePlayback(): void {
+    if (this.playbackActive) return
+    this.playbackActive = true
+    this.onSpeechEnvelope({ level: 0, observedAtMs: performance.now(), playoutActive: true })
+  }
+
   private deactivatePlayback(): void {
     if (!this.playbackActive) return
     this.playbackActive = false
-    this.onSpeechEnvelope({ level: 0, observedAtMs: performance.now() })
+    this.onSpeechEnvelope({ level: 0, observedAtMs: performance.now(), playoutActive: false })
   }
 
   private startEnvelopeObservation(): void {
@@ -420,6 +427,7 @@ export class AudioPlaybackBoundary {
       this.onSpeechEnvelope({
         level: speechEnvelopeFromTimeDomain(samples),
         observedAtMs: timeMs,
+        playoutActive: true,
       })
     }
     this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
@@ -450,6 +458,6 @@ export class AudioPlaybackBoundary {
       if (this.recoveringAudioContext === context) this.recoveringAudioContext = null
       void context.close().catch(() => undefined)
     }
-    this.onSpeechEnvelope({ level: 0, observedAtMs: performance.now() })
+    this.onSpeechEnvelope({ level: 0, observedAtMs: performance.now(), playoutActive: false })
   }
 }
