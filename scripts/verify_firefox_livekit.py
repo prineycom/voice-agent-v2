@@ -457,7 +457,7 @@ async def main() -> int:
         stale_candidate_turn = session.started_utterances[0]
         microphone_events_before_off = len(event_sink.events)
         microphone_toggle = driver.find_element(
-            "xpath", "//button[@aria-label='Mute microphone']"
+            "css selector", ".microphone-button[aria-pressed='true']"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_muted.wait(), 15)
@@ -517,7 +517,7 @@ async def main() -> int:
 
         microphone_muted.clear()
         microphone_toggle = driver.find_element(
-            "xpath", "//button[@aria-label='Mute microphone']"
+            "css selector", ".microphone-button[aria-pressed='true']"
         )
         await asyncio.to_thread(microphone_toggle.click)
         await asyncio.wait_for(microphone_muted.wait(), 15)
