@@ -6,13 +6,14 @@ import {
 } from './playback'
 
 function track(play: () => Promise<void>): AttachableAudioTrack {
-  const element = document.createElement('audio')
-  element.play = play
-  element.pause = vi.fn()
-  element.load = vi.fn()
   return {
-    attach: vi.fn(() => element),
-    detach: vi.fn(() => [element]),
+    attach: vi.fn((element: HTMLMediaElement) => {
+      element.play = play
+      element.pause = vi.fn()
+      element.load = vi.fn()
+      return element
+    }),
+    detach: vi.fn((element) => element === undefined ? [] : [element]),
   }
 }
 
@@ -63,32 +64,35 @@ describe('persistent playback observation', () => {
       return 1
     }))
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
-    const element = document.createElement('audio')
+    let element!: HTMLMediaElement
     let paused = true
     let ended = false
-    Object.defineProperties(element, {
-      paused: { configurable: true, get: () => paused },
-      ended: { configurable: true, get: () => ended },
-      readyState: { configurable: true, get: () => 4 },
-      error: { configurable: true, get: () => null },
-    })
-    element.play = vi.fn(() => {
-      paused = false
-      element.dispatchEvent(new Event('playing'))
-      return Promise.resolve()
-    })
-    element.pause = vi.fn(() => {
-      paused = true
-      element.dispatchEvent(new Event('pause'))
-    })
-    element.load = vi.fn()
     const observations: number[] = []
     const boundary = new AudioPlaybackBoundary(
       document.createElement('div'), vi.fn(), ({ level }) => observations.push(level),
     )
     boundary.setTrack({
-      attach: () => element,
-      detach: () => [element],
+      attach: (requestedElement) => {
+        element = requestedElement
+        Object.defineProperties(element, {
+          paused: { configurable: true, get: () => paused },
+          ended: { configurable: true, get: () => ended },
+          readyState: { configurable: true, get: () => 4 },
+          error: { configurable: true, get: () => null },
+        })
+        element.play = vi.fn(() => {
+          paused = false
+          element.dispatchEvent(new Event('playing'))
+          return Promise.resolve()
+        })
+        element.pause = vi.fn(() => {
+          paused = true
+          element.dispatchEvent(new Event('pause'))
+        })
+        element.load = vi.fn()
+        return element
+      },
+      detach: (detachedElement) => detachedElement === undefined ? [] : [detachedElement],
       mediaStreamTrack: {} as MediaStreamTrack,
     })
     await Promise.resolve()
@@ -153,7 +157,6 @@ describe('persistent playback observation', () => {
     }
     vi.stubGlobal('AudioContext', FakeAudioContext)
 
-    const pooledElement = document.createElement('audio')
     const prepareElement = (element: HTMLMediaElement): HTMLMediaElement => {
       Object.defineProperties(element, {
         paused: { configurable: true, get: () => false },
@@ -166,13 +169,8 @@ describe('persistent playback observation', () => {
       element.load = vi.fn()
       return element
     }
-    prepareElement(pooledElement)
     const remote: AttachableAudioTrack = {
-      attach: vi.fn((requestedElement?: HTMLMediaElement) => (
-        requestedElement === undefined
-          ? pooledElement
-          : prepareElement(requestedElement)
-      )),
+      attach: vi.fn((requestedElement: HTMLMediaElement) => prepareElement(requestedElement)),
       detach: vi.fn((element) => element === undefined ? [] : [element]),
     }
     const container = document.createElement('div')
@@ -191,11 +189,12 @@ describe('persistent playback observation', () => {
     await Promise.resolve()
 
     expect(remote.attach).toHaveBeenCalledTimes(2)
-    expect(remote.attach).toHaveBeenNthCalledWith(1, undefined)
+    const initialElement = vi.mocked(remote.attach).mock.calls[0]?.[0]
     const replacement = vi.mocked(remote.attach).mock.calls[1]?.[0]
+    expect(initialElement).toBeInstanceOf(HTMLAudioElement)
     expect(replacement).toBeInstanceOf(HTMLAudioElement)
-    expect(replacement).not.toBe(pooledElement)
-    expect(remote.detach).toHaveBeenCalledWith(pooledElement)
+    expect(replacement).not.toBe(initialElement)
+    expect(remote.detach).toHaveBeenCalledWith(initialElement)
     expect(container.firstElementChild).toBe(replacement)
     expect(replacement?.play).toHaveBeenCalledTimes(1)
     expect(source.disconnect).toHaveBeenCalledTimes(1)
@@ -218,19 +217,22 @@ describe('persistent playback observation', () => {
     }
     vi.stubGlobal('AudioContext', SuspendedAudioContext)
 
-    const element = document.createElement('audio')
-    Object.defineProperties(element, {
-      paused: { configurable: true, get: () => false },
-      ended: { configurable: true, get: () => false },
-      readyState: { configurable: true, get: () => 4 },
-      error: { configurable: true, get: () => null },
-    })
-    element.play = vi.fn().mockResolvedValue(undefined)
-    element.pause = vi.fn()
-    element.load = vi.fn()
+    let element!: HTMLMediaElement
     const remote: AttachableAudioTrack = {
-      attach: vi.fn(() => element),
-      detach: vi.fn(() => [element]),
+      attach: vi.fn((requestedElement: HTMLMediaElement) => {
+        element = requestedElement
+        Object.defineProperties(element, {
+          paused: { configurable: true, get: () => false },
+          ended: { configurable: true, get: () => false },
+          readyState: { configurable: true, get: () => 4 },
+          error: { configurable: true, get: () => null },
+        })
+        element.play = vi.fn().mockResolvedValue(undefined)
+        element.pause = vi.fn()
+        element.load = vi.fn()
+        return element
+      }),
+      detach: vi.fn((detachedElement) => detachedElement === undefined ? [] : [detachedElement]),
     }
     const container = document.createElement('div')
     const blocked = vi.fn()
@@ -255,6 +257,135 @@ describe('persistent playback observation', () => {
     expect(remote.detach).not.toHaveBeenCalled()
     expect(element.play).toHaveBeenCalledTimes(1)
     expect(close).toHaveBeenCalledTimes(1)
+    expect(blocked).toHaveBeenLastCalledWith(false)
+    expect(envelopeStatus).toHaveBeenLastCalledWith('unavailable')
+  })
+
+  it('keeps decoded envelope routing available across attachment generations', async () => {
+    const routedElements = new Set<HTMLMediaElement>()
+    const createMediaElementSource = vi.fn((element: HTMLMediaElement) => {
+      if (routedElements.has(element)) throw new Error('element was already routed')
+      routedElements.add(element)
+      return { connect: vi.fn(), disconnect: vi.fn() }
+    })
+    class FakeAudioContext {
+      state = 'running' as AudioContextState
+      destination = {}
+      onstatechange: ((this: BaseAudioContext, ev: Event) => unknown) | null = null
+      createAnalyser = vi.fn(() => ({
+        fftSize: 256,
+        smoothingTimeConstant: 0,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getByteTimeDomainData: vi.fn(),
+      }))
+      createMediaElementSource = createMediaElementSource
+      resume = vi.fn().mockResolvedValue(undefined)
+      close = vi.fn().mockResolvedValue(undefined)
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    const remote: AttachableAudioTrack = {
+      attach: vi.fn((element: HTMLMediaElement) => {
+        Object.defineProperties(element, {
+          paused: { configurable: true, get: () => false },
+          ended: { configurable: true, get: () => false },
+          readyState: { configurable: true, get: () => 4 },
+          error: { configurable: true, get: () => null },
+        })
+        element.play = vi.fn().mockResolvedValue(undefined)
+        element.pause = vi.fn()
+        element.load = vi.fn()
+        return element
+      }),
+      detach: vi.fn((element) => element === undefined ? [] : [element]),
+    }
+    const envelopeStatus = vi.fn()
+    const boundary = new AudioPlaybackBoundary(
+      document.createElement('div'), vi.fn(), () => undefined, envelopeStatus,
+    )
+
+    boundary.setTrack(remote)
+    await Promise.resolve()
+    await Promise.resolve()
+    boundary.suspend()
+    boundary.reset()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(createMediaElementSource).toHaveBeenCalledTimes(2)
+    const firstElement = createMediaElementSource.mock.calls[0]?.[0]
+    const secondElement = createMediaElementSource.mock.calls[1]?.[0]
+    expect(secondElement).not.toBe(firstElement)
+    expect(envelopeStatus).toHaveBeenLastCalledWith('available')
+  })
+
+  it('restores fresh direct playout when a routed context stops running', async () => {
+    const contexts: FakeAudioContext[] = []
+    class FakeAudioContext {
+      state = 'running' as AudioContextState
+      destination = {}
+      onstatechange: ((this: BaseAudioContext, ev: Event) => unknown) | null = null
+      createAnalyser = vi.fn(() => ({
+        fftSize: 256,
+        smoothingTimeConstant: 0,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getByteTimeDomainData: vi.fn(),
+      }))
+      createMediaElementSource = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() }))
+      resume = vi.fn().mockRejectedValue(new Error('context remains suspended'))
+      close = vi.fn().mockResolvedValue(undefined)
+
+      constructor() {
+        contexts.push(this)
+      }
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    const remote: AttachableAudioTrack = {
+      attach: vi.fn((element: HTMLMediaElement) => {
+        Object.defineProperties(element, {
+          paused: { configurable: true, get: () => false },
+          ended: { configurable: true, get: () => false },
+          readyState: { configurable: true, get: () => 4 },
+          error: { configurable: true, get: () => null },
+        })
+        element.play = vi.fn().mockResolvedValue(undefined)
+        element.pause = vi.fn()
+        element.load = vi.fn()
+        return element
+      }),
+      detach: vi.fn((element) => element === undefined ? [] : [element]),
+    }
+    const blocked = vi.fn()
+    const envelopeStatus = vi.fn()
+    const container = document.createElement('div')
+    const boundary = new AudioPlaybackBoundary(
+      container, blocked, () => undefined, envelopeStatus,
+    )
+
+    boundary.setTrack(remote)
+    await Promise.resolve()
+    await Promise.resolve()
+    const routedElement = vi.mocked(remote.attach).mock.calls[0]?.[0]
+    const context = contexts[0]
+    expect(context).toBeDefined()
+    context!.state = 'suspended'
+    context!.onstatechange?.call(context as unknown as BaseAudioContext, new Event('statechange'))
+    await vi.waitFor(() => {
+      expect(remote.attach).toHaveBeenCalledTimes(2)
+    })
+
+    expect(context!.resume).toHaveBeenCalledTimes(1)
+    const directElement = vi.mocked(remote.attach).mock.calls[1]?.[0]
+    expect(directElement).not.toBe(routedElement)
+    expect(container.firstElementChild).toBe(directElement)
+    expect(blocked).toHaveBeenCalledWith(true)
     expect(blocked).toHaveBeenLastCalledWith(false)
     expect(envelopeStatus).toHaveBeenLastCalledWith('unavailable')
   })
@@ -285,7 +416,7 @@ describe('persistent playback observation', () => {
     expect(current.detach).toHaveBeenCalledTimes(1)
   })
 
-  it('reattaches the same track after a brief suspension', () => {
+  it('reattaches the same track on a distinct explicit element after suspension', () => {
     const boundary = new AudioPlaybackBoundary(document.createElement('div'), vi.fn())
     const remote = track(vi.fn().mockResolvedValue(undefined))
 
@@ -294,5 +425,10 @@ describe('persistent playback observation', () => {
     boundary.reset()
 
     expect(remote.attach).toHaveBeenCalledTimes(2)
+    const firstElement = vi.mocked(remote.attach).mock.calls[0]?.[0]
+    const secondElement = vi.mocked(remote.attach).mock.calls[1]?.[0]
+    expect(firstElement).toBeInstanceOf(HTMLAudioElement)
+    expect(secondElement).toBeInstanceOf(HTMLAudioElement)
+    expect(secondElement).not.toBe(firstElement)
   })
 })

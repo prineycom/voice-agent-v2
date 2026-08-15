@@ -1,5 +1,5 @@
 export interface AttachableAudioTrack {
-  attach(element?: HTMLMediaElement): HTMLMediaElement
+  attach(element: HTMLMediaElement): HTMLMediaElement
   detach(element?: HTMLMediaElement): HTMLMediaElement[]
   readonly mediaStreamTrack?: MediaStreamTrack
 }
@@ -43,6 +43,7 @@ export class AudioPlaybackBoundary {
   private playbackActive = false
   private envelopeGraphDisabled = false
   private envelopeStatus: SpeechEnvelopeStatus = 'unknown'
+  private recoveringAudioContext: AudioContext | null = null
   private playbackListeners: Array<{
     element: HTMLMediaElement
     type: string
@@ -131,10 +132,19 @@ export class AudioPlaybackBoundary {
     this.clear()
   }
 
-  private attachFresh(requestedElement?: HTMLMediaElement): void {
+  private attachFresh(): void {
     if (this.track === null) return
     const generation = ++this.attachmentGeneration
+    const requestedElement = document.createElement('audio')
     const element = this.track.attach(requestedElement)
+    if (element !== requestedElement) {
+      try {
+        this.track.detach(element)
+      } finally {
+        this.track.detach(requestedElement)
+      }
+      throw new Error('audio track did not honor explicit element attachment')
+    }
     element.autoplay = true
     element.controls = false
     element.dataset.voiceAgentAudio = 'agent-response'
@@ -249,6 +259,10 @@ export class AudioPlaybackBoundary {
       return
     }
     if (this.audioContext !== null) {
+      if (this.audioContext.state !== 'running') {
+        this.recoverRoutedContext(this.audioContext, element)
+        return
+      }
       if (this.envelopeFrame === null) {
         this.reportEnvelopeStatus('available')
         this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
@@ -302,8 +316,11 @@ export class AudioPlaybackBoundary {
         this.analyserSource = source
         this.analyser = analyser
         this.analyserSamples = new Uint8Array(analyser.fftSize)
-        this.reportEnvelopeStatus('available')
-        this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
+        this.bindAudioContextState(context, element)
+        if (context.state === 'running') {
+          this.reportEnvelopeStatus('available')
+          this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
+        }
       } catch {
         try {
           source?.disconnect()
@@ -316,6 +333,44 @@ export class AudioPlaybackBoundary {
         this.reportEnvelopeStatus('unavailable')
         if (elementWasRerouted) this.restoreDirectPlayback(element)
       }
+    })
+  }
+
+  private bindAudioContextState(context: AudioContext, element: HTMLMediaElement): void {
+    context.onstatechange = () => {
+      if (this.audioContext !== context || this.element !== element) return
+      if (context.state !== 'running') this.recoverRoutedContext(context, element)
+    }
+    if (context.state !== 'running') this.recoverRoutedContext(context, element)
+  }
+
+  private recoverRoutedContext(context: AudioContext, element: HTMLMediaElement): void {
+    if (
+      this.audioContext !== context
+      || this.element !== element
+      || this.recoveringAudioContext === context
+    ) return
+    if (this.envelopeFrame !== null) cancelAnimationFrame(this.envelopeFrame)
+    this.envelopeFrame = null
+    this.elementBlocked = true
+    this.reportBlocked()
+    this.reportEnvelopeStatus('unavailable')
+    this.recoveringAudioContext = context
+    void this.waitForRunningContext(context).then((running) => {
+      if (this.recoveringAudioContext !== context) return
+      this.recoveringAudioContext = null
+      if (this.audioContext !== context || this.element !== element) return
+      if (running && context.state === 'running') {
+        this.elementBlocked = false
+        this.reportBlocked()
+        this.reportEnvelopeStatus('available')
+        if (this.playbackActive && this.envelopeFrame === null) {
+          this.envelopeFrame = requestAnimationFrame(this.observeSpeechEnvelope)
+        }
+        return
+      }
+      this.envelopeGraphDisabled = true
+      this.restoreDirectPlayback(element)
     })
   }
 
@@ -341,7 +396,7 @@ export class AudioPlaybackBoundary {
     try {
       this.detachElement()
       this.elementBlocked = false
-      this.attachFresh(document.createElement('audio'))
+      this.attachFresh()
     } catch {
       this.elementBlocked = true
       this.reportBlocked()
@@ -390,7 +445,11 @@ export class AudioPlaybackBoundary {
     this.analyserSamples = null
     const context = this.audioContext
     this.audioContext = null
-    if (context !== null) void context.close().catch(() => undefined)
+    if (context !== null) {
+      context.onstatechange = null
+      if (this.recoveringAudioContext === context) this.recoveringAudioContext = null
+      void context.close().catch(() => undefined)
+    }
     this.onSpeechEnvelope({ level: 0, observedAtMs: performance.now() })
   }
 }
