@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import json
+import os
 from pathlib import Path
 import secrets
 import threading
@@ -19,12 +20,17 @@ from .v2_audio import (
     OUTPUT_FRAME_BYTES,
     TTS_OUTPUT_AUDIO_FORMAT,
 )
-from .diagnostics import PrivacySafeTrace, TraceIdentity
+from .diagnostics import (
+    DiagnosticContentCapture,
+    PrivacySafeTrace,
+    TraceIdentity,
+)
 from .local_lfm import MODEL_ALIAS, LocalLFMProvider
 from .local_stt import WhisperSTT
 from .real_turn import RealTurnController
 from .silero_tts import SileroKseniyaTTS, SileroVoiceProfile
 from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
+from .observability import ComponentHealth, ResourceSampler
 from .realtime import (
     CLIENT_CONTROL_TOPIC,
     CONTROL_TOPIC,
@@ -177,6 +183,63 @@ class LiveTurnRunner:
                             "stale_before_dispatch_count": int(counters.get("stale_before_dispatch", 0)),
                         },
                     )
+            if trace_observer is not None:
+                stt_observation = next(
+                    (
+                        item for item in reversed(self.stt.observations)
+                        if item.get("session_id") == session_id
+                        and item.get("turn_id") == turn_id
+                    ),
+                    None,
+                )
+                if isinstance(stt_observation, dict):
+                    trace_observer(
+                        "stt",
+                        "summary",
+                        {
+                            "input_bytes": int(stt_observation.get("input_bytes", 0)),
+                            "duration_ms": round(float(stt_observation.get("audio_duration_ms", 0.0)), 3),
+                            "latency_ms": round(float(stt_observation.get("latency_ms", 0.0)), 3),
+                            "temporary_input_retained": bool(
+                                stt_observation.get("temporary_audio_retained", True)
+                            ),
+                            "request_count": 1,
+                            "failure_count": 0,
+                            "model_identity": self.stt.identity,
+                        },
+                    )
+                llm_observation = next(
+                    (
+                        item for item in reversed(self.llm.observations)
+                        if item.get("session_id") == session_id
+                        and item.get("turn_id") == turn_id
+                    ),
+                    None,
+                )
+                if isinstance(llm_observation, dict):
+                    usage = llm_observation.get("usage")
+                    usage = usage if isinstance(usage, dict) else {}
+                    trace_observer(
+                        "llm_provider",
+                        "summary",
+                        {
+                            "provider_mode": self.llm.provider_mode,
+                            "provider_identity": self.llm.provider_identity,
+                            "external_transfer": False,
+                            "provider_request_id_available": False,
+                            "success": bool(llm_observation.get("success")),
+                            "request_count": 1,
+                            "failure_count": 0 if llm_observation.get("success") else 1,
+                            "failure_code": llm_observation.get("error_class"),
+                            "provider_time_to_first_token_ms": llm_observation.get(
+                                "visible_first_content_ms"
+                            ),
+                            "provider_completion_ms": llm_observation.get("completion_ms"),
+                            "input_unit_count": usage.get("prompt_tokens"),
+                            "output_unit_count": usage.get("completion_tokens"),
+                            "total_unit_count": usage.get("total_tokens"),
+                        },
+                    )
             for adapter in (self.stt, self.llm, self.tts):
                 trim_observations = getattr(adapter, "trim_observations", None)
                 if trim_observations is not None:
@@ -231,9 +294,121 @@ class LiveTurnRunner:
         self._snapshots.pop((session_id, turn_id), None)
         self._release_tts_turn(session_id, turn_id)
 
+    def readiness_components(self) -> tuple[ComponentHealth, ...]:
+        warmup_metadata = getattr(self, "warmup_metadata", None)
+        warmup = warmup_metadata if isinstance(warmup_metadata, dict) else {}
+        stt_alive = getattr(self.stt, "process_id", None) is not None
+        stt_warmed = isinstance(warmup.get("stt"), dict) and warmup["stt"].get("discarded") is True
+        lfm_ready = warmup.get("lfm_ready")
+        lfm_alive = (
+            isinstance(lfm_ready, dict)
+            and lfm_ready.get("ready") is True
+            and bool(getattr(self.llm, "runtime_live", True))
+        )
+        if isinstance(self.llm, LocalLFMProvider):
+            lfm_compatible = (
+                lfm_alive
+                and lfm_ready.get("provider_mode") == self.llm.provider_mode
+                and lfm_ready.get("provider_identity") == self.llm.provider_identity
+                and lfm_ready.get("selected_alias") == MODEL_ALIAS
+                and lfm_ready.get("external_transfer") is False
+                and lfm_ready.get("automatic_fallback") is False
+            )
+        else:
+            lfm_compatible = (
+                lfm_alive
+                and getattr(self.llm, "version", None) == "voice-agent.llm-provider.v1"
+                and getattr(self.llm, "provider_mode", None) == "local"
+                and isinstance(warmup.get("lfm"), dict)
+                and warmup["lfm"].get("discarded") is True
+            )
+        process_ids = getattr(self.tts, "process_ids", None)
+        if process_ids is None:
+            process_id = getattr(self.tts, "process_id", None)
+            process_ids = () if process_id is None else (process_id,)
+        tts_alive = len(process_ids) > 0
+        tts_ready_check = getattr(self.tts, "ready_for_admission", None)
+        tts_ready = tts_alive and (
+            bool(tts_ready_check()) if tts_ready_check is not None else True
+        )
+        if isinstance(self.tts, SileroKseniyaTTS):
+            tts_compatible = (
+                self.tts.version == "voice-agent.tts.v2"
+                and isinstance(self.tts.identity, str)
+                and bool(self.tts.identity)
+                and self.tts.speaker == self.tts_profile.speaker
+            )
+        else:
+            tts_compatible = (
+                getattr(self.tts, "version", None) in {
+                    "voice-agent.tts.v1", "voice-agent.tts.v2"
+                }
+                and isinstance(warmup.get("tts"), dict)
+                and warmup["tts"].get("discarded") is True
+            )
+        return (
+            ComponentHealth(
+                "stt",
+                "alive" if stt_alive else "dead",
+                "ready" if stt_alive and stt_warmed else "unready",
+                stt_warmed,
+                getattr(self.stt, "identity", type(self.stt).__name__),
+                self.stt.version,
+                None if stt_alive and stt_warmed
+                else "stt_not_warmed" if stt_alive else "selected_stt_unavailable",
+            ),
+            ComponentHealth(
+                "selected_llm",
+                "alive" if lfm_alive else "dead",
+                "ready" if lfm_alive and lfm_compatible else "unready",
+                bool(lfm_compatible),
+                self.llm.provider_identity,
+                self.llm.version,
+                None if lfm_alive and lfm_compatible
+                else "local_lfm_incompatible" if lfm_alive else "local_lfm_unavailable",
+            ),
+            ComponentHealth(
+                "tts",
+                "alive" if tts_alive else "dead",
+                "ready" if tts_ready and tts_compatible else "unready",
+                tts_compatible,
+                getattr(self.tts, "identity", type(self.tts).__name__),
+                self.tts.version,
+                None if tts_ready and tts_compatible else "silero_pool_not_ready",
+            ),
+        )
+
     def ready_for_admission(self) -> bool:
-        ready = getattr(self.tts, "ready_for_admission", None)
-        return self._started and (ready is None or bool(ready()))
+        if not all(hasattr(self, name) for name in ("stt", "llm", "tts")):
+            ready = getattr(getattr(self, "tts", None), "ready_for_admission", None)
+            return bool(getattr(self, "_started", False)) and (
+                ready is None or bool(ready())
+            )
+        return self._started and all(
+            component.liveness == "alive"
+            and component.readiness == "ready"
+            and component.compatible
+            for component in self.readiness_components()
+        )
+
+    def admission_failure(self) -> tuple[str, str]:
+        if not self._started:
+            return "controller", "inference_stack_not_started"
+        for component in self.readiness_components():
+            if (
+                component.liveness != "alive"
+                or component.readiness != "ready"
+                or not component.compatible
+            ):
+                return {
+                    "stt": ("stt", component.reason_code or "selected_stt_unavailable"),
+                    "selected_llm": (
+                        "llm_provider",
+                        component.reason_code or "local_lfm_unavailable",
+                    ),
+                    "tts": ("tts", component.reason_code or "silero_pool_not_ready"),
+                }[component.component]
+        return "controller", "inference_stack_not_ready"
 
     def cancel_turn(
         self, session_id: str, stream_epoch: int, turn_id: str, turn_generation: int
@@ -592,6 +767,16 @@ class LiveKitRoomController:
         self.trace = PrivacySafeTrace(
             TRACE_ROOT / f"{session_id}.jsonl", TraceIdentity(session_id)
         )
+        self.diagnostic_capture = (
+            DiagnosticContentCapture(
+                settings.diagnostic_capture_root,
+                session_id,
+                opt_in=True,
+                ttl_seconds=settings.diagnostic_capture_ttl_seconds,
+            )
+            if settings.diagnostic_capture_root is not None
+            else None
+        )
         self.audio_sink = LiveKitAudioSink(
             self.room,
             self.audio_source,
@@ -609,6 +794,8 @@ class LiveKitRoomController:
                 stream_epoch=self.session.stream_epoch if hasattr(self, "session") else 1,
             ),
             reconnect_reset_handler=self._invalidate_microphone_for_reconnect,
+            resource_sampler=ResourceSampler(),
+            diagnostic_capture=self.diagnostic_capture,
         )
         self._audio_task: asyncio.Task[None] | None = None
         self._microphone_resume_task: asyncio.Task[None] | None = None
@@ -1179,11 +1366,27 @@ class SessionRegistry:
     def __init__(self, settings: Slice6Settings) -> None:
         self.settings = settings
         self.runner = LiveTurnRunner(settings)
+        runtime_id = f"runtime-{os.getpid()}-{time.monotonic_ns():x}"
+        self.trace = PrivacySafeTrace(
+            TRACE_ROOT / f"{runtime_id}.jsonl", TraceIdentity(runtime_id)
+        )
         self._controllers: dict[str, LiveKitRoomController] = {}
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
         await asyncio.to_thread(self.runner.start)
+        for component in self.runner.readiness_components():
+            self.trace.emit(
+                "model",
+                "loaded",
+                {
+                    "component": component.component,
+                    "model_identity": component.identity,
+                    "contract_version": component.contract_version,
+                    "compatible": component.compatible,
+                    "ready": component.readiness == "ready",
+                },
+            )
 
     @property
     def active_count(self) -> int:
@@ -1242,8 +1445,23 @@ class SessionRegistry:
         )
         errors = [result for result in results if isinstance(result, Exception)]
         try:
+            components = self.runner.readiness_components()
+        except Exception:
+            components = ()
+        try:
             await asyncio.to_thread(self.runner.shutdown)
         except Exception as error:
             errors.append(error)
+        finally:
+            for component in components:
+                self.trace.emit(
+                    "model",
+                    "unloaded",
+                    {
+                        "component": component.component,
+                        "model_identity": component.identity,
+                        "contract_version": component.contract_version,
+                    },
+                )
         if errors:
             raise ExceptionGroup("session registry cleanup failed", errors)

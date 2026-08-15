@@ -1,14 +1,25 @@
-"""Bounded content-free JSONL diagnostics for Slice 6 manual acceptance."""
+"""Bounded privacy-safe metadata diagnostics and explicit content capture."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import shutil
 import threading
 import time
 from typing import Mapping
+
+from .contracts import valid_correlation_id
+from .observability import (
+    MAX_OBSERVATION_SEQUENCE,
+    OBSERVATION_VERSION,
+    safe_observation_key,
+    safe_observation_scalar,
+    validate_observation,
+)
 
 MAX_TRACE_BYTES = 8 * 1024 * 1024
 MAX_TRACE_RECORDS = 20_000
@@ -16,24 +27,12 @@ MAX_TRACE_DIRECTORY_BYTES = 64 * 1024 * 1024
 MAX_TRACE_FILES = 32
 MAX_TRACE_AGE_SECONDS = 7 * 24 * 60 * 60
 MAX_TRACE_FAILURES = 20_000
+MAX_CAPTURE_BYTES = 1 * 1024 * 1024
+MAX_CAPTURE_FILES = 16
+MIN_CAPTURE_TTL_SECONDS = 60
+MAX_CAPTURE_TTL_SECONDS = 60 * 60
 _DIRECTORY_LOCK = threading.Lock()
-_ALLOWED_VALUE_TYPES = (bool, float, int, str, type(None))
-_FORBIDDEN_KEYS = frozenset({
-    "audio", "content", "pcm", "prompt", "response", "secret", "text", "token", "transcript"
-})
-
-
-def _safe_key(key: str) -> bool:
-    lowered = key.lower()
-    return not any(word in lowered for word in _FORBIDDEN_KEYS)
-
-
-def _safe_value(value: object) -> object:
-    if not isinstance(value, _ALLOWED_VALUE_TYPES):
-        raise ValueError("diagnostic value type is forbidden")
-    if isinstance(value, str) and (len(value) > 512 or "\n" in value or "\r" in value):
-        raise ValueError("diagnostic string is outside bounds")
-    return value
+_CAPTURE_KINDS = frozenset({"raw-audio", "transcript", "prompt", "response"})
 
 
 @dataclass(frozen=True)
@@ -42,46 +41,61 @@ class TraceIdentity:
     turn_id: str = "session"
     stream_epoch: int = 1
 
+    def __post_init__(self) -> None:
+        if (
+            not valid_correlation_id(self.session_id)
+            or not valid_correlation_id(self.turn_id)
+            or type(self.stream_epoch) is not int
+            or not 1 <= self.stream_epoch <= MAX_OBSERVATION_SEQUENCE
+        ):
+            raise ValueError("invalid diagnostic correlation")
+
+
+@dataclass
+class _TraceState:
+    started: float
+    records: int
+    byte_count: int
+    lock: threading.Lock
+    write_failed: bool
+    failure_counts: dict[str, int]
+
 
 class PrivacySafeTrace:
+    """Append-only metadata JSONL. Content-like keys and values fail closed."""
+
     def __init__(self, path: Path, identity: TraceIdentity) -> None:
         self.path = path.resolve()
         self.identity = identity
-        self._started = time.monotonic()
-        self._records = 0
-        self._bytes = 0
-        self._lock = threading.Lock()
-        self._write_failed = False
-        self._failure_counts = {"validation": 0, "write": 0, "limit": 0}
+        self._state = _TraceState(
+            time.monotonic(), 0, 0, threading.Lock(), False,
+            {"validation": 0, "write": 0, "limit": 0},
+        )
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with _DIRECTORY_LOCK:
                 self._prune_directory(reserve_bytes=MAX_TRACE_BYTES, reserve_files=1)
-            self._bytes = self.path.stat().st_size if self.path.exists() else 0
+            self._state.byte_count = self.path.stat().st_size if self.path.exists() else 0
         except OSError:
-            self._write_failed = True
+            self._state.write_failed = True
             self._increment_failure("write")
 
     @property
     def failure_counts(self) -> dict[str, int]:
-        with self._lock:
-            return dict(self._failure_counts)
+        with self._state.lock:
+            return dict(self._state.failure_counts)
 
     def _increment_failure(self, kind: str) -> None:
-        self._failure_counts[kind] = min(
-            self._failure_counts[kind] + 1, MAX_TRACE_FAILURES
+        self._state.failure_counts[kind] = min(
+            self._state.failure_counts[kind] + 1, MAX_TRACE_FAILURES
         )
 
-    def child(self, *, turn_id: str, stream_epoch: int) -> PrivacySafeTrace:
+    def child(self, *, turn_id: str, stream_epoch: int) -> "PrivacySafeTrace":
+        identity = TraceIdentity(self.identity.session_id, turn_id, stream_epoch)
         child = object.__new__(PrivacySafeTrace)
         child.path = self.path
-        child.identity = TraceIdentity(self.identity.session_id, turn_id, stream_epoch)
-        child._started = self._started
-        child._records = self._records
-        child._bytes = self._bytes
-        child._lock = self._lock
-        child._write_failed = self._write_failed
-        child._failure_counts = self._failure_counts
+        child.identity = identity
+        child._state = self._state
         return child
 
     def _trace_files(self) -> list[Path]:
@@ -125,46 +139,61 @@ class PrivacySafeTrace:
         turn_id: str | None = None,
         stream_epoch: int | None = None,
     ) -> bool:
+        effective_turn = turn_id or self.identity.turn_id
+        effective_epoch = stream_epoch or self.identity.stream_epoch
         try:
             values = dict(fields or {})
             if (
                 not isinstance(stage, str)
+                or not safe_observation_key(stage)
                 or not isinstance(event, str)
-                or len(stage) > 64
-                or len(event) > 64
-                or not _safe_key(stage)
-                or not _safe_key(event)
+                or not safe_observation_key(event)
+                or not valid_correlation_id(effective_turn)
+                or type(effective_epoch) is not int
+                or not 1 <= effective_epoch <= MAX_OBSERVATION_SEQUENCE
+                or len(values) > 64
             ):
-                raise ValueError("diagnostic stage/event is forbidden")
+                raise ValueError("diagnostic identity is forbidden")
             normalized: dict[str, object] = {}
             for key, value in values.items():
-                if not isinstance(key, str) or len(key) > 64 or not _safe_key(key):
-                    raise ValueError("diagnostic key is forbidden")
-                normalized[key] = _safe_value(value)
+                if (
+                    not isinstance(key, str)
+                    or not safe_observation_key(key)
+                    or not safe_observation_scalar(value, key=key)
+                ):
+                    raise ValueError("diagnostic field is forbidden")
+                normalized[key] = value
         except (TypeError, ValueError):
-            with self._lock:
+            with self._state.lock:
                 self._increment_failure("validation")
             return False
-        document = {
-            "schema_version": "voice-agent.slice6-diagnostic.v1",
-            "wall_time": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "monotonic_ms": round((time.monotonic() - self._started) * 1000, 3),
-            "session_id": self.identity.session_id,
-            "turn_id": turn_id or self.identity.turn_id,
-            "stream_epoch": stream_epoch or self.identity.stream_epoch,
-            "stage": stage,
-            "event": event,
-            "fields": normalized,
-        }
-        line = json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n"
-        encoded = line.encode("utf-8")
-        with self._lock:
-            if self._write_failed:
+        with self._state.lock:
+            if self._state.write_failed:
                 return False
-            if (
-                self._records >= MAX_TRACE_RECORDS
-                or self._bytes + len(encoded) > MAX_TRACE_BYTES
-            ):
+            if self._state.records >= MAX_TRACE_RECORDS:
+                self._increment_failure("limit")
+                return False
+            sequence = self._state.records + 1
+            document = {
+                "schema_version": OBSERVATION_VERSION,
+                "record_sequence": sequence,
+                "wall_time": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "monotonic_ms": round((time.monotonic() - self._state.started) * 1000, 3),
+                "session_id": self.identity.session_id,
+                "turn_id": effective_turn,
+                "stream_epoch": effective_epoch,
+                "stage": stage,
+                "event": event,
+                "fields": normalized,
+            }
+            try:
+                validate_observation(document)
+            except ValueError:
+                self._increment_failure("validation")
+                return False
+            line = json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n"
+            encoded = line.encode("utf-8")
+            if self._state.byte_count + len(encoded) > MAX_TRACE_BYTES:
                 self._increment_failure("limit")
                 return False
             try:
@@ -181,9 +210,164 @@ class PrivacySafeTrace:
                     with self.path.open("ab") as destination:
                         destination.write(encoded)
             except OSError:
-                self._write_failed = True
+                self._state.write_failed = True
                 self._increment_failure("write")
                 return False
-            self._records += 1
-            self._bytes += len(encoded)
+            self._state.records = sequence
+            self._state.byte_count += len(encoded)
             return True
+
+
+def _inside_git_worktree(path: Path) -> bool:
+    current = path.resolve()
+    for candidate in (current, *current.parents):
+        marker = candidate / ".git"
+        if marker.exists() or marker.is_symlink():
+            return True
+    return False
+
+
+class DiagnosticContentCapture:
+    """Explicit opt-in, short-lived content capture outside every Git worktree."""
+
+    def __init__(
+        self,
+        root: Path,
+        session_id: str,
+        *,
+        opt_in: bool,
+        ttl_seconds: int = 15 * 60,
+        now: callable = time.time,
+    ) -> None:
+        if not opt_in:
+            raise ValueError("diagnostic content capture requires explicit opt-in")
+        if not valid_correlation_id(session_id):
+            raise ValueError("invalid capture session identity")
+        if type(ttl_seconds) is not int or not MIN_CAPTURE_TTL_SECONDS <= ttl_seconds <= MAX_CAPTURE_TTL_SECONDS:
+            raise ValueError("diagnostic capture TTL is outside bounds")
+        resolved = root.expanduser().resolve()
+        if not resolved.is_absolute() or _inside_git_worktree(resolved):
+            raise ValueError("diagnostic content capture must remain outside Git")
+        self.root = resolved
+        self.session_id = session_id
+        self.path = resolved / f"capture-{session_id}"
+        self.ttl_seconds = ttl_seconds
+        self._now = now
+        self._created = float(now())
+        self._files = 0
+        self._bytes = 0
+        self._lock = threading.RLock()
+        self.purge_expired(resolved, now=now)
+        self.path.mkdir(parents=True, exist_ok=False, mode=0o700)
+        try:
+            os.chmod(self.path, 0o700)
+            manifest = {
+                "schema_version": "voice-agent.diagnostic-content-capture.v1",
+                "session_id": session_id,
+                "created_unix_seconds": self._created,
+                "expires_unix_seconds": self._created + ttl_seconds,
+                "max_files": MAX_CAPTURE_FILES,
+                "max_bytes": MAX_CAPTURE_BYTES,
+                "explicit_opt_in": True,
+            }
+            self._write_file(
+                "manifest.json",
+                json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
+            )
+        except BaseException:
+            shutil.rmtree(self.path, ignore_errors=True)
+            raise
+        # The manifest is retention metadata, not one of the bounded content files.
+        self._files = 0
+        self._bytes = 0
+
+    def _write_file(self, name: str, payload: bytes) -> None:
+        destination = self.path / name
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(payload)
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+
+    @property
+    def expired(self) -> bool:
+        return self._now() >= self._created + self.ttl_seconds
+
+    def capture(self, kind: str, payload: bytes | str) -> Path:
+        if kind not in _CAPTURE_KINDS:
+            raise ValueError("unsupported diagnostic content kind")
+        encoded = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        if not encoded:
+            raise ValueError("empty diagnostic content is not captured")
+        with self._lock:
+            if self.expired:
+                self.delete()
+                raise RuntimeError("diagnostic content capture expired")
+            if self._files >= MAX_CAPTURE_FILES or self._bytes + len(encoded) > MAX_CAPTURE_BYTES:
+                raise RuntimeError("diagnostic content capture limit reached")
+            sequence = self._files + 1
+            suffix = "bin" if kind == "raw-audio" else "utf8"
+            name = f"{sequence:03d}-{kind}.{suffix}"
+            self._write_file(name, encoded)
+            self._files = sequence
+            self._bytes += len(encoded)
+            return self.path / name
+
+    def delete(self) -> bool:
+        with self._lock:
+            if not self.path.exists():
+                return False
+            try:
+                return self.delete_path(self.path)
+            except ValueError as error:
+                raise RuntimeError("diagnostic capture deletion guard failed") from error
+
+    @staticmethod
+    def delete_path(path: Path) -> bool:
+        expanded = path.expanduser()
+        if expanded.is_symlink():
+            raise ValueError("path is not an owned outside-Git diagnostic capture")
+        resolved = expanded.resolve()
+        if (
+            _inside_git_worktree(resolved)
+            or not resolved.name.startswith("capture-")
+            or not resolved.is_dir()
+        ):
+            raise ValueError("path is not an owned outside-Git diagnostic capture")
+        try:
+            document = json.loads((resolved / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("diagnostic capture manifest is unavailable") from error
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_version") != "voice-agent.diagnostic-content-capture.v1"
+            or document.get("explicit_opt_in") is not True
+            or resolved.name != f"capture-{document.get('session_id')}"
+        ):
+            raise ValueError("diagnostic capture manifest does not own this path")
+        shutil.rmtree(resolved)
+        return True
+
+    @staticmethod
+    def purge_expired(root: Path, *, now: callable = time.time) -> int:
+        resolved = root.expanduser().resolve()
+        if _inside_git_worktree(resolved) or not resolved.exists():
+            return 0
+        removed = 0
+        current_time = float(now())
+        for directory in resolved.glob("capture-*"):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            manifest = directory / "manifest.json"
+            try:
+                document = json.loads(manifest.read_text(encoding="utf-8"))
+                expires = float(document["expires_unix_seconds"])
+                explicitly_enabled = document["explicit_opt_in"] is True
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if explicitly_enabled and expires <= current_time:
+                shutil.rmtree(directory)
+                removed += 1
+        return removed

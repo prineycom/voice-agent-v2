@@ -149,6 +149,36 @@ describe('Slice 7 modular shell', () => {
       .getByRole('status').textContent).toBe('MIC ERROR')
   })
 
+  it.each(['unavailable', 'degraded', 'interrupted'] as const)(
+    'shows the %s capability state without disconnecting a surviving session',
+    (availability) => {
+      const audioContainerRef = createRef<HTMLDivElement>()
+      render(
+        <VoiceShell
+          state={{
+            ...initialVoiceState,
+            connection: 'ready',
+            availability,
+            sessionId: 'session-visible-failure',
+          }}
+          avatarHost={testAvatarHost()}
+          buildVersion="build-test"
+          connectAttempted
+          audioContainerRef={audioContainerRef}
+          subscribeSpeechEnvelope={() => () => undefined}
+          onConnect={() => undefined}
+          onDisconnect={() => undefined}
+          onResumeAudio={() => undefined}
+          onToggleMicrophone={() => undefined}
+          onDownloadDiagnostics={() => undefined}
+        />,
+      )
+
+      expect(screen.getByRole('status', { name: availability.toUpperCase() })).toBeTruthy()
+      expect(screen.queryByRole('alertdialog', { name: 'Connection lost' })).toBeNull()
+    },
+  )
+
   it('renders the avatar viewport and only the four intended steady-state overlay responsibilities', () => {
     const { container } = render(
       <ReviewStand avatarHost={testAvatarHost()} buildVersion="0123456789abcdef" />,
@@ -200,8 +230,8 @@ describe('Slice 7 modular shell', () => {
     expect(screen.getByText('TURN turn-review-0000')).toBeTruthy()
     expect(screen.getByText('FIRST VISIBLE RESPONSE')).toBeTruthy()
     expect(screen.getByText('SERVER-ACCEPTED PCM')).toBeTruthy()
-    expect(screen.queryByText('LLM FIRST TOKEN')).toBeNull()
-    expect(screen.queryByText('TTS FIRST AUDIO')).toBeNull()
+    expect(screen.getByText('LLM FIRST TOKEN')).toBeTruthy()
+    expect(screen.getByText('TTS FIRST AUDIO')).toBeTruthy()
   })
 
   it('scopes Timeline turn selection to the active session', async () => {
@@ -268,7 +298,7 @@ describe('Slice 7 modular shell', () => {
 
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
     await user.click(screen.getByRole('menuitem', { name: 'DISCONNECT' }))
-    expect(screen.getByRole('alertdialog', { name: 'Connection lost' }).textContent).toContain('CONNECTION LOST')
+    expect(screen.getByRole('alertdialog', { name: 'Connection lost' }).textContent).toContain('UNAVAILABLE')
     const shellContent = document.querySelector('.voice-shell__content')
     expect(shellContent?.hasAttribute('inert')).toBe(true)
     const reconnect = screen.getByRole('button', { name: 'RECONNECT' })
@@ -503,7 +533,7 @@ describe('Slice 7 modular shell', () => {
     await user.click(screen.getByRole('menuitemcheckbox', { name: /STATUS/ }))
 
     expect(screen.getByText('SPEECH ENVELOPE').nextElementSibling?.textContent).toBe('UNAVAILABLE')
-    expect(screen.getByText('AVATAR').nextElementSibling?.textContent).toBe('DEGRADED')
+    expect(screen.getByText('AVATAR HOST').nextElementSibling?.textContent).toBe('DEGRADED')
   })
 
   it('keeps the icon-only microphone control coherent and persists reduced motion', async () => {

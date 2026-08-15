@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/health-readiness.v1.schema.json",
+  "title": "Voice Agent liveness and readiness report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "overall_readiness", "components", "provider_mode", "external_transfer", "automatic_fallback", "stt_location", "tts_location", "auth_boundary", "wake_enabled", "selected_avatar_module"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.health-readiness.v1"},
+    "overall_readiness": {"enum": ["ready", "unready"]},
+    "components": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["component", "liveness", "readiness", "compatible", "identity", "contract_version", "reason_code", "retry_count", "retry_limit"],
+        "properties": {
+          "component": {"enum": ["livekit", "controller", "stt", "selected_llm", "tts", "avatar_host", "active_module"]},
+          "liveness": {"enum": ["alive", "dead", "unknown"]},
+          "readiness": {"enum": ["ready", "unready", "degraded", "unknown"]},
+          "compatible": {"type": "boolean"},
+          "identity": {"type": "string", "minLength": 1, "maxLength": 256},
+          "contract_version": {"type": "string", "minLength": 1, "maxLength": 128},
+          "reason_code": {"oneOf": [{"const": null}, {"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}]},
+          "retry_count": {"type": "integer", "minimum": 0, "maximum": 16},
+          "retry_limit": {"type": "integer", "minimum": 0, "maximum": 16}
+        }
+      }
+    },
+    "provider_mode": {"const": "local"},
+    "external_transfer": {"const": false},
+    "automatic_fallback": {"const": false},
+    "stt_location": {"const": "local"},
+    "tts_location": {"const": "local"},
+    "auth_boundary": {"const": "tailnet"},
+    "wake_enabled": {"const": false},
+    "selected_avatar_module": {"const": "mvp-eye-svg-v1"}
+  }
+}

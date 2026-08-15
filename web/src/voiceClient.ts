@@ -26,19 +26,44 @@ import {
 
 const RECONNECT_ACK_TIMEOUT_MS = 5_000
 const RECONNECT_RETRY_INTERVAL_MS = 500
+const SAFE_DIAGNOSTIC_CODE = /^[a-z0-9_]{1,64}$/
+
+function privacySafeCode(value: unknown, fallback: string): string {
+  return typeof value === 'string' && SAFE_DIAGNOSTIC_CODE.test(value) ? value : fallback
+}
 
 export interface VoiceDiagnosticRecord {
+  schemaVersion: 'voice-agent.browser-observation.v1'
   timestamp: string
+  monotonicMs: number
+  recordSequence: number
   stage: string
   event: string
   sessionId: string | null
   turnId: string | null
+  requestId: string | null
   streamEpoch: number
+  mediaGeneration: number | null
   sequence: number | null
   serverControlType?: string
+  userState?: string
   failureStage?: string
   failureCode?: string
-  failureMessage?: string
+  failureClass?: string
+  providerMode?: string
+  externalTransfer?: boolean
+  providerInputUnitCount?: number
+  providerOutputUnitCount?: number
+  providerTotalUnitCount?: number
+  endpointToSttFinalMs?: number
+  providerTimeToFirstTokenMs?: number
+  providerCompletionMs?: number
+  ttsTimeToFirstAudioMs?: number
+  cancellationLatencyMs?: number
+  totalTurnMs?: number
+  cpuUtilizationPercent?: number
+  hostRamUsedMib?: number
+  gpuVramUsedMib?: number
 }
 
 export interface VoiceClientCallbacks {
@@ -76,10 +101,12 @@ export class VoiceClient {
   private readonly remoteTracks = new Map<string, RemoteAudioTrack>()
   private desiredMedia: {
     publicationId: string
+    turnId: string
     mediaGeneration: number
     turnGeneration: number
     requestId: string
     terminal: boolean
+    firstSignalObserved: boolean
   } | null = null
   private streamEpoch = 0
   private microphoneEnabled = false
@@ -87,6 +114,8 @@ export class VoiceClient {
   private microphoneFailureActive = false
   private microphoneTransition: Promise<void> | null = null
   private readonly diagnostics: VoiceDiagnosticRecord[] = []
+  private readonly diagnosticsStarted = performance.now()
+  private diagnosticSequence = 0
 
   constructor(
     audioContainer: HTMLElement,
@@ -95,7 +124,14 @@ export class VoiceClient {
     this.playback = new AudioPlaybackBoundary(
       audioContainer,
       callbacks.onAudioBlocked,
-      callbacks.onSpeechEnvelope,
+      (observation) => {
+        callbacks.onSpeechEnvelope(observation)
+        const desired = this.desiredMedia
+        if (observation.playoutActive && desired !== null && !desired.firstSignalObserved) {
+          desired.firstSignalObserved = true
+          this.recordDiagnostic('playback', 'first_programmatic_signal')
+        }
+      },
       callbacks.onSpeechEnvelopeStatus,
     )
   }
@@ -471,10 +507,12 @@ export class VoiceClient {
         } else {
           this.desiredMedia = {
             publicationId,
+            turnId: event.turn_id,
             mediaGeneration: event.media_generation,
             turnGeneration: event.turn_generation,
             requestId: event.request_id,
             terminal: false,
+            firstSignalObserved: false,
           }
           const remoteTrack = this.remoteTracks.get(publicationId)
           if (remoteTrack !== undefined && !this.reconnecting) {
@@ -513,12 +551,18 @@ export class VoiceClient {
         terminalFailure = `Голосовая сессия остановлена (${stage}/${code})`
       }
       const serverFailure = event.type === 'turn.failed' || event.type === 'session.degraded'
-      const serverStage = serverFailure && typeof event.payload.stage === 'string'
-        ? event.payload.stage
-        : event.type === 'session.degraded' ? 'session' : event.type === 'turn.failed' ? 'controller' : 'control'
-      const serverCode = serverFailure && typeof event.payload.code === 'string'
-        ? event.payload.code
-        : event.type === 'session.degraded' ? 'degraded' : event.type === 'turn.failed' ? 'unknown_failure' : undefined
+      const serverStage = serverFailure
+        ? privacySafeCode(
+          event.payload.stage,
+          event.type === 'session.degraded' ? 'session' : 'controller',
+        )
+        : 'control'
+      const serverCode = serverFailure
+        ? privacySafeCode(
+          event.payload.code,
+          event.type === 'session.degraded' ? 'degraded' : 'unknown_failure',
+        )
+        : undefined
       this.recordDiagnostic(serverStage, event.type, event, serverCode)
       try {
         this.callbacks.onControl(event)
@@ -649,22 +693,59 @@ export class VoiceClient {
     failureCode?: string,
     failure?: unknown,
   ): void {
+    this.diagnosticSequence += 1
     const record: VoiceDiagnosticRecord = {
+      schemaVersion: 'voice-agent.browser-observation.v1',
       timestamp: new Date().toISOString(),
+      monotonicMs: Math.max(0, performance.now() - this.diagnosticsStarted),
+      recordSequence: this.diagnosticSequence,
       stage,
       event,
       sessionId: this.capability?.session_id ?? null,
-      turnId: control?.turn_id ?? null,
+      turnId: control?.turn_id ?? this.desiredMedia?.turnId ?? null,
+      requestId: control?.request_id ?? this.desiredMedia?.requestId ?? null,
       streamEpoch: control?.stream_epoch ?? this.streamEpoch,
+      mediaGeneration: control?.media_generation ?? this.desiredMedia?.mediaGeneration ?? null,
       sequence: control?.sequence ?? null,
     }
     if (control !== undefined) record.serverControlType = control.type
-    if (control?.type === 'turn.failed') record.failureStage = stage
-    if (failureCode !== undefined) record.failureCode = failureCode
+    if (control?.type === 'turn.failed') record.failureStage = privacySafeCode(stage, 'controller')
+    if (failureCode !== undefined) record.failureCode = privacySafeCode(failureCode, 'unknown_failure')
     if (failure !== undefined) {
-      record.failureMessage = failure instanceof Error
-        ? `${failure.name}: ${failure.message}`.slice(0, 512)
-        : String(failure).slice(0, 512)
+      const candidate = failure instanceof Error ? failure.name : typeof failure
+      record.failureClass = /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(candidate) ? candidate : 'Error'
+    }
+    if (control !== undefined) {
+      const payload = control.payload
+      if (['available', 'unavailable', 'degraded', 'retrying', 'interrupted'].includes(String(payload.user_state))) {
+        record.userState = String(payload.user_state)
+      }
+      if (payload.provider_mode === 'local') record.providerMode = payload.provider_mode
+      if (typeof payload.external_transfer === 'boolean') record.externalTransfer = payload.external_transfer
+      const integerFields = [
+        ['provider_input_unit_count', 'providerInputUnitCount'],
+        ['provider_output_unit_count', 'providerOutputUnitCount'],
+        ['provider_total_unit_count', 'providerTotalUnitCount'],
+      ] as const
+      for (const [source, target] of integerFields) {
+        const value = payload[source]
+        if (Number.isSafeInteger(value) && (value as number) >= 0) record[target] = value as number
+      }
+      const metricFields = [
+        ['endpoint_to_stt_final_ms', 'endpointToSttFinalMs'],
+        ['provider_time_to_first_token_ms', 'providerTimeToFirstTokenMs'],
+        ['provider_completion_ms', 'providerCompletionMs'],
+        ['tts_time_to_first_audio_ms', 'ttsTimeToFirstAudioMs'],
+        ['cancellation_latency_ms', 'cancellationLatencyMs'],
+        ['total_turn_ms', 'totalTurnMs'],
+        ['cpu_utilization_percent', 'cpuUtilizationPercent'],
+        ['host_ram_used_mib', 'hostRamUsedMib'],
+        ['gpu_vram_used_mib', 'gpuVramUsedMib'],
+      ] as const
+      for (const [source, target] of metricFields) {
+        const value = payload[source]
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0) record[target] = value
+      }
     }
     this.diagnostics.push(record)
     if (this.diagnostics.length > 512) this.diagnostics.shift()

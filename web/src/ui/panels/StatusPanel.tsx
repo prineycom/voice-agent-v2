@@ -34,6 +34,10 @@ function SystemTab({
           <li key={component.id}>
             <span>{component.label}</span>
             <span className={`health health--${component.health.toLowerCase()}`}>{component.health}</span>
+            <small>
+              LIVE {component.liveness} · READINESS {component.readiness} · {component.compatible === null ? 'COMPATIBILITY UNKNOWN' : component.compatible ? 'COMPATIBLE' : 'INCOMPATIBLE'}
+              {component.reason ? ` · ${component.reason}` : ''}
+            </small>
           </li>
         ))}
       </ul>
@@ -44,6 +48,10 @@ function SystemTab({
         <div><dt>AVATAR MODULE</dt><dd>{avatarHealth.activeModuleId ?? 'UNAVAILABLE'}</dd></div>
         <div><dt>AVATAR INPUT DROPS</dt><dd>{avatarHealth.rejectedInputs}</dd></div>
         <div><dt>SPEECH ENVELOPE</dt><dd>{speechEnvelopeStatus.toUpperCase()}</dd></div>
+        <div><dt>EXTERNAL TRANSFER</dt><dd>FALSE</dd></div>
+        <div><dt>STT / TTS LOCATION</dt><dd>LOCAL / LOCAL</dd></div>
+        <div><dt>AUTOMATIC FALLBACK</dt><dd>FALSE</dd></div>
+        <div><dt>CONTENT CAPTURE</dt><dd>OFF BY DEFAULT</dd></div>
         <div><dt>BUILD</dt><dd className="build-version">{buildVersion}</dd></div>
       </dl>
     </div>
@@ -68,11 +76,28 @@ function TimelineTab({
           <p className="timeline-turn">TURN {item.turnId}</p>
           <ol className="timeline-list">
             <li><span>ENDPOINT</span><strong>OBSERVED</strong></li>
-            <li><span>STT FINAL</span><strong>{item.user ? 'OBSERVED' : 'NOT OBSERVED'}</strong></li>
+            <li><span>ENDPOINT → STT FINAL</span><strong>{milliseconds(item.endpointToSttFinalMs ?? null)}</strong></li>
+            <li><span>LLM FIRST TOKEN</span><strong>{milliseconds(item.providerTimeToFirstTokenMs ?? null)}</strong></li>
+            <li><span>LLM COMPLETION</span><strong>{milliseconds(item.providerCompletionMs ?? null)}</strong></li>
+            <li><span>TTS FIRST AUDIO</span><strong>{milliseconds(item.ttsTimeToFirstAudioMs ?? null)}</strong></li>
             <li><span>FIRST VISIBLE RESPONSE</span><strong>{milliseconds(item.endpointToFirstVisibleMs)}</strong></li>
             <li><span>SERVER-ACCEPTED PCM</span><strong>{milliseconds(item.endpointToFirstAcceptedPcmMs)}</strong></li>
-            <li><span>COMPLETION</span><strong>{item.outcome?.toUpperCase() ?? 'ACTIVE'}</strong></li>
+            <li><span>TOTAL TURN</span><strong>{milliseconds(item.totalTurnMs ?? null)}</strong></li>
+            <li><span>CANCELLATION LATENCY</span><strong>{milliseconds(item.cancellationLatencyMs ?? null)}</strong></li>
+            <li><span>SLOWEST STAGE</span><strong>{item.slowestStage?.toUpperCase() ?? 'NOT OBSERVED'}</strong></li>
+            <li><span>TERMINAL</span><strong>{item.outcome?.toUpperCase() ?? 'ACTIVE'}</strong></li>
           </ol>
+          <dl className="configuration-list timeline-metadata">
+            <div><dt>PROVIDER</dt><dd>{item.providerMode?.toUpperCase() ?? 'NOT OBSERVED'}</dd></div>
+            <div><dt>EXTERNAL TRANSFER</dt><dd>{item.externalTransfer === null || item.externalTransfer === undefined ? 'NOT OBSERVED' : String(item.externalTransfer).toUpperCase()}</dd></div>
+            <div><dt>USAGE UNITS</dt><dd>{item.providerInputUnitCount ?? '—'} / {item.providerOutputUnitCount ?? '—'} / {item.providerTotalUnitCount ?? '—'}</dd></div>
+            <div><dt>QUEUES PCM / SEGMENT</dt><dd>{item.pcmQueueMaxBlocks ?? '—'} / {item.segmentQueueMaxSegments ?? '—'}</dd></div>
+            <div><dt>CANCELLATIONS / STALE DROPS</dt><dd>{item.cancellationCount ?? 0} / {item.staleDropCount ?? 0}</dd></div>
+            <div><dt>CPU / RAM</dt><dd>{item.cpuUtilizationPercent ?? '—'}% / {item.hostRamUsedMib ?? '—'} MIB</dd></div>
+            <div><dt>PROCESS RSS</dt><dd>{item.processRssMib ?? '—'} MIB</dd></div>
+            <div><dt>GPU / VRAM</dt><dd>{item.gpuUtilizationPercent ?? '—'}% / {item.gpuVramUsedMib ?? '—'} MIB</dd></div>
+            <div><dt>USER STATE</dt><dd>{item.userState?.toUpperCase() ?? 'AVAILABLE'}</dd></div>
+          </dl>
         </>
       )}
       <p className="drop-count">REJECTED EVENTS · {droppedEvents}</p>

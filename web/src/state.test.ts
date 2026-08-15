@@ -6,10 +6,34 @@ import {
   initialVoiceState,
   parseCapability,
   parseControlEvent,
+  parseHealthReadinessReport,
   voiceReducer,
+  type ComponentHealthObservation,
   type ControlEvent,
+  type HealthReadinessReport,
   type SessionCapability,
 } from './state'
+
+const readyComponents: ComponentHealthObservation[] = [
+  ['livekit', 'livekit-server-1.13.5', CONTROL_VERSION],
+  ['controller', 'voice-agent-v2-controller', CONTROL_VERSION],
+  ['stt', 'whisper-large-v3-turbo', 'voice-agent.stt.v1'],
+  ['selected_llm', ACTIVE_LLM_MODEL_IDENTITY, 'voice-agent.llm-provider.v1'],
+  ['tts', 'silero-kseniya', 'voice-agent.tts.v2'],
+].map(([component, identity, contract_version]) => ({
+  component: component as ComponentHealthObservation['component'],
+  liveness: 'alive', readiness: 'ready', compatible: true,
+  identity, contract_version, reason_code: null, retry_count: 0, retry_limit: 0,
+}))
+
+const readyHealth: HealthReadinessReport = {
+  schema_version: 'voice-agent.health-readiness.v1',
+  overall_readiness: 'ready',
+  components: readyComponents,
+  provider_mode: 'local', external_transfer: false, automatic_fallback: false,
+  stt_location: 'local', tts_location: 'local', auth_boundary: 'tailnet',
+  wake_enabled: false, selected_avatar_module: 'mvp-eye-svg-v1',
+}
 
 const capability: SessionCapability = {
   session_id: 'session-test-0001',
@@ -38,6 +62,9 @@ function event(
 ): ControlEvent {
   const sessionEvent = type.startsWith('session.')
   const turnGeneration = sessionEvent ? 0 : Number(turnId.match(/(\d+)$/)?.[1] ?? 1)
+  const effectivePayload = type === 'session.ready'
+    ? { state: 'ready', user_state: 'available', health: readyHealth, ...payload }
+    : payload
   return {
     schema_version: CONTROL_VERSION,
     session_id: capability.session_id,
@@ -49,7 +76,7 @@ function event(
     sequence,
     type,
     terminal: ['turn.completed', 'turn.interrupted', 'turn.failed'].includes(type),
-    payload,
+    payload: effectivePayload,
   }
 }
 
@@ -114,6 +141,27 @@ describe('checkpoint A browser state', () => {
       tts_profile: { ...capability.tts_profile, output_sample_rate_hz: 16_000 },
     })).toBeNull()
   })
+
+  it('separates liveness from compatible readiness and rejects false ready reports', () => {
+    expect(parseHealthReadinessReport(readyHealth)?.overall_readiness).toBe('ready')
+    const incompatible = {
+      ...readyHealth,
+      overall_readiness: 'unready',
+      components: readyComponents.map((component) => component.component === 'selected_llm'
+        ? { ...component, readiness: 'unready', compatible: false, reason_code: 'model_contract_incompatible' }
+        : component),
+    }
+    expect(parseHealthReadinessReport(incompatible)).toMatchObject({
+      overall_readiness: 'unready',
+      components: expect.arrayContaining([
+        expect.objectContaining({
+          component: 'selected_llm', liveness: 'alive', readiness: 'unready', compatible: false,
+        }),
+      ]),
+    })
+    expect(parseHealthReadinessReport({ ...incompatible, overall_readiness: 'ready' })).toBeNull()
+  })
+
   it('rejects removed playout events at the serialized protocol boundary', () => {
     expect(parseControlEvent(JSON.stringify(event(1, 'turn.listening')))?.type).toBe('turn.listening')
     const removed = {
@@ -160,15 +208,18 @@ describe('checkpoint A browser state', () => {
       event(6, 'llm.visible', 'turn-00000001', { response: 'Видимый ответ.' }),
       event(7, 'turn.failed', 'turn-00000001', {
         outcome: 'failed', stage: 'tts', code: 'selected_tts_unavailable',
+        user_state: 'degraded', retry_count: 0, retry_limit: 0,
       }),
     ])
 
     expect(state.connection).toBe('ready')
     expect(state.phase).toBe('idle')
+    expect(state.availability).toBe('degraded')
     expect(state.history[0]).toMatchObject({
       assistant: 'Видимый ответ.',
       outcome: 'failed',
       audioUnavailable: true,
+      userState: 'degraded',
     })
   })
 
@@ -198,10 +249,12 @@ describe('checkpoint A browser state', () => {
       event(3, 'turn.media-ready'),
       event(4, 'turn.failed', 'turn-00000001', {
         outcome: 'failed', stage: 'stt', code: 'selected_stt_unavailable',
+        user_state: 'unavailable', retry_count: 0, retry_limit: 0,
       }),
     ])
 
     expect(state.connection).toBe('ready')
+    expect(state.availability).toBe('unavailable')
     expect(state.phase).toBe('idle')
     expect(state.currentTurnTerminal).toBe(true)
     expect(state.history).toEqual([

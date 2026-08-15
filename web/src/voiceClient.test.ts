@@ -257,6 +257,29 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     expect(diagnosticOutput).not.toContain('Приватный ответ.')
   })
 
+  it('normalizes content-shaped server failure fields before diagnostics', async () => {
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    emitControl(room, 'turn.failed', 4, {
+      outcome: 'failed',
+      stage: 'private transcript disguised as a stage',
+      code: 'private response disguised as a code',
+    }, true)
+
+    const diagnosticOutput = JSON.stringify(
+      vi.mocked(observed.onDiagnostic!).mock.calls.map(([record]) => record),
+    )
+    expect(diagnosticOutput).not.toContain('private transcript')
+    expect(diagnosticOutput).not.toContain('private response')
+    expect(diagnosticOutput).toContain('unknown_failure')
+  })
+
   it('keeps an unrecognized STT failure in memory without degrading the session', async () => {
     const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
     const observed = callbacks()

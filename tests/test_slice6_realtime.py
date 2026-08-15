@@ -386,28 +386,23 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await session.ready())
         self.assertEqual(failures, [("tts", "tts_backend_not_ready")])
-        self.assertEqual(
-            events.events,
-            [
-                {
-                    "schema_version": CONTROL_EVENT_VERSION,
-                    "session_id": "session-ready-loss",
-                    "turn_id": "session",
-                    "stream_epoch": 1,
-                    "turn_generation": 0,
-                    "request_id": "session",
-                    "media_generation": 0,
-                    "sequence": 1,
-                    "type": "session.degraded",
-                    "terminal": False,
-                    "payload": {
-                        "state": "degraded",
-                        "stage": "tts",
-                        "code": "tts_backend_not_ready",
-                    },
-                }
-            ],
+        self.assertEqual(len(events.events), 1)
+        degraded = events.events[0]
+        self.assertEqual(degraded["schema_version"], CONTROL_EVENT_VERSION)
+        self.assertEqual(degraded["session_id"], "session-ready-loss")
+        self.assertEqual(degraded["type"], "session.degraded")
+        self.assertEqual(degraded["payload"]["stage"], "tts")
+        self.assertEqual(degraded["payload"]["code"], "tts_backend_not_ready")
+        self.assertEqual(degraded["payload"]["user_state"], "degraded")
+        self.assertEqual(degraded["payload"]["failure_matrix_id"], "tts_failure")
+        self.assertEqual(degraded["payload"]["health"]["overall_readiness"], "unready")
+        tts_health = next(
+            component for component in degraded["payload"]["health"]["components"]
+            if component["component"] == "tts"
         )
+        self.assertEqual(tts_health["liveness"], "dead")
+        self.assertEqual(tts_health["readiness"], "unready")
+        self.assertFalse(tts_health["compatible"])
         with self.assertRaisesRegex(RuntimeError, "session is closed"):
             await session.start_utterance()
 

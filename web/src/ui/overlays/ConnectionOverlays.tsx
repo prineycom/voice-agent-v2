@@ -42,6 +42,7 @@ export function FullscreenConnectionOverlay({
   readyFlash,
   connectAttempted,
   microphoneStatusLabel,
+  unavailableLabel,
   onReconnect,
   overlayRef,
 }: {
@@ -49,6 +50,7 @@ export function FullscreenConnectionOverlay({
   readyFlash: boolean
   connectAttempted: boolean
   microphoneStatusLabel: string
+  unavailableLabel: string
   onReconnect(): void
   overlayRef: RefObject<HTMLDivElement | null>
 }) {
@@ -120,7 +122,7 @@ export function FullscreenConnectionOverlay({
       aria-label="Connection lost"
       tabIndex={-1}
     >
-      <p>CONNECTION LOST</p>
+      <p>{unavailableLabel}</p>
       <p className="connection-overlay__microphone-status" role="status" aria-live="polite">{microphoneStatusLabel}</p>
       <button type="button" className="neon-action" onClick={onReconnect}>RECONNECT</button>
     </div>

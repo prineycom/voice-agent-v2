@@ -72,7 +72,11 @@ describe('avatar host v1 boundary', () => {
     host.update({ ...input(), unexpected: true })
 
     expect(renderer.update).not.toHaveBeenCalled()
-    expect(host.health().rejectedInputs).toBe(3)
+    expect(host.health()).toMatchObject({ status: 'degraded', rejectedInputs: 3 })
+
+    host.update(input(1_010))
+    expect(renderer.update).toHaveBeenCalledTimes(1)
+    expect(host.health()).toMatchObject({ status: 'ready', rejectedInputs: 3 })
   })
 
   it('reports an explicit degraded fallback when the selected renderer fails', () => {

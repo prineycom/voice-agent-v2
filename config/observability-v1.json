@@ -1,0 +1,24 @@
+{
+  "schema_version": "voice-agent.observability-preregistration.v1",
+  "percentile_method": "nearest-rank",
+  "percentiles": [50, 95, 99],
+  "timing_metrics_ms": [
+    "endpoint_to_stt_final_ms",
+    "provider_time_to_first_token_ms",
+    "provider_completion_ms",
+    "tts_time_to_first_audio_ms",
+    "cancellation_latency_ms",
+    "total_turn_ms"
+  ],
+  "resource_metrics": [
+    "cpu_utilization_percent",
+    "host_ram_used_mib",
+    "process_rss_mib",
+    "gpu_vram_used_mib",
+    "gpu_utilization_percent"
+  ],
+  "resource_phases": ["endpoint", "terminal"],
+  "minimum_turns_for_acceptance_percentiles": 20,
+  "small_sample_behavior": "report_with_sample_count_but_do_not_claim_acceptance",
+  "physical_audibility_is_metadata_derivable": false
+}

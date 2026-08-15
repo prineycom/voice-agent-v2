@@ -142,7 +142,29 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertFalse(readiness["credentials_required"])
         self.assertEqual(readiness["parallel_slots"], 2)
         self.assertEqual(readiness["context_tokens_per_slot"], 32768)
+        self.assertTrue(provider.runtime_live)
         self.assertEqual(created_response[0].requests[0][:2], ("GET", "/health"))
+
+    def test_provider_failure_drops_liveness_after_a_successful_readiness_probe(self) -> None:
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        wrong_identity = StubResponse([
+            stream_event(content="Ответ.", model="wrong-model"),
+            stream_event(finish="stop", model="wrong-model"),
+        ])
+        factory, _created = self.factory([health, wrong_identity])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        provider.readiness()
+        self.assertTrue(provider.runtime_live)
+        with self.assertRaises(StageFailure):
+            provider.respond(
+                session_id="session-liveness",
+                turn_id="turn-liveness",
+                transcript="Проверка.",
+            )
+        self.assertFalse(provider.runtime_live)
 
     def test_payload_freezes_voice_sampling_reasoning_and_visible_bounds(self) -> None:
         provider = LocalLFMProvider(connection_factory=lambda *_a, **_k: None)

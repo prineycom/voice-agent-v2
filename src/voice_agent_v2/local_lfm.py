@@ -129,7 +129,17 @@ class LocalLFMProvider:
         self._handoff_cleanup_generations: set[int] = set()
         self._detached_handoff_generations: set[int] = set()
         self._handoff_capacity_error: str | None = None
+        self._runtime_live = False
         self.observations: list[dict[str, object]] = []
+
+    @property
+    def runtime_live(self) -> bool:
+        with self._operation_lock:
+            return self._runtime_live
+
+    def _set_runtime_live(self, live: bool) -> None:
+        with self._operation_lock:
+            self._runtime_live = live
 
     def _begin_operation(self, cancellation: CancellationToken | None) -> int:
         with self._operation_lock:
@@ -192,13 +202,18 @@ class LocalLFMProvider:
             document = json.loads(body)
             if not isinstance(document, dict) or document.get("status") != "ok":
                 raise StageFailure("llm_provider", "local_lfm_health_failed")
-        except StageFailure:
+        except StageFailure as error:
+            if error.code != "selected_provider_cancelled":
+                self._set_runtime_live(False)
             raise
         except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError) as error:
             code = "selected_provider_cancelled" if self._cancelled(generation) else "local_lfm_unavailable"
+            if code != "selected_provider_cancelled":
+                self._set_runtime_live(False)
             raise StageFailure("llm_provider", code) from error
         finally:
             self._release_connection(generation, connection)
+        self._set_runtime_live(True)
         return {
             "ready": True,
             "provider_mode": self.provider_mode,
@@ -540,7 +555,11 @@ class LocalLFMProvider:
             else lambda: None
         )
         def record_failure(error: StageFailure) -> None:
+            if error.code != "selected_provider_cancelled":
+                self._set_runtime_live(False)
             self.observations.append({
+                "session_id": session_id,
+                "turn_id": turn_id,
                 "provider_mode": self.provider_mode,
                 "provider_identity": self.provider_identity,
                 "external_transfer": False,
@@ -726,7 +745,10 @@ class LocalLFMProvider:
                     {"role": "assistant", "content": text},
                 ])
                 self._contexts[session_id] = context[-MAX_CONTEXT_MESSAGES:]
+            self._set_runtime_live(True)
             self.observations.append({
+                "session_id": session_id,
+                "turn_id": turn_id,
                 "provider_mode": self.provider_mode,
                 "provider_identity": self.provider_identity,
                 "external_transfer": False,
