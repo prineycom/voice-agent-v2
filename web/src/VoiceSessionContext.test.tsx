@@ -1,0 +1,119 @@
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const livekit = vi.hoisted(() => {
+  const createLocalAudioTrack = vi.fn()
+
+  class FakeRoom {
+    connect = vi.fn().mockResolvedValue(undefined)
+    disconnect = vi.fn().mockResolvedValue(undefined)
+    startAudio = vi.fn().mockResolvedValue(undefined)
+    localParticipant = {
+      publishTrack: vi.fn().mockResolvedValue(undefined),
+      publishData: vi.fn().mockResolvedValue(undefined),
+    }
+    remoteParticipants = new Map([
+      ['agent-session-test-0001', { identity: 'agent-session-test-0001' }],
+    ])
+    on = vi.fn().mockReturnThis()
+  }
+
+  return { createLocalAudioTrack, FakeRoom }
+})
+
+vi.mock('livekit-client', () => ({
+  Room: livekit.FakeRoom,
+  RoomEvent: {
+    TrackSubscribed: 'trackSubscribed',
+    TrackUnsubscribed: 'trackUnsubscribed',
+    ParticipantDisconnected: 'participantDisconnected',
+    DataReceived: 'dataReceived',
+    Reconnecting: 'reconnecting',
+    Reconnected: 'reconnected',
+    Disconnected: 'disconnected',
+    MediaDevicesError: 'mediaDevicesError',
+  },
+  Track: {
+    Kind: { Audio: 'audio' },
+    Source: { Microphone: 'microphone' },
+  },
+  createLocalAudioTrack: livekit.createLocalAudioTrack,
+}))
+
+import { VoiceSessionProvider, useVoiceSession } from './VoiceSessionContext'
+import { ACTIVE_LLM_MODEL_IDENTITY } from './state'
+
+function capabilityResponse(): Response {
+  return {
+    ok: true,
+    json: vi.fn().mockResolvedValue({
+      session_id: 'session-test-0001',
+      stream_epoch: 1,
+      livekit_url: 'wss://voice.test.ts.net:7443',
+      token: 'room-token-long-enough',
+      expires_in_seconds: 30,
+      admission_timeout_ms: 30_000,
+      control_version: 'voice-agent.realtime-control.v2',
+      llm_profile: {
+        provider_mode: 'local', model_identity: ACTIVE_LLM_MODEL_IDENTITY,
+      },
+      tts_profile: {
+        profile: 'silero-kseniya', backend: 'silero', speaker: 'kseniya',
+        output_sample_rate_hz: 48_000, native_sample_rate_hz: 48_000,
+        license: 'CC-BY-NC-SA-4.0', private_noncommercial_only: true,
+      },
+    }),
+  } as unknown as Response
+}
+
+function SessionProbe() {
+  const { state, connect, audioContainerRef } = useVoiceSession()
+  return (
+    <>
+      <button type="button" onClick={() => void connect()}>CONNECT</button>
+      <output aria-label="connection state">{state.connection}</output>
+      <output aria-label="microphone state">{state.microphoneStatus}</output>
+      <div ref={audioContainerRef} />
+    </>
+  )
+}
+
+beforeEach(() => {
+  livekit.createLocalAudioTrack.mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(capabilityResponse())
+    .mockResolvedValueOnce({ ok: false, status: 503 }))
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  livekit.createLocalAudioTrack.mockReset()
+})
+
+describe('VoiceSessionProvider connection attempts', () => {
+  it('does not carry a microphone failure into an earlier-stage retry failure', async () => {
+    const user = userEvent.setup()
+    render(
+      <VoiceSessionProvider>
+        <SessionProbe />
+      </VoiceSessionProvider>,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'CONNECT' }))
+    await waitFor(() => {
+      expect(screen.getByLabelText('connection state').textContent).toBe('failed')
+      expect(screen.getByLabelText('microphone state').textContent).toBe('error')
+    })
+
+    await user.click(screen.getByRole('button', { name: 'CONNECT' }))
+    await waitFor(() => {
+      expect(screen.getByLabelText('connection state').textContent).toBe('failed')
+      expect(screen.getByLabelText('microphone state').textContent).toBe('disconnected')
+    })
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(livekit.createLocalAudioTrack).toHaveBeenCalledTimes(1)
+  })
+})

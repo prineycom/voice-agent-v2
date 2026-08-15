@@ -51,6 +51,7 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
   const connect = useCallback(async () => {
     if (audioContainerRef.current === null) return
     await disconnect()
+    microphoneLifecycleRef.current = 'disconnected'
     const client = new VoiceClient(audioContainerRef.current, {
       onSession: (capability) => dispatch({ type: 'session-created', capability }),
       onConnection: (connection, error) => dispatch({ type: 'connection', connection, error }),

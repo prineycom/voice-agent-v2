@@ -200,6 +200,38 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
   })
 
+  it('starts a retained terminal drain when the announced track subscribes late', async () => {
+    vi.mocked(AudioPlaybackBoundary.prototype.finishGeneration)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+    const observed = callbacks()
+    const client = new VoiceClient(document.createElement('div'), observed)
+    await client.start()
+    const room = livekit.rooms[0]
+
+    emitControl(room, 'session.ready', 1, { state: 'ready' })
+    emitControl(room, 'turn.listening', 2)
+    emitControl(room, 'turn.media-ready', 3, mediaReadyPayload())
+    emitControl(room, 'stt.final', 4, { transcript: 'Вопрос.' })
+    emitControl(room, 'turn.thinking', 5)
+    emitControl(room, 'llm.visible', 6, { response: 'Ответ.' })
+    emitControl(room, 'turn.completed', 7, { outcome: 'completed' }, true)
+
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenCalledTimes(1)
+    expect(AudioPlaybackBoundary.prototype.setTrack).not.toHaveBeenCalled()
+
+    const track = { kind: 'audio' }
+    room.emit(
+      'trackSubscribed', track, { trackSid: 'publication-test' },
+      { identity: 'agent-session-test-0001' },
+    )
+
+    expect(AudioPlaybackBoundary.prototype.setTrack).toHaveBeenCalledWith(track, 1)
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenCalledTimes(2)
+    expect(AudioPlaybackBoundary.prototype.finishGeneration).toHaveBeenLastCalledWith(1)
+    expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
+  })
+
   it('keeps diagnostics and conversation content in memory only', async () => {
     const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
     const observed = callbacks()

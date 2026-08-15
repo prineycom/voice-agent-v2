@@ -50,6 +50,7 @@ export class AudioPlaybackBoundary {
   private generationDrained = false
   private generationCompletedAtMs = -Infinity
   private lastActiveEnvelopeAtMs = -Infinity
+  private generationObservationReady = false
   private generationDrainTimer: ReturnType<typeof setTimeout> | null = null
   private envelopeGraphDisabled = false
   private envelopeStatus: SpeechEnvelopeStatus = 'unknown'
@@ -119,6 +120,7 @@ export class AudioPlaybackBoundary {
     this.lastActiveEnvelopeAtMs = this.playbackActive
       ? this.generationCompletedAtMs
       : -Infinity
+    this.generationObservationReady = false
     this.scheduleGenerationDrain()
     return true
   }
@@ -295,7 +297,9 @@ export class AudioPlaybackBoundary {
     const maximumDeadline = this.generationCompletedAtMs + GENERATION_DRAIN_MAX_MS
     const quietBaseline = Math.max(this.generationCompletedAtMs, this.lastActiveEnvelopeAtMs)
     const quietDeadline = quietBaseline + GENERATION_DRAIN_QUIET_MS
-    const deadline = Math.min(maximumDeadline, quietDeadline)
+    const deadline = this.generationObservationReady
+      ? Math.min(maximumDeadline, quietDeadline)
+      : maximumDeadline
     this.generationDrainTimer = setTimeout(
       () => this.drainCompletedGeneration(),
       Math.max(0, deadline - now),
@@ -308,7 +312,10 @@ export class AudioPlaybackBoundary {
     const now = performance.now()
     const maximumDeadline = this.generationCompletedAtMs + GENERATION_DRAIN_MAX_MS
     const quietBaseline = Math.max(this.generationCompletedAtMs, this.lastActiveEnvelopeAtMs)
-    if (now < maximumDeadline && now < quietBaseline + GENERATION_DRAIN_QUIET_MS) {
+    if (
+      now < maximumDeadline
+      && (!this.generationObservationReady || now < quietBaseline + GENERATION_DRAIN_QUIET_MS)
+    ) {
       this.scheduleGenerationDrain()
       return
     }
@@ -488,12 +495,13 @@ export class AudioPlaybackBoundary {
       analyser.getByteTimeDomainData(samples)
       this.lastEnvelopeAtMs = timeMs
       const level = speechEnvelopeFromTimeDomain(samples)
-      if (
-        this.completedGeneration === this.publicationGeneration
-        && level >= ACTIVE_ENVELOPE_LEVEL
-      ) {
-        this.lastActiveEnvelopeAtMs = timeMs
-        this.scheduleGenerationDrain()
+      if (this.completedGeneration === this.publicationGeneration) {
+        const observationWasReady = this.generationObservationReady
+        this.generationObservationReady = true
+        if (level >= ACTIVE_ENVELOPE_LEVEL) this.lastActiveEnvelopeAtMs = timeMs
+        if (!observationWasReady || level >= ACTIVE_ENVELOPE_LEVEL) {
+          this.scheduleGenerationDrain()
+        }
       }
       this.onSpeechEnvelope({ level, observedAtMs: timeMs, playoutActive: true })
     }
@@ -509,6 +517,7 @@ export class AudioPlaybackBoundary {
     this.generationDrained = false
     this.generationCompletedAtMs = -Infinity
     this.lastActiveEnvelopeAtMs = -Infinity
+    this.generationObservationReady = false
     this.lastEnvelopeAtMs = -Infinity
     this.playbackActive = false
     this.envelopeSetupGeneration += 1

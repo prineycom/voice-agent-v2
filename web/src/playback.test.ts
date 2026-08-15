@@ -444,7 +444,11 @@ describe('persistent playback observation', () => {
     expect(boundary.finishGeneration(99)).toBe(false)
     expect(boundary.finishGeneration(1)).toBe(true)
 
-    await vi.advanceTimersByTimeAsync(199)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(observations.at(-1)).toMatchObject({ playoutActive: true })
+    firstElement.dispatchEvent(new Event('playing'))
+    expect(observations.at(-1)).toMatchObject({ playoutActive: true })
+    await vi.advanceTimersByTimeAsync(1_749)
     expect(observations.at(-1)).toMatchObject({ playoutActive: true })
     await vi.advanceTimersByTimeAsync(1)
     expect(observations.at(-1)).toMatchObject({ level: 0, playoutActive: false })

@@ -79,6 +79,7 @@ export class VoiceClient {
     mediaGeneration: number
     turnGeneration: number
     requestId: string
+    terminal: boolean
   } | null = null
   private streamEpoch = 0
   private microphoneEnabled = false
@@ -384,6 +385,9 @@ export class VoiceClient {
       }
       this.playback.setTrack(remoteTrack, desired.mediaGeneration)
       this.recordDiagnostic('playback', 'publication_generation_attached')
+      if (desired.terminal && this.playback.finishGeneration(desired.mediaGeneration)) {
+        this.recordDiagnostic('playback', 'deferred_generation_drain_started')
+      }
     })
     room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
       if (track.kind !== Track.Kind.Audio || !this.isExpectedAgent(participant.identity)) return
@@ -470,6 +474,7 @@ export class VoiceClient {
             mediaGeneration: event.media_generation,
             turnGeneration: event.turn_generation,
             requestId: event.request_id,
+            terminal: false,
           }
           const remoteTrack = this.remoteTracks.get(publicationId)
           if (remoteTrack !== undefined && !this.reconnecting) {
@@ -487,8 +492,12 @@ export class VoiceClient {
       } else if (event.type === 'turn.completed' || event.type === 'turn.failed') {
         const desired = this.desiredMedia
         if (desired !== null && desired.mediaGeneration === event.media_generation) {
-          this.playback.finishGeneration(event.media_generation)
-          this.recordDiagnostic('playback', 'generation_drain_started')
+          desired.terminal = true
+          if (this.playback.finishGeneration(event.media_generation)) {
+            this.recordDiagnostic('playback', 'generation_drain_started')
+          } else {
+            this.recordDiagnostic('playback', 'generation_drain_deferred')
+          }
         }
       } else if (event.type === 'session.ready') {
         this.clearInitialReadyTimer()
