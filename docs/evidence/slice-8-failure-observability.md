@@ -1,0 +1,127 @@
+# Slice 8 failure semantics and privacy-safe observability evidence
+
+- **Issue:** [#10](https://github.com/prineycom/voice-agent-v2/issues/10)
+- **Checkpoint date:** 2026-08-15
+- **Status:** deterministic fault/privacy/readiness/browser boundaries and bounded safe process/resource cases pass; physical/shared-network/destructive cases remain explicitly unclaimed
+- **Legacy source:** none inspected or used
+
+## Observation and failure architecture
+
+`src/voice_agent_v2/observability.py` is the single typed owner of:
+
+- `voice-agent.observation.v1` scalar-only metadata observations;
+- `voice-agent.health-readiness.v1` component liveness/readiness/compatibility reports;
+- the complete architecture §7 failure-to-user-state map;
+- safe resource snapshots, timeline reconstruction, nearest-rank percentiles, and slow-stage derivation.
+
+Existing boundaries remain in place: `PrivacySafeTrace` stores bounded outside-Git JSONL, `realtime-control.v2` carries public health/failure/timing/provider/count/resource payloads, `voiceReducer` owns client state, and the existing System/Timeline tabs render it. No telemetry server, generalized event bus, control plane, hosted vendor, alternate provider, or TTS/avatar selector was added.
+
+The active composition is unchanged: local LiveKit, Whisper large-v3-turbo, fixed local LFM2.5 Q4_K_M/llama.cpp, exact Silero `v5_5_ru` / `kseniya`, renderer-agnostic avatar host with the selected MVP eye/static safety representation, tailnet authorization, no wake, and no fallback. Health reports close these facts as `provider_mode=local`, `external_transfer=false`, `automatic_fallback=false`, local STT/TTS, `auth_boundary=tailnet`, `wake_enabled=false`, and `selected_avatar_module=mvp-eye-svg-v1`.
+
+## Readiness compatibility report
+
+The report separates for each of LiveKit, controller, STT, selected LLM, TTS, avatar host, and active module:
+
+- process/component **liveness** (`alive`, `dead`, or `unknown`);
+- capability **readiness** (`ready`, `unready`, `degraded`, or `unknown`);
+- contract/artifact/module compatibility;
+- identity, contract version, reason code, and bounded recovery attempts.
+
+A controlled report with an alive selected-LLM process but wrong/incompatible model contract yields `liveness=alive`, `readiness=unready`, `compatible=false`, and overall `unready`. The browser rejects a report that relabels that same component set as ready. Actual resident readiness additionally checks warmed Whisper process custody, the exact local-LFM readiness identity/no-transfer/no-fallback record, and two live compatible Silero workers. A dead resident capability blocks admission; failure does not route to another provider/model/backend.
+
+## Complete controlled fault matrix
+
+Run `./verify-slice8`. Every row invokes the executable failure mapper and asserts its public consequence, retry/admission bound, and unchanged provider/privacy/auth/wake/avatar-selection facts. Existing controller/adapter/avatar/browser suites exercise the corresponding turn, cancellation, malformed-input, render-failure, disconnect, and duplicate-event behavior.
+
+| Architecture failure row | Injection/validation | Public consequence | Retry/admission result |
+| --- | --- | --- | --- |
+| LiveKit unavailable | Controlled transport/control loss plus bounded reconnect reducer/client timer | `retrying`, then `unavailable` | At most 10 reconnect publications inside the 5-second acknowledgement window; no inference admission. |
+| Microphone capture/cleanup failure | Existing recorder/stream/setup/cleanup failure seams | `unavailable` | Zero inference admission/retry; retention truth remains explicit. |
+| STT unavailable/temp-input failure | Controlled adapter/process failure | `unavailable` for the turn | No fabricated transcript/downstream work; dead readiness blocks later admission. |
+| Selected LLM failure | Controlled selected-provider transport/identity/terminal failure | `unavailable` | No answer/fallback; visible accepted prefix semantics remain non-retractable. |
+| Cloud credential/allowlist/privacy invalid | Controlled inactive-cloud configuration case | `unavailable` | Not applicable to the fixed active local mode; no credential was sought and local was not selected as a failure fallback. |
+| TTS unavailable/fails | Controlled pool/readiness/synthesis/late-failure cases | `degraded` | Valid text/accepted PCM prefix remains; spoken completion fails; zero retry/fallback. |
+| Avatar input malformed/missing/late/stale | Bounded host contract cases | `degraded` | Safe deterministic input/state and rejection count; voice continues. |
+| Avatar module/render failure | Controlled render-loop failure callback | `degraded` | Voice/text continue; runaway motion stops; only configured static safety representation, not another selected avatar. |
+| Client disconnect | Existing session disconnect cleanup case | `interrupted` | In-flight delivery terminalized; no orphan work/admission. |
+| GPU allocation/model process crash | Controlled GPU failure mapping plus real disposable process loss | `unavailable` | Readiness drops; zero inference request retry/provider switch. |
+| Tailscale unavailable | Controlled remote-path loss policy | product `degraded`, remote path unavailable | Loopback may continue; no public exposure appears. |
+| Late/duplicate event | Strict gate replay | User state unchanged (`available`); operator drop count | No retry, UI, media, or inference action. |
+
+A safe real-process case starts a task-owned disposable Python worker, kills it, observes lost liveness, permits exactly one test-only recovery, kills it again, and proves the second restart is blocked. It touches no shared service. The real product runtime is stricter in Slice 8: it performs zero automatic inference request retry and zero automatic service restart; service supervision remains Slice 9. This cannot form an admission/restart loop.
+
+## Correlated timeline and percentile report
+
+`config/observability-v1.json` preregisters nearest-rank p50/p95/p99 for:
+
+- endpoint → STT final;
+- selected-provider time to first token and completion;
+- TTS time to first accepted audio;
+- cancellation latency when interruption occurs;
+- total turn;
+- CPU, host RAM, process RSS, GPU VRAM, and GPU utilization.
+
+It requires at least 20 turns before percentiles may be called acceptance evidence. Smaller samples remain honest diagnostic output with `turn_count`.
+
+The bounded verifier emits one synthetic metadata-only turn and reconstructs, without input/output content:
+
+```json
+{
+  "session_id": "session-slice8",
+  "turn_id": "turn-slice8",
+  "terminal_outcome": "completed",
+  "endpoint_to_stt_final_ms": 80.0,
+  "provider_time_to_first_token_ms": 45.0,
+  "provider_completion_ms": 110.0,
+  "tts_time_to_first_audio_ms": 30.0,
+  "total_turn_ms": 250.0,
+  "slowest_stage": "selected_llm"
+}
+```
+
+The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance-percentile claim. The same report reconstructs provider mode/identity, `external_transfer=false`, usage-unit counts when the local runtime supplies them, terminal outcome, PCM/segment queue high-water marks, cancellation/stale/control-drop counts, and endpoint/terminal resource samples. Runtime-level content-free model `loaded`/`unloaded` events are recorded separately.
+
+## Default-log privacy review and capture deletion
+
+Default metadata paths reject keys for raw audio/PCM, transcript, prompt, response/text/content, secrets/tokens, and content-bearing identifiers. Only specifically named count/timing fields such as provider time-to-first-token are allowlisted. Values must be bounded scalar JSON; browser error diagnostics keep a normalized class/code and never an exception message. Conversation text/history remains current-page memory and is not included in downloaded diagnostics.
+
+Content capture is off by default. Enabling it requires all of:
+
+```text
+VOICE_AGENT_DIAGNOSTIC_CAPTURE=1
+VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT=<absolute outside-Git path>
+VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS=<60..3600>
+```
+
+One capture is capped at 16 files / 1 MiB, directory mode `0700`, file mode `0600`, and has an owned manifest/expiry. The verifier captured only labelled synthetic raw bytes/transcript/prompt/response, invoked the public `./manage-diagnostics delete <capture-directory>` path, and proved the directory no longer existed. It also exercises expiry deletion and rejects a repository-local root. No capture or content was written to Git.
+
+## Safe resource case
+
+The safe real resource case allocates exactly 16 MiB, applies about 100 ms bounded CPU work, and samples `/proc` plus read-only `nvidia-smi` metadata before/under pressure. The latest run observed the allocation/RSS change and returned finite host/GPU values; these transient numbers are intentionally not frozen as a capacity claim. It performs no RAM/VRAM exhaustion and makes no OOM result claim.
+
+## Validation commands
+
+```sh
+./verify-slice8
+./verify
+./verify-local-lfm
+./verify-silero-kseniya
+./verify-slice7
+./verify-slice6
+```
+
+`./verify-slice8` is the focused safe gate. The remaining commands are cumulative regression/exact-cache gates required by repository memory; their current run results belong in the Slice 8 do report and PR checks.
+
+## Exact validation gaps
+
+Not performed or claimed by Slice 8 automation:
+
+- physical microphone behavior or cleanup on a new private recording;
+- physical speaker audibility, Kseniya quality/joins, or physical interruption timing;
+- Raspberry Pi rendering/performance or a physical browser render crash;
+- an actual Tailscale interface disconnect, because it would disrupt shared remote access/network state;
+- destructive RAM/VRAM exhaustion or a real production-model OOM;
+- killing the shared active LiveKit/model services;
+- 20-turn physical/full-stack acceptance percentiles.
+
+Controlled browser render, remote-path, provider, GPU-allocation, and process-loss cases validate state/custody semantics only and are not substituted for those physical/shared/destructive results. The pre-existing Slice 6/7 physical/full-stack gaps remain open and visible.

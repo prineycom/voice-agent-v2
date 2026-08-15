@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 project architecture
 >
-> **Last updated:** 2026-08-14
+> **Last updated:** 2026-08-15
 
 This document defines the active target architecture. It records user-approved candidate identities and endpoints only at their evidence gate; a gateway investigation is not a passing provider/model selection.
 
@@ -36,6 +36,7 @@ Untested behavior is not implied by a target diagram.
 | D12 | Decision | Issue #15 supersedes the active ADR-0006 cloud exception inside the same Slice 6 delivery. The app uses only pinned cache-local official LFM2.5 Q4_K_M on GPU-enabled llama.cpp, loopback-only, two 32,768-token slots, no credentials and no cloud fallback. Historical DeepSeek evidence remains factual. See [ADR-0008](adr/0008-local-lfm2-llamacpp-for-slice-6.md). |
 | D13 | Decision | The private unmerged TTS evaluation branch adds backend-neutral TTS/event/control v2 contracts but fixes active composition directly to exact cache-local Silero `v5_5_ru` / `kseniya`. Input stays mono 16 kHz; output is native mono 48 kHz through two isolated resident workers and generation-gated playback. Historical Qwen/TTS v1 stays inactive and immutable. There is no TTS selector, second adapter, co-start, retry, fallback, production authority, or commercial authority. See [ADR-0009](adr/0009-silero-kseniya-tts-v2-native-48-private-evaluation.md). |
 | D14 | Decision | The browser is a portrait-first full-viewport avatar shell. UI chrome knows only the avatar-host v1 API; the selected module knows no panels or controls. Four steady overlays, right-edge panels, neon-minimal tokens, and system/user reduced-motion behavior are fixed by ADR-0011 and ADR-0012. |
+| D15 | Decision | Slice 8 observation shapes and failure-to-user-state mapping have one direct owner in `voice_agent_v2.observability`. The existing metadata trace, realtime-control payload, reducer, and System/Timeline panels compose that boundary; there is no telemetry service, generalized event bus, fallback controller, or hosted vendor. |
 
 ## 3. System boundary
 
@@ -147,7 +148,8 @@ Media and control remain distinct even when LiveKit transports both.
 | Speech envelope | Browser decoded-audio analyser → avatar module | Browser media adapter | Derived from the decoded audio signal, bounded rate/range, correlated lifecycle, no raw audio in the control event, and never treated as physical-speaker evidence. |
 | External tracking target | Approved trigger producer → avatar host | Avatar host | Optional, bounded coordinates/age/confidence, stale-input rejection; producer implementation is separate. |
 | Render state | Avatar module internal | Avatar module | Deterministic mapping from validated inputs; never accepted from an LLM or network as frame data. |
-| Health/readiness report | Each service → operator/controller | Owning service | Liveness distinct from readiness; build, provider mode, and loaded-model/module identity; no secrets. |
+| Health/readiness report | Each service/avatar host → operator/controller/System panel | Session-controller observability boundary, with each component supplying its own state | `voice-agent.health-readiness.v1`: liveness distinct from readiness; contract/artifact compatibility, build/provider/loaded-model/module identity, reason code, and bounded recovery attempts; no secrets. |
+| Privacy-safe observation | Services/controller/browser adapters → operator report | Session-controller observability boundary | `voice-agent.observation.v1`: one session/turn correlation, monotonic sequence/time, scalar content-free fields, bounded storage/failures, and executable reconstruction/percentile rules. |
 
 Contract versions change for semantic compatibility, not every implementation release. During implementation, machine-readable schemas and executable producer/consumer contract tests become authoritative; this document continues to own the boundary and invariants.
 
@@ -233,7 +235,7 @@ The agent reuses `RealTurnController`, Whisper, and local LFM rather than creati
 
 ## 7. Failure semantics
 
-No failure silently switches LLM provider, moves another inference capability to cloud, changes authorization, enables always-listening wake behavior, or selects a different avatar module.
+No failure silently switches LLM provider, moves another inference capability to cloud, changes authorization, enables always-listening wake behavior, or selects a different avatar module. `voice_agent_v2.observability.failure_disposition` is the single executable owner of mapping failure codes to the public state. `unavailable` blocks the affected operation, `degraded` preserves only explicitly safe remaining behavior, `retrying` exposes a bounded transport retry, and `interrupted` terminalizes the current delivery. A late/duplicate control is intentionally operator-only and leaves the user's available state unchanged.
 
 | Failure | Dependency class | Required behavior |
 | --- | --- | --- |
@@ -249,6 +251,25 @@ No failure silently switches LLM provider, moves another inference capability to
 | GPU out of memory or local model process crash | Hard for affected local inference capability | Readiness drops, current turn terminates explicitly, supervised recovery is bounded, and no request retry or provider switch can amplify/change load or alter privacy. |
 | Tailscale unavailable | Soft for loopback, hard for remote access | Local use may continue; remote clients receive no alternate public exposure. |
 | Late or duplicate event | Soft | Client discards it using session/turn identity and sequence rules. |
+
+### 7.1 Executable user-state mapping
+
+| Architecture row | User-visible state | Retry/admission consequence |
+| --- | --- | --- |
+| LiveKit unavailable | `retrying`, then `unavailable` on bounded failure | Reconnect acknowledgement attempts are bounded to 10 in 5 seconds; no inference admission. |
+| Microphone capture/cleanup failure | `unavailable` | No turn or inference admission; zero retry. |
+| STT unavailable/temporary-input failure | `unavailable` for the turn | No downstream inference or transcript fabrication; a dead/unready resident capability blocks later admission. |
+| Selected LLM failure | `unavailable` for the response | No fallback or fabricated answer; a dead/incompatible resident capability blocks later admission. |
+| Invalid cloud credential/allowlist/privacy facts | `unavailable` | Controlled inactive-cloud validation only in the fixed local deployment; local is not selected as fallback because it is already the configured mode. |
+| TTS failure | `degraded` | Valid text/accepted prefix is salvageable; spoken completion fails, with zero request retry/fallback. |
+| Invalid/stale avatar input | `degraded` | Deterministic safe state, count increment, voice admission continues. |
+| Avatar runtime/render failure | `degraded` | Voice/text continue through only the configured static safety representation; no alternate selected avatar. |
+| Client disconnect | `interrupted` | Current delivery is terminalized and cleaned; no orphan admission. |
+| GPU allocation/model process crash | `unavailable` | Readiness drops; zero inference request retry/provider switch. Foreground Slice 8 performs no automatic service restart. |
+| Tailscale unavailable | `degraded` for the product as a whole, unavailable remotely | Loopback can continue; no public route appears. |
+| Late/duplicate event | user state unchanged (`available`) | Drop count only; no retry or state/media action. |
+
+The deterministic matrix executes every row. Real-process validation kills only disposable task-owned workers, permits one test-only recovery, then proves a second restart is blocked. Actual model/service supervision remains Slice 9; Slice 8 therefore has a stricter zero-automatic-restart runtime rather than an admission/restart loop.
 
 ## 8. Observability and privacy
 
@@ -267,9 +288,13 @@ Every turn must be diagnosable without recording its private content by default.
 - GPU VRAM, GPU utilization, host RAM, CPU, and local-model load/unload events.
 - Avatar input validation/fallback counts, active module capabilities, and render-loop health without private content.
 
+`config/observability-v1.json` preregisters nearest-rank p50/p95/p99 for endpoint-to-STT-final, selected-provider first token/completion, TTS first audio, cancellation latency, total turn, CPU, RAM/RSS, GPU VRAM, and GPU utilization. Reports always include sample count; fewer than 20 turns is diagnostic evidence and cannot be called an acceptance percentile. The slowest measured stage is derived from those emitted durations. Resource samples occur at endpoint and terminal; runtime model load/unload observations are separate content-free events. Browser playout remains programmatic telemetry, never a physical audibility claim.
+
 ### 8.2 Data handling
 
-Raw recordings, transcripts, prompts, responses, model artifacts, tokens, and environment values are not committed. Production logs omit raw media and conversation content by default. Temporary input cleanup must fail closed and report whether input may remain; it cannot silently admit downstream inference. A bounded diagnostic capture must be explicitly enabled, identify its retention path and lifetime, and remain outside Git. This foundation does not authorize a durable conversation-history store.
+Raw recordings, transcripts, prompts, responses, model artifacts, tokens, content-bearing identifiers, and environment values are not committed or written by default diagnostics. `voice-agent.observation.v1` rejects content-bearing field names and non-scalar/unbounded values before JSONL storage; browser diagnostic errors retain only a normalized class/code, never an exception message. Temporary input cleanup must fail closed and report whether input may remain; it cannot silently admit downstream inference.
+
+Content capture is off unless ignored server configuration sets exact `VOICE_AGENT_DIAGNOSTIC_CAPTURE=1`, an absolute `VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT` outside every Git worktree, and a 60–3,600 second TTL. One capture is limited to 16 content files / 1 MiB with `0700` directory and `0600` files. It never enters the browser download. `./manage-diagnostics status|delete` validates the owned manifest without enumerating content; expiry pruning and the explicit deletion path are executable. This boundary still does not authorize a durable conversation-history store.
 
 ## 9. Configuration, artifacts, and secrets
 
