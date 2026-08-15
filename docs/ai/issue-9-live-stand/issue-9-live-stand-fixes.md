@@ -1,7 +1,7 @@
 # Fix Report: Issue #9 live review stand
 
 **Source:** Pasha's manual acceptance feedback on PR #20
-**Status:** 🚧 validation pending
+**Status:** ⚠️ implementation and live runtime validated; no-mistakes/CI follow-up pending
 **Scope stayed small:** yes — deployment entry/session admission and microphone-state repair on the existing branch/PR
 
 ## Reproduction and diagnosis
@@ -53,7 +53,16 @@ The ordinary production entry (`web/src/main.tsx`) mounts `VoiceSessionProvider`
 
 ## Validation
 
-Pending focused `verify-slice7`, `verify-slice6`, the existing Firefox/official-LiveKit end-to-end path with synthetic microphone/control/PCM, exact-head deployment, API/capability/public-endpoint checks, and CI. No aesthetic visual review is performed.
+| Command/check | Result | Notes |
+| --- | --- | --- |
+| `./verify-slice7` | PASS | 67 focused tests; production and isolated fixture builds; generated entry divergence. |
+| `./verify-slice6` | PASS | Existing deterministic controller plus Firefox/official-LiveKit microphone/VAD, control events, reconnect, response PCM/playout, history/status, and diagnostics. Uses synthetic microphone/audio and deterministic inference; no physical audibility claim. |
+| Stable URL pre-CONNECT functional check | PASS | Production title/entry, explicit CONNECT, empty history, `MIC DISCONNECTED`, permission `prompt`, and no pre-connect API/LiveKit request. No aesthetic visual judgment. |
+| Stable API/runtime check | PASS | HTTPS 200; exact candidate bundle; gateway/status available; scoped capability returned public `wss://priney-arch.darter-smoot.ts.net:7443`, verified LLM/TTS identities, and a token without exposing it; unjoined capacity recovered. |
+| Runtime listeners/routes | PASS | Gateway `127.0.0.1:8000`, LiveKit `127.0.0.1:7880`, local LFM `127.0.0.1:18080`, owned tailnet HTTPS `8447` application and `7443` signaling. HTTPS/443/firewall unchanged. |
+| no-mistakes and CI | PENDING | Run after the follow-up commits, then redeploy exact final PR head. |
+
+No aesthetic visual review was performed.
 
 ## Follow-ups
 

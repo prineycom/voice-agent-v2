@@ -53,9 +53,12 @@ start() {
     echo "Production bundle does not contain the exact review head." >&2
     exit 2
   }
+  DEPLOY_DIST=$(mktemp -d "$ROOT/tmp/review-stand-dist.$BUILD.XXXXXX")
+  cp -a "$ROOT/web/dist/." "$DEPLOY_DIST/"
   nohup env \
     VOICE_AGENT_APP_PUBLIC_URL_OVERRIDE="$TAILNET_URL" \
     VOICE_AGENT_APP_HTTPS_PORT_OVERRIDE="$TAILNET_PORT" \
+    VOICE_AGENT_WEB_DIST_OVERRIDE="$DEPLOY_DIST" \
     "$ROOT/run-slice6" >"$LOG_FILE" 2>&1 &
   PID=$!
   printf '%s\n' "$PID" > "$PID_FILE"

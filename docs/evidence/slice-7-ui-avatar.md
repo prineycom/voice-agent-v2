@@ -42,7 +42,7 @@ The committed historical capture is [`slice-7-review-portrait.png`](slice-7-revi
 
 ## Live review stand
 
-The launcher builds the current clean commit's ordinary production entry, then reuses the safe Slice 6 foreground runtime: local LFM, LiveKit, gateway/controller, STT/TTS, loopback gateway `8000`, and explicit owned Tailscale Serve routes. The stable application route overrides only the configured application origin/port to HTTPS `8447`; LiveKit's public signaling URL remains operator-configured and is returned through the typed capability. It does not change HTTPS/443, firewalld, public exposure, or unrelated services.
+The launcher builds the current clean commit's ordinary production entry, verifies its embedded SHA, copies it to an immutable ignored per-run directory, then reuses the safe Slice 6 foreground runtime: local LFM, LiveKit, gateway/controller, STT/TTS, loopback gateway `8000`, and explicit owned Tailscale Serve routes. The stable application route overrides only the configured application origin/port to HTTPS `8447`; LiveKit's public signaling URL remains operator-configured and is returned through the typed capability. It does not change HTTPS/443, firewalld, public exposure, or unrelated services.
 
 The page starts `DISCONNECTED`; **CONNECT** is the user gesture that requests the same-origin session capability, microphone permission, LiveKit join, and microphone publication. History is empty until genuine server control events. The microphone overlay reports permission, publication, live/listening, muted, or error state explicitly.
 
