@@ -1,5 +1,5 @@
 export interface AttachableAudioTrack {
-  attach(): HTMLMediaElement
+  attach(element?: HTMLMediaElement): HTMLMediaElement
   detach(element?: HTMLMediaElement): HTMLMediaElement[]
   readonly mediaStreamTrack?: MediaStreamTrack
 }
@@ -131,10 +131,10 @@ export class AudioPlaybackBoundary {
     this.clear()
   }
 
-  private attachFresh(): void {
+  private attachFresh(requestedElement?: HTMLMediaElement): void {
     if (this.track === null) return
     const generation = ++this.attachmentGeneration
-    const element = this.track.attach()
+    const element = this.track.attach(requestedElement)
     element.autoplay = true
     element.controls = false
     element.dataset.voiceAgentAudio = 'agent-response'
@@ -341,7 +341,7 @@ export class AudioPlaybackBoundary {
     try {
       this.detachElement()
       this.elementBlocked = false
-      this.attachFresh()
+      this.attachFresh(document.createElement('audio'))
     } catch {
       this.elementBlocked = true
       this.reportBlocked()

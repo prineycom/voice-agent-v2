@@ -123,7 +123,7 @@ describe('persistent playback observation', () => {
     expect(context.close).toHaveBeenCalledTimes(1)
   })
 
-  it('restores direct playout when media-element analyser routing fails', async () => {
+  it('restores direct playout on a fresh element when analyser routing fails', async () => {
     const source = {
       connect: vi.fn(() => {
         throw new Error('routing failed')
@@ -153,22 +153,26 @@ describe('persistent playback observation', () => {
     }
     vi.stubGlobal('AudioContext', FakeAudioContext)
 
-    const elements: HTMLAudioElement[] = []
+    const pooledElement = document.createElement('audio')
+    const prepareElement = (element: HTMLMediaElement): HTMLMediaElement => {
+      Object.defineProperties(element, {
+        paused: { configurable: true, get: () => false },
+        ended: { configurable: true, get: () => false },
+        readyState: { configurable: true, get: () => 4 },
+        error: { configurable: true, get: () => null },
+      })
+      element.play = vi.fn().mockResolvedValue(undefined)
+      element.pause = vi.fn()
+      element.load = vi.fn()
+      return element
+    }
+    prepareElement(pooledElement)
     const remote: AttachableAudioTrack = {
-      attach: vi.fn(() => {
-        const element = document.createElement('audio')
-        Object.defineProperties(element, {
-          paused: { configurable: true, get: () => false },
-          ended: { configurable: true, get: () => false },
-          readyState: { configurable: true, get: () => 4 },
-          error: { configurable: true, get: () => null },
-        })
-        element.play = vi.fn().mockResolvedValue(undefined)
-        element.pause = vi.fn()
-        element.load = vi.fn()
-        elements.push(element)
-        return element
-      }),
+      attach: vi.fn((requestedElement?: HTMLMediaElement) => (
+        requestedElement === undefined
+          ? pooledElement
+          : prepareElement(requestedElement)
+      )),
       detach: vi.fn((element) => element === undefined ? [] : [element]),
     }
     const container = document.createElement('div')
@@ -187,9 +191,13 @@ describe('persistent playback observation', () => {
     await Promise.resolve()
 
     expect(remote.attach).toHaveBeenCalledTimes(2)
-    expect(remote.detach).toHaveBeenCalledWith(elements[0])
-    expect(container.firstElementChild).toBe(elements[1])
-    expect(elements[1].play).toHaveBeenCalledTimes(1)
+    expect(remote.attach).toHaveBeenNthCalledWith(1, undefined)
+    const replacement = vi.mocked(remote.attach).mock.calls[1]?.[0]
+    expect(replacement).toBeInstanceOf(HTMLAudioElement)
+    expect(replacement).not.toBe(pooledElement)
+    expect(remote.detach).toHaveBeenCalledWith(pooledElement)
+    expect(container.firstElementChild).toBe(replacement)
+    expect(replacement?.play).toHaveBeenCalledTimes(1)
     expect(source.disconnect).toHaveBeenCalledTimes(1)
     expect(context.close).toHaveBeenCalledTimes(1)
     expect(blocked).toHaveBeenLastCalledWith(false)
