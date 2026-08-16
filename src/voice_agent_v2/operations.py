@@ -374,6 +374,17 @@ def parse_server_configuration(path: Path) -> dict[str, str]:
     return values
 
 
+def _require_service_configuration_path(path: Path, *, state_root: Path) -> None:
+    if state_root.expanduser().resolve() != DEFAULT_STATE_ROOT.resolve():
+        return
+    service_home = Path.home().resolve()
+    if path == service_home or not path.is_relative_to(service_home):
+        raise OperationalError(
+            "configuration_unavailable",
+            "system service configuration must remain beneath the service user home",
+        )
+
+
 def _configuration_matches_tracked_file(
     *, source_root: Path, commit: str, metadata: os.stat_result,
 ) -> bool:
@@ -671,6 +682,7 @@ def validate_host(
     verify_artifact_state: bool = True,
     configuration_values: Mapping[str, str] | None = None,
 ) -> ValidationReport:
+    _require_service_configuration_path(config_path, state_root=state_root)
     manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
     verify_tracked_manifest_alignment(
         source_root=source_root, operations_manifest=manifest,
@@ -985,38 +997,63 @@ class ReleaseStore:
         transaction = _json_object(
             self.stage_transaction_path, code="release_state_invalid",
         )
-        _require_exact_keys(
-            transaction, {"schema_version", "stage"},
-            label="release stage transaction", code="release_state_invalid",
-        )
+        schema = transaction.get("schema_version")
+        if schema == "voice-agent.release-stage.v1":
+            _require_exact_keys(
+                transaction, {"schema_version", "stage"},
+                label="release stage transaction", code="release_state_invalid",
+            )
+            target_name = None
+        elif schema == "voice-agent.release-stage.v2":
+            _require_exact_keys(
+                transaction, {"schema_version", "stage", "target"},
+                label="release stage transaction", code="release_state_invalid",
+            )
+            target_name = transaction.get("target")
+            if not isinstance(target_name, str) or not RELEASE_ID.fullmatch(target_name):
+                raise OperationalError(
+                    "release_state_invalid", "release stage transaction is invalid",
+                )
+        else:
+            raise OperationalError(
+                "release_state_invalid", "release stage transaction is incompatible",
+            )
         stage_name = transaction.get("stage")
         if (
-            transaction.get("schema_version") != "voice-agent.release-stage.v1"
-            or not isinstance(stage_name, str)
+            not isinstance(stage_name, str)
             or re.fullmatch(r"\.stage-[0-9a-f]{32}", stage_name) is None
         ):
             raise OperationalError(
                 "release_state_invalid", "release stage transaction is invalid",
             )
-        stage = self.releases / stage_name
-        try:
-            stage_metadata = stage.lstat()
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            raise OperationalError(
-                "release_state_invalid", "release stage is unavailable",
-            ) from error
-        else:
+        candidates = [self.releases / stage_name]
+        if target_name is not None:
+            candidates.append(self.releases / target_name)
+        owned: list[Path] = []
+        for candidate in candidates:
+            try:
+                candidate_metadata = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise OperationalError(
+                    "release_state_invalid", "release stage is unavailable",
+                ) from error
             if not (
-                stat.S_ISDIR(stage_metadata.st_mode)
-                and stage_metadata.st_uid == os.geteuid()
-                and stat.S_IMODE(stage_metadata.st_mode) == 0o700
+                stat.S_ISDIR(candidate_metadata.st_mode)
+                and candidate_metadata.st_uid == os.geteuid()
+                and stat.S_IMODE(candidate_metadata.st_mode) == 0o700
             ):
                 raise OperationalError(
                     "release_state_invalid", "release stage custody changed",
                 )
-            shutil.rmtree(stage)
+            owned.append(candidate)
+        if len(owned) > 1:
+            raise OperationalError(
+                "release_state_invalid", "release stage transaction is ambiguous",
+            )
+        if owned:
+            shutil.rmtree(owned[0])
             _fsync_directory(self.releases)
         self.stage_transaction_path.unlink()
         _fsync_directory(self.state_root)
@@ -1035,6 +1072,13 @@ class ReleaseStore:
             _fsync_directory(self.state_root)
             raise
         return stage
+
+    def _record_stage_target(self, stage: Path, target: Path) -> None:
+        _atomic_json(self.stage_transaction_path, {
+            "schema_version": "voice-agent.release-stage.v2",
+            "stage": stage.name,
+            "target": target.name,
+        })
 
     def _finish_stage(self) -> None:
         self.stage_transaction_path.unlink()
@@ -1080,6 +1124,7 @@ class ReleaseStore:
     def deploy(self, *, source_root: Path, config_path: Path) -> dict[str, object]:
         source_root = source_root.resolve()
         config_path = Path(os.path.abspath(config_path.expanduser()))
+        _require_service_configuration_path(config_path, state_root=self.state_root)
         if self.state_root.is_relative_to(source_root):
             raise OperationalError("release_state_invalid", "release state must remain outside source")
         status = _run_git(source_root, "status", "--porcelain=v1", "--untracked-files=all")
@@ -1164,16 +1209,6 @@ class ReleaseStore:
                 web_dist = web_root / "dist"
                 if web_dist.exists():
                     shutil.rmtree(web_dist)
-                dependencies = source_root / "web" / "node_modules"
-                dependency_link = web_root / "node_modules"
-                if (
-                    not dependencies.is_dir()
-                    or dependency_link.exists()
-                    or dependency_link.is_symlink()
-                ):
-                    raise OperationalError(
-                        "release_build_failed", "versioned client dependencies are unavailable",
-                    )
                 environment = {
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                     "HOME": str(Path.home()),
@@ -1181,18 +1216,39 @@ class ReleaseStore:
                     "LC_ALL": "C.UTF-8",
                     "VITE_APP_VERSION": commit,
                 }
-                os.symlink(dependencies, dependency_link, target_is_directory=True)
+                dependency_tree = web_root / "node_modules"
                 try:
-                    build = subprocess.run(
-                        [
-                            "npm", "run", "build", "--", "--outDir", str(web_dist),
-                            "--emptyOutDir",
-                        ],
-                        cwd=web_root, env=environment,
-                        capture_output=True, text=True, timeout=180, check=False,
-                    )
+                    try:
+                        install = subprocess.run(
+                            [
+                                "npm", "ci", "--offline", "--ignore-scripts",
+                                "--no-audit", "--no-fund",
+                            ],
+                            cwd=web_root, env=environment,
+                            capture_output=True, text=True, timeout=180, check=False,
+                        )
+                        if install.returncode != 0:
+                            raise OperationalError(
+                                "release_build_failed",
+                                "versioned client dependencies are unavailable from the local cache",
+                            )
+                        build = subprocess.run(
+                            [
+                                "npm", "run", "build", "--", "--outDir", str(web_dist),
+                                "--emptyOutDir",
+                            ],
+                            cwd=web_root, env=environment,
+                            capture_output=True, text=True, timeout=180, check=False,
+                        )
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        raise OperationalError(
+                            "release_build_failed", "versioned client build failed",
+                        ) from error
                 finally:
-                    dependency_link.unlink(missing_ok=True)
+                    if dependency_tree.is_symlink():
+                        dependency_tree.unlink()
+                    elif dependency_tree.exists():
+                        shutil.rmtree(dependency_tree)
                 if build.returncode != 0:
                     raise OperationalError(
                         "release_build_failed", "versioned client build failed",
@@ -1242,6 +1298,11 @@ class ReleaseStore:
                 stage_bytes = directory_size(stage)
                 if target.exists():
                     shutil.rmtree(stage)
+                    _fsync_directory(self.releases)
+                    self._finish_stage()
+                    validate_release(
+                        target, state_root=self.state_root, verify_host_state=True,
+                    )
                 else:
                     if len(existing) >= maximum_count:
                         raise OperationalError(
@@ -1253,15 +1314,16 @@ class ReleaseStore:
                             "release_cache_pressure",
                             "release byte bound reached; no existing release was deleted",
                         )
+                    self._record_stage_target(stage, target)
                     os.rename(stage, target)
                     _fsync_directory(self.releases)
-                self._finish_stage()
+                    validate_release(
+                        target, state_root=self.state_root, verify_host_state=True,
+                    )
+                    self._finish_stage()
             except BaseException:
-                shutil.rmtree(stage, ignore_errors=True)
-                self.stage_transaction_path.unlink(missing_ok=True)
-                _fsync_directory(self.state_root)
+                self._recover_stage_transaction()
                 raise
-            validate_release(target, state_root=self.state_root, verify_host_state=True)
             retained_previous: str | None = None
             previous_target: str | None = None
             if current is not None and current != target and current_release is not None:

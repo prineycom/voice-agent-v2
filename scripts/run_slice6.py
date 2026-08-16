@@ -236,7 +236,7 @@ def systemd_notify_ready() -> None:
 
 
 def gateway_operational_ready(
-    timeout: float = 0.2, *, expected_build_id: str | None = None,
+    timeout: float = 1.0, *, expected_build_id: str | None = None,
     expected_release_id: str | None = None,
 ) -> bool:
     connection = http.client.HTTPConnection("127.0.0.1", GATEWAY_PORT, timeout=timeout)

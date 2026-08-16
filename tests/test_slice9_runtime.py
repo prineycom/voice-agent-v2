@@ -139,7 +139,7 @@ class Slice9RuntimeTests(unittest.TestCase):
     def test_bounded_endpoint_probes_observe_current_listener_health(self) -> None:
         from voice_agent_v2 import livekit_runtime
 
-        state = {"status": 200, "body": b'{"status":"ok"}'}
+        state = {"status": 200, "body": b"OK"}
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
@@ -160,10 +160,17 @@ class Slice9RuntimeTests(unittest.TestCase):
             self.assertTrue(
                 livekit_runtime.livekit_endpoint_ready(f"ws://{host}:{port}")
             )
+            state["body"] = b'{"status":"ok"}'
+            self.assertFalse(
+                livekit_runtime.livekit_endpoint_ready(f"ws://{host}:{port}")
+            )
             self.assertEqual(
                 livekit_runtime.local_lfm_endpoint_health(host, port), "ready",
             )
             state.update(status=503, body=b'{"status":"loading"}')
+            self.assertFalse(
+                livekit_runtime.livekit_endpoint_ready(f"ws://{host}:{port}")
+            )
             self.assertEqual(
                 livekit_runtime.local_lfm_endpoint_health(host, port), "unready",
             )

@@ -869,6 +869,19 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
 
 
 class ReleaseAndRollbackTests(unittest.TestCase):
+    def test_canonical_deploy_rejects_config_outside_service_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            config = root / "runtime.env"
+            write_configuration(config, configuration_values())
+            with (
+                patch.object(operations, "DEFAULT_STATE_ROOT", state),
+                self.assertRaisesRegex(OperationalError, "service user home"),
+            ):
+                ReleaseStore(state).deploy(source_root=ROOT, config_path=config)
+            self.assertFalse((state / "current").exists())
+
     def test_deploy_cli_rejects_a_selected_private_config_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1115,6 +1128,10 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             (web / "package.json").write_text(
                 '{"scripts":{"build":"fixture"}}\n', encoding="utf-8",
             )
+            (web / "package-lock.json").write_text(
+                '{"name":"fixture","lockfileVersion":3,"requires":true,'
+                '"packages":{"":{"name":"fixture"}}}\n', encoding="utf-8",
+            )
             (source / ".gitignore").write_text("web/node_modules/\n", encoding="utf-8")
             subprocess.run(["git", "init", "-q", str(source)], check=True)
             subprocess.run(
@@ -1134,6 +1151,9 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                 capture_output=True, text=True, check=True,
             ).stdout.strip()
             (web / "node_modules").mkdir()
+            (web / "node_modules" / "poisoned-tree").write_text(
+                "ignored dependency state", encoding="utf-8",
+            )
 
             tools = root / "tools"
             tools.mkdir()
@@ -1141,6 +1161,14 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             npm.write_text(
                 "#!/usr/bin/python3\n"
                 "import os, pathlib, sys\n"
+                "if sys.argv[1] == 'ci':\n"
+                "    pathlib.Path('node_modules').mkdir()\n"
+                "    pathlib.Path('node_modules/exact-lock-tree').write_text('ready')\n"
+                "    raise SystemExit(0)\n"
+                "if not pathlib.Path('node_modules/exact-lock-tree').is_file():\n"
+                "    raise SystemExit(9)\n"
+                "if pathlib.Path('node_modules/poisoned-tree').exists():\n"
+                "    raise SystemExit(10)\n"
                 "out = pathlib.Path(sys.argv[sys.argv.index('--outDir') + 1])\n"
                 "(out / 'assets').mkdir(parents=True, exist_ok=True)\n"
                 "(out / 'index.html').write_text('<main></main>')\n"
@@ -1172,6 +1200,26 @@ class ReleaseAndRollbackTests(unittest.TestCase):
 
             environment = dict(os.environ)
             environment["PATH"] = f"{tools}:{environment['PATH']}"
+            failed_state = root / "failed-state"
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch(
+                    "voice_agent_v2.operations.validate_host", return_value=report,
+                ),
+                patch(
+                    "voice_agent_v2.operations.validate_release",
+                    side_effect=OperationalError(
+                        "release_incompatible", "final validation changed",
+                    ),
+                ),
+                self.assertRaisesRegex(OperationalError, "final validation changed"),
+            ):
+                ReleaseStore(failed_state).deploy(
+                    source_root=source, config_path=config,
+                )
+            self.assertEqual(list((failed_state / "releases").iterdir()), [])
+            self.assertFalse((failed_state / "stage-transaction.json").exists())
+
             with (
                 patch.dict(os.environ, environment, clear=True),
                 patch(
@@ -1381,6 +1429,31 @@ class ReleaseAndRollbackTests(unittest.TestCase):
 
             self.assertFalse(owned.exists())
             self.assertTrue((unrelated / "retained").is_file())
+            self.assertFalse(store.stage_transaction_path.exists())
+
+    def test_locked_store_recovers_promoted_unvalidated_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            store = ReleaseStore(state)
+            store._initialize()
+            stage_name = ".stage-" + "a" * 32
+            target = store.releases / ("c" * 24)
+            retained = store.releases / ("d" * 24)
+            target.mkdir(mode=0o700)
+            retained.mkdir(mode=0o700)
+            (target / "unvalidated").write_bytes(b"partial")
+            (retained / "release.json").write_bytes(b"retained")
+            operations._atomic_json(store.stage_transaction_path, {
+                "schema_version": "voice-agent.release-stage.v2",
+                "stage": stage_name,
+                "target": target.name,
+            })
+
+            with store.locked():
+                pass
+
+            self.assertFalse(target.exists())
+            self.assertTrue((retained / "release.json").is_file())
             self.assertFalse(store.stage_transaction_path.exists())
 
     def test_recovered_activation_removes_a_stale_previous_link(self) -> None:

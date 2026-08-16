@@ -75,7 +75,7 @@ def livekit_endpoint_ready(url: str, timeout: float = OPERATIONAL_PROBE_TIMEOUT_
         connection.request("GET", "/", headers={"Connection": "close"})
         response = connection.getresponse()
         body = response.read(OPERATIONAL_PROBE_BODY_LIMIT_BYTES + 1)
-        return 100 <= response.status <= 599 and len(body) <= OPERATIONAL_PROBE_BODY_LIMIT_BYTES
+        return response.status == 200 and body == b"OK"
     except (OSError, TimeoutError, http.client.HTTPException):
         return False
     finally:

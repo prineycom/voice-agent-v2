@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -103,6 +106,37 @@ class SystemdReadinessTests(unittest.TestCase):
         )
         custody.assert_called_once_with(supervisor)
         notify.assert_not_called()
+
+    def test_operational_probe_allows_gateway_component_probe_budget(self) -> None:
+        document = json.dumps({
+            "accepting": True,
+            "provider_mode": "local",
+            "external_provider_supervised": False,
+            "automatic_fallback": False,
+            "health": {"overall_readiness": "ready"},
+        }).encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                time.sleep(0.3)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(document)))
+                self.end_headers()
+                self.wfile.write(document)
+
+            def log_message(self, _format: str, *_arguments: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(run_slice6, "GATEWAY_PORT", server.server_port):
+                self.assertTrue(run_slice6.gateway_operational_ready())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_shutdown_request_prevents_systemd_ready_publication(self) -> None:
         supervisor = run_slice6.ProcessSupervisor()
