@@ -863,7 +863,11 @@ class RealtimeSession:
 
     async def fail(self, stage: str, code: str) -> None:
         async with self._lock:
-            cleanup, drain_error, _publication_id = await self._interrupt_locked(code)
+            try:
+                cleanup, drain_error, _publication_id = await self._interrupt_locked(code)
+            except asyncio.CancelledError:
+                await self._degrade_locked(stage, code)
+                raise
             if cleanup is not None:
                 self._watch_cleanup(cleanup)
             await self._degrade_locked(stage, drain_error or code)
@@ -1129,8 +1133,16 @@ class RealtimeSession:
         # may continue only as a silent worker drain.
         context.cancellation.cancel()
         started = time.monotonic()
+        cancellation_requested = False
         try:
-            drain_error, publication_id = await self._clear_audio(context.turn_id)
+            try:
+                drain_error, publication_id = await self._clear_audio(context.turn_id)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                drain_error, publication_id = "audio_drain_cancelled", None
         finally:
             drain_ms = (time.monotonic() - started) * 1000
             cleanup = self._ensure_context_cleanup(context)
@@ -1148,7 +1160,19 @@ class RealtimeSession:
             if publication_id is not None:
                 payload["server_media_publication_id"] = publication_id
             self._add_metrics(context, payload)
-            await self._emit(context.turn_id, "turn.interrupted", payload, terminal=True)
+            try:
+                await self._emit(context.turn_id, "turn.interrupted", payload, terminal=True)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        if cancellation_requested:
+            if drain_error is not None:
+                await self._degrade_locked("publication", drain_error)
+            elif cleanup is not None:
+                self._watch_cleanup(cleanup)
+            raise asyncio.CancelledError
         return cleanup, drain_error, publication_id
 
     async def _run_turn(self, context: TurnContext, pcm: bytes) -> None:

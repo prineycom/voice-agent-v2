@@ -30,6 +30,7 @@ from voice_agent_v2.observability import (
     reconstruct_timelines,
     validate_observation,
 )
+from voice_agent_v2.runtime_directory import require_lifetime_runtime_root
 from voice_agent_v2.schema import SchemaViolation, validate as validate_schema
 from voice_agent_v2.slice6_config import Slice6ConfigurationError, Slice6Settings
 
@@ -606,6 +607,56 @@ class CaptureAndResourceTests(unittest.TestCase):
             )
             self.assertEqual(process.returncode, 0)
             self.assertTrue(capture.exists())
+
+    def test_detached_expiry_executable_deletes_on_supported_runtime_tmpfs(self) -> None:
+        runtime_value = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime_value is None:
+            self.skipTest("no XDG runtime directory")
+        try:
+            runtime_root = require_lifetime_runtime_root(Path(runtime_value))
+        except ValueError:
+            self.skipTest("host has no supported non-lingering runtime tmpfs")
+        with tempfile.TemporaryDirectory(dir=runtime_root) as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            capture = root / "capture-independent-runtime"
+            capture.mkdir(mode=0o700)
+            nonce = "b" * 32
+            expires = time.time() + 0.1
+            uptime_clock = getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC)
+            expires_uptime = time.clock_gettime(uptime_clock) + 0.1
+            manifest = capture / "manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": "voice-agent.diagnostic-content-capture.v1",
+                "session_id": "independent-runtime",
+                "created_unix_seconds": expires - 1,
+                "expires_unix_seconds": expires,
+                "owner_nonce": nonce,
+                "max_files": 16,
+                "max_bytes": 1_048_576,
+                "root_max_captures": 4,
+                "root_max_content_bytes": 4_194_304,
+                "explicit_opt_in": True,
+            }))
+            manifest.chmod(0o600)
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "src" / "voice_agent_v2" / "diagnostic_expiry.py"),
+                    "--path", str(capture),
+                    "--owner-nonce", nonce,
+                    "--expires-unix-seconds", str(expires),
+                    "--expires-uptime-seconds", str(expires_uptime),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=2,
+                env={"PYTHONUTF8": "1"},
+            )
+            self.assertEqual(process.returncode, 0)
+            self.assertFalse(capture.exists())
 
     def test_expiry_purge_refuses_unowned_capture_directories(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
