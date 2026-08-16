@@ -111,7 +111,7 @@ class OperationsManifestTests(unittest.TestCase):
         self.assertNotIn(".local/share/voice-agent-v2", service["ReadWritePaths"])
         self.assertEqual(service["RuntimeDirectory"], "voice-agent-v2")
         self.assertEqual(service["RuntimeDirectoryMode"], "0700")
-        self.assertEqual(service["RuntimeDirectoryPreserve"], "restart")
+        self.assertEqual(service["RuntimeDirectoryPreserve"], "no")
         self.assertEqual(
             service["Environment"],
             "PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache",
@@ -127,7 +127,7 @@ class ServiceApplicationTests(unittest.TestCase):
         unit.parent.mkdir(parents=True)
         unit.write_text("[Service]\n", encoding="utf-8")
         (state / "current").symlink_to(f"releases/{release.name}")
-        return state, release, SimpleNamespace(state_root=state)
+        return state, release, SimpleNamespace(state_root=state, restart=False)
 
     def test_reapplying_ready_service_is_a_no_op(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -183,6 +183,57 @@ class ServiceApplicationTests(unittest.TestCase):
             wait.assert_called_once_with(release.name)
             self.assertTrue(output.call_args.args[0]["changed"])
             self.assertTrue(output.call_args.args[0]["ready"])
+            self.assertTrue(output.call_args.args[0]["service_restarted"])
+
+    def test_explicit_restart_revalidates_and_restarts_the_unchanged_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state, release, arguments = self._fixture(Path(temporary))
+            arguments.restart = True
+            calls: list[tuple[str, ...]] = []
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "validate_release", return_value={}) as validate,
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(
+                    operations_cli, "_runtime_status",
+                    return_value={"release_id": release.name},
+                ),
+                patch.object(operations_cli, "_wait_for_runtime_release") as wait,
+                patch.object(operations_cli, "_print") as output,
+            ):
+                operations_cli.command_install_service(arguments)
+            validate.assert_called_once_with(
+                release, state_root=state.resolve(), verify_host_state=True,
+            )
+            self.assertIn(("systemctl", "restart", operations_cli.SERVICE_NAME), calls)
+            wait.assert_called_once_with(release.name)
+            result = output.call_args.args[0]
+            self.assertTrue(result["restart_requested"])
+            self.assertTrue(result["service_restarted"])
+            self.assertTrue(result["changed"])
+
+    def test_deploy_apply_signal_is_limited_to_release_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            arguments = SimpleNamespace(state_root=state, config=state / "runtime.env")
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(
+                    operations_cli.ReleaseStore, "deploy",
+                    return_value={"changed": False, "status": "no-op"},
+                ),
+                patch.object(operations_cli, "_systemctl_show", return_value={"load": "loaded"}),
+                patch.object(operations_cli, "_print") as output,
+            ):
+                operations_cli.command_deploy(arguments)
+            result = output.call_args.args[0]
+            self.assertFalse(result["release_service_apply_required"])
+            self.assertNotIn("service_apply_required", result)
 
     def test_run_exit_status_retries_only_transient_tailnet_unavailability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

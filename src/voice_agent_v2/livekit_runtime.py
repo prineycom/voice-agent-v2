@@ -1474,6 +1474,8 @@ class SessionRegistry:
         async with self._lock:
             if not self._accepting:
                 raise RuntimeError("the voice stack is draining")
+            if self.operational_health()["overall_readiness"] != "ready":
+                raise RuntimeError("the voice stack is unavailable")
             if len(self._controllers) >= self.settings.max_sessions:
                 raise SessionCapacityError("the single measured Slice 6 session is in use")
             session_id = f"session-{secrets.token_hex(12)}"

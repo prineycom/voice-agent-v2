@@ -103,7 +103,7 @@ def command_deploy(arguments: argparse.Namespace) -> None:
     )
     canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
     service = _systemctl_show() if canonical else {"load": "not-applicable"}
-    result["service_apply_required"] = bool(
+    result["release_service_apply_required"] = bool(
         result.get("changed") is True and service.get("load") == "loaded"
     )
     _print(result)
@@ -243,9 +243,11 @@ def command_install_service(arguments: argparse.Namespace) -> None:
     if not enabled:
         _sudo("systemctl", "enable", SERVICE_NAME)
         changed = True
-    if active and (unit_changed or release_changed):
+    service_restarted = False
+    if arguments.restart or (active and (unit_changed or release_changed)):
         _sudo("systemctl", "restart", SERVICE_NAME)
         changed = True
+        service_restarted = True
     elif not active:
         _sudo("systemctl", "start", SERVICE_NAME)
         changed = True
@@ -266,6 +268,8 @@ def command_install_service(arguments: argparse.Namespace) -> None:
         "active": True,
         "ready": True,
         "release_id": current.name,
+        "restart_requested": arguments.restart,
+        "service_restarted": service_restarted,
     })
 
 
@@ -335,6 +339,10 @@ def parser() -> argparse.ArgumentParser:
 
     install = subcommands.add_parser("install-service", help="idempotently install/enable the canonical systemd unit")
     install.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    install.add_argument(
+        "--restart", action="store_true",
+        help="revalidate and restart even when the active release identity is unchanged",
+    )
     install.set_defaults(function=command_install_service)
 
     rollback = subcommands.add_parser("rollback", help="activate only the verified previous compatible release")

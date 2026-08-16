@@ -43,6 +43,7 @@ class Slice9RuntimeTests(unittest.TestCase):
             release_id="b" * 24,
             supervised_livekit_process="123:456",
             supervised_lfm_process="789:1011",
+            max_sessions=1,
         )
         registry._accepting = True
         registry.runner = SimpleNamespace(readiness_components=lambda: (
@@ -70,6 +71,18 @@ class Slice9RuntimeTests(unittest.TestCase):
         registry.settings.supervised_lfm_process = None
         missing_identity_health = registry.operational_health()
         self.assertEqual(missing_identity_health["overall_readiness"], "unready")
+
+        registry.settings.supervised_livekit_process = "123:456"
+        registry.settings.supervised_lfm_process = "789:1011"
+        registry._controllers = {}
+        registry._lock = asyncio.Lock()
+        with (
+            patch.object(livekit_runtime, "supervised_process_alive", return_value=False),
+            patch.object(livekit_runtime, "LiveKitRoomController") as controller,
+            self.assertRaisesRegex(RuntimeError, "unavailable"),
+        ):
+            asyncio.run(registry.create())
+        controller.assert_not_called()
 
     def test_public_status_reports_build_health_client_and_no_external_supervision(self) -> None:
         from voice_agent_v2.slice6_gateway import status as public_gateway_status
