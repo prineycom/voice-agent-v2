@@ -474,6 +474,14 @@ def _process_group_exists(process_group: int) -> bool:
     return True
 
 
+def _wait_for_process_group_exit(process_group: int, *, deadline: float) -> None:
+    while _process_group_exists(process_group):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ServiceProcessFailure("supervised process group survived forced stop")
+        time.sleep(min(0.01, remaining))
+
+
 def stop(
     process: subprocess.Popen,
     *,
@@ -491,6 +499,7 @@ def stop(
         except subprocess.TimeoutExpired:
             pass
     group_alive = process_group is not None and _process_group_exists(process_group)
+    forced_deadline = min(deadline, time.monotonic() + kill_timeout)
     if group_alive:
         try:
             os.killpg(process_group, signal.SIGKILL)
@@ -499,7 +508,9 @@ def stop(
     elif process.poll() is None:
         process.kill()
     if process.poll() is None:
-        process.wait(timeout=min(kill_timeout, max(0.0, deadline - time.monotonic())))
+        process.wait(timeout=max(0.0, forced_deadline - time.monotonic()))
+    if process_group is not None:
+        _wait_for_process_group_exit(process_group, deadline=forced_deadline)
 
 
 def main() -> int:

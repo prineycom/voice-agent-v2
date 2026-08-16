@@ -10,7 +10,6 @@ from dataclasses import dataclass
 import fcntl
 import glob
 import hashlib
-import io
 import ipaddress
 import json
 import math
@@ -18,12 +17,14 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import shutil
 import stat
 import subprocess
 import tarfile
 import tempfile
-from typing import Callable, Iterator, Mapping
+import time
+from typing import BinaryIO, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
 from .runtime_directory import SYSTEMD_RUNTIME_ROOT
@@ -388,6 +389,22 @@ def _require_exact_keys(
         raise OperationalError(code, f"{label} has missing or unknown fields")
 
 
+def _exact_json_equal(observed: object, expected: object) -> bool:
+    if type(observed) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(observed) == set(expected) and all(
+            _exact_json_equal(observed[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(observed) == len(expected) and all(
+            _exact_json_equal(item, expected_item)
+            for item, expected_item in zip(observed, expected)
+        )
+    return observed == expected
+
+
 def load_operations_manifest(path: Path) -> dict[str, object]:
     manifest = _json_object(path, code="operations_manifest_invalid")
     _require_exact_keys(
@@ -422,11 +439,11 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         },
         label="disk policy",
     )
-    if deployment != EXPECTED_DEPLOYMENT:
+    if not _exact_json_equal(deployment, EXPECTED_DEPLOYMENT):
         raise OperationalError(
             "operations_manifest_incompatible", "fixed deployment policy changed",
         )
-    if lifecycle != EXPECTED_LIFECYCLE:
+    if not _exact_json_equal(lifecycle, EXPECTED_LIFECYCLE):
         raise OperationalError(
             "operations_manifest_incompatible", "service lifecycle policy changed",
         )
@@ -438,7 +455,7 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         if name in by_name:
             raise OperationalError("operations_manifest_invalid", "component declaration is duplicated")
         by_name[name] = component
-    if by_name != EXPECTED_COMPONENTS:
+    if not _exact_json_equal(by_name, EXPECTED_COMPONENTS):
         raise OperationalError(
             "operations_manifest_incompatible",
             "operational component supervision boundary changed",
@@ -447,7 +464,7 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     artifacts = manifest.get("artifacts")
     runtimes = manifest.get("python_runtimes")
     sustained = manifest.get("sustained_acceptance")
-    if contracts != EXPECTED_CONTRACTS:
+    if not _exact_json_equal(contracts, EXPECTED_CONTRACTS):
         raise OperationalError("operations_manifest_incompatible", "contract/client compatibility changed")
     if not isinstance(artifacts, list):
         raise OperationalError("operations_manifest_invalid", "artifact declarations are invalid")
@@ -457,7 +474,10 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     ):
         raise OperationalError("operations_manifest_invalid", "artifact declaration is invalid")
     observed_artifacts = {str(artifact["name"]): artifact for artifact in artifacts}
-    if len(observed_artifacts) != len(artifacts) or observed_artifacts != EXPECTED_ARTIFACTS:
+    if (
+        len(observed_artifacts) != len(artifacts)
+        or not _exact_json_equal(observed_artifacts, EXPECTED_ARTIFACTS)
+    ):
         raise OperationalError("operations_manifest_incompatible", "selected artifact contract changed")
     if not isinstance(runtimes, list) or any(
         not isinstance(runtime, dict) or not isinstance(runtime.get("name"), str)
@@ -465,7 +485,10 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     ):
         raise OperationalError("operations_manifest_invalid", "Python runtime declarations are invalid")
     observed_runtimes = {str(runtime["name"]): runtime for runtime in runtimes}
-    if len(observed_runtimes) != len(runtimes) or observed_runtimes != EXPECTED_PYTHON_RUNTIMES:
+    if (
+        len(observed_runtimes) != len(runtimes)
+        or not _exact_json_equal(observed_runtimes, EXPECTED_PYTHON_RUNTIMES)
+    ):
         raise OperationalError("operations_manifest_incompatible", "selected Python runtime contract changed")
     cache_roots = disk.get("cache_roots")
     if not isinstance(cache_roots, list) or any(
@@ -474,15 +497,18 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     ):
         raise OperationalError("operations_manifest_invalid", "cache root declarations are invalid")
     observed_cache_roots = {str(cache["name"]): cache for cache in cache_roots}
-    if len(observed_cache_roots) != len(cache_roots) or observed_cache_roots != EXPECTED_CACHE_ROOTS:
-        raise OperationalError("operations_manifest_incompatible", "cache root contract changed")
-    if not (
-        disk.get("cleanup_policy") == "refuse-without-deleting"
-        and disk.get("minimum_free_bytes") == 8_589_934_592
-        and disk.get("release_maximum_count") == 3
-        and disk.get("release_maximum_bytes") == 1_073_741_824
-        and sustained == EXPECTED_SUSTAINED_ACCEPTANCE
+    if (
+        len(observed_cache_roots) != len(cache_roots)
+        or not _exact_json_equal(observed_cache_roots, EXPECTED_CACHE_ROOTS)
     ):
+        raise OperationalError("operations_manifest_incompatible", "cache root contract changed")
+    if not all((
+        _exact_json_equal(disk.get("cleanup_policy"), "refuse-without-deleting"),
+        _exact_json_equal(disk.get("minimum_free_bytes"), 8_589_934_592),
+        _exact_json_equal(disk.get("release_maximum_count"), 3),
+        _exact_json_equal(disk.get("release_maximum_bytes"), 1_073_741_824),
+        _exact_json_equal(sustained, EXPECTED_SUSTAINED_ACCEPTANCE),
+    )):
         raise OperationalError("operations_manifest_incompatible", "disk/cache/sustained policy changed")
     return manifest
 
@@ -1073,6 +1099,86 @@ def _run_git_bytes(source_root: Path, *arguments: str) -> bytes:
     return result.stdout
 
 
+class _BoundedArchiveReader:
+    def __init__(self, source: BinaryIO, *, maximum_bytes: int, timeout: float) -> None:
+        self.source = source
+        self.maximum_bytes = maximum_bytes
+        self.deadline = time.monotonic() + timeout
+        self.observed_bytes = 0
+
+    def read(self, size: int = -1) -> bytes:
+        requested = 64 * 1024 if size is None or size < 0 else size
+        remaining_time = self.deadline - time.monotonic()
+        if remaining_time <= 0 or not select.select(
+            [self.source.fileno()], [], [], remaining_time,
+        )[0]:
+            raise subprocess.TimeoutExpired("git archive", 60)
+        chunk = os.read(
+            self.source.fileno(),
+            min(max(1, requested), self.maximum_bytes - self.observed_bytes + 1),
+        )
+        self.observed_bytes += len(chunk)
+        if self.observed_bytes > self.maximum_bytes:
+            raise OperationalError(
+                "release_cache_pressure",
+                "committed source archive exceeds the release byte bound",
+            )
+        return chunk
+
+
+def _extract_git_archive(
+    *, source_root: Path, commit: str, stage: Path, maximum_bytes: int,
+) -> None:
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(source_root), "archive", "--format=tar", commit],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except OSError as error:
+        raise OperationalError(
+            "release_build_failed", "committed source archive failed",
+        ) from error
+    try:
+        if process.stdout is None:
+            raise OperationalError(
+                "release_build_failed", "committed source archive failed",
+            )
+        reader = _BoundedArchiveReader(
+            process.stdout, maximum_bytes=maximum_bytes, timeout=60,
+        )
+        extracted_bytes = 0
+        with tarfile.open(fileobj=reader, mode="r|") as bundle:
+            for member in bundle:
+                extracted_bytes += member.size
+                if extracted_bytes > maximum_bytes:
+                    raise OperationalError(
+                        "release_cache_pressure",
+                        "committed source exceeds the release byte bound",
+                    )
+                bundle.extract(member, stage, filter="data")
+        process.stdout.close()
+        if process.wait(timeout=1) != 0:
+            raise OperationalError(
+                "release_build_failed", "committed source archive failed",
+            )
+    except OperationalError:
+        raise
+    except (OSError, subprocess.TimeoutExpired, tarfile.TarError) as error:
+        raise OperationalError(
+            "release_build_failed", "committed source archive failed",
+        ) from error
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+
+
 class ReleaseStore:
     def __init__(self, state_root: Path = DEFAULT_STATE_ROOT) -> None:
         self.state_root = _require_canonical_state_root_custody(state_root)
@@ -1377,6 +1483,7 @@ class ReleaseStore:
         )
         manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
         manifest_digest = sha256_file(source_root / DEFAULT_MANIFEST_RELATIVE)
+        maximum_count, maximum_bytes = self._release_limit(manifest)
         locator_digest = _sha256_bytes(str(config_path).encode("utf-8"))
         with self.locked():
             current = self.current()
@@ -1412,26 +1519,25 @@ class ReleaseStore:
             existing_bytes = sum(directory_size(path) for path in existing)
             stage = self._create_stage()
             try:
-                archive = subprocess.run(
-                    ["git", "-C", str(source_root), "archive", "--format=tar", commit],
-                    capture_output=True, timeout=60, check=False,
-                    env={
-                        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-                    },
+                _extract_git_archive(
+                    source_root=source_root, commit=commit, stage=stage,
+                    maximum_bytes=maximum_bytes,
                 )
-                if archive.returncode != 0:
-                    raise OperationalError(
-                        "release_build_failed", "committed source archive failed",
-                    )
-                with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
-                    bundle.extractall(stage, filter="data")
                 host_report = validate_host(
                     source_root=stage, config_path=config_path, state_root=self.state_root,
                     configuration_values=configuration_values,
                 )
                 manifest = load_operations_manifest(stage / DEFAULT_MANIFEST_RELATIVE)
                 manifest_digest = sha256_file(stage / DEFAULT_MANIFEST_RELATIVE)
-                maximum_count, maximum_bytes = self._release_limit(manifest)
+                archived_maximum_count, archived_maximum_bytes = self._release_limit(manifest)
+                if (
+                    archived_maximum_count != maximum_count
+                    or archived_maximum_bytes != maximum_bytes
+                ):
+                    raise OperationalError(
+                        "operations_manifest_incompatible",
+                        "release bounds changed while capturing the commit",
+                    )
                 web_root = stage / "web"
                 web_dist = web_root / "dist"
                 if web_dist.exists():

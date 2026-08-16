@@ -422,8 +422,10 @@ class SupervisorLifecycleTests(unittest.TestCase):
         assert parent.stdout is not None
         child_pid = int(parent.stdout.readline())
         parent.stdout.close()
+        process_group = parent.pid
         parent.wait(timeout=2)
         supervisor.close(run_slice6.SHUTDOWN_ORDER)
+        self.assertFalse(run_slice6._process_group_exists(process_group))
         deadline = time.monotonic() + 2
         child_state = None
         while time.monotonic() < deadline:
@@ -435,6 +437,19 @@ class SupervisorLifecycleTests(unittest.TestCase):
                 break
             time.sleep(0.02)
         self.assertIn(child_state, {None, "Z"})
+
+    def test_forced_stop_reports_a_process_group_that_survives_its_budget(self) -> None:
+        process = FakeProcess(returncode=0)
+        with (
+            patch.object(run_slice6, "_process_group_exists", return_value=True),
+            patch.object(run_slice6.os, "killpg"),
+            self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "survived forced stop",
+            ),
+        ):
+            run_slice6.stop(
+                process, timeout=0, kill_timeout=0.01, process_group=12345,
+            )
 
     def test_forced_stop_reaps_within_its_total_role_budget(self) -> None:
         class StubbornProcess(FakeProcess):

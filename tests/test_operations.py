@@ -223,6 +223,27 @@ class OperationsManifestTests(unittest.TestCase):
                     with self.assertRaisesRegex(OperationalError, "contract changed"):
                         load_operations_manifest(path)
 
+    def test_manifest_rejects_json_scalar_type_substitutions(self) -> None:
+        manifest = json.loads(
+            (ROOT / DEFAULT_MANIFEST_RELATIVE).read_text(encoding="utf-8")
+        )
+        mutations = (
+            lambda value: next(
+                artifact for artifact in value["artifacts"]
+                if artifact["name"] == "livekit-server"
+            ).update(executable=1),
+            lambda value: value["deployment"].update(automatic_fallback=0),
+            lambda value: value["disk"].update(release_maximum_count=3.0),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "operations.json"
+            for mutate in mutations:
+                changed = json.loads(json.dumps(manifest))
+                mutate(changed)
+                path.write_text(json.dumps(changed), encoding="utf-8")
+                with self.assertRaisesRegex(OperationalError, "policy changed|contract changed"):
+                    load_operations_manifest(path)
+
     def test_server_configuration_rejects_internal_endpoints_not_served_by_livekit(self) -> None:
         for endpoint in ("ws://[::1]:7880", "ws://localhost:7880", "wss://127.0.0.1:7880"):
             with self.subTest(endpoint=endpoint):
@@ -478,7 +499,7 @@ class ServiceApplicationTests(unittest.TestCase):
             wait.assert_called_once_with(release.name)
             self.assertFalse(output.call_args.args[0]["changed"])
 
-    def test_changed_unit_and_release_restart_before_ready_success(self) -> None:
+    def test_changed_unit_restarts_before_ready_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state, release, arguments = self._fixture(Path(temporary))
             calls: list[tuple[str, ...]] = []
@@ -496,7 +517,7 @@ class ServiceApplicationTests(unittest.TestCase):
                 patch.object(operations_cli, "_validate_effective_systemd_service"),
                 patch.object(
                     operations_cli, "_runtime_status",
-                    return_value={"release_id": "b" * 24},
+                    return_value={"release_id": release.name},
                 ),
                 patch.object(operations_cli, "_wait_for_runtime_release") as wait,
                 patch.object(operations_cli, "_print") as output,
@@ -630,6 +651,61 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertLess(
                 reloads[1],
                 calls.index(("systemctl", "stop", operations_cli.SERVICE_NAME)),
+            )
+
+    def test_failed_release_activation_restores_prior_runtime_release_and_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, release, arguments = self._fixture(root)
+            prior = state / "releases" / ("b" * 24)
+            prior_unit = prior / "ops/systemd/voice-agent-v2.service"
+            prior_unit.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "ops/systemd/voice-agent-v2.service", prior_unit)
+            (state / "previous").symlink_to(f"releases/{prior.name}")
+            installed = root / "installed.service"
+            shutil.copy2(prior_unit, installed)
+            calls: list[tuple[str, ...]] = []
+            waited: list[str] = []
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(returncode=0)
+
+            def wait_for_release(release_id: str, *, timeout: float = 90.0) -> None:
+                del timeout
+                waited.append(release_id)
+                if release_id == release.name:
+                    raise OperationalError(
+                        "systemd_install_failed", "fixture activation failure",
+                    )
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(
+                    operations_cli, "validate_release",
+                    return_value={"build_id": "a" * 40},
+                ),
+                patch.object(operations, "validate_release", return_value={"build_id": "a" * 40}),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
+                patch.object(
+                    operations_cli, "_runtime_status",
+                    return_value={"release_id": prior.name},
+                ),
+                patch.object(
+                    operations_cli, "_wait_for_runtime_release",
+                    side_effect=wait_for_release,
+                ),
+                self.assertRaisesRegex(OperationalError, "fixture activation failure"),
+            ):
+                operations_cli.command_install_service(arguments)
+
+            self.assertEqual((state / "current").resolve(), prior.resolve())
+            self.assertEqual((state / "previous").resolve(), release.resolve())
+            self.assertEqual(waited, [release.name, prior.name])
+            self.assertEqual(
+                calls.count(("systemctl", "restart", operations_cli.SERVICE_NAME)), 2,
             )
 
     def test_explicit_restart_revalidates_and_restarts_the_unchanged_release(self) -> None:
@@ -1356,6 +1432,45 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             self.assertEqual(result["status"], "no-op")
             self.assertFalse(result["changed"])
             self.assertEqual((state / "current").resolve(), target.resolve())
+
+    def test_deploy_refuses_an_archive_over_the_release_bound_before_build(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            (source / "config").mkdir(parents=True)
+            shutil.copy2(
+                ROOT / DEFAULT_MANIFEST_RELATIVE,
+                source / DEFAULT_MANIFEST_RELATIVE,
+            )
+            (source / "payload.bin").write_bytes(b"x" * 4096)
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.name", "Release Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.email", "release@test.invalid"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "commit", "-qm", "oversized"],
+                check=True,
+            )
+            config = root / "runtime.env"
+            write_configuration(config, configuration_values())
+            report = ValidationReport(
+                None, None, "local", 1, {}, 10**12, "c" * 64,
+            )
+            state = root / "state"
+            with (
+                patch("voice_agent_v2.operations.validate_host", return_value=report),
+                patch.object(ReleaseStore, "_release_limit", return_value=(3, 1024)),
+                self.assertRaisesRegex(OperationalError, "archive exceeds"),
+            ):
+                ReleaseStore(state).deploy(source_root=source, config_path=config)
+            self.assertEqual(list((state / "releases").iterdir()), [])
+            self.assertFalse((state / "stage-transaction.json").exists())
 
     def test_release_archives_and_builds_the_captured_commit_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:

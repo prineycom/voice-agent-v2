@@ -489,6 +489,8 @@ def _install_service_locked(
         unit_attempted = False
         enable_attempted = False
         activation_attempted = False
+        rollback_release = False
+        restore_release_id = current.name
         try:
             if unit_changed:
                 unit_attempted = True
@@ -500,6 +502,36 @@ def _install_service_locked(
             _validate_effective_systemd_service()
             running = _runtime_status() if active_before else None
             release_changed = running is None or running.get("release_id") != current.name
+            if active_before and release_changed:
+                running_release_id = (
+                    running.get("release_id") if isinstance(running, dict) else None
+                )
+                previous = store.previous()
+                if (
+                    not isinstance(running_release_id, str)
+                    or previous is None
+                    or previous.name != running_release_id
+                ):
+                    raise OperationalError(
+                        "systemd_install_failed",
+                        "active service release cannot be restored after activation failure",
+                    )
+                validate_release(
+                    previous, state_root=store.state_root, verify_host_state=True,
+                )
+                previous_unit = previous / "ops/systemd/voice-agent-v2.service"
+                _validate_systemd_unit(previous_unit)
+                installed_unit_before = backup if unit_changed else SYSTEM_UNIT_PATH
+                if not exists or _sudo(
+                    "cmp", "-s", str(previous_unit), str(installed_unit_before),
+                    allowed=(0, 1),
+                ).returncode != 0:
+                    raise OperationalError(
+                        "systemd_install_failed",
+                        "active service unit cannot be restored after activation failure",
+                    )
+                rollback_release = True
+                restore_release_id = running_release_id
             if not enabled_before:
                 enable_attempted = True
                 _sudo("systemctl", "enable", SERVICE_NAME)
@@ -542,7 +574,17 @@ def _install_service_locked(
                     )
                 if activation_attempted:
                     if active_before:
+                        if rollback_release:
+                            rollback_result = store.rollback(
+                                required_system_unit=SYSTEM_UNIT_PATH,
+                            )
+                            if rollback_result.get("release_id") != restore_release_id:
+                                raise OperationalError(
+                                    "systemd_install_failed",
+                                    "prior runtime release could not be restored",
+                                )
                         _start_service_with_recovery_allowance("restart")
+                        _wait_for_runtime_release(restore_release_id)
                     else:
                         _sudo("systemctl", "stop", SERVICE_NAME)
             except BaseException as restore_error:
