@@ -342,6 +342,48 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(degraded["payload"]["code"], "microphone_stream_failed")
         self.assertTrue(session.closed)
 
+    async def test_cancelled_degradation_publish_failure_restores_cancellation(self) -> None:
+        class FailingDegradedEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.degraded_started = asyncio.Event()
+                self.release_degraded = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "session.degraded":
+                    self.degraded_started.set()
+                    await self.release_degraded.wait()
+                    raise RuntimeError("synthetic control transport failure")
+                await super().send(event)
+
+        events = FailingDegradedEvents()
+        failures: list[tuple[str, str]] = []
+        session = RealtimeSession(
+            session_id="session-cancelled-degrade-failure",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            failure_handler=lambda stage, code: failures.append((stage, code)),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(
+            session.fail("microphone_capture", "microphone_stream_failed")
+        )
+        await asyncio.wait_for(events.degraded_started.wait(), 0.5)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(caller.done())
+        events.release_degraded.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertEqual(failures, [("transport", "control_publish_failed")])
+        self.assertNotIn("session.degraded", [event["type"] for event in events.events])
+        self.assertTrue(session.closed)
+
     async def test_cancelled_initial_failure_terminal_closes_admission(self) -> None:
         class BlockingFailureEvents(MemoryEvents):
             def __init__(self) -> None:
@@ -1235,6 +1277,94 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tts_health["compatible"])
         with self.assertRaisesRegex(RuntimeError, "session is closed"):
             await session.start_utterance()
+
+    async def test_reconnect_worker_loss_publishes_degradation_without_ready_ack(self) -> None:
+        class ResetLosesReadinessRunner(StreamingRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.admission_ready = True
+
+            def ready_for_admission(self) -> bool:
+                return self.admission_ready
+
+            def reset_session(self, _session_id: str) -> None:
+                self.admission_ready = False
+
+            def admission_failure(self) -> tuple[str, str]:
+                return "stt", "selected_stt_unavailable"
+
+        events = MemoryEvents()
+        runner = ResetLosesReadinessRunner()
+        session = RealtimeSession(
+            session_id="session-reconnect-readiness-loss",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        request = json.dumps({
+            "schema_version": "voice-agent.client-control.v1",
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+
+        self.assertTrue(await session.handle_client_control(request))
+
+        self.assertEqual([event["type"] for event in events.events], ["session.degraded"])
+        self.assertEqual(events.events[0]["stream_epoch"], 2)
+        self.assertEqual(events.events[0]["payload"]["stage"], "stt")
+        self.assertEqual(
+            events.events[0]["payload"]["health"]["overall_readiness"], "unready"
+        )
+        self.assertTrue(session.closed)
+
+    async def test_reconnect_replay_rechecks_readiness_before_ack(self) -> None:
+        class MutableReadinessRunner(StreamingRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.admission_ready = True
+                self.resets = 0
+
+            def ready_for_admission(self) -> bool:
+                return self.admission_ready
+
+            def reset_session(self, _session_id: str) -> None:
+                self.resets += 1
+
+            def admission_failure(self) -> tuple[str, str]:
+                return "llm_provider", "local_lfm_unavailable"
+
+        events = MemoryEvents()
+        runner = MutableReadinessRunner()
+        session = RealtimeSession(
+            session_id="session-reconnect-replay-readiness-loss",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        request = json.dumps({
+            "schema_version": "voice-agent.client-control.v1",
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+
+        self.assertTrue(await session.handle_client_control(request))
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["session.reconnected", "session.ready"],
+        )
+        events.events.clear()
+        runner.admission_ready = False
+
+        self.assertTrue(await session.handle_client_control(request))
+
+        self.assertEqual(runner.resets, 1)
+        self.assertEqual([event["type"] for event in events.events], ["session.degraded"])
+        self.assertEqual(events.events[0]["payload"]["stage"], "llm_provider")
+        self.assertTrue(session.closed)
 
 
 class FinalSegmentOverlapRunner(OverlapRunner):

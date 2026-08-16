@@ -601,22 +601,68 @@ class RealtimeSession:
         async with self._lock:
             if self._closed:
                 return False
-            admission = getattr(self.runner, "ready_for_admission", None)
-            if admission is not None and not admission():
-                stage, code = self._readiness_failure()
-                await self._degrade_locked(stage, code)
-                return False
+            return await self._publish_ready_or_degrade_locked(
+                ready_payload={"barge_in_drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS}
+            )
+
+    @staticmethod
+    def _health_failure(health: dict[str, object]) -> tuple[str, str]:
+        components = health.get("components")
+        if isinstance(components, list):
+            for component in components:
+                if (
+                    isinstance(component, dict)
+                    and (
+                        component.get("liveness") != "alive"
+                        or component.get("readiness") != "ready"
+                        or component.get("compatible") is not True
+                    )
+                ):
+                    name = component.get("component")
+                    stage, default_code = {
+                        "livekit": ("livekit", "livekit_unavailable"),
+                        "controller": ("controller", "inference_stack_not_ready"),
+                        "stt": ("stt", "selected_stt_unavailable"),
+                        "selected_llm": ("llm_provider", "local_lfm_unavailable"),
+                        "tts": ("tts", "silero_pool_not_ready"),
+                    }.get(name, ("controller", "inference_stack_not_ready"))
+                    reason = component.get("reason_code")
+                    return stage, reason if isinstance(reason, str) else default_code
+        return "controller", "inference_stack_not_ready"
+
+    async def _publish_ready_or_degrade_locked(
+        self,
+        *,
+        ready_payload: dict[str, object] | None = None,
+        reconnect_payload: dict[str, object] | None = None,
+    ) -> bool:
+        admission = getattr(self.runner, "ready_for_admission", None)
+        failure = None
+        if admission is not None and not admission():
+            failure = self._readiness_failure()
+        health = self._health_report(
+            failed_stage=failure[0] if failure is not None else None,
+            failure_code=failure[1] if failure is not None else None,
+        )
+        if health.get("overall_readiness") != "ready":
+            stage, code = failure or self._health_failure(health)
+            await self._degrade_locked(stage, code, health=health)
+            return False
+        if reconnect_payload is not None:
             await self._emit(
                 SESSION_TURN_ID,
-                "session.ready",
-                {
-                    "state": "ready",
-                    "user_state": "available",
-                    "barge_in_drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS,
-                    "health": self._health_report(),
-                },
+                "session.reconnected",
+                dict(reconnect_payload),
             )
-            return True
+        payload = {
+            "state": "ready",
+            "user_state": "available",
+            "health": health,
+        }
+        if ready_payload is not None:
+            payload.update(ready_payload)
+        await self._emit(SESSION_TURN_ID, "session.ready", payload)
+        return True
 
     async def start_utterance(self, *, announce: bool = True) -> str:
         async with self._reconnect_lock:
@@ -918,7 +964,13 @@ class RealtimeSession:
         if self.failure_handler is not None:
             self.failure_handler(stage, code)
 
-    async def _publish_degraded_locked(self, stage: str, code: str) -> None:
+    async def _publish_degraded_locked(
+        self,
+        stage: str,
+        code: str,
+        *,
+        health: dict[str, object] | None = None,
+    ) -> None:
         async def publish() -> None:
             try:
                 await self._emit(
@@ -929,7 +981,7 @@ class RealtimeSession:
                         "stage": stage,
                         "code": code,
                         **failure_payload(stage, code),
-                        "health": self._health_report(
+                        "health": health or self._health_report(
                             failed_stage=stage, failure_code=code
                         ),
                     },
@@ -941,26 +993,34 @@ class RealtimeSession:
             publish(), name=f"publish-session-degraded-{self.session_id}"
         )
         cancellation_requested = False
-        while True:
+        while not operation.done():
             try:
-                await asyncio.shield(operation)
-                break
+                await asyncio.wait((operation,))
             except asyncio.CancelledError:
                 cancellation_requested = True
-                if operation.done():
-                    await operation
-                    break
                 current = asyncio.current_task()
                 if current is not None:
                     current.uncancel()
+        try:
+            await operation
+        except BaseException:
+            if cancellation_requested:
+                raise asyncio.CancelledError from None
+            raise
         if cancellation_requested:
             raise asyncio.CancelledError
 
-    async def _degrade_locked(self, stage: str, code: str) -> None:
+    async def _degrade_locked(
+        self,
+        stage: str,
+        code: str,
+        *,
+        health: dict[str, object] | None = None,
+    ) -> None:
         if self._closed:
             return
         self._closed = True
-        await self._publish_degraded_locked(stage, code)
+        await self._publish_degraded_locked(stage, code, health=health)
 
     async def _rollback_context(
         self, context: TurnContext, *, restore_context: bool = True
@@ -2152,19 +2212,8 @@ class RealtimeSession:
                     and stream_epoch + 1 == self.stream_epoch
                     and not self._closed
                 ):
-                    await self._emit(
-                        SESSION_TURN_ID,
-                        "session.reconnected",
-                        dict(self._last_reconnect_payload),
-                    )
-                    await self._emit(
-                        SESSION_TURN_ID,
-                        "session.ready",
-                        {
-                            "state": "ready",
-                            "user_state": "available",
-                            "health": self._health_report(),
-                        },
+                    await self._publish_ready_or_degrade_locked(
+                        reconnect_payload=self._last_reconnect_payload
                     )
                     return True
                 if sequence <= self._client_sequence or stream_epoch != self.stream_epoch:
@@ -2216,22 +2265,11 @@ class RealtimeSession:
                         "stale_server_pcm_discarded": True,
                         "interrupted_turn_id": interrupted_turn_id,
                     }
-                    self._last_reconnect_request = request_key
-                    self._last_reconnect_payload = reconnect_payload
-                    await self._emit(
-                        SESSION_TURN_ID,
-                        "session.reconnected",
-                        dict(reconnect_payload),
-                    )
-                    await self._emit(
-                        SESSION_TURN_ID,
-                        "session.ready",
-                        {
-                            "state": "ready",
-                            "user_state": "available",
-                            "health": self._health_report(),
-                        },
-                    )
+                    if await self._publish_ready_or_degrade_locked(
+                        reconnect_payload=reconnect_payload
+                    ):
+                        self._last_reconnect_request = request_key
+                        self._last_reconnect_payload = reconnect_payload
                 else:
                     await self._degrade_locked("controller", reset_error)
             return True
