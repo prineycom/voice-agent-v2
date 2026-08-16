@@ -99,13 +99,87 @@ EXPECTED_CONTRACTS = {
     "avatar_control": "voice-agent.avatar-control.v1",
     "selected_avatar_module": "mvp-eye-svg-v1",
 }
-EXPECTED_ARTIFACT_NAMES = frozenset({
-    "livekit-server", "silero-vad-v6", "whisper-large-v3-turbo-model",
-    "whisper-large-v3-turbo-config", "whisper-large-v3-turbo-tokenizer",
-    "whisper-large-v3-turbo-vocabulary", "whisper-large-v3-turbo-preprocessor",
-    "llama-server-b10357", "lfm2.5-q4-k-m", "silero-v5-5-ru",
-    "silero-python", "silero-torch-extension", "silero-libtorch-cpu",
-})
+EXPECTED_ARTIFACTS = {
+    "livekit-server": {
+        "name": "livekit-server",
+        "path": "{home}/.cache/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5",
+        "size_bytes": 53_420_194,
+        "sha256": "51a1bbe04439b33d6d7a6d6d83fdefad9b938162c341f0f07f75af03e456b49a",
+        "executable": True,
+    },
+    "silero-vad-v6": {
+        "name": "silero-vad-v6",
+        "path": "{home}/.cache/voice-agent-v2/slice-6/models/silero-vad-v6.onnx",
+        "size_bytes": 1_245_151,
+        "sha256": "4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2",
+    },
+    "whisper-large-v3-turbo-model": {
+        "name": "whisper-large-v3-turbo-model",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/model.bin",
+        "size_bytes": 1_617_884_929,
+        "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+    },
+    "whisper-large-v3-turbo-config": {
+        "name": "whisper-large-v3-turbo-config",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/config.json",
+        "size_bytes": 2_263,
+        "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e",
+    },
+    "whisper-large-v3-turbo-tokenizer": {
+        "name": "whisper-large-v3-turbo-tokenizer",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/tokenizer.json",
+        "size_bytes": 2_710_337,
+        "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+    },
+    "whisper-large-v3-turbo-vocabulary": {
+        "name": "whisper-large-v3-turbo-vocabulary",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/vocabulary.json",
+        "size_bytes": 1_068_114,
+        "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
+    },
+    "whisper-large-v3-turbo-preprocessor": {
+        "name": "whisper-large-v3-turbo-preprocessor",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/preprocessor_config.json",
+        "size_bytes": 340,
+        "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+    },
+    "llama-server-b10357": {
+        "name": "llama-server-b10357",
+        "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4/runtime/llama-b10357-cuda13-build/bin/llama-server",
+        "sha256": "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11",
+        "executable": True,
+    },
+    "lfm2.5-q4-k-m": {
+        "name": "lfm2.5-q4-k-m",
+        "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4/model/LFM2.5-2.6B-Q4_K_M.gguf",
+        "size_bytes": 1_674_454_848,
+        "sha256": "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14",
+    },
+    "silero-v5-5-ru": {
+        "name": "silero-v5-5-ru",
+        "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/downloads/v5_5_ru.pt",
+        "size_bytes": 145_420_684,
+        "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437",
+    },
+    "silero-python": {
+        "name": "silero-python",
+        "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/venv/bin/python",
+        "sha256": "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0acec7",
+        "executable": True,
+        "resolve_symlink": True,
+    },
+    "silero-torch-extension": {
+        "name": "silero-torch-extension",
+        "path_glob": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/venv/lib/python3.12/site-packages/torch/_C.cpython-312-*-linux-gnu.so",
+        "matches": 1,
+        "sha256": "5dc8a93ddc69041dbd3f796794e0c2b3f72b47e0dc24ae2b46d9e7d0dc78953b",
+    },
+    "silero-libtorch-cpu": {
+        "name": "silero-libtorch-cpu",
+        "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/venv/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so",
+        "sha256": "629d28a5fb24e2c33df077e2d98d5da0c73d0b53e628bb826fd4ba36616b482b",
+    },
+}
 EXPECTED_PYTHON_RUNTIMES = {
     "slice6": {
         "name": "slice6",
@@ -357,17 +431,14 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         raise OperationalError("operations_manifest_incompatible", "contract/client compatibility changed")
     if not isinstance(artifacts, list):
         raise OperationalError("operations_manifest_invalid", "artifact declarations are invalid")
-    artifact_names = {
-        artifact.get("name") for artifact in artifacts if isinstance(artifact, dict)
-    }
-    if artifact_names != EXPECTED_ARTIFACT_NAMES or len(artifacts) != len(artifact_names):
-        raise OperationalError("operations_manifest_incompatible", "selected artifact set changed")
     if any(
-        not isinstance(artifact.get("sha256"), str)
-        or not SHA256.fullmatch(str(artifact["sha256"]))
-        for artifact in artifacts if isinstance(artifact, dict)
+        not isinstance(artifact, dict) or not isinstance(artifact.get("name"), str)
+        for artifact in artifacts
     ):
-        raise OperationalError("operations_manifest_invalid", "artifact checksum declaration is invalid")
+        raise OperationalError("operations_manifest_invalid", "artifact declaration is invalid")
+    observed_artifacts = {str(artifact["name"]): artifact for artifact in artifacts}
+    if len(observed_artifacts) != len(artifacts) or observed_artifacts != EXPECTED_ARTIFACTS:
+        raise OperationalError("operations_manifest_incompatible", "selected artifact contract changed")
     if not isinstance(runtimes, list) or any(
         not isinstance(runtime, dict) or not isinstance(runtime.get("name"), str)
         for runtime in runtimes
@@ -1698,8 +1769,8 @@ def evaluate_sustained_run(
     if not isinstance(thresholds, dict):
         raise OperationalError("operations_manifest_invalid", "sustained thresholds are invalid")
     minimum_turns = thresholds.get("minimum_turns")
-    if not isinstance(minimum_turns, int) or len(turns) < minimum_turns:
-        raise OperationalError("sustained_sample_too_small", "sustained run has too few turns")
+    if not isinstance(minimum_turns, int):
+        raise OperationalError("operations_manifest_invalid", "sustained thresholds are invalid")
     if any(
         not isinstance(turn, Mapping)
         or turn.get("outcome") not in {"completed", "failed", "interrupted"}
@@ -1719,12 +1790,24 @@ def evaluate_sustained_run(
             "sustained_report_invalid",
             "sustained measurements must be finite non-negative bounded scalars",
         )
-    completed = sum(turn.get("outcome") == "completed" for turn in turns)
-    success_ratio = completed / len(turns)
-    totals = [float(turn["total_turn_ms"]) for turn in turns]
+    if any(
+        (turn.get("outcome") == "interrupted")
+        != (turn.get("cancellation_latency_ms") is not None)
+        for turn in turns
+    ):
+        raise OperationalError(
+            "sustained_report_invalid",
+            "sustained cancellation measurements require interrupted outcomes",
+        )
+    evaluated_turns = [turn for turn in turns if turn.get("outcome") != "interrupted"]
+    if len(evaluated_turns) < minimum_turns:
+        raise OperationalError("sustained_sample_too_small", "sustained run has too few turns")
+    completed = sum(turn.get("outcome") == "completed" for turn in evaluated_turns)
+    success_ratio = completed / len(evaluated_turns)
+    totals = [float(turn["total_turn_ms"]) for turn in evaluated_turns]
     cancellations = [
         float(turn["cancellation_latency_ms"])
-        for turn in turns if turn.get("cancellation_latency_ms") is not None
+        for turn in turns if turn.get("outcome") == "interrupted"
     ]
     rss = [float(turn["process_rss_mib"]) for turn in turns]
     vram = [float(turn["gpu_vram_used_mib"]) for turn in turns]

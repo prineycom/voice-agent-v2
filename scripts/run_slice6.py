@@ -89,6 +89,7 @@ class ProcessSupervisor:
     ) -> None:
         self.processes: list[subprocess.Popen] = []
         self._roles: dict[int, str] = {}
+        self._process_groups: dict[int, int] = {}
         self._stop_requested = stop_requested
 
     def start(
@@ -96,14 +97,19 @@ class ProcessSupervisor:
     ) -> subprocess.Popen:
         if self._stop_requested is not None and self._stop_requested():
             raise ServiceStopRequested
+        if "start_new_session" in kwargs:
+            raise ServiceProcessFailure("supervised session ownership cannot be overridden")
         try:
-            process = subprocess.Popen(command, **kwargs)
+            process = subprocess.Popen(command, start_new_session=True, **kwargs)
         except OSError as error:
             raise ServiceProcessFailure("supervised component could not start") from error
         self.processes.append(process)
+        process_pid = getattr(process, "pid", None)
+        if type(process_pid) is int and process_pid > 0:
+            self._process_groups[id(process)] = process_pid
         if role is not None:
             if role in self._roles.values():
-                stop(process)
+                stop(process, process_group=self._process_groups.get(id(process)))
                 raise RuntimeError(f"duplicate supervised role: {role}")
             self._roles[id(process)] = role
         return process
@@ -132,6 +138,7 @@ class ProcessSupervisor:
                     timeout=graceful_timeout,
                     kill_timeout=kill_timeout,
                     deadline=deadline,
+                    process_group=self._process_groups.get(id(process)),
                 )
             except BaseException as error:
                 if first_error is None:
@@ -459,22 +466,39 @@ def wait_for_port(
     raise ServiceProcessFailure(f"{name} did not {readiness} within {timeout:.0f}s")
 
 
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def stop(
     process: subprocess.Popen,
     *,
     timeout: float = 5.0,
     kill_timeout: float = 1.0,
     deadline: float | None = None,
+    process_group: int | None = None,
 ) -> None:
-    if process.poll() is not None:
-        return
     if deadline is None:
         deadline = time.monotonic() + timeout + kill_timeout
-    process.terminate()
-    try:
-        process.wait(timeout=min(timeout, max(0.0, deadline - time.monotonic())))
-    except subprocess.TimeoutExpired:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=min(timeout, max(0.0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+    group_alive = process_group is not None and _process_group_exists(process_group)
+    if group_alive:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
         process.kill()
+    if process.poll() is None:
         process.wait(timeout=min(kill_timeout, max(0.0, deadline - time.monotonic())))
 
 

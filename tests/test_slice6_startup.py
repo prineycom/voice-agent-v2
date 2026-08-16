@@ -5,6 +5,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -379,7 +380,9 @@ class SupervisorLifecycleTests(unittest.TestCase):
             timeout: float = 5.0,
             kill_timeout: float = 1.0,
             deadline: float | None = None,
+            process_group: int | None = None,
         ) -> None:
+            del process_group
             stopped.append((supervisor.role(process), timeout, kill_timeout, deadline))
             process.terminate()
 
@@ -401,6 +404,37 @@ class SupervisorLifecycleTests(unittest.TestCase):
             ),
             [role for role, *_budget in stopped].index("livekit"),
         )
+
+    def test_close_kills_descendants_after_the_role_parent_exits(self) -> None:
+        supervisor = run_slice6.ProcessSupervisor()
+        parent = supervisor.start(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c',"
+                "\"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(30)\"]); "
+                "print(child.pid,flush=True)",
+            ],
+            role="gateway-controller-stt-tts-provider",
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert parent.stdout is not None
+        child_pid = int(parent.stdout.readline())
+        parent.stdout.close()
+        parent.wait(timeout=2)
+        supervisor.close(run_slice6.SHUTDOWN_ORDER)
+        deadline = time.monotonic() + 2
+        child_state = None
+        while time.monotonic() < deadline:
+            try:
+                child_state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
+            except (FileNotFoundError, ProcessLookupError):
+                child_state = None
+            if child_state in {None, "Z"}:
+                break
+            time.sleep(0.02)
+        self.assertIn(child_state, {None, "Z"})
 
     def test_forced_stop_reaps_within_its_total_role_budget(self) -> None:
         class StubbornProcess(FakeProcess):

@@ -126,11 +126,12 @@ The canonical host's real user systemd manager also ran one unique disposable tr
 
 | Metric | Controlled result |
 | --- | --- |
-| Turns / completed | 20 / 20 |
+| Evaluated turns / completed | 20 / 20 |
+| Interrupted cancellation samples | 4 / 4 |
 | Total-turn p95 | 1,180 ms |
 | Cancellation p95 | 100 ms (4 samples) |
-| Process RSS range | 38 MiB |
-| GPU VRAM range | 19 MiB |
+| Process RSS range | 43 MiB |
+| GPU VRAM range | 23 MiB |
 | Avatar healthy-frame ratio | 0.999 |
 | Avatar frames/s | 60 |
 

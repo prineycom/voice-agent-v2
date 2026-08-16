@@ -112,12 +112,19 @@ def sustained_metadata_run(manifest: dict[str, object]) -> dict[str, object]:
         {
             "outcome": "completed",
             "total_turn_ms": 1000 + index * 10,
-            "cancellation_latency_ms": 100 if index in {4, 9, 14, 19} else None,
+            "cancellation_latency_ms": None,
             "process_rss_mib": 1000 + index * 2,
             "gpu_vram_used_mib": 3000 + index,
         }
         for index in range(20)
     ]
+    turns.extend({
+        "outcome": "interrupted",
+        "total_turn_ms": 500,
+        "cancellation_latency_ms": 100,
+        "process_rss_mib": 1040 + index,
+        "gpu_vram_used_mib": 3020 + index,
+    } for index in range(4))
     return evaluate_sustained_run(
         manifest,
         turns=turns,

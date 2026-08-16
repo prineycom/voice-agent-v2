@@ -995,6 +995,25 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(OperationalError, "unsupported name"):
                 parse_server_configuration(path)
 
+    def test_operations_manifest_rejects_redirected_runtime_artifacts(self) -> None:
+        original = json.loads((ROOT / DEFAULT_MANIFEST_RELATIVE).read_text())
+        mutations = (
+            ("livekit-server", "path", "{home}/alternate/livekit-server"),
+            ("silero-vad-v6", "sha256", "0" * 64),
+            ("whisper-large-v3-turbo-model", "size_bytes", 1),
+        )
+        for name, field, value in mutations:
+            with self.subTest(name=name, field=field), tempfile.TemporaryDirectory() as temporary:
+                manifest = json.loads(json.dumps(original))
+                artifact = next(
+                    item for item in manifest["artifacts"] if item["name"] == name
+                )
+                artifact[field] = value
+                path = Path(temporary) / "operations.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(OperationalError, "artifact contract"):
+                    load_operations_manifest(path)
+
     def test_artifact_manifest_verifies_behavior_and_rejects_changed_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -1708,23 +1727,54 @@ class LifecycleAndSustainedTests(unittest.TestCase):
             {
                 "outcome": "completed",
                 "total_turn_ms": 1000 + index,
-                "cancellation_latency_ms": 100 if index in {5, 15} else None,
+                "cancellation_latency_ms": None,
                 "process_rss_mib": 1000 + index,
                 "gpu_vram_used_mib": 3000 + index,
             }
             for index in range(20)
         ]
+        turns.extend({
+            "outcome": "interrupted",
+            "total_turn_ms": 500,
+            "cancellation_latency_ms": 100,
+            "process_rss_mib": 1020 + index,
+            "gpu_vram_used_mib": 3020 + index,
+        } for index in range(2))
         report = evaluate_sustained_run(
             manifest, turns=turns, avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
         )
         self.assertEqual(report["status"], "pass")
-        self.assertEqual(report["turn_count"], 20)
+        self.assertEqual(report["turn_count"], 22)
+        self.assertEqual(report["turn_success_ratio"], 1.0)
         self.assertNotIn("transcript", json.dumps(report))
-        turns[-1] = dict(turns[-1], outcome="failed")
+        turns[19] = dict(turns[19], outcome="failed")
         with self.assertRaisesRegex(OperationalError, "turn_success"):
             evaluate_sustained_run(
                 manifest, turns=turns, avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
             )
+
+    def test_sustained_acceptance_rejects_mismatched_cancellation_outcome(self) -> None:
+        manifest = load_operations_manifest(ROOT / DEFAULT_MANIFEST_RELATIVE)
+        baseline = [{
+            "outcome": "completed",
+            "total_turn_ms": 1000,
+            "cancellation_latency_ms": None,
+            "process_rss_mib": 1000,
+            "gpu_vram_used_mib": 3000,
+        } for _index in range(20)]
+        inconsistent = (
+            dict(baseline[0], cancellation_latency_ms=100),
+            dict(baseline[0], outcome="interrupted"),
+        )
+        for turn in inconsistent:
+            turns = [dict(item) for item in baseline]
+            turns[0] = turn
+            with self.assertRaisesRegex(OperationalError, "interrupted outcomes"):
+                evaluate_sustained_run(
+                    manifest,
+                    turns=turns,
+                    avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
+                )
 
     def test_sustained_acceptance_requires_cancellation_evidence(self) -> None:
         manifest = load_operations_manifest(ROOT / DEFAULT_MANIFEST_RELATIVE)
