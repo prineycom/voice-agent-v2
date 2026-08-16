@@ -229,6 +229,7 @@ class WhisperSTT:
         if not transcript.strip():
             raise StageFailure("stt", "empty_transcript")
         self.observations.append({
+            "session_id": session_id, "turn_id": turn_id,
             "session_id_present": bool(session_id), "turn_id_present": bool(turn_id),
             "input_bytes": len(pcm), "audio_duration_ms": len(pcm) / 2 / 16_000 * 1000,
             "latency_ms": (time.monotonic() - started) * 1000,

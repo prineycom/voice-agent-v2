@@ -886,6 +886,15 @@ async def main() -> int:
             for record in records
         ):
             raise AssertionError("downloaded Firefox diagnostics lost normalized server failure fields")
+        if not any(
+            record.get("stage") == "playback"
+            and record.get("event") == "first_programmatic_signal"
+            and record.get("turnId") == first_turn
+            and record.get("requestId") is not None
+            and record.get("mediaGeneration") is not None
+            for record in records
+        ):
+            raise AssertionError("downloaded Firefox diagnostics lost the first programmatic browser signal")
         event_types = [event["type"] for event in event_sink.events]
         if "turn.completed" not in event_types or "turn.failed" not in event_types:
             raise AssertionError(f"full-stack deterministic lifecycle is incomplete: {event_types}")

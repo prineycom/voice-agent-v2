@@ -25,5 +25,7 @@ jobs:
           node-version: "22"
       - name: Acquire pinned Slice 6 test tooling outside Git
         run: ./setup-slice6
+      - name: Run Slice 8 failure, readiness, privacy, and safe resource boundaries
+        run: ./verify-slice8
       - name: Run deterministic controller and browser boundaries
         run: ./verify-slice6

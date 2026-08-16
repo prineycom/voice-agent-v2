@@ -26,6 +26,7 @@ export class AvatarHostV1 {
   private activeFactoryIndex = -1
   private lastTimestampMs = -1
   private rejectedInputs = 0
+  private inputDegraded = false
   private renderFailures = 0
   private lastCommand: AvatarCommand | null = null
   private lastPublishedHealth: AvatarHealthV1 | null = null
@@ -59,13 +60,16 @@ export class AvatarHostV1 {
     const result = validateAvatarControl(input, this.now())
     if (!result.accepted) {
       this.rejectedInputs += result.rejectedSignals
+      this.inputDegraded = true
       this.publishHealth()
       return
     }
     const control = result.control
     this.rejectedInputs += control.rejectedSignals
+    this.inputDegraded = control.rejectedSignals > 0
     if (control.timestampMs < this.lastTimestampMs) {
       this.rejectedInputs += 1
+      this.inputDegraded = true
       this.publishHealth()
       return
     }
@@ -88,9 +92,11 @@ export class AvatarHostV1 {
       || timestampMs < this.lastTimestampMs
     ) {
       this.rejectedInputs += 1
+      this.inputDegraded = true
       this.publishHealth()
       return
     }
+    this.inputDegraded = false
     this.lastTimestampMs = timestampMs
     this.lastCommand = { kind: 'cancel', timestampMs, motion }
     try {
@@ -105,7 +111,11 @@ export class AvatarHostV1 {
   health(): AvatarHealthV1 {
     const mounted = this.activeModule !== null
     return {
-      status: !mounted ? 'failed' : this.activeFactoryIndex === 0 ? 'ready' : 'degraded',
+      status: !mounted
+        ? 'failed'
+        : this.activeFactoryIndex === 0 && !this.inputDegraded
+          ? 'ready'
+          : 'degraded',
       activeModuleId: this.activeModule?.manifest.id ?? null,
       usingFallback: mounted && this.activeFactoryIndex > 0,
       rejectedInputs: this.rejectedInputs,
@@ -123,6 +133,7 @@ export class AvatarHostV1 {
       this.container = null
       this.lastTimestampMs = -1
       this.lastCommand = null
+      this.inputDegraded = false
       this.publishHealth()
     }
   }

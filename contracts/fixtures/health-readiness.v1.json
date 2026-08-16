@@ -1,0 +1,19 @@
+{
+  "schema_version": "voice-agent.health-readiness.v1",
+  "overall_readiness": "ready",
+  "components": [
+    {"component": "livekit", "liveness": "alive", "readiness": "ready", "compatible": true, "identity": "livekit-server-1.13.5", "contract_version": "voice-agent.realtime-control.v2", "reason_code": null, "retry_count": 0, "retry_limit": 0},
+    {"component": "controller", "liveness": "alive", "readiness": "ready", "compatible": true, "identity": "voice-agent-v2", "contract_version": "voice-agent.realtime-control.v2", "reason_code": null, "retry_count": 0, "retry_limit": 0},
+    {"component": "stt", "liveness": "alive", "readiness": "ready", "compatible": true, "identity": "whisper-large-v3-turbo", "contract_version": "voice-agent.stt.v1", "reason_code": null, "retry_count": 0, "retry_limit": 0},
+    {"component": "selected_llm", "liveness": "alive", "readiness": "ready", "compatible": true, "identity": "lfm2.5-q4-k-m", "contract_version": "voice-agent.llm-provider.v1", "reason_code": null, "retry_count": 0, "retry_limit": 0},
+    {"component": "tts", "liveness": "alive", "readiness": "ready", "compatible": true, "identity": "silero-kseniya", "contract_version": "voice-agent.tts.v2", "reason_code": null, "retry_count": 0, "retry_limit": 0}
+  ],
+  "provider_mode": "local",
+  "external_transfer": false,
+  "automatic_fallback": false,
+  "stt_location": "local",
+  "tts_location": "local",
+  "auth_boundary": "tailnet",
+  "wake_enabled": false,
+  "selected_avatar_module": "mvp-eye-svg-v1"
+}

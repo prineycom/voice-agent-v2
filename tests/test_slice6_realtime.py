@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from tests.test_checkpoint_ab import (
     CapacityAudio,
@@ -11,6 +15,13 @@ from tests.test_checkpoint_ab import (
     MemoryAudio,
     MemoryEvents,
     StreamingRunner,
+)
+from voice_agent_v2.diagnostics import PrivacySafeTrace, TraceIdentity
+from voice_agent_v2.observability import (
+    ComponentHealth,
+    ResourceSnapshot,
+    failure_payload,
+    reconstruct_timelines,
 )
 from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES
 from voice_agent_v2.v2_contracts import EventEnvelopeV2
@@ -23,7 +34,866 @@ from voice_agent_v2.realtime import (
 from voice_agent_v2.tracer import TraceResult
 
 
+class BlockingCancellationRunner(StreamingRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_started = threading.Event()
+        self.cancel_release = threading.Event()
+        self.rollback_finished = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_started.set()
+        self.cancel_release.wait(2)
+        super().cancel()
+
+    def discard_turn(self, session_id: str, turn_id: str) -> None:
+        super().discard_turn(session_id, turn_id)
+        self.rollback_finished.set()
+
+
 class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trace_observer_refusal_is_counted(self) -> None:
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=StreamingRunner(),
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda _stage, _event, _fields: False,
+        )
+        session._trace("control", "published", turn_id="turn-test")
+        self.assertEqual(session.diagnostic_failure_counts["observer"], 1)
+
+    async def test_context_commit_failure_uses_terminal_failure_metadata_boundary(self) -> None:
+        class CommitFailingRunner(StreamingRunner):
+            def turn_delivered(self, _session_id: str, _turn_id: str) -> None:
+                raise RuntimeError("synthetic commit failure")
+
+        events = MemoryEvents()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+        session = RealtimeSession(
+            session_id="session-commit-failure",
+            runner=CommitFailingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+
+        failed = next(event for event in events.events if event["type"] == "turn.failed")
+        self.assertEqual(failed["payload"]["outcome"], "failed")
+        self.assertEqual(failed["payload"]["dependency_class"], "hard")
+        self.assertEqual(failed["payload"]["failure_matrix_id"], "controller_failure")
+        self.assertEqual(failed["payload"]["user_state"], "unavailable")
+        self.assertEqual(failed["payload"]["turn_failure_count"], 1)
+        published = next(
+            fields for stage, event, fields in observations
+            if stage == "control"
+            and event == "published"
+            and fields.get("event_type") == "turn.failed"
+        )
+        self.assertEqual(published["failure_stage"], "controller")
+        self.assertEqual(published["failure_code"], "context_commit_failed")
+        self.assertEqual(published["dependency_class"], "hard")
+        self.assertEqual(published["failure_matrix_id"], "controller_failure")
+        self.assertEqual(published["user_state"], "unavailable")
+
+    async def test_publish_failure_records_correlated_enriched_failed_terminal(self) -> None:
+        class FailingTerminalEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.completed":
+                    raise RuntimeError("synthetic control transport failure")
+                await super().send(event)
+
+        with tempfile.TemporaryDirectory() as directory:
+            events = FailingTerminalEvents()
+            trace = PrivacySafeTrace(
+                Path(directory) / "trace.jsonl",
+                TraceIdentity("session-publish-failure"),
+            )
+            session = RealtimeSession(
+                session_id="session-publish-failure",
+                runner=StreamingRunner(),
+                event_sink=events,
+                audio_sink=MemoryAudio(),
+                trace_observer=trace.observe,
+            )
+
+            await session.submit_utterance(b"\0\0" * 320)
+            await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+
+            records = [
+                json.loads(line)
+                for line in trace.path.read_text(encoding="utf-8").splitlines()
+            ]
+            timeline = reconstruct_timelines(records)[0]
+            self.assertEqual(timeline.terminal_outcome, "failed")
+            self.assertEqual(timeline.failure_stage, "transport")
+            self.assertEqual(timeline.failure_code, "control_publish_failed")
+            self.assertEqual(timeline.failure_matrix_id, "livekit_unavailable")
+            self.assertEqual(timeline.dependency_class, "hard")
+            self.assertEqual(timeline.user_state, "retrying")
+            failed = next(
+                record for record in records if record["event"] == "publish_failed"
+            )
+            self.assertEqual(failed["turn_id"], "turn-00000001")
+            self.assertEqual(failed["fields"]["event_type"], "turn.failed")
+            self.assertTrue(failed["fields"]["terminal"])
+            self.assertEqual(failed["fields"]["failed_event_type"], "turn.completed")
+            for name, value in failure_payload(
+                "transport", "control_publish_failed"
+            ).items():
+                self.assertEqual(failed["fields"][name], value)
+            self.assertEqual(failed["fields"]["turn_completion_count"], 0)
+            self.assertEqual(failed["fields"]["turn_failure_count"], 1)
+            self.assertNotIn("turn.completed", [event["type"] for event in events.events])
+
+    async def test_interruption_publish_failure_replaces_terminal_counter(self) -> None:
+        class FailingInterruptEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.interrupted":
+                    raise RuntimeError("synthetic interruption publish failure")
+                await super().send(event)
+
+        session = RealtimeSession(
+            session_id="session-interrupt-publish-failure",
+            runner=StreamingRunner(),
+            event_sink=FailingInterruptEvents(),
+            audio_sink=MemoryAudio(write_delay=0.2),
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+
+        with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+            await session.interrupt()
+
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+
+    async def test_publication_failure_blocks_later_turn_admission(self) -> None:
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-publication-failure",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        await session.start_utterance()
+        context = session._active
+        self.assertIsNotNone(context)
+        assert context is not None
+        await session._terminate_failed_turn(
+            context,
+            "turn.failed",
+            {"outcome": "failed", "stage": "publication", "code": "audio_stream_failed"},
+        )
+
+        failed = next(event for event in events.events if event["type"] == "turn.failed")
+        self.assertEqual(failed["payload"]["failure_matrix_id"], "livekit_unavailable")
+        self.assertFalse(failed["payload"]["admit_turn"])
+        self.assertIn("session.degraded", [event["type"] for event in events.events])
+        self.assertFalse(await session.ready())
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
+    async def test_cancel_during_audio_clear_still_terminalizes_and_closes(self) -> None:
+        holder: dict[str, asyncio.Task[None]] = {}
+
+        class CancelClearAudio(MemoryAudio):
+            async def clear(self, _turn_id: str) -> str:
+                holder["caller"].cancel()
+                await asyncio.sleep(0)
+                return "persistent-publication"
+
+        events = MemoryEvents()
+        runner = BlockingCancellationRunner()
+        session = RealtimeSession(
+            session_id="session-clear-cancel",
+            runner=runner,
+            event_sink=events,
+            audio_sink=CancelClearAudio(),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(session.interrupt())
+        holder["caller"] = caller
+
+        cleanup_started = await asyncio.to_thread(runner.cancel_started.wait, 0.5)
+        propagated_before_cleanup = caller.done()
+        runner.cancel_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertTrue(cleanup_started)
+        self.assertFalse(propagated_before_cleanup)
+        self.assertTrue(runner.rollback_finished.is_set())
+        self.assertIn("turn.interrupted", [event["type"] for event in events.events])
+        self.assertIn("session.degraded", [event["type"] for event in events.events])
+        self.assertTrue(session.closed)
+        self.assertEqual(session.turn_counts["interrupted"], 1)
+
+    async def test_cancel_during_fail_audio_clear_preserves_requested_stage(self) -> None:
+        holder: dict[str, asyncio.Task[None]] = {}
+
+        class CancelFailClearAudio(MemoryAudio):
+            async def clear(self, _turn_id: str) -> str:
+                holder["caller"].cancel()
+                await asyncio.sleep(0)
+                return "persistent-publication"
+
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-fail-clear-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=CancelFailClearAudio(),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(
+            session.fail("microphone_capture", "microphone_stream_failed")
+        )
+        holder["caller"] = caller
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        degraded = next(
+            event for event in events.events if event["type"] == "session.degraded"
+        )
+        self.assertEqual(degraded["payload"]["stage"], "microphone_capture")
+        self.assertEqual(degraded["payload"]["code"], "audio_drain_cancelled")
+        self.assertTrue(session.closed)
+
+    async def test_completed_interruption_before_fail_cancellation_closes_requested_stage(self) -> None:
+        holder: dict[str, asyncio.Task[None]] = {}
+
+        class CancelAfterInterrupt(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                await super().send(event)
+                if event["type"] == "turn.interrupted":
+                    holder["caller"].cancel()
+
+        events = CancelAfterInterrupt()
+        runner = BlockingCancellationRunner()
+        session = RealtimeSession(
+            session_id="session-fail-interrupt-race",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(
+            session.fail("microphone_capture", "microphone_stream_failed")
+        )
+        holder["caller"] = caller
+
+        cleanup_started = await asyncio.to_thread(runner.cancel_started.wait, 0.5)
+        propagated_before_cleanup = caller.done()
+        runner.cancel_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertTrue(cleanup_started)
+        self.assertFalse(propagated_before_cleanup)
+        self.assertTrue(runner.rollback_finished.is_set())
+        degraded = next(
+            event for event in events.events if event["type"] == "session.degraded"
+        )
+        self.assertEqual(degraded["payload"]["stage"], "microphone_capture")
+        self.assertEqual(degraded["payload"]["code"], "microphone_stream_failed")
+        self.assertTrue(session.closed)
+
+    async def test_repeated_cancellation_waits_for_requested_degradation_publish(self) -> None:
+        class BlockingDegradedEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.degraded_started = asyncio.Event()
+                self.release_degraded = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "session.degraded":
+                    self.degraded_started.set()
+                    await self.release_degraded.wait()
+                await super().send(event)
+
+        events = BlockingDegradedEvents()
+        session = RealtimeSession(
+            session_id="session-repeated-cancel-degrade",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(
+            session.fail("microphone_capture", "microphone_stream_failed")
+        )
+        await asyncio.wait_for(events.degraded_started.wait(), 0.5)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(caller.done())
+        events.release_degraded.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        degraded = next(
+            event for event in events.events if event["type"] == "session.degraded"
+        )
+        self.assertEqual(degraded["payload"]["stage"], "microphone_capture")
+        self.assertEqual(degraded["payload"]["code"], "microphone_stream_failed")
+        self.assertTrue(session.closed)
+
+    async def test_cancelled_degradation_publish_failure_restores_cancellation(self) -> None:
+        class FailingDegradedEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.degraded_started = asyncio.Event()
+                self.release_degraded = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "session.degraded":
+                    self.degraded_started.set()
+                    await self.release_degraded.wait()
+                    raise RuntimeError("synthetic control transport failure")
+                await super().send(event)
+
+        events = FailingDegradedEvents()
+        failures: list[tuple[str, str]] = []
+        session = RealtimeSession(
+            session_id="session-cancelled-degrade-failure",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            failure_handler=lambda stage, code: failures.append((stage, code)),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(
+            session.fail("microphone_capture", "microphone_stream_failed")
+        )
+        await asyncio.wait_for(events.degraded_started.wait(), 0.5)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(caller.done())
+        events.release_degraded.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertEqual(failures, [("transport", "control_publish_failed")])
+        self.assertNotIn("session.degraded", [event["type"] for event in events.events])
+        self.assertTrue(session.closed)
+
+    async def test_cancelled_initial_failure_terminal_closes_admission(self) -> None:
+        class BlockingFailureEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.failure_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.failed":
+                    self.failure_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        class FailingPrepareAudio(MemoryAudio):
+            async def prepare(self, _turn_id: str, _media_generation: int) -> str:
+                raise RuntimeError("synthetic publication setup failure")
+
+        events = BlockingFailureEvents()
+        session = RealtimeSession(
+            session_id="session-initial-terminal-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=FailingPrepareAudio(),
+        )
+        admission = asyncio.create_task(session.start_utterance())
+        await asyncio.wait_for(events.failure_started.wait(), 0.5)
+        admission.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await admission
+
+        self.assertTrue(session.closed)
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
+    async def test_completed_initial_failure_terminal_closes_before_cancellation(self) -> None:
+        holder: dict[str, asyncio.Task[str]] = {}
+
+        class CancelAfterFailureEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                await super().send(event)
+                if event["type"] == "turn.failed":
+                    holder["caller"].cancel()
+
+        class FailingPrepareAudio(MemoryAudio):
+            async def prepare(self, _turn_id: str, _media_generation: int) -> str:
+                raise RuntimeError("synthetic publication setup failure")
+
+        events = CancelAfterFailureEvents()
+        session = RealtimeSession(
+            session_id="session-initial-terminal-send-race",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=FailingPrepareAudio(),
+        )
+        admission = asyncio.create_task(session.start_utterance())
+        holder["caller"] = admission
+
+        with self.assertRaises(asyncio.CancelledError):
+            await admission
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.failed", "session.degraded"],
+        )
+        self.assertTrue(session.closed)
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
+    async def test_cancelled_post_announcement_control_becomes_transport_failure(self) -> None:
+        class BlockingSttEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stt_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "stt.final":
+                    self.stt_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingSttEvents()
+        runner = StreamingRunner()
+        session = RealtimeSession(
+            session_id="session-nonterminal-cancel",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        turn_id = await session.start_utterance()
+        control = asyncio.create_task(
+            session._emit(turn_id, "stt.final", {"transcript": "Синтетика."})
+        )
+        await asyncio.wait_for(events.stt_started.wait(), 0.5)
+        control.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await control
+
+        self.assertTrue(session.closed)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        context = session._active
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertTrue(context.transport_failed)
+        self.assertTrue(context.terminal)
+        self.assertTrue(context.cancellation.cancelled)
+        self.assertIsNotNone(context.cancellation_cleanup)
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+        self.assertTrue(runner.cancelled.is_set())
+
+    async def test_completed_control_send_commits_before_cancellation_propagates(self) -> None:
+        holder: dict[str, asyncio.Task[None]] = {}
+
+        class CancelCallerAfterSend(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                await super().send(event)
+                holder["caller"].cancel()
+
+        events = CancelCallerAfterSend()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+        session = RealtimeSession(
+            session_id="session-control-send-race",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+        turn_id = await session.start_utterance(announce=False)
+        caller = asyncio.create_task(
+            session._emit(turn_id, "turn.listening", {"state": "listening"})
+        )
+        holder["caller"] = caller
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        context = session._active
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertTrue(context.public_event_published)
+        self.assertEqual([event["type"] for event in events.events], ["turn.listening"])
+        self.assertTrue(any(
+            stage == "control" and event == "published"
+            for stage, event, _fields in observations
+        ))
+
+    async def test_announcement_send_race_terminalizes_published_turn(self) -> None:
+        holder: dict[str, asyncio.Task[str]] = {}
+
+        class CancelCallerAfterListening(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                await super().send(event)
+                if event["type"] == "turn.listening":
+                    holder["caller"].cancel()
+
+        events = CancelCallerAfterListening()
+        session = RealtimeSession(
+            session_id="session-announcement-send-race",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        caller = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        holder["caller"] = caller
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.interrupted"],
+        )
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 1)
+        self.assertEqual(session.turn_counts["failed"], 0)
+
+    async def test_cancelled_terminal_send_records_transport_failure(self) -> None:
+        class BlockingInterruptEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.interrupt_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.interrupted":
+                    self.interrupt_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingInterruptEvents()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+        session = RealtimeSession(
+            session_id="session-cancelled-terminal-send",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(session.interrupt())
+        await asyncio.wait_for(events.interrupt_started.wait(), 0.5)
+
+        caller.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.media-ready"],
+        )
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        self.assertTrue(session.closed)
+        publish_failure = next(
+            fields
+            for stage, event, fields in observations
+            if stage == "control" and event == "publish_failed"
+        )
+        self.assertEqual(publish_failure["event_type"], "turn.failed")
+        self.assertEqual(publish_failure["failed_event_type"], "turn.interrupted")
+        self.assertEqual(publish_failure["failure_class"], "CancelledError")
+        self.assertTrue(publish_failure["terminal"])
+
+    async def test_media_sink_cancellation_after_listening_terminalizes_turn(self) -> None:
+        class CancelMediaEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    raise asyncio.CancelledError
+                await super().send(event)
+
+        events = CancelMediaEvents()
+        session = RealtimeSession(
+            session_id="session-media-sink-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+
+        with self.assertRaises(asyncio.CancelledError):
+            await session.finish_utterance(b"\0\0" * 320)
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.interrupted"],
+        )
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 1)
+
+    async def test_cancelled_announcement_media_timeout_closes_session(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-timeout",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        with patch("voice_agent_v2.realtime.CONTROL_PUBLISH_BOUND_MS", 20):
+            finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+            await asyncio.wait_for(events.media_started.wait(), 0.5)
+            finish.cancel()
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(finish, 0.5)
+
+        self.assertEqual([event["type"] for event in events.events], ["turn.listening"])
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        self.assertTrue(session.closed)
+
+    async def test_interruption_publication_timeout_closes_session(self) -> None:
+        class BlockingInterruptEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.interrupted":
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingInterruptEvents()
+        session = RealtimeSession(
+            session_id="session-interruption-timeout",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance()
+
+        with patch("voice_agent_v2.realtime.CONTROL_PUBLISH_BOUND_MS", 20):
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(session.interrupt(), 0.5)
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.media-ready"],
+        )
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        self.assertTrue(session.closed)
+
+    async def test_cancelled_announcement_finishes_media_boundary_then_terminalizes(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+                self.media_release = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await self.media_release.wait()
+                await super().send(event)
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        await asyncio.wait_for(events.media_started.wait(), 0.5)
+
+        finish.cancel()
+        events.media_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await finish
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.media-ready", "turn.interrupted"],
+        )
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 1)
+        next_turn = await session.start_utterance()
+        self.assertEqual(next_turn, "turn-00000002")
+
+    async def test_cancelled_announcement_media_failure_closes_session(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+                self.media_release = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await self.media_release.wait()
+                await super().send(event)
+
+        class FailingClearAudio(MemoryAudio):
+            async def clear(self, turn_id: str) -> str | None:
+                self.cleared.append(turn_id)
+                raise RuntimeError("synthetic media drain failure")
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-drain-failure",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=FailingClearAudio(),
+        )
+        await session.start_utterance(announce=False)
+        finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        await asyncio.wait_for(events.media_started.wait(), 0.5)
+
+        finish.cancel()
+        events.media_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await finish
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            [
+                "turn.listening",
+                "turn.media-ready",
+                "turn.interrupted",
+                "session.degraded",
+            ],
+        )
+        degraded = events.events[-1]
+        self.assertEqual(degraded["payload"]["stage"], "publication")
+        self.assertEqual(degraded["payload"]["code"], "audio_drain_failed")
+        self.assertTrue(session.closed)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
+    async def test_cancelled_announcement_observes_rollback_failure(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+                self.media_release = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await self.media_release.wait()
+                await super().send(event)
+
+        class FailingRollbackRunner(StreamingRunner):
+            def discard_turn(self, _session_id: str, _turn_id: str) -> None:
+                raise RuntimeError("synthetic rollback failure")
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-rollback-failure",
+            runner=FailingRollbackRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        await asyncio.wait_for(events.media_started.wait(), 0.5)
+
+        finish.cancel()
+        events.media_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await finish
+        for _attempt in range(20):
+            if any(event["type"] == "session.degraded" for event in events.events):
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertTrue(session.closed)
+        degraded = next(
+            event for event in events.events if event["type"] == "session.degraded"
+        )
+        self.assertEqual(degraded["payload"]["stage"], "controller")
+        self.assertEqual(degraded["payload"]["code"], "context_rollback_failed")
+
+    async def test_resource_sampling_never_blocks_endpoint_admission(self) -> None:
+        class SlowSampler:
+            def sample(self) -> ResourceSnapshot:
+                time.sleep(0.25)
+                return ResourceSnapshot(None, 1.0, 1.0, None, None)
+
+        session = RealtimeSession(
+            session_id="session-resource",
+            runner=StreamingRunner(),
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+            resource_sampler=SlowSampler(),
+        )
+        await session.start_utterance(announce=False)
+        started = time.monotonic()
+        await session.finish_utterance(b"\0\0" * 320)
+        self.assertLess(time.monotonic() - started, 0.1)
+        await asyncio.sleep(0.6)
+        self.assertFalse(session._diagnostic_tasks)
+
+    async def test_delayed_resource_sample_keeps_original_stream_epoch(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+
+        class GatedSampler:
+            def sample(self) -> ResourceSnapshot:
+                entered.set()
+                release.wait(0.5)
+                return ResourceSnapshot(None, 1.0, 1.0, None, None)
+
+        session = RealtimeSession(
+            session_id="session-resource-epoch",
+            runner=StreamingRunner(),
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+            resource_sampler=GatedSampler(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+        await session.start_utterance(announce=False)
+        await session.finish_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(entered.wait, 0.5))
+        session.stream_epoch = 2
+        release.set()
+        await asyncio.sleep(0.05)
+
+        resource = [
+            fields for stage, event, fields in observations
+            if stage == "resource" and event == "sample"
+        ]
+        self.assertTrue(resource)
+        self.assertTrue(all(fields["stream_epoch"] == 1 for fields in resource))
+
     async def test_abandoned_vad_candidate_emits_no_user_turn(self) -> None:
         events = MemoryEvents()
         session = RealtimeSession(
@@ -37,7 +907,13 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.events, [])
         self.assertTrue(await session.abandon_unannounced_utterance(turn_id))
         self.assertEqual(events.events, [])
+        self.assertEqual(session.turn_counts["admitted"], 0)
         self.assertIsNone(session.active_turn_id)
+
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+        completed = next(event for event in events.events if event["type"] == "turn.completed")
+        self.assertEqual(completed["payload"]["turn_admission_count"], 1)
 
     async def test_cancelled_candidate_announcement_cannot_launch_a_turn(self) -> None:
         class BlockingEvents:
@@ -65,6 +941,7 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(session.active_turn_id)
         self.assertIsNone(session._active)
+        self.assertEqual(session.turn_counts["admitted"], 0)
 
 
 class OverlapRunner:
@@ -374,6 +1251,22 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
             def ready_for_admission(self) -> bool:
                 return False
 
+            def readiness_components(self) -> tuple[ComponentHealth, ...]:
+                return (
+                    ComponentHealth(
+                        "stt", "alive", "ready", True,
+                        "stt", "voice-agent.stt.v1",
+                    ),
+                    ComponentHealth(
+                        "selected_llm", "alive", "ready", True,
+                        "llm", "voice-agent.llm-provider.v1",
+                    ),
+                    ComponentHealth(
+                        "tts", "dead", "unready", True,
+                        "silero", "voice-agent.tts.v2", "silero_pool_not_ready",
+                    ),
+                )
+
         events = MemoryEvents()
         failures: list[tuple[str, str]] = []
         session = RealtimeSession(
@@ -385,31 +1278,221 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(await session.ready())
-        self.assertEqual(failures, [("tts", "tts_backend_not_ready")])
-        self.assertEqual(
-            events.events,
-            [
-                {
-                    "schema_version": CONTROL_EVENT_VERSION,
-                    "session_id": "session-ready-loss",
-                    "turn_id": "session",
-                    "stream_epoch": 1,
-                    "turn_generation": 0,
-                    "request_id": "session",
-                    "media_generation": 0,
-                    "sequence": 1,
-                    "type": "session.degraded",
-                    "terminal": False,
-                    "payload": {
-                        "state": "degraded",
-                        "stage": "tts",
-                        "code": "tts_backend_not_ready",
-                    },
-                }
-            ],
+        self.assertEqual(failures, [("tts", "silero_pool_not_ready")])
+        self.assertEqual(len(events.events), 1)
+        degraded = events.events[0]
+        self.assertEqual(degraded["schema_version"], CONTROL_EVENT_VERSION)
+        self.assertEqual(degraded["session_id"], "session-ready-loss")
+        self.assertEqual(degraded["type"], "session.degraded")
+        self.assertEqual(degraded["payload"]["stage"], "tts")
+        self.assertEqual(degraded["payload"]["code"], "silero_pool_not_ready")
+        self.assertEqual(degraded["payload"]["user_state"], "degraded")
+        self.assertEqual(degraded["payload"]["failure_matrix_id"], "tts_failure")
+        self.assertEqual(degraded["payload"]["health"]["overall_readiness"], "unready")
+        tts_health = next(
+            component for component in degraded["payload"]["health"]["components"]
+            if component["component"] == "tts"
         )
+        self.assertEqual(tts_health["liveness"], "dead")
+        self.assertEqual(tts_health["readiness"], "unready")
+        self.assertTrue(tts_health["compatible"])
         with self.assertRaisesRegex(RuntimeError, "session is closed"):
             await session.start_utterance()
+
+    async def test_partial_tts_pool_preserves_alive_but_unready_health(self) -> None:
+        class PartialTtsRunner:
+            def ready_for_admission(self) -> bool:
+                return False
+
+            def admission_failure(self) -> tuple[str, str]:
+                return "tts", "silero_pool_not_ready"
+
+            def readiness_components(self) -> tuple[ComponentHealth, ...]:
+                return (
+                    ComponentHealth(
+                        "stt", "alive", "ready", True,
+                        "stt", "voice-agent.stt.v1",
+                    ),
+                    ComponentHealth(
+                        "selected_llm", "alive", "ready", True,
+                        "llm", "voice-agent.llm-provider.v1",
+                    ),
+                    ComponentHealth(
+                        "tts", "alive", "unready", True,
+                        "silero", "voice-agent.tts.v2", "silero_pool_not_ready",
+                    ),
+                )
+
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-partial-tts",
+            runner=PartialTtsRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        self.assertFalse(await session.ready())
+        degraded = events.events[0]
+        tts_health = next(
+            component for component in degraded["payload"]["health"]["components"]
+            if component["component"] == "tts"
+        )
+        self.assertEqual(tts_health["liveness"], "alive")
+        self.assertEqual(tts_health["readiness"], "unready")
+        self.assertEqual(tts_health["reason_code"], "silero_pool_not_ready")
+
+    async def test_ready_and_reconnect_gate_on_one_fresh_five_component_snapshot(self) -> None:
+        class SnapshotRunner:
+            def __init__(self) -> None:
+                self.snapshot_count = 0
+
+            def ready_for_admission(self) -> bool:
+                raise AssertionError("readiness must come from the health snapshot")
+
+            def readiness_components(self) -> tuple[ComponentHealth, ...]:
+                self.snapshot_count += 1
+                return (
+                    ComponentHealth(
+                        "stt", "alive", "ready", True,
+                        "stt", "voice-agent.stt.v1",
+                    ),
+                    ComponentHealth(
+                        "selected_llm", "alive", "ready", True,
+                        "llm", "voice-agent.llm-provider.v1",
+                    ),
+                    ComponentHealth(
+                        "tts", "alive", "ready", True,
+                        "silero", "voice-agent.tts.v2",
+                    ),
+                )
+
+        events = MemoryEvents()
+        runner = SnapshotRunner()
+        session = RealtimeSession(
+            session_id="session-single-health-snapshot",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        self.assertTrue(await session.ready())
+        self.assertEqual(runner.snapshot_count, 1)
+        self.assertEqual([event["type"] for event in events.events], ["session.ready"])
+        health = events.events[0]["payload"]["health"]
+        self.assertEqual(health["overall_readiness"], "ready")
+        self.assertEqual(
+            {component["component"] for component in health["components"]},
+            {"livekit", "controller", "stt", "selected_llm", "tts"},
+        )
+        self.assertEqual(len(health["components"]), 5)
+
+        request = json.dumps({
+            "schema_version": "voice-agent.client-control.v1",
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(request))
+        self.assertEqual(runner.snapshot_count, 2)
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["session.ready", "session.reconnected", "session.ready"],
+        )
+        reconnect_health = events.events[-1]["payload"]["health"]
+        self.assertEqual(len(reconnect_health["components"]), 5)
+        self.assertEqual(
+            len({component["component"] for component in reconnect_health["components"]}),
+            5,
+        )
+
+    async def test_reconnect_worker_loss_publishes_degradation_without_ready_ack(self) -> None:
+        class ResetLosesReadinessRunner(StreamingRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.admission_ready = True
+
+            def ready_for_admission(self) -> bool:
+                return self.admission_ready
+
+            def reset_session(self, _session_id: str) -> None:
+                self.admission_ready = False
+
+            def admission_failure(self) -> tuple[str, str]:
+                return "stt", "selected_stt_unavailable"
+
+        events = MemoryEvents()
+        runner = ResetLosesReadinessRunner()
+        session = RealtimeSession(
+            session_id="session-reconnect-readiness-loss",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        request = json.dumps({
+            "schema_version": "voice-agent.client-control.v1",
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+
+        self.assertTrue(await session.handle_client_control(request))
+
+        self.assertEqual([event["type"] for event in events.events], ["session.degraded"])
+        self.assertEqual(events.events[0]["stream_epoch"], 2)
+        self.assertEqual(events.events[0]["payload"]["stage"], "stt")
+        self.assertEqual(
+            events.events[0]["payload"]["health"]["overall_readiness"], "unready"
+        )
+        self.assertTrue(session.closed)
+
+    async def test_reconnect_replay_rechecks_readiness_before_ack(self) -> None:
+        class MutableReadinessRunner(StreamingRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.admission_ready = True
+                self.resets = 0
+
+            def ready_for_admission(self) -> bool:
+                return self.admission_ready
+
+            def reset_session(self, _session_id: str) -> None:
+                self.resets += 1
+
+            def admission_failure(self) -> tuple[str, str]:
+                return "llm_provider", "local_lfm_unavailable"
+
+        events = MemoryEvents()
+        runner = MutableReadinessRunner()
+        session = RealtimeSession(
+            session_id="session-reconnect-replay-readiness-loss",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        request = json.dumps({
+            "schema_version": "voice-agent.client-control.v1",
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+
+        self.assertTrue(await session.handle_client_control(request))
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["session.reconnected", "session.ready"],
+        )
+        events.events.clear()
+        runner.admission_ready = False
+
+        self.assertTrue(await session.handle_client_control(request))
+
+        self.assertEqual(runner.resets, 1)
+        self.assertEqual([event["type"] for event in events.events], ["session.degraded"])
+        self.assertEqual(events.events[0]["payload"]["stage"], "llm_provider")
+        self.assertTrue(session.closed)
 
 
 class FinalSegmentOverlapRunner(OverlapRunner):
@@ -674,6 +1757,28 @@ class ControlEventGateTests(unittest.TestCase):
         self.assertFalse(gate.accept(self.event(4, "turn.thinking")))
         self.assertFalse(gate.accept(self.event(5, "turn.playout-ready")))
         self.assertEqual(gate.drop_count, 3)
+
+    def test_enriched_publication_failure_is_valid_first_turn_terminal(self) -> None:
+        gate = ControlEventGate("session-test")
+        failure = self.event(
+            2,
+            "turn.failed",
+            terminal=True,
+            payload={
+                "outcome": "failed",
+                "stage": "publication",
+                "code": "audio_publication_unavailable",
+                "dependency_class": "hard",
+                "failure_matrix_id": "livekit_unavailable",
+                "admit_turn": False,
+                "user_state": "retrying",
+            },
+        )
+
+        self.assertTrue(gate.accept(self.event(1, "session.ready")))
+        self.assertTrue(gate.accept(failure))
+        self.assertTrue(gate.current_turn_terminal)
+        self.assertEqual(gate.drop_count, 0)
 
     def test_immediate_completion_after_server_pcm_is_admitted(self) -> None:
         gate = ControlEventGate("session-test")

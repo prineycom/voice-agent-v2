@@ -217,6 +217,7 @@ export function VoiceShell({
         readyFlash={readyFlash}
         connectAttempted={connectAttempted}
         microphoneStatusLabel={model.microphoneStatusLabel}
+        unavailableLabel={model.connectionLabel}
         onReconnect={onConnect}
         overlayRef={connectionOverlayRef}
       />

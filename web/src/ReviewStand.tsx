@@ -7,6 +7,7 @@ function reviewState(): VoiceState {
   return {
     ...initialVoiceState,
     connection: 'ready',
+    availability: 'available',
     sessionId: 'review-stand',
     streamEpoch: 1,
     lastSequence: 7,
@@ -62,8 +63,8 @@ export function ReviewStand({ avatarHost, buildVersion }: {
   const [state, setState] = useState(reviewState)
   const audioContainerRef = useRef<HTMLDivElement>(null)
   const shortBuild = buildVersion.slice(0, 12)
-  const reconnect = () => setState((current) => ({ ...current, connection: 'ready', error: null }))
-  const disconnect = () => setState((current) => ({ ...current, connection: 'failed' }))
+  const reconnect = () => setState((current) => ({ ...current, connection: 'ready', availability: 'available', error: null }))
+  const disconnect = () => setState((current) => ({ ...current, connection: 'failed', availability: 'unavailable' }))
   const downloadDiagnostics = () => {
     const blob = new Blob([
       `${JSON.stringify({ mode: 'review-stand', build: buildVersion, control: CONTROL_VERSION })}\n`,

@@ -15,6 +15,12 @@ import time
 from typing import Awaitable, Callable, Protocol
 
 from .contracts import StageFailure, valid_correlation_id
+from .observability import (
+    ComponentHealth,
+    HealthReport,
+    ResourceSampler,
+    failure_payload,
+)
 from .v2_audio import (
     INPUT_AUDIO_FORMAT,
     INPUT_MEDIA_MAX_BYTES,
@@ -63,6 +69,57 @@ CANCELLATION_CLEANUP_BOUND_MS = 1_000
 CONTROL_PUBLISH_BOUND_MS = 1_000
 MAX_UTTERANCE_BYTES = INPUT_MEDIA_MAX_BYTES
 TERMINAL_CONTROLLER_FAILURE_CODES = frozenset({"local_lfm_handoff_cleanup_failed"})
+CONTROL_OBSERVATION_PAYLOAD_FIELDS = (
+    "user_state",
+    "dependency_class",
+    "failure_matrix_id",
+    "outcome",
+    "admit_turn",
+    "voice_continues",
+    "text_salvageable",
+    "retry_count",
+    "retry_limit",
+    "operator_only",
+    "provider_switched",
+    "external_transfer_changed",
+    "stt_or_tts_moved_to_cloud",
+    "auth_changed",
+    "wake_changed",
+    "avatar_selection_changed",
+    "provider_mode",
+    "provider_identity",
+    "external_transfer",
+    "provider_request_id_available",
+    "provider_input_unit_count",
+    "provider_output_unit_count",
+    "provider_total_unit_count",
+    "endpoint_to_stt_final_ms",
+    "provider_time_to_first_token_ms",
+    "provider_completion_ms",
+    "tts_time_to_first_audio_ms",
+    "cancellation_latency_ms",
+    "endpoint_to_first_visible_ms",
+    "endpoint_to_first_accepted_pcm_ms",
+    "total_turn_ms",
+    "slowest_stage",
+    "output_bytes",
+    "output_padded_bytes",
+    "output_frames_submitted",
+    "server_pcm_queue_max_blocks",
+    "server_segment_queue_max_segments",
+    "turn_admission_count",
+    "turn_completion_count",
+    "turn_failure_count",
+    "turn_interruption_count",
+    "cancellation_count",
+    "stale_drop_count",
+    "client_control_drop_count",
+    "cpu_utilization_percent",
+    "host_ram_used_mib",
+    "process_rss_mib",
+    "gpu_vram_used_mib",
+    "gpu_utilization_percent",
+)
 
 
 class EventSink(Protocol):
@@ -86,7 +143,7 @@ class TurnRunner(Protocol):
         input_pcm: bytes,
         cancellation: CancellationToken,
         event_observer: Callable[[dict[str, object]], None],
-        trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
+        trace_observer: Callable[[str, str, dict[str, object]], bool | None] | None = None,
     ) -> TraceResult: ...
 
     def cancel(self) -> None: ...
@@ -119,6 +176,22 @@ class TurnContext:
     noncooperative_worker_drains: int = 0
     cooperative_cleanup_complete: threading.Event = field(default_factory=threading.Event)
     llm_context_committed: bool = False
+    stt_final_ms: float | None = None
+    llm_started_monotonic: float | None = None
+    provider_first_token_ms: float | None = None
+    provider_completion_ms: float | None = None
+    provider_input_unit_count: int | None = None
+    provider_output_unit_count: int | None = None
+    provider_total_unit_count: int | None = None
+    tts_started_monotonic: float | None = None
+    tts_first_audio_ms: float | None = None
+    resource_endpoint: dict[str, object] = field(default_factory=dict)
+    resource_terminal: dict[str, object] = field(default_factory=dict)
+    resource_endpoint_started: bool = False
+    resource_terminal_started: bool = False
+    transport_failed: bool = False
+    admission_counted: bool = False
+    public_event_published: bool = False
 
 
 @dataclass(frozen=True)
@@ -230,7 +303,7 @@ class ControlEventGate:
                 or media_generation != 0
             ):
                 return self._drop()
-        elif event_type == "turn.listening":
+        elif event_type == "turn.listening" or self._initial_publication_failure(event):
             if (
                 self.current_turn_id == turn_id
                 or not self.current_turn_terminal
@@ -243,7 +316,7 @@ class ControlEventGate:
             self.current_turn_generation = turn_generation
             self.current_request_id = request_id
             self.current_media_generation = media_generation
-            self.current_turn_terminal = False
+            self.current_turn_terminal = terminal
             self.last_turn_event = event_type
         elif (
             turn_id != self.current_turn_id
@@ -268,6 +341,27 @@ class ControlEventGate:
         self.last_sequence = sequence
         return True
 
+    @staticmethod
+    def _initial_publication_failure(event: dict[str, object]) -> bool:
+        payload = event.get("payload")
+        return (
+            event.get("type") == "turn.failed"
+            and event.get("terminal") is True
+            and isinstance(payload, dict)
+            and payload.get("outcome") == "failed"
+            and payload.get("stage") == "publication"
+            and isinstance(payload.get("code"), str)
+            and 1 <= len(payload["code"]) <= 64
+            and all(
+                character in "abcdefghijklmnopqrstuvwxyz0123456789_"
+                for character in payload["code"]
+            )
+            and payload.get("dependency_class") == "hard"
+            and payload.get("failure_matrix_id") == "livekit_unavailable"
+            and payload.get("admit_turn") is False
+            and payload.get("user_state") == "retrying"
+        )
+
     def _drop(self) -> bool:
         self.drop_count += 1
         return False
@@ -284,8 +378,10 @@ class RealtimeSession:
         event_sink: EventSink,
         audio_sink: AudioSink,
         failure_handler: Callable[[str, str], None] | None = None,
-        trace_observer: Callable[[str, str, dict[str, object]], None] | None = None,
+        trace_observer: Callable[[str, str, dict[str, object]], bool | None] | None = None,
         reconnect_reset_handler: Callable[[], Awaitable[None]] | None = None,
+        resource_sampler: ResourceSampler | None = None,
+        diagnostic_capture: object | None = None,
     ) -> None:
         if not valid_correlation_id(session_id):
             raise ValueError("invalid realtime session ID")
@@ -296,6 +392,8 @@ class RealtimeSession:
         self.failure_handler = failure_handler
         self.trace_observer = trace_observer
         self.reconnect_reset_handler = reconnect_reset_handler
+        self.resource_sampler = resource_sampler
+        self.diagnostic_capture = diagnostic_capture
         self.stream_epoch = 1
         self._event_sequence = 0
         self._turn_sequence = 0
@@ -321,14 +419,27 @@ class RealtimeSession:
         self._detached_cleanup_tasks: set[asyncio.Task[str | None]] = set()
         self._cleanup_error: str | None = None
         self._turn_tasks: set[asyncio.Task[None]] = set()
+        self._diagnostic_tasks: set[asyncio.Task[None]] = set()
         self.drop_counts = {"stale_event": 0, "client_control": 0}
+        self.turn_counts = {
+            "admitted": 0,
+            "completed": 0,
+            "failed": 0,
+            "interrupted": 0,
+            "cancellations": 0,
+        }
         self.diagnostic_failure_counts = {"validation": 0, "write": 0, "observer": 0}
 
     def _trace(self, stage: str, event: str, **fields: object) -> None:
         if self.trace_observer is None:
             return
         try:
-            self.trace_observer(stage, event, fields)
+            accepted = self.trace_observer(stage, event, fields)
+            if accepted is False:
+                self.diagnostic_failure_counts["observer"] = min(
+                    self.diagnostic_failure_counts["observer"] + 1,
+                    MAX_DIAGNOSTIC_FAILURES,
+                )
         except Exception as error:
             if isinstance(error, OSError):
                 kind = "write"
@@ -345,20 +456,210 @@ class RealtimeSession:
     def active_turn_id(self) -> str | None:
         return self._active.turn_id if self._active and not self._active.terminal else None
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _count_admission(self, context: TurnContext) -> None:
+        if context.admission_counted:
+            return
+        context.admission_counted = True
+        self.turn_counts["admitted"] += 1
+
+    def _rollback_unpublished_admission(self, context: TurnContext) -> None:
+        if (
+            context.admission_counted
+            and not context.public_event_published
+            and not context.transport_failed
+        ):
+            context.admission_counted = False
+            self.turn_counts["admitted"] -= 1
+
+    def _health_report(
+        self, *, failed_stage: str | None = None, failure_code: str | None = None
+    ) -> dict[str, object]:
+        components = [
+            ComponentHealth(
+                "livekit", "alive", "ready", True,
+                "livekit-room-session", CONTROL_EVENT_VERSION,
+            ),
+            ComponentHealth(
+                "controller", "alive", "ready", True,
+                "voice-agent-v2-controller", CONTROL_EVENT_VERSION,
+            ),
+        ]
+        readiness_components = getattr(self.runner, "readiness_components", None)
+        if readiness_components is None:
+            components.extend((
+                ComponentHealth("stt", "alive", "ready", True, "configured-stt", "voice-agent.stt.v1"),
+                ComponentHealth("selected_llm", "alive", "ready", True, "configured-local-llm", "voice-agent.llm-provider.v1"),
+                ComponentHealth("tts", "alive", "ready", True, "configured-tts", TTS_V2_VERSION),
+            ))
+            admission = getattr(self.runner, "ready_for_admission", None)
+            if (
+                failed_stage is None
+                and failure_code is None
+                and admission is not None
+                and not admission()
+            ):
+                failed_stage, failure_code = self._readiness_failure()
+        else:
+            reported = tuple(readiness_components())
+            if not all(isinstance(component, ComponentHealth) for component in reported):
+                raise RuntimeError("runner readiness components are invalid")
+            components.extend(reported)
+        if failed_stage is not None and failure_code is not None:
+            affected = {
+                "transport": "livekit",
+                "livekit": "livekit",
+                "publication": "livekit",
+                "controller": "controller",
+                "input": "controller",
+                "microphone_capture": "controller",
+                "stt": "stt",
+                "llm_provider": "selected_llm",
+                "local_inference": "selected_llm",
+                "tts": "tts",
+            }.get(failed_stage, "controller")
+            components = [
+                ComponentHealth(
+                    component.component,
+                    component.liveness,
+                    "unready" if component.component == affected else component.readiness,
+                    component.compatible,
+                    component.identity,
+                    component.contract_version,
+                    failure_code if component.component == affected else component.reason_code,
+                    component.retry_count,
+                    component.retry_limit,
+                )
+                for component in components
+            ]
+        return HealthReport(tuple(components)).as_dict()
+
+    def _readiness_failure(self) -> tuple[str, str]:
+        failure = getattr(self.runner, "admission_failure", None)
+        if failure is not None:
+            reported = failure()
+            if (
+                isinstance(reported, tuple)
+                and len(reported) == 2
+                and all(isinstance(value, str) for value in reported)
+            ):
+                return reported
+        return "tts", "tts_backend_not_ready"
+
+    async def _sample_resources(self, context: TurnContext, phase: str) -> None:
+        if self.resource_sampler is None:
+            return
+        try:
+            sample = await asyncio.to_thread(self.resource_sampler.sample)
+            fields = sample.as_fields(phase=phase)
+            if phase == "endpoint":
+                context.resource_endpoint = fields
+            else:
+                context.resource_terminal = fields
+            self._trace(
+                "resource", "sample", turn_id=context.turn_id,
+                stream_epoch=context.stream_epoch, **fields,
+            )
+        except Exception as error:
+            self._trace(
+                "resource", "sample_failed", turn_id=context.turn_id,
+                stream_epoch=context.stream_epoch,
+                failure_class=type(error).__name__, failure_code="resource_sample_failed",
+            )
+
+    def _schedule_resource_sample(self, context: TurnContext, phase: str) -> None:
+        if self.resource_sampler is None:
+            return
+        started_name = (
+            "resource_endpoint_started" if phase == "endpoint"
+            else "resource_terminal_started"
+        )
+        if getattr(context, started_name):
+            return
+        setattr(context, started_name, True)
+        task = asyncio.create_task(
+            self._sample_resources(context, phase),
+            name=f"resource-{phase}-{context.turn_id}",
+        )
+        self._diagnostic_tasks.add(task)
+        task.add_done_callback(self._diagnostic_tasks.discard)
+
+    def _capture_content(self, kind: str, payload: bytes | str, turn_id: str) -> None:
+        capture = self.diagnostic_capture
+        if capture is None:
+            return
+        try:
+            capture.capture(kind, payload)
+            self._trace("capture", "written", turn_id=turn_id, capture_kind=kind)
+        except Exception as error:
+            self._trace(
+                "capture", "write_failed", turn_id=turn_id,
+                capture_kind=kind, failure_class=type(error).__name__,
+                failure_code="capture_write_failed",
+            )
+
     async def ready(self) -> bool:
         async with self._lock:
             if self._closed:
                 return False
-            admission = getattr(self.runner, "ready_for_admission", None)
-            if admission is not None and not admission():
-                await self._degrade_locked("tts", "tts_backend_not_ready")
-                return False
+            return await self._publish_ready_or_degrade_locked(
+                ready_payload={"barge_in_drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS}
+            )
+
+    @staticmethod
+    def _health_failure(health: dict[str, object]) -> tuple[str, str]:
+        components = health.get("components")
+        if isinstance(components, list):
+            for component in components:
+                if (
+                    isinstance(component, dict)
+                    and (
+                        component.get("liveness") != "alive"
+                        or component.get("readiness") != "ready"
+                        or component.get("compatible") is not True
+                    )
+                ):
+                    name = component.get("component")
+                    stage, default_code = {
+                        "livekit": ("livekit", "livekit_unavailable"),
+                        "controller": ("controller", "inference_stack_not_ready"),
+                        "stt": ("stt", "selected_stt_unavailable"),
+                        "selected_llm": ("llm_provider", "local_lfm_unavailable"),
+                        "tts": ("tts", "silero_pool_not_ready"),
+                    }.get(name, ("controller", "inference_stack_not_ready"))
+                    reason = component.get("reason_code")
+                    return stage, reason if isinstance(reason, str) else default_code
+        return "controller", "inference_stack_not_ready"
+
+    async def _publish_ready_or_degrade_locked(
+        self,
+        *,
+        ready_payload: dict[str, object] | None = None,
+        reconnect_payload: dict[str, object] | None = None,
+    ) -> bool:
+        health = self._health_report()
+        if health.get("overall_readiness") != "ready":
+            stage, code = self._health_failure(health)
+            await self._degrade_locked(stage, code, health=health)
+            return False
+        if reconnect_payload is not None:
             await self._emit(
                 SESSION_TURN_ID,
-                "session.ready",
-                {"state": "ready", "barge_in_drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS},
+                "session.reconnected",
+                dict(reconnect_payload),
             )
-            return True
+        payload = {
+            "state": "ready",
+            "user_state": "available",
+            "health": health,
+        }
+        if ready_payload is not None:
+            payload.update(ready_payload)
+        await self._emit(SESSION_TURN_ID, "session.ready", payload)
+        return True
 
     async def start_utterance(self, *, announce: bool = True) -> str:
         async with self._reconnect_lock:
@@ -367,8 +668,9 @@ class RealtimeSession:
                     raise RuntimeError("session is closed")
                 admission = getattr(self.runner, "ready_for_admission", None)
                 if admission is not None and not admission():
-                    await self._degrade_locked("tts", "tts_backend_not_ready")
-                    raise RuntimeError("TTS backend is not ready for admission")
+                    stage, code = self._readiness_failure()
+                    await self._degrade_locked(stage, code)
+                    raise RuntimeError(f"{stage} is not ready for admission")
                 if self._active is not None and not self._active.terminal:
                     cleanup, drain_error, _publication_id = await self._interrupt_locked("barge_in")
                     if drain_error is not None:
@@ -409,15 +711,61 @@ class RealtimeSession:
         self._active = context
         if announce:
             try:
-                await self._announce_context_locked(context)
+                await self._announce_context_cancellation_safe_locked(context)
             except BaseException:
                 context.terminal = True
+                self._rollback_unpublished_admission(context)
                 if self._active is context:
                     self._active = None
                 if context.media_publication_id is not None:
                     await self._abandon_audio(context.turn_id)
                 raise
         return turn_id
+
+    async def _announce_context_cancellation_safe_locked(
+        self, context: TurnContext
+    ) -> None:
+        announcement = asyncio.create_task(
+            self._announce_context_locked(context),
+            name=f"announce-{context.turn_id}",
+        )
+        cancellation_requested = False
+        while True:
+            try:
+                await asyncio.wait((announcement,))
+                await announcement
+                break
+            except asyncio.CancelledError:
+                if announcement.done():
+                    try:
+                        await announcement
+                    except asyncio.CancelledError:
+                        if not context.public_event_published:
+                            raise
+                        cancellation_requested = True
+                        break
+                if not context.public_event_published:
+                    announcement.cancel()
+                    try:
+                        await announcement
+                    except asyncio.CancelledError:
+                        pass
+                    if not context.public_event_published:
+                        raise
+                cancellation_requested = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        if cancellation_requested:
+            if self._active is context and not context.terminal:
+                cleanup, drain_error, _publication_id = await self._interrupt_locked(
+                    "announcement_cancelled"
+                )
+                if drain_error is not None:
+                    await self._degrade_locked("publication", drain_error)
+                elif cleanup is not None:
+                    self._watch_cleanup(cleanup)
+            raise asyncio.CancelledError
 
     async def _announce_context_locked(self, context: TurnContext) -> None:
         prepare = getattr(self.audio_sink, "prepare", None)
@@ -429,14 +777,37 @@ class RealtimeSession:
                     prepare(context.turn_id, context.media_generation),
                     CONTROL_PUBLISH_BOUND_MS / 1000,
                 )
-            except BaseException:
+            except asyncio.CancelledError:
                 await self._abandon_audio(context.turn_id)
                 raise
+            except Exception:
+                self._count_admission(context)
+                await self._terminate_failed_turn_locked(
+                    context,
+                    "turn.failed",
+                    {
+                        "outcome": "failed",
+                        "stage": "publication",
+                        "code": "audio_publication_unavailable",
+                    },
+                    abandon_audio=True,
+                )
+                raise
         if not isinstance(publication_id, str) or not publication_id or len(publication_id) > 128:
-            if prepare is not None:
-                await self._abandon_audio(context.turn_id)
+            self._count_admission(context)
+            await self._terminate_failed_turn_locked(
+                context,
+                "turn.failed",
+                {
+                    "outcome": "failed",
+                    "stage": "publication",
+                    "code": "audio_publication_identity_invalid",
+                },
+                abandon_audio=True,
+            )
             raise RuntimeError("audio publication has no bounded identity")
         context.media_publication_id = publication_id
+        self._count_admission(context)
         await self._emit(context.turn_id, "turn.listening", {"state": "listening"})
         tts_profile = getattr(self.runner, "tts_profile", None)
         metadata = tts_profile.public_metadata() if tts_profile is not None else {
@@ -487,11 +858,19 @@ class RealtimeSession:
             if not math.isfinite(endpoint) or endpoint > time.monotonic() + 0.01:
                 raise ValueError("invalid acoustic endpoint timestamp")
             context.endpoint_monotonic = endpoint
+            self._trace(
+                "turn", "endpoint", turn_id=context.turn_id,
+                input_bytes=len(pcm),
+                duration_ms=round(len(pcm) / 2 / INPUT_AUDIO_FORMAT.sample_rate_hz * 1000, 3),
+            )
+            self._schedule_resource_sample(context, "endpoint")
+            self._capture_content("raw-audio", pcm, context.turn_id)
             if not context.announced:
                 try:
-                    await self._announce_context_locked(context)
+                    await self._announce_context_cancellation_safe_locked(context)
                 except BaseException:
                     context.terminal = True
+                    self._rollback_unpublished_admission(context)
                     if self._active is context:
                         self._active = None
                     if context.media_publication_id is not None:
@@ -527,7 +906,13 @@ class RealtimeSession:
 
     async def fail(self, stage: str, code: str) -> None:
         async with self._lock:
-            cleanup, drain_error, _publication_id = await self._interrupt_locked(code)
+            try:
+                cleanup, drain_error, _publication_id = await self._interrupt_locked(
+                    code, cancellation_failure=(stage, code)
+                )
+            except asyncio.CancelledError:
+                await self._degrade_locked(stage, code)
+                raise
             if cleanup is not None:
                 self._watch_cleanup(cleanup)
             await self._degrade_locked(stage, drain_error or code)
@@ -576,21 +961,63 @@ class RealtimeSession:
         if self.failure_handler is not None:
             self.failure_handler(stage, code)
 
-    async def _publish_degraded_locked(self, stage: str, code: str) -> None:
-        try:
-            await self._emit(
-                SESSION_TURN_ID,
-                "session.degraded",
-                {"state": "degraded", "stage": stage, "code": code},
-            )
-        finally:
-            self._report_failure(stage, code)
+    async def _publish_degraded_locked(
+        self,
+        stage: str,
+        code: str,
+        *,
+        health: dict[str, object] | None = None,
+    ) -> None:
+        async def publish() -> None:
+            try:
+                await self._emit(
+                    SESSION_TURN_ID,
+                    "session.degraded",
+                    {
+                        "state": "degraded",
+                        "stage": stage,
+                        "code": code,
+                        **failure_payload(stage, code),
+                        "health": health or self._health_report(
+                            failed_stage=stage, failure_code=code
+                        ),
+                    },
+                )
+            finally:
+                self._report_failure(stage, code)
 
-    async def _degrade_locked(self, stage: str, code: str) -> None:
+        operation = asyncio.create_task(
+            publish(), name=f"publish-session-degraded-{self.session_id}"
+        )
+        cancellation_requested = False
+        while not operation.done():
+            try:
+                await asyncio.wait((operation,))
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        try:
+            await operation
+        except BaseException:
+            if cancellation_requested:
+                raise asyncio.CancelledError from None
+            raise
+        if cancellation_requested:
+            raise asyncio.CancelledError
+
+    async def _degrade_locked(
+        self,
+        stage: str,
+        code: str,
+        *,
+        health: dict[str, object] | None = None,
+    ) -> None:
         if self._closed:
             return
         self._closed = True
-        await self._publish_degraded_locked(stage, code)
+        await self._publish_degraded_locked(stage, code, health=health)
 
     async def _rollback_context(
         self, context: TurnContext, *, restore_context: bool = True
@@ -772,19 +1199,33 @@ class RealtimeSession:
         return cleanup
 
     async def _interrupt_locked(
-        self, reason: str, *, notify_client: bool = True
+        self,
+        reason: str,
+        *,
+        notify_client: bool = True,
+        cancellation_failure: tuple[str, str] | None = None,
     ) -> tuple[asyncio.Task[str | None] | None, str | None, str | None]:
         context = self._active
         if context is None or context.terminal:
             return None, None, None
         context.terminal = True
+        self.turn_counts["interrupted"] += 1
+        self.turn_counts["cancellations"] += 1
         # Invalidate request-scoped provider/TTS work before a replacement can be
         # admitted. Cancellation callbacks are non-blocking; a Silero model call
         # may continue only as a silent worker drain.
         context.cancellation.cancel()
         started = time.monotonic()
+        cancellation_requested = False
         try:
-            drain_error, publication_id = await self._clear_audio(context.turn_id)
+            try:
+                drain_error, publication_id = await self._clear_audio(context.turn_id)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                drain_error, publication_id = "audio_drain_cancelled", None
         finally:
             drain_ms = (time.monotonic() - started) * 1000
             cleanup = self._ensure_context_cleanup(context)
@@ -792,13 +1233,56 @@ class RealtimeSession:
             payload: dict[str, object] = {
                 "outcome": "interrupted",
                 "reason": reason,
+                "user_state": "interrupted",
+                "retry_count": 0,
+                "retry_limit": 0,
                 "drain_ms": round(drain_ms, 3),
+                "cancellation_latency_ms": round(drain_ms, 3),
                 "drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS,
             }
             if publication_id is not None:
                 payload["server_media_publication_id"] = publication_id
             self._add_metrics(context, payload)
-            await self._emit(context.turn_id, "turn.interrupted", payload, terminal=True)
+            try:
+                await self._emit(context.turn_id, "turn.interrupted", payload, terminal=True)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        if cancellation_requested:
+            cleanup_error: str | None = None
+            if cleanup is not None:
+                deadline = (
+                    asyncio.get_running_loop().time()
+                    + CANCELLATION_CLEANUP_BOUND_MS / 1000
+                )
+                while not cleanup.done():
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        cleanup_error = "cancellation_cleanup_timeout"
+                        break
+                    try:
+                        await asyncio.wait((cleanup,), timeout=remaining)
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if current is not None:
+                            current.uncancel()
+                if cleanup.done():
+                    try:
+                        cleanup_error = cleanup.result()
+                    except BaseException:
+                        cleanup_error = "cancellation_cleanup_failed"
+            if cancellation_failure is not None:
+                failure_stage, failure_code = cancellation_failure
+                await self._degrade_locked(
+                    failure_stage, drain_error or cleanup_error or failure_code
+                )
+            elif drain_error is not None:
+                await self._degrade_locked("publication", drain_error)
+            elif cleanup_error is not None:
+                await self._degrade_locked("controller", cleanup_error)
+            raise asyncio.CancelledError
         return cleanup, drain_error, publication_id
 
     async def _run_turn(self, context: TurnContext, pcm: bytes) -> None:
@@ -1127,6 +1611,33 @@ class RealtimeSession:
                 elif stage == "llm_provider" and event == "cooperative_cleanup_complete":
                     context.llm_context_committed = bool(fields.get("context_committed"))
                     context.cooperative_cleanup_complete.set()
+                elif stage == "llm_provider" and event == "completed":
+                    if context.llm_started_monotonic is not None:
+                        context.provider_completion_ms = round(
+                            max(
+                                0.0,
+                                (time.monotonic() - context.llm_started_monotonic) * 1000,
+                            ),
+                            3,
+                        )
+                elif stage == "llm_provider" and event == "summary":
+                    first = fields.get("provider_time_to_first_token_ms")
+                    completion = fields.get("provider_completion_ms")
+                    if type(first) in {int, float} and math.isfinite(first) and first >= 0:
+                        context.provider_first_token_ms = round(float(first), 3)
+                    if type(completion) in {int, float} and math.isfinite(completion) and completion >= 0:
+                        context.provider_completion_ms = round(float(completion), 3)
+                    for name in (
+                        "provider_input_unit_count",
+                        "provider_output_unit_count",
+                        "provider_total_unit_count",
+                    ):
+                        value = fields.get(name.removeprefix("provider_"))
+                        if type(value) is int and value >= 0:
+                            setattr(context, name, value)
+                elif stage == "tts" and event == "segment_started":
+                    if context.tts_started_monotonic is None:
+                        context.tts_started_monotonic = time.monotonic()
                 self._trace(stage, event, turn_id=context.turn_id, **fields)
 
             runner_arguments["trace_observer"] = observe_trace
@@ -1231,6 +1742,23 @@ class RealtimeSession:
             )
             return
 
+        captured_transcript = False
+        latest_response: str | None = None
+        for internal_event in result.events:
+            internal_payload = internal_event.get("payload")
+            if not isinstance(internal_payload, dict):
+                continue
+            if internal_event.get("type") == "stt.final" and not captured_transcript:
+                private_value = internal_payload.get("transcript")
+                if isinstance(private_value, str) and private_value:
+                    self._capture_content("transcript", private_value, context.turn_id)
+                    captured_transcript = True
+            if internal_event.get("type") in {"llm.final", "llm.visible"}:
+                private_value = internal_payload.get("response")
+                if isinstance(private_value, str) and private_value:
+                    latest_response = private_value
+        if latest_response is not None:
+            self._capture_content("response", latest_response, context.turn_id)
         terminal = result.terminal_event
         terminal_payload = terminal.get("payload")
         if terminal["type"] != "turn.completed":
@@ -1309,6 +1837,11 @@ class RealtimeSession:
                 context.first_pcm_ms = round(
                     max(0.0, (time.monotonic() - context.endpoint_monotonic) * 1000), 3
                 )
+                if context.tts_started_monotonic is not None:
+                    context.tts_first_audio_ms = round(
+                        max(0.0, (time.monotonic() - context.tts_started_monotonic) * 1000),
+                        3,
+                    )
                 await self._emit(
                     context.turn_id,
                     "turn.speaking",
@@ -1316,6 +1849,7 @@ class RealtimeSession:
                         "state": "speaking",
                         "server_streamed_output": True,
                         "endpoint_to_first_accepted_pcm_ms": context.first_pcm_ms,
+                        "tts_time_to_first_audio_ms": context.tts_first_audio_ms,
                     },
                 )
 
@@ -1328,17 +1862,18 @@ class RealtimeSession:
                     async with self._runner_lock:
                         await asyncio.to_thread(delivered, self.session_id, context.turn_id)
                 except Exception:
-                    context.terminal = True
-                    payload = {
-                        "outcome": "failed",
-                        "stage": "controller",
-                        "code": "context_commit_failed",
-                    }
-                    self._add_metrics(context, payload)
-                    await self._emit(context.turn_id, "turn.failed", payload, terminal=True)
-                    await self._degrade_locked("controller", "context_commit_failed")
+                    await self._terminate_failed_turn_locked(
+                        context,
+                        "turn.failed",
+                        {
+                            "outcome": "failed",
+                            "stage": "controller",
+                            "code": "context_commit_failed",
+                        },
+                    )
                     return
             context.terminal = True
+            self.turn_counts["completed"] += 1
             payload: dict[str, object] = {
                 "outcome": "completed",
                 "output_bytes": output_bytes,
@@ -1352,10 +1887,49 @@ class RealtimeSession:
             await self._emit(context.turn_id, "turn.completed", payload, terminal=True)
 
     def _add_metrics(self, context: TurnContext, payload: dict[str, object]) -> None:
+        self._schedule_resource_sample(context, "terminal")
         if context.first_visible_ms is not None:
             payload["endpoint_to_first_visible_ms"] = context.first_visible_ms
         if context.first_pcm_ms is not None:
             payload["endpoint_to_first_accepted_pcm_ms"] = context.first_pcm_ms
+        if context.stt_final_ms is not None:
+            payload["endpoint_to_stt_final_ms"] = context.stt_final_ms
+        if context.provider_first_token_ms is not None:
+            payload["provider_time_to_first_token_ms"] = context.provider_first_token_ms
+        if context.provider_completion_ms is not None:
+            payload["provider_completion_ms"] = context.provider_completion_ms
+        if context.tts_first_audio_ms is not None:
+            payload["tts_time_to_first_audio_ms"] = context.tts_first_audio_ms
+        payload["total_turn_ms"] = round(
+            max(0.0, (time.monotonic() - context.endpoint_monotonic) * 1000), 3
+        )
+        stages = {
+            "stt": context.stt_final_ms,
+            "selected_llm": context.provider_completion_ms,
+            "tts": context.tts_first_audio_ms,
+        }
+        measured = {name: value for name, value in stages.items() if value is not None}
+        if measured:
+            payload["slowest_stage"] = max(measured, key=measured.get)
+        llm = getattr(self.runner, "llm", None)
+        payload["provider_mode"] = getattr(llm, "provider_mode", "local")
+        payload["provider_identity"] = getattr(llm, "provider_identity", "configured-local-llm")
+        payload["external_transfer"] = False
+        payload["provider_request_id_available"] = False
+        payload["provider_input_unit_count"] = context.provider_input_unit_count
+        payload["provider_output_unit_count"] = context.provider_output_unit_count
+        payload["provider_total_unit_count"] = context.provider_total_unit_count
+        payload["turn_admission_count"] = self.turn_counts["admitted"]
+        payload["turn_completion_count"] = self.turn_counts["completed"]
+        payload["turn_failure_count"] = self.turn_counts["failed"]
+        payload["turn_interruption_count"] = self.turn_counts["interrupted"]
+        payload["cancellation_count"] = self.turn_counts["cancellations"]
+        payload["stale_drop_count"] = self.drop_counts["stale_event"]
+        payload["client_control_drop_count"] = self.drop_counts["client_control"]
+        latest_resource = context.resource_terminal or context.resource_endpoint
+        for name, value in latest_resource.items():
+            if name != "resource_phase":
+                payload[name] = value
 
     async def _terminate_failed_turn(
         self,
@@ -1364,31 +1938,65 @@ class RealtimeSession:
         payload: dict[str, object],
     ) -> None:
         async with self._lock:
-            if context.terminal or self._closed or self._active is not context:
-                return
-            if payload.get("stage") == "publication":
-                drain_error, publication_id = await self._clear_audio(context.turn_id)
-            else:
-                drain_error, publication_id = await self._abandon_audio(context.turn_id)
-            context.rollback_error = await self._rollback_context(context)
-            context.terminal = True
-            public_payload = dict(payload)
-            if publication_id is not None:
-                public_payload["server_media_publication_id"] = publication_id
-            self._add_metrics(context, public_payload)
+            await self._terminate_failed_turn_locked(context, event_type, payload)
+
+    async def _terminate_failed_turn_locked(
+        self,
+        context: TurnContext,
+        event_type: str,
+        payload: dict[str, object],
+        *,
+        abandon_audio: bool = False,
+    ) -> None:
+        if context.terminal or self._closed or self._active is not context:
+            return
+        if abandon_audio or payload.get("stage") != "publication":
+            drain_error, publication_id = await self._abandon_audio(context.turn_id)
+        else:
+            drain_error, publication_id = await self._clear_audio(context.turn_id)
+        context.rollback_error = await self._rollback_context(context)
+        context.terminal = True
+        self.turn_counts["failed"] += 1
+        public_payload = dict(payload)
+        stage = str(public_payload.get("stage", "controller"))
+        code = str(public_payload.get("code", "unknown_failure"))
+        public_payload.update(failure_payload(stage, code))
+        if publication_id is not None:
+            public_payload["server_media_publication_id"] = publication_id
+        self._add_metrics(context, public_payload)
+        cancellation_after_publish = False
+        try:
             await self._emit(context.turn_id, event_type, public_payload, terminal=True)
-            terminal_code = payload.get("code")
-            terminal_controller_failure = (
-                payload.get("stage") == "llm_provider"
-                and isinstance(terminal_code, str)
-                and terminal_code in TERMINAL_CONTROLLER_FAILURE_CODES
-            )
-            if terminal_controller_failure:
-                await self._degrade_locked("llm_provider", terminal_code)
-            elif drain_error is not None:
-                await self._degrade_locked("publication", drain_error)
-            elif context.rollback_error is not None:
-                await self._degrade_locked("controller", context.rollback_error)
+        except asyncio.CancelledError:
+            if context.public_event_published and not context.transport_failed:
+                cancellation_after_publish = True
+            else:
+                raise
+        terminal_code = payload.get("code")
+        terminal_controller_failure = (
+            payload.get("stage") == "llm_provider"
+            and isinstance(terminal_code, str)
+            and terminal_code in TERMINAL_CONTROLLER_FAILURE_CODES
+        )
+        admission = getattr(self.runner, "ready_for_admission", None)
+        if terminal_controller_failure:
+            await self._degrade_locked("llm_provider", terminal_code)
+        elif (
+            payload.get("stage") == "controller"
+            and terminal_code == "context_commit_failed"
+        ):
+            await self._degrade_locked("controller", terminal_code)
+        elif stage == "publication" and public_payload.get("admit_turn") is False:
+            await self._degrade_locked(stage, code)
+        elif admission is not None and not admission():
+            readiness_stage, readiness_code = self._readiness_failure()
+            await self._degrade_locked(readiness_stage, readiness_code)
+        elif drain_error is not None:
+            await self._degrade_locked("publication", drain_error)
+        elif context.rollback_error is not None:
+            await self._degrade_locked("controller", context.rollback_error)
+        if cancellation_after_publish:
+            raise asyncio.CancelledError
 
     async def _relay_queued_pcm(self, item: PcmPumpItem) -> None:
         context = item.request
@@ -1493,6 +2101,11 @@ class RealtimeSession:
             context.first_pcm_ms = round(
                 max(0.0, (time.monotonic() - context.endpoint_monotonic) * 1000), 3
             )
+            if context.tts_started_monotonic is not None:
+                context.tts_first_audio_ms = round(
+                    max(0.0, (time.monotonic() - context.tts_started_monotonic) * 1000),
+                    3,
+                )
             await self._emit(
                 context.turn_id,
                 "turn.speaking",
@@ -1500,6 +2113,7 @@ class RealtimeSession:
                     "state": "speaking",
                     "server_streamed_output": True,
                     "endpoint_to_first_accepted_pcm_ms": context.first_pcm_ms,
+                    "tts_time_to_first_audio_ms": context.tts_first_audio_ms,
                 },
             )
 
@@ -1539,9 +2153,17 @@ class RealtimeSession:
             self.drop_counts["stale_event"] += 1
             return
         public_payload = dict(event["payload"])
+        observed = time.monotonic()
+        if event_type == "stt.final" and context.stt_final_ms is None:
+            context.stt_final_ms = round(
+                max(0.0, (observed - context.endpoint_monotonic) * 1000), 3
+            )
+            public_payload["endpoint_to_stt_final_ms"] = context.stt_final_ms
+        if event_type == "turn.thinking" and context.llm_started_monotonic is None:
+            context.llm_started_monotonic = observed
         if event_type == "llm.visible" and context.first_visible_ms is None:
             context.first_visible_ms = round(
-                max(0.0, (time.monotonic() - context.endpoint_monotonic) * 1000), 3
+                max(0.0, (observed - context.endpoint_monotonic) * 1000), 3
             )
             public_payload["endpoint_to_first_visible_ms"] = context.first_visible_ms
         await self._emit(context.turn_id, str(event_type), public_payload)
@@ -1587,12 +2209,9 @@ class RealtimeSession:
                     and stream_epoch + 1 == self.stream_epoch
                     and not self._closed
                 ):
-                    await self._emit(
-                        SESSION_TURN_ID,
-                        "session.reconnected",
-                        dict(self._last_reconnect_payload),
+                    await self._publish_ready_or_degrade_locked(
+                        reconnect_payload=self._last_reconnect_payload
                     )
-                    await self._emit(SESSION_TURN_ID, "session.ready", {"state": "ready"})
                     return True
                 if sequence <= self._client_sequence or stream_epoch != self.stream_epoch:
                     self.drop_counts["client_control"] += 1
@@ -1643,14 +2262,11 @@ class RealtimeSession:
                         "stale_server_pcm_discarded": True,
                         "interrupted_turn_id": interrupted_turn_id,
                     }
-                    self._last_reconnect_request = request_key
-                    self._last_reconnect_payload = reconnect_payload
-                    await self._emit(
-                        SESSION_TURN_ID,
-                        "session.reconnected",
-                        dict(reconnect_payload),
-                    )
-                    await self._emit(SESSION_TURN_ID, "session.ready", {"state": "ready"})
+                    if await self._publish_ready_or_degrade_locked(
+                        reconnect_payload=reconnect_payload
+                    ):
+                        self._last_reconnect_request = request_key
+                        self._last_reconnect_payload = reconnect_payload
                 else:
                     await self._degrade_locked("controller", reset_error)
             return True
@@ -1720,6 +2336,77 @@ class RealtimeSession:
             "payload": payload,
         }
 
+    @staticmethod
+    def _control_observation_fields(
+        event: dict[str, object],
+        event_type: str,
+        payload: dict[str, object],
+        terminal: bool,
+    ) -> dict[str, object]:
+        observation_fields: dict[str, object] = {
+            "event_type": event_type,
+            "sequence": int(event["sequence"]),
+            "terminal": terminal,
+            "stream_epoch": int(event["stream_epoch"]),
+            "request_id": str(event["request_id"]),
+            "media_generation": int(event["media_generation"]),
+        }
+        for name in CONTROL_OBSERVATION_PAYLOAD_FIELDS:
+            value = payload.get(name)
+            if value is None or isinstance(value, (bool, int, float, str)):
+                observation_fields[name] = value
+        if isinstance(payload.get("stage"), str):
+            observation_fields["failure_stage"] = payload["stage"]
+        if isinstance(payload.get("code"), str):
+            observation_fields["failure_code"] = payload["code"]
+        return observation_fields
+
+    def _record_control_publish_failure(
+        self,
+        event: dict[str, object],
+        turn_id: str,
+        event_type: str,
+        error: BaseException,
+    ) -> None:
+        failure = {
+            "outcome": "failed",
+            "stage": "transport",
+            "code": "control_publish_failed",
+            **failure_payload("transport", "control_publish_failed"),
+        }
+        failed_event_type = event_type
+        failed_terminal = False
+        context = self._active
+        if (
+            turn_id != SESSION_TURN_ID
+            and context is not None
+            and context.turn_id == turn_id
+        ):
+            if not context.transport_failed:
+                if event_type == "turn.completed" and self.turn_counts["completed"] > 0:
+                    self.turn_counts["completed"] -= 1
+                if event_type == "turn.interrupted" and self.turn_counts["interrupted"] > 0:
+                    self.turn_counts["interrupted"] -= 1
+                if event_type != "turn.failed":
+                    self.turn_counts["failed"] += 1
+                context.transport_failed = True
+            context.cancellation.cancel()
+            self._ensure_context_cleanup(context, wait_for_turn=False)
+            context.terminal = True
+            self._add_metrics(context, failure)
+            failed_event_type = "turn.failed"
+            failed_terminal = True
+        observation_fields = self._control_observation_fields(
+            event, failed_event_type, failure, failed_terminal
+        )
+        observation_fields["failed_event_type"] = event_type
+        observation_fields["failure_class"] = type(error).__name__
+        self._trace(
+            "control", "publish_failed", turn_id=turn_id, **observation_fields
+        )
+        self._closed = True
+        self._report_failure("transport", "control_publish_failed")
+
     async def _emit(
         self,
         turn_id: str,
@@ -1729,21 +2416,89 @@ class RealtimeSession:
         terminal: bool = False,
     ) -> None:
         event = self._reserve_public_event(turn_id, event_type, payload, terminal=terminal)
+        send_task = asyncio.create_task(
+            self.event_sink.send(event),
+            name=f"control-send-{event_type}-{turn_id}",
+        )
+        cancellation_after_success = False
+
+        async def cancel_unfinished_send() -> None:
+            if send_task.done():
+                return
+            send_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(send_task), CONTROL_PUBLISH_BOUND_MS / 1000
+                )
+            except BaseException:
+                pass
+
         try:
-            await self.event_sink.send(event)
-            self._trace(
-                "control", "published", event_type=event_type, sequence=self._event_sequence
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(send_task), CONTROL_PUBLISH_BOUND_MS / 1000
+                )
+            except asyncio.CancelledError:
+                if send_task.done() and not send_task.cancelled():
+                    send_error = send_task.exception()
+                    if send_error is not None:
+                        raise send_error
+                    cancellation_after_success = True
+                else:
+                    await cancel_unfinished_send()
+                    raise
+            except TimeoutError:
+                await cancel_unfinished_send()
+                raise
+            context = self._active
+            if (
+                turn_id != SESSION_TURN_ID
+                and context is not None
+                and context.turn_id == turn_id
+            ):
+                context.public_event_published = True
+            observation_fields = self._control_observation_fields(
+                event, event_type, payload, terminal
             )
+            self._trace(
+                "control", "published", turn_id=turn_id, **observation_fields
+            )
+            if cancellation_after_success:
+                raise asyncio.CancelledError
+        except asyncio.CancelledError as error:
+            if not cancellation_after_success:
+                context = self._active
+                correlated_turn = (
+                    turn_id != SESSION_TURN_ID
+                    and context is not None
+                    and context.turn_id == turn_id
+                )
+                cancelled_terminal = (
+                    terminal
+                    and correlated_turn
+                    and (context.public_event_published or context.admission_counted)
+                )
+                cancelled_post_announcement = (
+                    not terminal
+                    and event_type != "turn.media-ready"
+                    and correlated_turn
+                    and context.public_event_published
+                )
+                cancelled_session_degradation = (
+                    turn_id == SESSION_TURN_ID
+                    and event_type == "session.degraded"
+                )
+                if (
+                    cancelled_terminal
+                    or cancelled_post_announcement
+                    or cancelled_session_degradation
+                ):
+                    self._record_control_publish_failure(
+                        event, turn_id, event_type, error
+                    )
+            raise
         except Exception as error:
-            self._trace(
-                "control",
-                "publish_failed",
-                event_type=event_type,
-                failure_class=type(error).__name__,
-                failure_code="control_publish_failed",
-            )
-            self._closed = True
-            self._report_failure("transport", "control_publish_failed")
+            self._record_control_publish_failure(event, turn_id, event_type, error)
             raise
 
 

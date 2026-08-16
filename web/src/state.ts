@@ -11,9 +11,39 @@ const MAX_SEQUENCE = 1_000_000_000
 const CORRELATION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 export type ConnectionState = 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'closed' | 'failed'
+export type UserVisibleState = 'available' | 'unavailable' | 'degraded' | 'retrying' | 'interrupted'
 export type MicrophoneLifecycle = 'disconnected' | 'requesting-permission' | 'publishing' | 'live' | 'muted' | 'error'
 export type TurnPhase = 'idle' | 'listening' | 'thinking' | 'speaking'
 export type TurnOutcome = 'completed' | 'interrupted' | 'failed'
+export type HealthComponentName = 'livekit' | 'controller' | 'stt' | 'selected_llm' | 'tts'
+export type LivenessState = 'alive' | 'dead' | 'unknown'
+export type ReadinessState = 'ready' | 'unready' | 'degraded' | 'unknown'
+
+export interface ComponentHealthObservation {
+  component: HealthComponentName
+  liveness: LivenessState
+  readiness: ReadinessState
+  compatible: boolean
+  identity: string
+  contract_version: string
+  reason_code: string | null
+  retry_count: number
+  retry_limit: number
+}
+
+export interface HealthReadinessReport {
+  schema_version: 'voice-agent.health-readiness.v1'
+  overall_readiness: 'ready' | 'unready'
+  components: ComponentHealthObservation[]
+  provider_mode: 'local'
+  external_transfer: false
+  automatic_fallback: false
+  stt_location: 'local'
+  tts_location: 'local'
+  auth_boundary: 'tailnet'
+  wake_enabled: false
+  selected_avatar_module: 'mvp-eye-svg-v1'
+}
 export type ControlEventType =
   | 'session.ready'
   | 'session.reconnected'
@@ -94,10 +124,36 @@ export interface TurnHistoryItem {
   audioUnavailable: boolean
   endpointToFirstVisibleMs: number | null
   endpointToFirstAcceptedPcmMs: number | null
+  endpointToSttFinalMs?: number | null
+  providerTimeToFirstTokenMs?: number | null
+  providerCompletionMs?: number | null
+  ttsTimeToFirstAudioMs?: number | null
+  cancellationLatencyMs?: number | null
+  totalTurnMs?: number | null
+  slowestStage?: string | null
+  providerMode?: string | null
+  providerIdentity?: string | null
+  externalTransfer?: boolean | null
+  providerInputUnitCount?: number | null
+  providerOutputUnitCount?: number | null
+  providerTotalUnitCount?: number | null
+  pcmQueueMaxBlocks?: number | null
+  segmentQueueMaxSegments?: number | null
+  cancellationCount?: number
+  staleDropCount?: number
+  cpuUtilizationPercent?: number | null
+  hostRamUsedMib?: number | null
+  processRssMib?: number | null
+  gpuVramUsedMib?: number | null
+  gpuUtilizationPercent?: number | null
+  userState?: UserVisibleState
+  failureStage?: string | null
+  failureCode?: string | null
 }
 
 export interface VoiceState {
   connection: ConnectionState
+  availability: UserVisibleState
   sessionId: string | null
   streamEpoch: number
   lastSequence: number
@@ -112,7 +168,13 @@ export interface VoiceState {
   response: string
   history: TurnHistoryItem[]
   error: string | null
+  failureStage: string | null
+  failureCode: string | null
+  retryCount: number
+  retryLimit: number
+  health: HealthReadinessReport | null
   droppedEvents: number
+  lateControlDegraded: boolean
   audioBlocked: boolean
   speechEnvelopeStatus: SpeechEnvelopeStatus
   microphoneStatus: MicrophoneLifecycle
@@ -126,6 +188,7 @@ export interface VoiceState {
 
 export const initialVoiceState: VoiceState = {
   connection: 'idle',
+  availability: 'unavailable',
   sessionId: null,
   streamEpoch: 0,
   lastSequence: 0,
@@ -140,7 +203,13 @@ export const initialVoiceState: VoiceState = {
   response: '',
   history: [],
   error: null,
+  failureStage: null,
+  failureCode: null,
+  retryCount: 0,
+  retryLimit: 0,
+  health: null,
   droppedEvents: 0,
+  lateControlDegraded: false,
   audioBlocked: false,
   speechEnvelopeStatus: 'unknown',
   microphoneStatus: 'disconnected',
@@ -180,6 +249,62 @@ function boundedValue(value: unknown, depth = 0): boolean {
   return false
 }
 
+export function parseHealthReadinessReport(value: unknown): HealthReadinessReport | null {
+  if (!ownObject(value)) return null
+  const expected = [
+    'auth_boundary', 'automatic_fallback', 'components', 'external_transfer',
+    'overall_readiness', 'provider_mode', 'schema_version', 'selected_avatar_module',
+    'stt_location', 'tts_location', 'wake_enabled',
+  ]
+  const keys = Object.keys(value).sort()
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null
+  if (
+    value.schema_version !== 'voice-agent.health-readiness.v1'
+    || !['ready', 'unready'].includes(String(value.overall_readiness))
+    || value.provider_mode !== 'local'
+    || value.external_transfer !== false
+    || value.automatic_fallback !== false
+    || value.stt_location !== 'local'
+    || value.tts_location !== 'local'
+    || value.auth_boundary !== 'tailnet'
+    || value.wake_enabled !== false
+    || value.selected_avatar_module !== 'mvp-eye-svg-v1'
+    || !Array.isArray(value.components)
+    || value.components.length !== 5
+  ) return null
+  const componentNames: HealthComponentName[] = ['livekit', 'controller', 'stt', 'selected_llm', 'tts']
+  const components: ComponentHealthObservation[] = []
+  for (const candidate of value.components) {
+    if (!ownObject(candidate)) return null
+    const componentKeys = Object.keys(candidate).sort()
+    const expectedComponentKeys = [
+      'compatible', 'component', 'contract_version', 'identity', 'liveness',
+      'readiness', 'reason_code', 'retry_count', 'retry_limit',
+    ]
+    if (
+      componentKeys.length !== expectedComponentKeys.length
+      || componentKeys.some((key, index) => key !== expectedComponentKeys[index])
+      || !componentNames.includes(candidate.component as HealthComponentName)
+      || !['alive', 'dead', 'unknown'].includes(String(candidate.liveness))
+      || !['ready', 'unready', 'degraded', 'unknown'].includes(String(candidate.readiness))
+      || typeof candidate.compatible !== 'boolean'
+      || typeof candidate.identity !== 'string' || !candidate.identity || candidate.identity.length > 256
+      || typeof candidate.contract_version !== 'string' || !candidate.contract_version || candidate.contract_version.length > 128
+      || !(candidate.reason_code === null || typeof candidate.reason_code === 'string' && /^[a-z0-9_]{1,64}$/.test(candidate.reason_code))
+      || !Number.isSafeInteger(candidate.retry_count) || (candidate.retry_count as number) < 0
+      || !Number.isSafeInteger(candidate.retry_limit) || (candidate.retry_limit as number) < (candidate.retry_count as number)
+      || (candidate.retry_limit as number) > 16
+    ) return null
+    components.push(candidate as unknown as ComponentHealthObservation)
+  }
+  if (new Set(components.map((component) => component.component)).size !== componentNames.length) return null
+  const hardReady = components.every((component) => (
+    component.liveness === 'alive' && component.readiness === 'ready' && component.compatible
+  ))
+  if ((value.overall_readiness === 'ready') !== hardReady) return null
+  return { ...value, components } as unknown as HealthReadinessReport
+}
+
 export function parseControlEvent(payload: Uint8Array | string): ControlEvent | null {
   let text: string
   try {
@@ -212,6 +337,14 @@ export function parseControlEvent(payload: Uint8Array | string): ControlEvent | 
     || typeof value.terminal !== 'boolean' || value.terminal !== TERMINAL_TYPES.has(eventType as ControlEventType)
     || !ownObject(value.payload) || !boundedValue(value.payload)
   ) return null
+  if (eventType === 'session.ready' || eventType === 'session.degraded') {
+    const health = parseHealthReadinessReport(value.payload.health)
+    if (
+      health === null
+      || eventType === 'session.ready' && health.overall_readiness !== 'ready'
+      || eventType === 'session.degraded' && health.overall_readiness !== 'unready'
+    ) return null
+  }
   return value as unknown as ControlEvent
 }
 
@@ -266,7 +399,7 @@ export class RealtimeControlGate {
       this.lastSequence = event.sequence
       return true
     }
-    if (event.type === 'turn.listening') {
+    if (event.type === 'turn.listening' || initialPublicationFailure(event)) {
       if (
         !this.currentTurnTerminal
         || this.currentTurnId === event.turn_id
@@ -278,7 +411,7 @@ export class RealtimeControlGate {
       this.currentTurnGeneration = event.turn_generation
       this.currentRequestId = event.request_id
       this.currentMediaGeneration = event.media_generation
-      this.currentTurnTerminal = false
+      this.currentTurnTerminal = event.terminal
       this.lastTurnEvent = event.type
     } else {
       if (
@@ -357,7 +490,35 @@ export function parseCapability(value: unknown): SessionCapability | null {
 }
 
 function drop(state: VoiceState): VoiceState {
-  return { ...state, droppedEvents: state.droppedEvents + 1 }
+  const activeSession = state.sessionId !== null
+  const readySession = state.connection === 'ready'
+  return {
+    ...state,
+    availability: readySession ? 'degraded' : state.availability,
+    failureStage: activeSession ? 'controller' : state.failureStage,
+    failureCode: activeSession ? 'late_or_duplicate_event' : state.failureCode,
+    lateControlDegraded: activeSession || state.lateControlDegraded,
+    droppedEvents: state.droppedEvents + 1,
+  }
+}
+
+function hasLateControlDegradation(state: VoiceState): boolean {
+  return state.lateControlDegraded
+}
+
+function initialPublicationFailure(event: ControlEvent): boolean {
+  return (
+    event.type === 'turn.failed'
+    && event.terminal
+    && event.payload.outcome === 'failed'
+    && event.payload.stage === 'publication'
+    && typeof event.payload.code === 'string'
+    && /^[a-z0-9_]{1,64}$/.test(event.payload.code)
+    && event.payload.dependency_class === 'hard'
+    && event.payload.failure_matrix_id === 'livekit_unavailable'
+    && event.payload.admit_turn === false
+    && event.payload.user_state === 'retrying'
+  )
 }
 
 function validTurnTransition(previous: ControlEventType | null, next: ControlEventType): boolean {
@@ -371,6 +532,23 @@ function validTurnTransition(previous: ControlEventType | null, next: ControlEve
 function metric(payload: Record<string, unknown>, name: string): number | null {
   const value = payload[name]
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+function count(payload: Record<string, unknown>, name: string): number | null {
+  const value = payload[name]
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null
+}
+
+function failureCode(payload: Record<string, unknown>, name: 'stage' | 'code', fallback: string): string {
+  const value = payload[name]
+  return typeof value === 'string' && /^[a-z0-9_]{1,64}$/.test(value) ? value : fallback
+}
+
+function visibleState(payload: Record<string, unknown>, fallback: UserVisibleState): UserVisibleState {
+  const value = payload.user_state
+  return ['available', 'unavailable', 'degraded', 'retrying', 'interrupted'].includes(String(value))
+    ? value as UserVisibleState
+    : fallback
 }
 
 function updateHistory(
@@ -421,6 +599,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     return {
       ...initialVoiceState,
       connection: 'connecting',
+      availability: 'unavailable',
       sessionId: action.capability.session_id,
       streamEpoch: action.capability.stream_epoch,
       llmProfile: action.capability.llm_profile,
@@ -432,6 +611,9 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       return {
         ...state,
         connection: 'reconnecting',
+        availability: hasLateControlDegradation(state) ? 'degraded' : 'retrying',
+        retryCount: Math.min(state.retryCount + 1, 10),
+        retryLimit: 10,
         currentTurnTerminal: true,
         currentTurnGeneration: 0,
         currentRequestId: null,
@@ -445,6 +627,13 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     return {
       ...state,
       connection: action.connection,
+      availability: action.connection === 'failed'
+        ? state.availability === 'degraded' || state.availability === 'interrupted'
+          ? state.availability
+          : 'unavailable'
+        : action.connection === 'ready'
+          ? hasLateControlDegradation(state) ? 'degraded' : 'available'
+          : state.availability,
       error: action.error ?? (action.connection === 'failed' ? 'Соединение недоступно' : null),
     }
   }
@@ -463,9 +652,15 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       || event.media_generation !== 0
     ) return drop(state)
     const degraded = event.type === 'session.degraded'
+    const preserveLateDegradation = !degraded && hasLateControlDegradation(state)
+    const health = degraded ? parseHealthReadinessReport(event.payload.health) : state.health
+    if (degraded && health === null) return drop(state)
     return {
       ...state,
       connection: degraded ? 'failed' : 'reconnecting',
+      availability: degraded
+        ? visibleState(event.payload, 'unavailable')
+        : hasLateControlDegradation(state) ? 'degraded' : 'retrying',
       streamEpoch: event.stream_epoch,
       lastSequence: event.sequence,
       currentTurnId: null,
@@ -476,6 +671,15 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       lastTurnEvent: null,
       phase: 'idle',
       error: degraded ? 'Не удалось безопасно восстановить сессию' : null,
+      failureStage: degraded
+        ? failureCode(event.payload, 'stage', 'session')
+        : preserveLateDegradation ? state.failureStage : null,
+      failureCode: degraded
+        ? failureCode(event.payload, 'code', 'degraded')
+        : preserveLateDegradation ? state.failureCode : null,
+      retryCount: degraded ? count(event.payload, 'retry_count') ?? 0 : state.retryCount,
+      retryLimit: degraded ? count(event.payload, 'retry_limit') ?? 0 : state.retryLimit,
+      health,
     }
   }
   if (state.connection === 'reconnecting' && event.type === 'session.ready') {
@@ -486,7 +690,21 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       || event.request_id !== 'session'
       || event.media_generation !== 0
     ) return drop(state)
-    return { ...state, connection: 'ready', lastSequence: event.sequence, error: null }
+    const health = parseHealthReadinessReport(event.payload.health)
+    if (health === null || health.overall_readiness !== 'ready') return drop(state)
+    const preserveLateDegradation = hasLateControlDegradation(state)
+    return {
+      ...state,
+      connection: 'ready',
+      availability: preserveLateDegradation ? 'degraded' : 'available',
+      lastSequence: event.sequence,
+      error: null,
+      failureStage: preserveLateDegradation ? state.failureStage : null,
+      failureCode: preserveLateDegradation ? state.failureCode : null,
+      retryCount: preserveLateDegradation ? state.retryCount : 0,
+      retryLimit: preserveLateDegradation ? state.retryLimit : 0,
+      health,
+    }
   }
   if (state.connection === 'reconnecting' || event.stream_epoch !== state.streamEpoch) return drop(state)
   if (event.type.startsWith('session.')) {
@@ -496,17 +714,52 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       || event.request_id !== 'session'
       || event.media_generation !== 0
     ) return drop(state)
+    if (event.type === 'session.reconnected') {
+      return {
+        ...state,
+        connection: 'reconnecting',
+        availability: hasLateControlDegradation(state) ? 'degraded' : 'retrying',
+        lastSequence: event.sequence,
+      }
+    }
+    const health = parseHealthReadinessReport(event.payload.health)
+    if (health === null) return drop(state)
+    const degraded = event.type === 'session.degraded'
+    if (!degraded && health.overall_readiness !== 'ready') return drop(state)
+    const preserveLateDegradation = !degraded && hasLateControlDegradation(state)
     return {
       ...state,
-      connection: event.type === 'session.degraded' ? 'failed' : 'ready',
+      connection: degraded ? 'failed' : 'ready',
+      availability: degraded
+        ? visibleState(event.payload, 'unavailable')
+        : preserveLateDegradation ? 'degraded' : 'available',
       lastSequence: event.sequence,
-      error: event.type === 'session.degraded' ? 'Локальный голосовой путь недоступен' : null,
+      error: degraded ? 'Локальный голосовой путь недоступен' : null,
+      failureStage: degraded
+        ? failureCode(event.payload, 'stage', 'session')
+        : preserveLateDegradation ? state.failureStage : null,
+      failureCode: degraded
+        ? failureCode(event.payload, 'code', 'degraded')
+        : preserveLateDegradation ? state.failureCode : null,
+      retryCount: degraded
+        ? count(event.payload, 'retry_count') ?? 0
+        : preserveLateDegradation ? state.retryCount : 0,
+      retryLimit: degraded
+        ? count(event.payload, 'retry_limit') ?? 0
+        : preserveLateDegradation ? state.retryLimit : 0,
+      health,
     }
   }
 
   let next = state
-  if (event.type === 'turn.listening') {
-    if (!state.currentTurnTerminal || state.currentTurnId === event.turn_id) return drop(state)
+  if (event.type === 'turn.listening' || initialPublicationFailure(event)) {
+    if (
+      !state.currentTurnTerminal
+      || state.currentTurnId === event.turn_id
+      || event.turn_generation < 1
+      || event.request_id === 'session'
+      || event.media_generation < 1
+    ) return drop(state)
     const item: TurnHistoryItem = {
       turnId: event.turn_id,
       user: '',
@@ -516,6 +769,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       endpointToFirstVisibleMs: null,
       endpointToFirstAcceptedPcmMs: null,
     }
+    const preserveLateDegradation = hasLateControlDegradation(state)
     next = {
       ...state,
       currentTurnId: event.turn_id,
@@ -523,34 +777,39 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       currentRequestId: event.request_id,
       currentMediaGeneration: event.media_generation,
       currentTurnTerminal: false,
-      lastTurnEvent: event.type,
+      lastTurnEvent: 'turn.listening',
       phase: 'listening',
+      availability: preserveLateDegradation ? 'degraded' : 'available',
       transcript: '',
       response: '',
       history: [...state.history, item],
       error: null,
-      lastSequence: event.sequence,
+      failureStage: preserveLateDegradation ? state.failureStage : null,
+      failureCode: preserveLateDegradation ? state.failureCode : null,
+      retryCount: preserveLateDegradation ? state.retryCount : 0,
+      retryLimit: preserveLateDegradation ? state.retryLimit : 0,
+      lastSequence: event.type === 'turn.listening' ? event.sequence : state.lastSequence,
     }
-    return next
+    if (event.type === 'turn.listening') return next
   }
   if (
-    event.turn_id !== state.currentTurnId
-    || event.turn_generation !== state.currentTurnGeneration
-    || event.request_id !== state.currentRequestId
-    || event.media_generation !== state.currentMediaGeneration
-    || state.currentTurnTerminal
-    || !validTurnTransition(state.lastTurnEvent, event.type)
+    event.turn_id !== next.currentTurnId
+    || event.turn_generation !== next.currentTurnGeneration
+    || event.request_id !== next.currentRequestId
+    || event.media_generation !== next.currentMediaGeneration
+    || next.currentTurnTerminal
+    || !validTurnTransition(next.lastTurnEvent, event.type)
   ) return drop(state)
 
-  let phase: TurnPhase = state.phase
+  let phase: TurnPhase = next.phase
   if (event.type === 'stt.final' || event.type === 'turn.thinking') phase = 'thinking'
-  if (event.type === 'llm.visible' && state.phase !== 'speaking') phase = 'thinking'
+  if (event.type === 'llm.visible' && next.phase !== 'speaking') phase = 'thinking'
   if (event.type === 'turn.speaking') phase = 'speaking'
   if (event.terminal) phase = 'idle'
   const transcript = event.type === 'stt.final' && typeof event.payload.transcript === 'string'
-    ? event.payload.transcript : state.transcript
+    ? event.payload.transcript : next.transcript
   const response = event.type === 'llm.visible' && typeof event.payload.response === 'string'
-    ? event.payload.response : state.response
+    ? event.payload.response : next.response
   const outcome: TurnOutcome | null = event.type === 'turn.completed'
     ? 'completed'
     : event.type === 'turn.interrupted'
@@ -560,7 +819,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
         : null
   const visibleMetric = metric(event.payload, 'endpoint_to_first_visible_ms')
   const pcmMetric = metric(event.payload, 'endpoint_to_first_accepted_pcm_ms')
-  const history = updateHistory(state.history, event.turn_id, (item) => ({
+  const history = updateHistory(next.history, event.turn_id, (item) => ({
     ...item,
     user: transcript,
     assistant: response,
@@ -570,18 +829,59 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     ),
     endpointToFirstVisibleMs: visibleMetric ?? item.endpointToFirstVisibleMs,
     endpointToFirstAcceptedPcmMs: pcmMetric ?? item.endpointToFirstAcceptedPcmMs,
+    endpointToSttFinalMs: metric(event.payload, 'endpoint_to_stt_final_ms') ?? item.endpointToSttFinalMs ?? null,
+    providerTimeToFirstTokenMs: metric(event.payload, 'provider_time_to_first_token_ms') ?? item.providerTimeToFirstTokenMs ?? null,
+    providerCompletionMs: metric(event.payload, 'provider_completion_ms') ?? item.providerCompletionMs ?? null,
+    ttsTimeToFirstAudioMs: metric(event.payload, 'tts_time_to_first_audio_ms') ?? item.ttsTimeToFirstAudioMs ?? null,
+    cancellationLatencyMs: metric(event.payload, 'cancellation_latency_ms') ?? item.cancellationLatencyMs ?? null,
+    totalTurnMs: metric(event.payload, 'total_turn_ms') ?? item.totalTurnMs ?? null,
+    slowestStage: typeof event.payload.slowest_stage === 'string' ? event.payload.slowest_stage : item.slowestStage ?? null,
+    providerMode: typeof event.payload.provider_mode === 'string' ? event.payload.provider_mode : item.providerMode ?? null,
+    providerIdentity: typeof event.payload.provider_identity === 'string' ? event.payload.provider_identity : item.providerIdentity ?? null,
+    externalTransfer: typeof event.payload.external_transfer === 'boolean' ? event.payload.external_transfer : item.externalTransfer ?? null,
+    providerInputUnitCount: count(event.payload, 'provider_input_unit_count') ?? item.providerInputUnitCount ?? null,
+    providerOutputUnitCount: count(event.payload, 'provider_output_unit_count') ?? item.providerOutputUnitCount ?? null,
+    providerTotalUnitCount: count(event.payload, 'provider_total_unit_count') ?? item.providerTotalUnitCount ?? null,
+    pcmQueueMaxBlocks: count(event.payload, 'server_pcm_queue_max_blocks') ?? item.pcmQueueMaxBlocks ?? null,
+    segmentQueueMaxSegments: count(event.payload, 'server_segment_queue_max_segments') ?? item.segmentQueueMaxSegments ?? null,
+    cancellationCount: count(event.payload, 'cancellation_count') ?? item.cancellationCount ?? 0,
+    staleDropCount: count(event.payload, 'stale_drop_count') ?? item.staleDropCount ?? 0,
+    cpuUtilizationPercent: metric(event.payload, 'cpu_utilization_percent') ?? item.cpuUtilizationPercent ?? null,
+    hostRamUsedMib: metric(event.payload, 'host_ram_used_mib') ?? item.hostRamUsedMib ?? null,
+    processRssMib: metric(event.payload, 'process_rss_mib') ?? item.processRssMib ?? null,
+    gpuVramUsedMib: metric(event.payload, 'gpu_vram_used_mib') ?? item.gpuVramUsedMib ?? null,
+    gpuUtilizationPercent: metric(event.payload, 'gpu_utilization_percent') ?? item.gpuUtilizationPercent ?? null,
+    userState: event.terminal
+      ? visibleState(event.payload, event.type === 'turn.completed' ? 'available' : event.type === 'turn.interrupted' ? 'interrupted' : 'unavailable')
+      : item.userState ?? 'available',
+    failureStage: event.type === 'turn.failed' ? failureCode(event.payload, 'stage', 'controller') : item.failureStage ?? null,
+    failureCode: event.type === 'turn.failed' ? failureCode(event.payload, 'code', 'unknown_failure') : item.failureCode ?? null,
   }))
   const error = event.type === 'turn.failed'
-    ? `Ошибка ответа: ${String(event.payload.stage ?? 'turn')}/${String(event.payload.code ?? 'unknown')}`
-    : state.error
+    ? `Ошибка ответа: ${failureCode(event.payload, 'stage', 'controller')}/${failureCode(event.payload, 'code', 'unknown_failure')}`
+    : next.error
+  const availability = event.type === 'turn.completed'
+    ? hasLateControlDegradation(next) ? 'degraded' : 'available'
+    : event.type === 'turn.interrupted'
+      ? 'interrupted'
+      : event.type === 'turn.failed'
+        ? visibleState(event.payload, 'unavailable')
+        : next.availability
   return {
-    ...state,
+    ...next,
     lastSequence: event.sequence,
+    availability,
     phase,
     transcript,
     response,
     history,
     error,
+    failureStage: event.type === 'turn.failed'
+      ? failureCode(event.payload, 'stage', 'controller') : next.failureStage,
+    failureCode: event.type === 'turn.failed'
+      ? failureCode(event.payload, 'code', 'unknown_failure') : next.failureCode,
+    retryCount: event.type === 'turn.failed' ? count(event.payload, 'retry_count') ?? 0 : next.retryCount,
+    retryLimit: event.type === 'turn.failed' ? count(event.payload, 'retry_limit') ?? 0 : next.retryLimit,
     currentTurnTerminal: event.terminal,
     lastTurnEvent: event.type,
   }

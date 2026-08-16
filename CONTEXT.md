@@ -7,6 +7,9 @@
 - **Barge-in** — A user interruption that occurs while an agent response is being delivered.
 - **Cloud LLM mode** — An explicitly configured mode in which permitted transcript and context data are sent to one approved cloud LLM provider; it is never entered automatically as fallback.
 - **Control event** — A versioned non-media message that reports or changes session, turn, response, or avatar state.
+- **Capability liveness** — Whether a component/process is responsive or alive; it does not imply that the loaded artifact, contract, identity, or configuration is ready for admission.
+- **Capability readiness** — Whether a live component has the compatible contract, selected artifact/identity, configuration, and capacity required for its next admitted operation.
+- **Diagnostic content capture** — An explicit opt-in, short-lived, bounded outside-Git retention of private diagnostic content; it is distinct from content-free default observations and is disabled by default.
 - **Core MVP** — An interruptible voice conversation using local LiveKit, local STT/TTS, the selected LLM provider, the MVP eye, and enough operational behavior to run reliably.
 - **External tracking trigger** — An optional bounded target supplied to the avatar host for pupil direction; the system that derives that target is separate from the eye renderer.
 - **Hard dependency** — A capability whose loss prevents the current operation from completing correctly.
@@ -15,6 +18,7 @@
 - **LLM gateway** — An allowlisted server-side relay to one explicitly selected cloud model alias; it is not itself proof of the underlying provider/model and may not choose an implicit default or fallback.
 - **LLM provider** — The single explicitly selected response-generation backend for a deployment, either host-local or an approved cloud service.
 - **MVP eye** — The initial custom animated-eye avatar module with deterministic pupil, blink, speech-pulse, palette, and state behavior.
+- **Privacy-safe observation** — A bounded correlated metadata record that can describe health, timing, counts, resources, provider facts, and terminal outcomes without conversation or media content.
 - **Provider selection** — The deliberate configured choice of one LLM provider after measurement and privacy review, never a per-request or failure-triggered fallback.
 - **Realtime session** — The bounded period in which a client and the agent share media, control events, and conversation state.
 - **Render state** — Renderer-internal values and frames owned exclusively by an avatar module, never supplied by an LLM.

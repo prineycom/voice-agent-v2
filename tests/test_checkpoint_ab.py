@@ -123,6 +123,11 @@ class FailingPrepareAudio(MemoryAudio):
         raise RuntimeError("publication unavailable")
 
 
+class InvalidPrepareAudio(MemoryAudio):
+    async def prepare(self, _turn_id: str, _media_generation: int) -> str:
+        return ""
+
+
 class CapacitySTT:
     version = STT_VERSION
 
@@ -346,22 +351,42 @@ class VisibleTTSFailureRunner(StreamingRunner):
 
 
 class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_publication_is_prepared_before_a_turn_is_announced(self) -> None:
-        events = MemoryEvents()
-        audio = FailingPrepareAudio()
-        session = RealtimeSession(
-            session_id="session-test",
-            runner=StreamingRunner(),
-            event_sink=events,
-            audio_sink=audio,
+    async def test_publication_preparation_failures_fail_and_close_the_session(self) -> None:
+        cases = (
+            (FailingPrepareAudio(), "publication unavailable", "audio_publication_unavailable"),
+            (InvalidPrepareAudio(), "no bounded identity", "audio_publication_identity_invalid"),
         )
+        for index, (audio, message, code) in enumerate(cases, start=1):
+            with self.subTest(code=code):
+                events = MemoryEvents()
+                session = RealtimeSession(
+                    session_id=f"session-publication-{index}",
+                    runner=StreamingRunner(),
+                    event_sink=events,
+                    audio_sink=audio,
+                )
 
-        with self.assertRaisesRegex(RuntimeError, "publication unavailable"):
-            await session.submit_utterance(b"\0\0" * 320)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    await session.submit_utterance(b"\0\0" * 320)
 
-        self.assertEqual(events.events, [])
-        self.assertIsNone(session.active_turn_id)
-        self.assertEqual(audio.abandoned, ["turn-00000001"])
+                self.assertEqual(
+                    [event["type"] for event in events.events],
+                    ["turn.failed", "session.degraded"],
+                )
+                failed = events.events[0]["payload"]
+                self.assertEqual(failed["stage"], "publication")
+                self.assertEqual(failed["code"], code)
+                self.assertEqual(failed["failure_matrix_id"], "livekit_unavailable")
+                self.assertEqual(failed["dependency_class"], "hard")
+                self.assertFalse(failed["admit_turn"])
+                self.assertEqual(failed["turn_admission_count"], 1)
+                self.assertEqual(failed["turn_failure_count"], 1)
+                self.assertTrue(session.closed)
+                self.assertFalse(await session.ready())
+                with self.assertRaisesRegex(RuntimeError, "closed"):
+                    await session.start_utterance()
+                self.assertIsNone(session.active_turn_id)
+                self.assertEqual(audio.abandoned, ["turn-00000001"])
 
     async def test_streamed_turn_completes_without_browser_media_controls(self) -> None:
         events = MemoryEvents()

@@ -34,6 +34,21 @@ READINESS_TIMEOUT_SECONDS = 3.0
 MAX_TOKENS = 768
 REASONING_BUDGET = 384
 HANDOFF_CLEANUP_TIMEOUT_SECONDS = 6.0
+_UNSET = object()
+_TRANSPORT_FAILURE_CODES = frozenset({
+    "local_lfm_unavailable",
+    "local_lfm_transport_error",
+    "local_lfm_request_timeout",
+})
+_CONTRACT_FAILURE_CODES = frozenset({
+    "local_lfm_health_failed",
+    "selected_provider_identity_mismatch",
+    "selected_provider_protocol_error",
+    "selected_provider_output_out_of_bounds",
+    "local_lfm_incomplete_response",
+    "empty_selected_provider_response",
+    "forbidden_request_field",
+})
 ALLOWED_PAYLOAD_FIELDS = frozenset({
     "model", "messages", "stream", "stream_options", "temperature", "top_p",
     "top_k", "repeat_penalty", "max_tokens", "reasoning_format", "reasoning_budget",
@@ -129,7 +144,59 @@ class LocalLFMProvider:
         self._handoff_cleanup_generations: set[int] = set()
         self._detached_handoff_generations: set[int] = set()
         self._handoff_capacity_error: str | None = None
+        self._runtime_live = False
+        self._runtime_ready = False
+        self._runtime_compatible = True
+        self._runtime_reason: str | None = "local_lfm_not_probed"
         self.observations: list[dict[str, object]] = []
+
+    @property
+    def runtime_live(self) -> bool:
+        with self._operation_lock:
+            return self._runtime_live
+
+    @property
+    def runtime_health(self) -> dict[str, object]:
+        with self._operation_lock:
+            return {
+                "live": self._runtime_live,
+                "ready": self._runtime_ready,
+                "compatible": self._runtime_compatible,
+                "reason_code": self._runtime_reason,
+            }
+
+    def _set_runtime_health(
+        self,
+        *,
+        live: bool | None = None,
+        ready: bool | None = None,
+        compatible: bool | None = None,
+        reason_code: str | None | object = _UNSET,
+    ) -> None:
+        with self._operation_lock:
+            if live is not None:
+                self._runtime_live = live
+            if ready is not None:
+                self._runtime_ready = ready
+            if compatible is not None:
+                self._runtime_compatible = compatible
+            if reason_code is not _UNSET:
+                assert reason_code is None or isinstance(reason_code, str)
+                self._runtime_reason = reason_code
+
+    def _record_runtime_failure(self, code: str) -> None:
+        if code in {
+            "selected_provider_cancelled",
+            "invalid_correlation_id",
+            "transcript_out_of_bounds",
+        }:
+            return
+        self._set_runtime_health(
+            live=False if code in _TRANSPORT_FAILURE_CODES else None,
+            ready=False,
+            compatible=False if code in _CONTRACT_FAILURE_CODES else None,
+            reason_code=code,
+        )
 
     def _begin_operation(self, cancellation: CancellationToken | None) -> int:
         with self._operation_lock:
@@ -184,6 +251,7 @@ class LocalLFMProvider:
         try:
             connection.request("GET", "/health", headers={"Connection": "close"})
             response = connection.getresponse()
+            self._set_runtime_health(live=True)
             body = response.read(4_097)
             if self._cancelled(generation):
                 raise StageFailure("llm_provider", "selected_provider_cancelled")
@@ -192,13 +260,28 @@ class LocalLFMProvider:
             document = json.loads(body)
             if not isinstance(document, dict) or document.get("status") != "ok":
                 raise StageFailure("llm_provider", "local_lfm_health_failed")
-        except StageFailure:
+        except StageFailure as error:
+            self._record_runtime_failure(error.code)
             raise
-        except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError) as error:
-            code = "selected_provider_cancelled" if self._cancelled(generation) else "local_lfm_unavailable"
+        except (UnicodeError, json.JSONDecodeError) as error:
+            code = (
+                "selected_provider_cancelled"
+                if self._cancelled(generation)
+                else "local_lfm_health_failed"
+            )
+            self._record_runtime_failure(code)
+            raise StageFailure("llm_provider", code) from error
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
+            code = (
+                "selected_provider_cancelled"
+                if self._cancelled(generation)
+                else "local_lfm_unavailable"
+            )
+            self._record_runtime_failure(code)
             raise StageFailure("llm_provider", code) from error
         finally:
             self._release_connection(generation, connection)
+        self._set_runtime_health(live=True, ready=True, reason_code=None)
         return {
             "ready": True,
             "provider_mode": self.provider_mode,
@@ -290,6 +373,7 @@ class LocalLFMProvider:
         deadline: float,
         handoff: Callable[[str], None] | None,
         visible_observer: Callable[[str], None] | None,
+        provider_token_observer: Callable[[float], None] | None,
     ) -> dict[str, object]:
         connection = self._register_connection(
             generation, max(0.001, deadline - time.monotonic())
@@ -311,11 +395,13 @@ class LocalLFMProvider:
         handoff_offset = 0
         published_visible = ""
         visible_chars = visible_bytes = reasoning_chars = stream_events = 0
+        provider_first_token: float | None = None
         visible_first: float | None = None
         finish_reason: str | None = None
         response_models: set[str] = set()
         usage: dict[str, int] = {}
         result: dict[str, object]
+        response_received = False
 
         def deliver_complete_sentences(*, final: bool = False) -> None:
             nonlocal handoff_offset, published_visible
@@ -357,6 +443,8 @@ class LocalLFMProvider:
                 connection, None, generation, deadline, deadline_expired
             )
             response = connection.getresponse()
+            response_received = True
+            self._set_runtime_health(live=True)
             self._apply_deadline(
                 connection, response, generation, deadline, deadline_expired
             )
@@ -436,6 +524,12 @@ class LocalLFMProvider:
                     raise StageFailure(
                         "llm_provider", "selected_provider_protocol_error"
                     )
+                if (reasoning or content) and provider_first_token is None:
+                    provider_first_token = time.monotonic()
+                    if provider_token_observer is not None:
+                        provider_token_observer(
+                            max(0.0, (provider_first_token - started) * 1_000)
+                        )
                 reasoning_chars += len(reasoning)
                 if reasoning_chars > MAX_REASONING_CHARS:
                     raise StageFailure(
@@ -486,6 +580,9 @@ class LocalLFMProvider:
             completed = time.monotonic()
             result = {
                 "text": output,
+                "provider_first_token_ms": (
+                    (provider_first_token or completed) - started
+                ) * 1_000,
                 "visible_first_content_ms": (
                     (visible_first or completed) - started
                 ) * 1_000,
@@ -509,6 +606,8 @@ class LocalLFMProvider:
                 code = "selected_provider_cancelled"
             elif deadline_expired.is_set() or time.monotonic() >= deadline:
                 code = "local_lfm_request_timeout"
+            elif response_received and isinstance(error, (UnicodeError, json.JSONDecodeError)):
+                code = "selected_provider_protocol_error"
             else:
                 code = "local_lfm_transport_error"
             raise StageFailure("llm_provider", code) from error
@@ -539,13 +638,23 @@ class LocalLFMProvider:
             if cancellation is not None
             else lambda: None
         )
+        provider_first_token_ms: float | None = None
+
+        def observe_provider_token(value: float) -> None:
+            nonlocal provider_first_token_ms
+            provider_first_token_ms = value
+
         def record_failure(error: StageFailure) -> None:
+            self._record_runtime_failure(error.code)
             self.observations.append({
+                "session_id": session_id,
+                "turn_id": turn_id,
                 "provider_mode": self.provider_mode,
                 "provider_identity": self.provider_identity,
                 "external_transfer": False,
                 "success": False,
                 "error_class": error.code,
+                "provider_first_token_ms": provider_first_token_ms,
                 "completion_ms": (time.monotonic() - started) * 1_000,
             })
 
@@ -675,6 +784,7 @@ class LocalLFMProvider:
                     deadline,
                     enqueue_handoff if on_sentence is not None else None,
                     on_visible_sentence,
+                    observe_provider_token,
                 )
                 text = result["text"]
                 if not isinstance(text, str):
@@ -726,12 +836,18 @@ class LocalLFMProvider:
                     {"role": "assistant", "content": text},
                 ])
                 self._contexts[session_id] = context[-MAX_CONTEXT_MESSAGES:]
+            self._set_runtime_health(
+                live=True, ready=True, compatible=True, reason_code=None
+            )
             self.observations.append({
+                "session_id": session_id,
+                "turn_id": turn_id,
                 "provider_mode": self.provider_mode,
                 "provider_identity": self.provider_identity,
                 "external_transfer": False,
                 "success": True,
                 "error_class": None,
+                "provider_first_token_ms": result.get("provider_first_token_ms"),
                 "visible_first_content_ms": result.get("visible_first_content_ms"),
                 "completion_ms": result.get("completion_ms"),
                 "reasoning_chars": result.get("reasoning_chars"),

@@ -142,7 +142,107 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertFalse(readiness["credentials_required"])
         self.assertEqual(readiness["parallel_slots"], 2)
         self.assertEqual(readiness["context_tokens_per_slot"], 32768)
+        self.assertTrue(provider.runtime_live)
+        self.assertTrue(provider.runtime_health["ready"])
+        self.assertTrue(provider.runtime_health["compatible"])
         self.assertEqual(created_response[0].requests[0][:2], ("GET", "/health"))
+
+    def test_identity_failure_preserves_liveness_but_drops_readiness_and_compatibility(self) -> None:
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        wrong_identity = StubResponse([
+            stream_event(content="Ответ.", model="wrong-model"),
+            stream_event(finish="stop", model="wrong-model"),
+        ])
+        factory, _created = self.factory([health, wrong_identity])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        provider.readiness()
+        self.assertTrue(provider.runtime_live)
+        with self.assertRaises(StageFailure):
+            provider.respond(
+                session_id="session-liveness",
+                turn_id="turn-liveness",
+                transcript="Проверка.",
+            )
+        self.assertTrue(provider.runtime_live)
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": False,
+            "compatible": False,
+            "reason_code": "selected_provider_identity_mismatch",
+        })
+
+    def test_protocol_failure_preserves_liveness_but_drops_compatibility(self) -> None:
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        malformed = StubResponse([
+            stream_event(reasoning="Скрытый токен."),
+            {"model": MODEL_ALIAS, "choices": "invalid"},
+        ])
+        factory, _created = self.factory([health, malformed])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        provider.readiness()
+        with self.assertRaises(StageFailure) as raised:
+            provider.respond(
+                session_id="session-protocol",
+                turn_id="turn-protocol",
+                transcript="Проверка.",
+            )
+
+        self.assertEqual(raised.exception.code, "selected_provider_protocol_error")
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": False,
+            "compatible": False,
+            "reason_code": "selected_provider_protocol_error",
+        })
+        self.assertIsInstance(
+            provider.observations[-1]["provider_first_token_ms"], float
+        )
+        self.assertNotIn("visible_first_content_ms", provider.observations[-1])
+
+    def test_health_body_transport_loss_is_dead_not_a_contract_mismatch(self) -> None:
+        health = StubResponse([])
+
+        def fail_read(_limit=None):
+            raise OSError("truncated health transfer")
+
+        health.read = fail_read
+        factory, _created = self.factory([health])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.readiness()
+
+        self.assertEqual(raised.exception.code, "local_lfm_unavailable")
+        self.assertEqual(provider.runtime_health, {
+            "live": False,
+            "ready": False,
+            "compatible": True,
+            "reason_code": "local_lfm_unavailable",
+        })
+
+    def test_invalid_health_document_is_alive_but_incompatible(self) -> None:
+        health = StubResponse([])
+        health._body = b'{invalid'
+        health.read = lambda limit=None: health._body
+        factory, _created = self.factory([health])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.readiness()
+
+        self.assertEqual(raised.exception.code, "local_lfm_health_failed")
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": False,
+            "compatible": False,
+            "reason_code": "local_lfm_health_failed",
+        })
 
     def test_payload_freezes_voice_sampling_reasoning_and_visible_bounds(self) -> None:
         provider = LocalLFMProvider(connection_factory=lambda *_a, **_k: None)
@@ -179,6 +279,10 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertNotIn("Скрытое", text + "".join(handed_off))
         self.assertFalse(provider.observations[-1]["external_transfer"])
         self.assertGreater(provider.observations[-1]["reasoning_chars"], 0)
+        self.assertLessEqual(
+            provider.observations[-1]["provider_first_token_ms"],
+            provider.observations[-1]["visible_first_content_ms"],
+        )
 
     def test_decimal_split_across_stream_events_stays_exact_for_visibility_and_handoff(self) -> None:
         response = StubResponse([
@@ -713,6 +817,9 @@ class LocalLFMProviderTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "local_lfm_request_timeout")
+        self.assertFalse(provider.runtime_live)
+        self.assertFalse(provider.runtime_health["ready"])
+        self.assertTrue(provider.runtime_health["compatible"])
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertTrue(created[0].closed)
 

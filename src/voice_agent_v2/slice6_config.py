@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .runtime_directory import require_lifetime_runtime_root
+
 
 TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 LOOPBACK_APP_ORIGIN = "http://127.0.0.1:8000"
@@ -92,6 +94,8 @@ class Slice6Settings:
     room_token_ttl_seconds: int = 300
     browser_join_timeout_seconds: int = 30
     max_sessions: int = 1
+    diagnostic_capture_root: Path | None = None
+    diagnostic_capture_ttl_seconds: int = 15 * 60
 
     @classmethod
     def from_environment(
@@ -131,6 +135,50 @@ class Slice6Settings:
             )
         root = (project_root or Path(__file__).resolve().parents[2]).resolve()
         web_dist = Path(values.get("SLICE6_WEB_DIST", str(root / "web" / "dist"))).resolve()
+        capture_enabled = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE", "0")
+        capture_root_value = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT")
+        if capture_enabled not in {"0", "1"}:
+            raise Slice6ConfigurationError(
+                "VOICE_AGENT_DIAGNOSTIC_CAPTURE must be exactly 0 or 1"
+            )
+        if capture_enabled == "0" and capture_root_value is not None:
+            raise Slice6ConfigurationError(
+                "diagnostic capture root requires explicit VOICE_AGENT_DIAGNOSTIC_CAPTURE=1"
+            )
+        diagnostic_capture_root: Path | None = None
+        diagnostic_capture_ttl_seconds = 15 * 60
+        if capture_enabled == "1":
+            if capture_root_value is None or not capture_root_value.strip():
+                raise Slice6ConfigurationError(
+                    "explicit diagnostic capture requires an outside-Git root"
+                )
+            diagnostic_capture_root = Path(capture_root_value).expanduser().resolve()
+            if diagnostic_capture_root.is_relative_to(root):
+                raise Slice6ConfigurationError(
+                    "diagnostic capture root must remain outside the project worktree"
+                )
+            runtime_root_value = values.get("XDG_RUNTIME_DIR")
+            if runtime_root_value is None or not runtime_root_value.strip():
+                raise Slice6ConfigurationError(
+                    "diagnostic capture requires the lifetime-scoped private runtime tmpfs"
+                )
+            try:
+                runtime_root = require_lifetime_runtime_root(Path(runtime_root_value))
+            except ValueError as error:
+                raise Slice6ConfigurationError(
+                    "diagnostic capture requires the lifetime-scoped private runtime tmpfs"
+                ) from error
+            if not diagnostic_capture_root.is_relative_to(runtime_root):
+                raise Slice6ConfigurationError(
+                    "diagnostic capture root must remain in the lifetime-scoped private runtime tmpfs"
+                )
+            ttl_value = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS", "900")
+            try:
+                diagnostic_capture_ttl_seconds = int(ttl_value)
+            except ValueError as error:
+                raise Slice6ConfigurationError("invalid diagnostic capture TTL") from error
+            if not 60 <= diagnostic_capture_ttl_seconds <= 3_600:
+                raise Slice6ConfigurationError("diagnostic capture TTL is outside 60..3600 seconds")
         return cls(
             livekit_api_key=api_key,
             livekit_api_secret=api_secret,
@@ -138,4 +186,6 @@ class Slice6Settings:
             livekit_public_url=public_url,
             app_public_url=app_public_url,
             web_dist=web_dist,
+            diagnostic_capture_root=diagnostic_capture_root,
+            diagnostic_capture_ttl_seconds=diagnostic_capture_ttl_seconds,
         )

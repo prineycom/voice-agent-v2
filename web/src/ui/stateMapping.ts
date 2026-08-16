@@ -1,14 +1,23 @@
 import type { AvatarHealthV1, AvatarLifecycleState } from '../avatar/contract'
 import type { SpeechEnvelopeStatus } from '../playback'
-import type { ConnectionState, TurnHistoryItem, VoiceState } from '../state'
+import type {
+  ConnectionState,
+  HealthComponentName,
+  TurnHistoryItem,
+  VoiceState,
+} from '../state'
 
 export type MicrophoneVisualState = 'idle' | 'listening' | 'muted' | 'error'
-export type ComponentHealth = 'READY' | 'CONNECTING' | 'DEGRADED' | 'FAILED' | 'UNKNOWN'
+export type ComponentHealth = 'READY' | 'CONNECTING' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN'
 
 export interface UiSystemComponent {
-  id: 'livekit' | 'stt' | 'llm' | 'tts' | 'avatar'
+  id: 'livekit' | 'controller' | 'stt' | 'selected_llm' | 'tts' | 'avatar_host' | 'active_module'
   label: string
   health: ComponentHealth
+  liveness: 'ALIVE' | 'DEAD' | 'UNKNOWN'
+  readiness: 'READY' | 'UNREADY' | 'DEGRADED' | 'UNKNOWN'
+  compatible: boolean | null
+  reason: string | null
 }
 
 export interface VoiceUiModel {
@@ -36,9 +45,47 @@ export interface VoiceUiModel {
 function voicePathHealth(connection: ConnectionState): ComponentHealth {
   if (connection === 'ready') return 'READY'
   if (connection === 'connecting' || connection === 'reconnecting') return 'CONNECTING'
-  if (connection === 'failed') return 'FAILED'
+  if (connection === 'failed') return 'UNAVAILABLE'
   if (connection === 'closed') return 'DEGRADED'
   return 'UNKNOWN'
+}
+
+function observedServerComponent(
+  state: VoiceState,
+  component: HealthComponentName,
+  label: string,
+): UiSystemComponent {
+  const observation = state.health?.components.find((candidate) => candidate.component === component)
+  const affected = state.failureStage === (
+    component === 'selected_llm' ? 'llm_provider' : component
+  )
+  if (observation === undefined) {
+    return {
+      id: component,
+      label,
+      health: affected && state.availability === 'degraded'
+        ? 'DEGRADED'
+        : voicePathHealth(state.connection),
+      liveness: 'UNKNOWN',
+      readiness: 'UNKNOWN',
+      compatible: null,
+      reason: affected ? state.failureCode : null,
+    }
+  }
+  const health: ComponentHealth = observation.readiness === 'ready' && observation.compatible
+    ? affected && state.availability !== 'available'
+      ? state.availability === 'degraded' ? 'DEGRADED' : 'UNAVAILABLE'
+      : 'READY'
+    : observation.readiness === 'degraded' ? 'DEGRADED' : 'UNAVAILABLE'
+  return {
+    id: component,
+    label,
+    health,
+    liveness: observation.liveness.toUpperCase() as UiSystemComponent['liveness'],
+    readiness: observation.readiness.toUpperCase() as UiSystemComponent['readiness'],
+    compatible: observation.compatible,
+    reason: affected ? state.failureCode : observation.reason_code,
+  }
 }
 
 export function mapVoiceStateToUi(
@@ -75,17 +122,22 @@ export function mapVoiceStateToUi(
             : state.microphoneStatus === 'muted'
               ? 'MIC MUTED'
               : 'MIC DISCONNECTED'
+  const visualCapabilityDegraded = avatarHealth.status !== 'ready'
+    || state.speechEnvelopeStatus === 'unavailable'
   const connectionLabel: Record<ConnectionState, string> = {
     idle: 'OFFLINE',
     connecting: 'CONNECTING',
-    ready: 'READY',
+    ready: state.availability === 'available'
+      ? visualCapabilityDegraded ? 'DEGRADED' : 'READY'
+      : state.availability.toUpperCase(),
     reconnecting: 'RECONNECTING',
     closed: 'CLOSED',
-    failed: 'CONNECTION LOST',
+    failed: state.availability === 'degraded' || state.availability === 'unavailable'
+      ? state.availability.toUpperCase()
+      : 'CONNECTION LOST',
   }
-  const commonHealth = voicePathHealth(state.connection)
   const avatarComponentHealth: ComponentHealth = avatarHealth.status === 'failed'
-    ? 'FAILED'
+    ? 'UNAVAILABLE'
     : avatarHealth.status === 'degraded' || state.speechEnvelopeStatus === 'unavailable'
       ? 'DEGRADED'
       : 'READY'
@@ -104,11 +156,25 @@ export function mapVoiceStateToUi(
     responseComplete: state.currentTurnTerminal,
     history: state.history,
     components: [
-      { id: 'livekit', label: 'LIVEKIT', health: commonHealth },
-      { id: 'stt', label: 'STT', health: commonHealth },
-      { id: 'llm', label: 'LLM', health: commonHealth },
-      { id: 'tts', label: 'TTS', health: commonHealth },
-      { id: 'avatar', label: 'AVATAR', health: avatarComponentHealth },
+      observedServerComponent(state, 'livekit', 'LIVEKIT'),
+      observedServerComponent(state, 'controller', 'CONTROLLER'),
+      observedServerComponent(state, 'stt', 'STT'),
+      observedServerComponent(state, 'selected_llm', 'SELECTED LLM'),
+      observedServerComponent(state, 'tts', 'TTS'),
+      {
+        id: 'avatar_host', label: 'AVATAR HOST', health: avatarComponentHealth,
+        liveness: avatarHealth.status === 'failed' ? 'DEAD' : 'ALIVE',
+        readiness: avatarHealth.status === 'ready' ? 'READY' : avatarHealth.status === 'degraded' ? 'DEGRADED' : 'UNREADY',
+        compatible: avatarHealth.status !== 'failed',
+        reason: avatarHealth.status === 'failed' ? 'avatar_host_unavailable' : null,
+      },
+      {
+        id: 'active_module', label: 'ACTIVE MODULE', health: avatarComponentHealth,
+        liveness: avatarHealth.status === 'failed' ? 'DEAD' : 'ALIVE',
+        readiness: avatarHealth.status === 'ready' ? 'READY' : avatarHealth.status === 'degraded' ? 'DEGRADED' : 'UNREADY',
+        compatible: avatarHealth.activeModuleId !== null,
+        reason: avatarHealth.renderFailures > 0 ? 'render_loop_failed' : null,
+      },
     ],
     llmProviderSummary: state.llmProfile === null
       ? 'UNAVAILABLE'

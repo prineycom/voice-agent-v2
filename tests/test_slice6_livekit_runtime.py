@@ -14,7 +14,11 @@ from tests.test_checkpoint_ab import (
     load_runtime,
 )
 from tests.test_silero_tts import FakeSTT, FakeVisibleLLM, ProcessCoordinator
-from voice_agent_v2.silero_tts import SileroKseniyaTTS, SileroWorkerPool
+from voice_agent_v2.silero_tts import (
+    SileroKseniyaTTS,
+    SileroPoolHealth,
+    SileroWorkerPool,
+)
 from voice_agent_v2.tracer import CancellationToken
 
 
@@ -45,6 +49,64 @@ class PublishedLLMProfileTests(unittest.TestCase):
         runner.warmup_metadata["lfm_ready"]["selected_alias"] = "unverified-model"
         with self.assertRaisesRegex(RuntimeError, "verified local LLM identity is unavailable"):
             runner.public_llm_profile()
+
+
+class TTSHealthSnapshotTests(unittest.TestCase):
+    def test_runner_preserves_partial_and_total_pool_liveness(self) -> None:
+        runtime = load_runtime()
+
+        class Pool:
+            observations: list[dict[str, object]] = []
+
+            def __init__(self) -> None:
+                self.snapshot = SileroPoolHealth((3103,), 1, True)
+
+            def health_snapshot(self) -> SileroPoolHealth:
+                return self.snapshot
+
+            @property
+            def process_ids(self):
+                raise AssertionError("split process-id read is not allowed")
+
+            @property
+            def ready_count(self):
+                raise AssertionError("split readiness read is not allowed")
+
+        pool = Pool()
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.stt = types.SimpleNamespace(
+            process_id=3101,
+            identity="local/test-stt",
+            version="voice-agent.stt.v1",
+        )
+        runner.llm = types.SimpleNamespace(
+            provider_mode="local",
+            provider_identity="local/test-llm",
+            version="voice-agent.llm-provider.v1",
+        )
+        runner.tts_profile = runtime.SileroVoiceProfile()
+        runner.tts = SileroKseniyaTTS(pool)
+        runner.warmup_metadata = {
+            "stt": {"discarded": True},
+            "lfm_ready": {"ready": True},
+            "lfm": {"discarded": True},
+            "tts": {"discarded": True},
+        }
+
+        partial = next(
+            component for component in runner.readiness_components()
+            if component.component == "tts"
+        )
+        self.assertEqual(partial.liveness, "alive")
+        self.assertEqual(partial.readiness, "unready")
+
+        pool.snapshot = SileroPoolHealth((), 0, True)
+        absent = next(
+            component for component in runner.readiness_components()
+            if component.component == "tts"
+        )
+        self.assertEqual(absent.liveness, "dead")
+        self.assertEqual(absent.readiness, "unready")
 
 
 class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
@@ -505,6 +567,78 @@ class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(endpoint_models, [model, model])
         self.assertEqual(stream_count, 2)
         self.assertGreaterEqual(model.reset_calls, 4)
+        self.assertEqual(controller.session.failures, [])
+
+    async def test_handled_publication_failure_is_not_relabelled_as_microphone_failure(self) -> None:
+        runtime = load_runtime()
+
+        class Model:
+            def reset(self) -> None:
+                return None
+
+        class Endpoint:
+            def __init__(self, _model, **_kwargs) -> None:
+                return None
+
+            def feed(self, _pcm: bytes):
+                return (
+                    types.SimpleNamespace(kind="speech_started", payload=None),
+                    types.SimpleNamespace(kind="utterance", payload=b"\0\0" * 320),
+                )
+
+            def flush(self):
+                return ()
+
+            def reset(self) -> None:
+                return None
+
+        class Stream:
+            async def __aiter__(self):
+                yield types.SimpleNamespace(frame=types.SimpleNamespace(data=b"\0\0" * 320))
+
+            async def aclose(self) -> None:
+                return None
+
+        class Session:
+            stream_epoch = 2
+
+            def __init__(self) -> None:
+                self.closed = False
+                self.failures: list[tuple[str, str]] = []
+
+            async def start_utterance(self, *, announce: bool = True) -> str:
+                self.assert_unannounced = not announce
+                return "turn-candidate"
+
+            async def finish_utterance(self, _payload: bytes, **_kwargs) -> None:
+                self.closed = True
+                raise RuntimeError("publication unavailable")
+
+            async def abandon_unannounced_utterance(self, _turn_id: str) -> bool:
+                return False
+
+            async def fail(self, stage: str, code: str) -> None:
+                self.failures.append((stage, code))
+
+        runtime.SileroSpeechEndpoint = Endpoint
+        runtime.rtc.AudioStream = types.SimpleNamespace(
+            from_track=lambda **_kwargs: Stream()
+        )
+        controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
+        controller.session_id = "session-test"
+        controller.session = Session()
+        controller.trace = None
+        controller._closed = False
+        controller._capture_invalidated = False
+        controller._microphone_muted = False
+        controller._microphone_generation = 1
+        controller._vad_model = Model()
+        task = asyncio.create_task(controller._consume_microphone(object(), 1))
+        controller._audio_task = task
+
+        await asyncio.wait_for(task, 0.5)
+
+        self.assertTrue(controller.session.assert_unannounced)
         self.assertEqual(controller.session.failures, [])
 
     async def test_current_generation_setup_failure_fails_closed_with_trace(self) -> None:

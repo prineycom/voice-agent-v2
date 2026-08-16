@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**The private Silero/Kseniya native-48 path passes deterministic and focused exact-cache checks; Pasha's physical Firefox acceptance is still required. Slice 7 adds the bounded renderer-agnostic avatar host, original deterministic eye, and portrait-first UI shell, while physical Raspberry Pi/full-stack visual acceptance remains open.** Active Slice 6 composition is fixed directly to cache-local Silero `v5_5_ru`, speaker `kseniya`, behind TTS v2. There is no TTS selector, Qwen adapter, co-start, hot switch, fallback, or cross-adapter retry. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`. The local LFM2.5 Q4_K_M path remains fixed and cloud-free.
+**Slice 8 controlled failure semantics, compatible readiness, privacy-safe timeline/percentile reconstruction, bounded diagnostic retention/deletion, disposable process loss, and safe resource pressure pass. Physical/shared/destructive acceptance remains explicitly open.** The private Silero/Kseniya native-48 path passes deterministic and focused exact-cache checks; Pasha's physical Firefox acceptance is still required. Slice 7 provides the bounded renderer-agnostic avatar host, original deterministic eye, and portrait-first UI shell, while physical Raspberry Pi/full-stack visual acceptance remains open. Active composition is fixed directly to cache-local Silero `v5_5_ru`, speaker `kseniya`, behind TTS v2. There is no TTS selector, Qwen adapter, co-start, hot switch, fallback, or cross-adapter retry. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`. The local LFM2.5 Q4_K_M path remains fixed and cloud-free.
 
 Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
@@ -80,6 +80,25 @@ A clean committed head can be deployed for physical acceptance through the exist
 ```
 
 The launcher prints the exact compiled commit and stable tailnet URL. The first page is deliberately disconnected: select **CONNECT** to mint a same-origin room capability, join its validated public LiveKit endpoint, request microphone permission, and publish the microphone. Conversation history remains empty until genuine server events arrive, and the compact control visibly reports the real microphone lifecycle throughout admission, listening, mute, and failure. The synthetic `ReviewStand` is built only by `npm run build:review` under `web/review/dist`; it is never served by this launcher.
+
+### Slice 8 failure/observability verification
+
+Run the focused bounded gate:
+
+```sh
+./verify-slice8
+```
+
+It executes all architecture failure rows and their documented consequences, liveness-versus-compatible-readiness checks, a metadata-only correlated timeline and preregistered percentile report, default privacy rejection, opt-in capture plus the public deletion command when the lifetime runtime is available (otherwise persistent-root fail-closed behavior), one disposable real-process recovery bound, a safe 16-MiB/100-ms pressure sample, and focused System/Timeline/avatar-render/browser state tests. It does not stop shared services, disconnect Tailscale, or exhaust RAM/VRAM.
+
+Default metadata diagnostics contain no conversation/media content, secrets, exception messages, or content-bearing identifiers. Explicit content capture is off by default. To enable it, add the exact settings documented in [`.env.slice6.example`](.env.slice6.example) to ignored server configuration; the capture root must remain outside Git beneath the exact `/run/user/<uid>` `XDG_RUNTIME_DIR` tmpfs, with user lingering disabled. Read selected manifest status fields or delete a capture without enumerating its content. Deletion succeeds only while the capture still passes the lifetime-runtime, ownership, privacy-mode, manifest, and path guards:
+
+```sh
+./manage-diagnostics status <capture-directory>
+./manage-diagnostics delete <capture-directory>
+```
+
+[`docs/architecture.md` §8.2](docs/architecture.md#82-data-handling) owns the capture limits, expiry, and privacy contract. The complete exercised matrix, example redacted report, privacy evidence, and exact nonclaims are in [`docs/evidence/slice-8-failure-observability.md`](docs/evidence/slice-8-failure-observability.md).
 
 ### Pasha physical acceptance and rollback
 

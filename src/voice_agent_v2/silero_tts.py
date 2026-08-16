@@ -283,6 +283,26 @@ class SileroTurnBudget:
 ProcessFactory = Callable[[str, Path, dict[str, str]], AdapterProcess]
 
 
+@dataclass(frozen=True)
+class SileroPoolHealth:
+    process_ids: tuple[int, ...]
+    ready_worker_count: int
+    started: bool
+
+    @property
+    def live_worker_count(self) -> int:
+        return len(self.process_ids)
+
+    @property
+    def ready_for_admission(self) -> bool:
+        return (
+            self.started
+            and self.ready_worker_count == POOL_SIZE
+            and len(self.process_ids) == POOL_SIZE
+            and len(set(self.process_ids)) == POOL_SIZE
+        )
+
+
 class SileroWorkerPool:
     """Exactly two isolated models, one call per worker, with silent stale drain."""
 
@@ -343,11 +363,28 @@ class SileroWorkerPool:
         process = getattr(slot.process, "process", None)
         return getattr(process, "pid", None) if process is not None and process.poll() is None else None
 
+    def health_snapshot(self) -> SileroPoolHealth:
+        with self._condition:
+            self._refresh_worker_health_locked()
+            process_ids = tuple(
+                pid
+                for pid in (self._slot_pid(slot) for slot in self._slots)
+                if pid is not None
+            )
+            ready_worker_count = (
+                sum(slot.state in {"idle", "busy"} for slot in self._slots)
+                if self._started
+                else 0
+            )
+            return SileroPoolHealth(
+                process_ids=process_ids,
+                ready_worker_count=ready_worker_count,
+                started=self._started,
+            )
+
     @property
     def process_ids(self) -> tuple[int, ...]:
-        return tuple(
-            pid for pid in (self._slot_pid(slot) for slot in self._slots) if pid is not None
-        )
+        return self.health_snapshot().process_ids
 
     @property
     def retained_turn_count(self) -> int:
@@ -370,14 +407,10 @@ class SileroWorkerPool:
 
     @property
     def ready_count(self) -> int:
-        with self._condition:
-            if not self._started:
-                return 0
-            self._refresh_worker_health_locked()
-            return sum(slot.state in {"idle", "busy"} for slot in self._slots)
+        return self.health_snapshot().ready_worker_count
 
     def require_ready(self) -> None:
-        if self.ready_count != POOL_SIZE:
+        if not self.health_snapshot().ready_for_admission:
             raise StageFailure("tts", "silero_pool_not_ready")
 
     def start(self) -> dict[str, object]:
@@ -387,7 +420,6 @@ class SileroWorkerPool:
             if self._closed:
                 raise StageFailure("tts", "silero_pool_closed")
             if self._started:
-                self.require_ready()
                 return self.readiness_metadata()
             self._starting = True
         started: list[_WorkerSlot] = []
@@ -467,9 +499,8 @@ class SileroWorkerPool:
         self.process_start_count += 1
 
     def readiness_metadata(self) -> dict[str, object]:
-        self.require_ready()
-        pids = self.process_ids
-        if len(pids) != POOL_SIZE or len(set(pids)) != POOL_SIZE:
+        snapshot = self.health_snapshot()
+        if not snapshot.ready_for_admission:
             raise StageFailure("tts", "silero_pool_not_ready")
         return {
             "backend": "silero",
@@ -478,7 +509,7 @@ class SileroWorkerPool:
             "sample_rate_hz": 48_000,
             "worker_count": POOL_SIZE,
             "worker_ids": list(WORKER_IDS),
-            "process_ids": list(pids),
+            "process_ids": list(snapshot.process_ids),
             "warmed": True,
             "cooperative_cancel": False,
             "automatic_retry": False,
@@ -915,6 +946,9 @@ class SileroKseniyaTTS:
     def process_ids(self) -> tuple[int, ...]:
         return self.pool.process_ids
 
+    def health_snapshot(self) -> SileroPoolHealth:
+        return self.pool.health_snapshot()
+
     def start(self, cancellation: CancellationToken | None = None) -> dict[str, object]:
         if cancellation is not None and cancellation.cancelled:
             raise StageFailure("tts", "selected_tts_cancelled")
@@ -935,7 +969,7 @@ class SileroKseniyaTTS:
         }
 
     def ready_for_admission(self) -> bool:
-        return self.pool.ready_count == POOL_SIZE
+        return self.health_snapshot().ready_for_admission
 
     def create_turn_budget(self) -> SileroTurnBudget:
         return SileroTurnBudget.create()
