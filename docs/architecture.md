@@ -239,7 +239,7 @@ No failure silently switches LLM provider, moves another inference capability to
 
 | Failure | Dependency class | Required behavior |
 | --- | --- | --- |
-| LiveKit unavailable | Hard for realtime use | Client shows unavailable/reconnecting; no inference turn is admitted. |
+| LiveKit unavailable | Hard for realtime use | Client shows unavailable/reconnecting. Reconnect acknowledgement is bounded. A hard media-publication setup/identity/stream failure publishes one correlated, failure-enriched terminal outcome before closing/degrading the session; a control-publication failure records the equivalent correlated terminal replacement when transport prevents publication. Both refuse later inference admission. |
 | Host microphone duration, recorder availability/setup/startup/nonzero/timeout/output, or cleanup failure | Hard before turn admission | Capture remains within the 1–30 second bound. PipeWire status 1 is accepted only for exact-size bounded PCM. Every other capture failure emits content-free `microphone_capture`/`turn.failed` evidence without a Python traceback or STT/LLM/TTS admission. Cleanup is mandatory; if deletion and scrubbing cannot establish that no input remains, the failure evidence reports `input_retained=true`. |
 | STT unavailable, temporary-audio setup/request/cleanup, or output failure | Hard for the affected voice turn | No transcript is fabricated and no downstream inference is admitted. The CLI normalizes the stage failure to content-free `turn.failed` output without a Python traceback. Temporary audio is deleted or scrubbed before a transcript is accepted; an unconfirmed cleanup reports its retention state. |
 | Selected LLM provider unavailable or fails | Hard for the affected response | No fabricated answer or alternate-provider request. No visible/TTS handoff occurs before the exact selected identity is proven. A late failure stops future visible text/PCM and fails explicitly; an already published validated sentence/PCM prefix is non-retractable and never represented as atomic rollback. |
@@ -256,7 +256,7 @@ No failure silently switches LLM provider, moves another inference capability to
 
 | Architecture row | User-visible state | Retry/admission consequence |
 | --- | --- | --- |
-| LiveKit unavailable | `retrying`, then `unavailable` on bounded failure | Reconnect acknowledgement attempts are bounded to 10 in 5 seconds; no inference admission. |
+| LiveKit unavailable | `retrying`, then `unavailable` on bounded reconnect failure | Reconnect acknowledgement attempts are bounded to 10 in 5 seconds. A hard media/control publication failure terminalizes the correlated turn and closes/degrades the session immediately; neither path permits later inference admission in that session. |
 | Microphone capture/cleanup failure | `unavailable` | No turn or inference admission; zero retry. |
 | STT unavailable/temporary-input failure | `unavailable` for the turn | No downstream inference or transcript fabrication; a dead/unready resident capability blocks later admission. |
 | Selected LLM failure | `unavailable` for the response | No fallback or fabricated answer. Transport loss is dead/unready while retaining the separately verified compatibility fact; a responding identity/contract failure is alive/unready/incompatible. Either blocks later admission. |
@@ -279,12 +279,12 @@ Every turn must be diagnosable without recording its private content by default.
 
 - Build, contract, selected LLM provider mode/identity, loaded-model, and avatar-module identifiers.
 - Session and turn correlation IDs. Concurrent TTS segment observations are selected by full session/epoch/turn/generation/request identity, never by temporal slices of shared adapter history.
-- State transitions and one terminal outcome per turn; failed-turn reconstruction retains dependency class, failure-matrix ID, failure stage/code, and allowed user state.
+- State transitions and one terminal outcome per turn; failed-turn reconstruction retains dependency class, failure-matrix ID, failure stage/code, and allowed user state. If transport replaces a completion/interruption or prevents publishing its control, the replacement remains correlated and enriched, and the mutually exclusive terminal counters record exactly one failure.
 - Audio duration/bytes, not raw audio.
 - Endpoint-to-STT-final, selected-provider time to its first non-empty reasoning-or-visible token and completion, independently measured first visible response, TTS time-to-first-audio, first programmatically observed browser audio signal, and total-turn timing; partial provider failures retain observed TTFT, while physical audibility/timing is recorded only by manual acceptance.
 - Cloud external-transfer fact, provider request ID, usage/token and cost data when available, and error class—never prompt/response content.
 - Cancellation latency and stale/duplicate/drop counts.
-- Per-service/provider request counts, failures, queue depth, and readiness changes.
+- Per-service/provider request counts, failures, queue depth, and readiness changes. A turn is counted as admitted when its public media/control path is attempted, including an enriched publication-setup failure; an unannounced VAD candidate abandoned or cancelled before any public event is not counted. Completion, interruption, and failure counts remain mutually exclusive.
 - GPU VRAM, GPU utilization, host RAM, CPU, and local-model load/unload events.
 - Avatar input validation/fallback counts, active module capabilities, and render-loop health without private content.
 
