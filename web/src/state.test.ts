@@ -160,6 +160,21 @@ describe('checkpoint A browser state', () => {
       ]),
     })
     expect(parseHealthReadinessReport({ ...incompatible, overall_readiness: 'ready' })).toBeNull()
+
+    const duplicateServerComponent = {
+      ...readyHealth,
+      components: readyComponents.map((component, index) => index === 4
+        ? { ...readyComponents[0], identity: 'second-livekit-identity' }
+        : component),
+    }
+    expect(parseHealthReadinessReport(duplicateServerComponent)).toBeNull()
+    expect(parseHealthReadinessReport({
+      ...readyHealth,
+      components: [...readyComponents.slice(0, 4), {
+        ...readyComponents[4],
+        component: 'avatar_host',
+      }],
+    })).toBeNull()
   })
 
   it('rejects removed playout events at the serialized protocol boundary', () => {

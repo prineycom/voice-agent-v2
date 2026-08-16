@@ -35,6 +35,10 @@ describe('voice reducer to UI domain mapping', () => {
       llmModelSummary: 'UNAVAILABLE',
     })
     expect(model.components.every((component) => component.health === 'READY')).toBe(true)
+    expect(model.components.map((component) => component.id)).toEqual([
+      'livekit', 'controller', 'stt', 'selected_llm', 'tts',
+      'avatar_host', 'active_module',
+    ])
   })
 
   it('gives reconnect, interruption and microphone failure their safe visual states', () => {
