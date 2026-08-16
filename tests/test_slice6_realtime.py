@@ -176,6 +176,32 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await session.start_utterance()
 
+    async def test_media_sink_cancellation_after_listening_terminalizes_turn(self) -> None:
+        class CancelMediaEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    raise asyncio.CancelledError
+                await super().send(event)
+
+        events = CancelMediaEvents()
+        session = RealtimeSession(
+            session_id="session-media-sink-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+
+        with self.assertRaises(asyncio.CancelledError):
+            await session.finish_utterance(b"\0\0" * 320)
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.interrupted"],
+        )
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 1)
+
     async def test_cancelled_announcement_finishes_media_boundary_then_terminalizes(self) -> None:
         class BlockingMediaEvents(MemoryEvents):
             def __init__(self) -> None:

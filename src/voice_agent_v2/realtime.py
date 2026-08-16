@@ -693,7 +693,13 @@ class RealtimeSession:
                 break
             except asyncio.CancelledError:
                 if announcement.done():
-                    await announcement
+                    try:
+                        await announcement
+                    except asyncio.CancelledError:
+                        if not context.public_event_published:
+                            raise
+                        cancellation_requested = True
+                        break
                 if not context.public_event_published:
                     announcement.cancel()
                     try:
