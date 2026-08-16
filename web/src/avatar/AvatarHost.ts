@@ -17,8 +17,8 @@ type AvatarCommand =
   | { kind: 'cancel'; timestampMs: number; motion: AvatarMotionPreference }
 
 /**
- * Owns module compatibility, input validation, lifecycle and an explicitly
- * reported static fallback. It never owns renderer geometry or frames.
+ * Owns module compatibility, input validation, lifecycle and renderer health.
+ * It never owns renderer geometry or frames.
  */
 export class AvatarHostV1 {
   private container: HTMLElement | null = null
@@ -49,10 +49,7 @@ export class AvatarHostV1 {
   mount(container: HTMLElement): void {
     if (this.container !== null) throw new Error('avatar host is already mounted')
     this.container = container
-    if (!this.activateFirstCompatibleModule(0)) {
-      this.publishHealth()
-      throw new Error('no compatible avatar module could be mounted')
-    }
+    if (!this.activateFirstCompatibleModule(0)) this.publishHealth()
   }
 
   update(input: unknown): void {

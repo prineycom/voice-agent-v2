@@ -127,7 +127,7 @@ LiveKit credentials remain only in the current-user mode-`0600` server configura
 
 The unit starts local LFM → LiveKit → gateway/controller-owned STT/TTS/provider adapter → exact foreground tailnet routes. Shutdown removes application admission first, drains the controller/workers, then closes signaling, LiveKit, and LFM. A runtime loss gets at most one completed systemd restart in 600 seconds; configuration/artifact incompatibility never restarts. `status` reports the exact build/release, local provider, browser avatar contract/MVP eye, and external-cloud-not-supervised facts without secrets.
 
-Rollback accepts only the recorded previous release and revalidates its complete inventory, referenced configuration, exact external artifacts/runtimes, tailnet identity, and disk/cache preflight before restarting:
+Rollback accepts only the recorded previous release and revalidates its complete inventory, referenced configuration, exact external artifacts/runtimes, tailnet identity, and disk/cache preflight before restarting. When the canonical service is installed, the prior release unit must also be byte-for-byte identical to the installed root-owned unit before either release pointer moves; a different lifecycle or sandbox policy requires a separate explicit service operation and rollback leaves the running service unchanged:
 
 ```sh
 ./voice-agent-ops rollback

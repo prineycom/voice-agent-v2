@@ -1035,7 +1035,7 @@ class ReleaseStore:
                 "previous_release_id": retained_previous,
             }
 
-    def rollback(self) -> dict[str, object]:
+    def rollback(self, *, required_system_unit: Path | None = None) -> dict[str, object]:
         with self.locked():
             current = self.current()
             previous = self.previous()
@@ -1044,6 +1044,22 @@ class ReleaseStore:
             previous_document = validate_release(
                 previous, state_root=self.state_root, verify_host_state=True,
             )
+            if required_system_unit is not None:
+                target_unit = previous / "ops/systemd/voice-agent-v2.service"
+                try:
+                    unit_matches = (
+                        target_unit.is_file()
+                        and required_system_unit.is_file()
+                        and target_unit.stat().st_size == required_system_unit.stat().st_size
+                        and sha256_file(target_unit) == sha256_file(required_system_unit)
+                    )
+                except (OSError, OperationalError):
+                    unit_matches = False
+                if not unit_matches:
+                    raise OperationalError(
+                        "rollback_unit_incompatible",
+                        "prior release systemd unit differs from the installed unit",
+                    )
             try:
                 current_document = validate_release(
                     current, state_root=self.state_root, verify_host_state=False,

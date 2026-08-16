@@ -1493,26 +1493,30 @@ class SessionRegistry:
         try:
             await controller.start()
             llm_profile = self.runner.public_llm_profile()
+            tts_profile = self.runner.tts_profile.public_metadata()
+            if self.operational_health()["overall_readiness"] != "ready":
+                raise RuntimeError("the voice stack became unavailable during admission")
+            capability = {
+                "session_id": session_id,
+                "stream_epoch": 1,
+                "livekit_url": self.settings.livekit_public_url,
+                "token": controller.browser_token(),
+                "expires_in_seconds": self.settings.room_token_ttl_seconds,
+                "admission_timeout_ms": min(
+                    self.settings.browser_join_timeout_seconds,
+                    self.settings.room_token_ttl_seconds,
+                ) * 1_000,
+                "control_version": "voice-agent.realtime-control.v2",
+                "llm_profile": llm_profile,
+                "tts_profile": tts_profile,
+            }
             controller.arm_browser_join_timeout()
         except BaseException:
             await controller.close(notify=False)
             async with self._lock:
                 self._controllers.pop(session_id, None)
             raise
-        return {
-            "session_id": session_id,
-            "stream_epoch": 1,
-            "livekit_url": self.settings.livekit_public_url,
-            "token": controller.browser_token(),
-            "expires_in_seconds": self.settings.room_token_ttl_seconds,
-            "admission_timeout_ms": min(
-                self.settings.browser_join_timeout_seconds,
-                self.settings.room_token_ttl_seconds,
-            ) * 1_000,
-            "control_version": "voice-agent.realtime-control.v2",
-            "llm_profile": llm_profile,
-            "tts_profile": self.runner.tts_profile.public_metadata(),
-        }
+        return capability
 
     async def remove(self, session_id: str) -> None:
         async with self._lock:

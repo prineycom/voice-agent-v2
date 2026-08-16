@@ -274,9 +274,17 @@ def command_install_service(arguments: argparse.Namespace) -> None:
 
 
 def command_rollback(arguments: argparse.Namespace) -> None:
-    result = ReleaseStore(arguments.state_root).rollback()
     canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
-    if canonical and _systemctl_show()["load"] == "loaded":
+    service_loaded = canonical and _systemctl_show()["load"] == "loaded"
+    unit_boundary = (
+        SYSTEM_UNIT_PATH
+        if canonical and (service_loaded or SYSTEM_UNIT_PATH.exists())
+        else None
+    )
+    result = ReleaseStore(arguments.state_root).rollback(
+        required_system_unit=unit_boundary,
+    )
+    if service_loaded:
         _sudo("systemctl", "restart", SERVICE_NAME)
         active = _sudo("systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4)).returncode == 0
         if not active:

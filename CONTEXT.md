@@ -25,7 +25,7 @@
 - **Realtime session** — The bounded period in which a client and the agent share media, control events, and conversation state.
 - **Render state** — Renderer-internal values and frames owned exclusively by an avatar module, never supplied by an LLM.
 - **Soft dependency** — A capability whose loss permits an explicitly degraded but still correct experience.
-- **Compatible rollback** — Atomic activation of only the recorded prior operational release after its file inventory, referenced configuration, artifact/runtime, tailnet, and disk/cache compatibility are freshly revalidated.
+- **Compatible rollback** — Atomic activation of only the recorded prior operational release after its file inventory, referenced configuration, artifact/runtime, tailnet, disk/cache, and—when installed—exact system-unit compatibility are freshly revalidated without replacing the unit.
 - **Speech envelope** — A bounded 30-Hz timing/amplitude observation derived from the browser's current decoded audio playout path for deterministic speech-synchronous visual behavior; it is not proof of physical audibility.
 - **Tailnet** — The private network formed by devices that are members of the project's Tailscale network.
 - **Tracer** — The smallest end-to-end path that crosses the intended boundaries with deterministic substitutes and produces inspectable evidence.

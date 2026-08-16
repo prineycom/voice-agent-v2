@@ -142,6 +142,51 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(capability["llm_profile"], llm_profile)
 
+    async def test_refuses_capability_when_readiness_is_lost_during_room_start(self) -> None:
+        runtime = load_runtime()
+        token_requests: list[str] = []
+        closed: list[bool] = []
+        runner = types.SimpleNamespace(
+            public_llm_profile=lambda: {"provider_mode": "local"},
+            tts_profile=types.SimpleNamespace(public_metadata=lambda: {"profile": "test"}),
+        )
+        settings = types.SimpleNamespace(
+            max_sessions=1,
+            livekit_public_url="wss://voice.test.ts.net:7443",
+            room_token_ttl_seconds=300,
+            browser_join_timeout_seconds=30,
+        )
+        registry = runtime.SessionRegistry.__new__(runtime.SessionRegistry)
+        registry.settings = settings
+        registry.runner = runner
+        registry._controllers = {}
+        registry._lock = asyncio.Lock()
+        registry._accepting = True
+        health = iter((
+            {"overall_readiness": "ready"},
+            {"overall_readiness": "unready"},
+        ))
+        registry.operational_health = lambda: next(health)
+
+        async def close(*, notify: bool) -> None:
+            closed.append(notify)
+
+        controller = types.SimpleNamespace(
+            start=lambda: asyncio.sleep(0),
+            close=close,
+            arm_browser_join_timeout=lambda: None,
+            browser_token=lambda: token_requests.append("requested") or "room-token",
+        )
+        with (
+            patch.object(runtime, "LiveKitRoomController", return_value=controller),
+            self.assertRaisesRegex(RuntimeError, "became unavailable"),
+        ):
+            await registry.create()
+
+        self.assertEqual(token_requests, [])
+        self.assertEqual(closed, [False])
+        self.assertEqual(registry._controllers, {})
+
 
 class LiveTurnObservationTests(unittest.TestCase):
     def test_segment_reservations_reach_the_real_controller_before_synthesis(self) -> None:

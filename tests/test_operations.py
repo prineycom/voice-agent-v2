@@ -248,6 +248,50 @@ class ServiceApplicationTests(unittest.TestCase):
                 ), redirect_stderr(StringIO()):
                     self.assertEqual(operations_cli.main(), expected)
 
+    def test_installed_service_rollback_rejects_a_different_prior_unit_before_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            releases = state / "releases"
+            current = releases / ("1" * 24)
+            previous = releases / ("2" * 24)
+            for release in (current, previous):
+                (release / "ops/systemd").mkdir(parents=True)
+            (current / "ops/systemd/voice-agent-v2.service").write_text(
+                "[Service]\nKillMode=mixed\n", encoding="utf-8",
+            )
+            (previous / "ops/systemd/voice-agent-v2.service").write_text(
+                "[Service]\nKillMode=control-group\n", encoding="utf-8",
+            )
+            (state / "current").symlink_to(f"releases/{current.name}")
+            (state / "previous").symlink_to(f"releases/{previous.name}")
+            installed_unit = root / "voice-agent-v2.service"
+            installed_unit.write_text("[Service]\nKillMode=mixed\n", encoding="utf-8")
+            arguments = SimpleNamespace(state_root=state)
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed_unit),
+                patch.object(
+                    operations_cli, "_systemctl_show", return_value={"load": "loaded"},
+                ),
+                patch(
+                    "voice_agent_v2.operations.validate_release",
+                    side_effect=lambda path, **_kwargs: {"build_id": path.name[0] * 40},
+                ),
+                patch.object(operations_cli, "_sudo") as sudo,
+                self.assertRaisesRegex(OperationalError, "differs from the installed unit"),
+            ):
+                operations_cli.command_rollback(arguments)
+
+            self.assertEqual((state / "current").resolve(), current.resolve())
+            self.assertEqual((state / "previous").resolve(), previous.resolve())
+            self.assertEqual(
+                installed_unit.read_text(encoding="utf-8"),
+                "[Service]\nKillMode=mixed\n",
+            )
+            sudo.assert_not_called()
+
 
 class ConfigurationAndArtifactTests(unittest.TestCase):
     def test_config_is_mode_guarded_without_persistable_secret_verifier(self) -> None:
@@ -747,6 +791,14 @@ class LifecycleAndSustainedTests(unittest.TestCase):
         )
         validate_schema(report, status_schema)
         validate_schema(report["health"], health_schema)
+        missing_component = json.loads(json.dumps(report))
+        missing_component["health"]["components"].pop()
+        with self.assertRaises(AssertionError):
+            validate_schema(missing_component, status_schema)
+        unknown_health_field = json.loads(json.dumps(report))
+        unknown_health_field["health"]["unexpected"] = True
+        with self.assertRaises(AssertionError):
+            validate_schema(unknown_health_field, status_schema)
         self.assertFalse(report["external_provider_supervised"])
         self.assertFalse(report["automatic_fallback"])
 
