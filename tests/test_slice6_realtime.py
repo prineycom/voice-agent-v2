@@ -176,6 +176,44 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await session.start_utterance()
 
+    async def test_cancelled_announcement_finishes_media_boundary_then_terminalizes(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+                self.media_release = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await self.media_release.wait()
+                await super().send(event)
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        await asyncio.wait_for(events.media_started.wait(), 0.5)
+
+        finish.cancel()
+        events.media_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await finish
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.media-ready", "turn.interrupted"],
+        )
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 1)
+        next_turn = await session.start_utterance()
+        self.assertEqual(next_turn, "turn-00000002")
+
     async def test_resource_sampling_never_blocks_endpoint_admission(self) -> None:
         class SlowSampler:
             def sample(self) -> ResourceSnapshot:
@@ -195,6 +233,41 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 0.1)
         await asyncio.sleep(0.6)
         self.assertFalse(session._diagnostic_tasks)
+
+    async def test_delayed_resource_sample_keeps_original_stream_epoch(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+
+        class GatedSampler:
+            def sample(self) -> ResourceSnapshot:
+                entered.set()
+                release.wait(0.5)
+                return ResourceSnapshot(None, 1.0, 1.0, None, None)
+
+        session = RealtimeSession(
+            session_id="session-resource-epoch",
+            runner=StreamingRunner(),
+            event_sink=MemoryEvents(),
+            audio_sink=MemoryAudio(),
+            resource_sampler=GatedSampler(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+        await session.start_utterance(announce=False)
+        await session.finish_utterance(b"\0\0" * 320)
+        self.assertTrue(await asyncio.to_thread(entered.wait, 0.5))
+        session.stream_epoch = 2
+        release.set()
+        await asyncio.sleep(0.05)
+
+        resource = [
+            fields for stage, event, fields in observations
+            if stage == "resource" and event == "sample"
+        ]
+        self.assertTrue(resource)
+        self.assertTrue(all(fields["stream_epoch"] == 1 for fields in resource))
 
     async def test_abandoned_vad_candidate_emits_no_user_turn(self) -> None:
         events = MemoryEvents()

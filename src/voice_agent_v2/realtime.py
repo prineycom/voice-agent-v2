@@ -534,10 +534,14 @@ class RealtimeSession:
                 context.resource_endpoint = fields
             else:
                 context.resource_terminal = fields
-            self._trace("resource", "sample", turn_id=context.turn_id, **fields)
+            self._trace(
+                "resource", "sample", turn_id=context.turn_id,
+                stream_epoch=context.stream_epoch, **fields,
+            )
         except Exception as error:
             self._trace(
                 "resource", "sample_failed", turn_id=context.turn_id,
+                stream_epoch=context.stream_epoch,
                 failure_class=type(error).__name__, failure_code="resource_sample_failed",
             )
 
@@ -643,7 +647,7 @@ class RealtimeSession:
         self._active = context
         if announce:
             try:
-                await self._announce_context_locked(context)
+                await self._announce_context_cancellation_safe_locked(context)
             except BaseException:
                 context.terminal = True
                 self._rollback_unpublished_admission(context)
@@ -653,6 +657,37 @@ class RealtimeSession:
                     await self._abandon_audio(context.turn_id)
                 raise
         return turn_id
+
+    async def _announce_context_cancellation_safe_locked(
+        self, context: TurnContext
+    ) -> None:
+        announcement = asyncio.create_task(
+            self._announce_context_locked(context),
+            name=f"announce-{context.turn_id}",
+        )
+        cancellation_requested = False
+        while True:
+            try:
+                await asyncio.shield(announcement)
+                break
+            except asyncio.CancelledError:
+                if announcement.done():
+                    await announcement
+                if not context.public_event_published:
+                    announcement.cancel()
+                    try:
+                        await announcement
+                    except asyncio.CancelledError:
+                        pass
+                    raise
+                cancellation_requested = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        if cancellation_requested:
+            if self._active is context and not context.terminal:
+                await self._interrupt_locked("announcement_cancelled")
+            raise asyncio.CancelledError
 
     async def _announce_context_locked(self, context: TurnContext) -> None:
         prepare = getattr(self.audio_sink, "prepare", None)
@@ -754,7 +789,7 @@ class RealtimeSession:
             self._capture_content("raw-audio", pcm, context.turn_id)
             if not context.announced:
                 try:
-                    await self._announce_context_locked(context)
+                    await self._announce_context_cancellation_safe_locked(context)
                 except BaseException:
                     context.terminal = True
                     self._rollback_unpublished_admission(context)

@@ -30,19 +30,19 @@
 
 ## No-mistakes follow-up
 
-The first pipeline head `556d57eb` fixed `OBS-001`, `READY-001`, `FAIL-001`, and `DATA-001`; its fix review then reported the accepted `READY-002`, `OBS-002`, `PRIV-001`, `PERF-001`, and `DOC-001`. The follow-up pipelines refined those through `READY-004`, `OBS-010`, `PRIV-007`, `FAIL-002`, and `DOC-003`. The final boundary classifies transport versus responding contract health independently, reconstructs every failure through one enrichment path, keeps terminal outcome counters exclusive, excludes abandoned/cancelled unpublished VAD candidates from admission counts, terminalizes hard media-publication setup failures before closing the session, measures first reasoning-or-visible provider token separately from first visible, deduplicates resource samples, enforces minimal-env monotonic expiry plus file-locked guardian custody/TOCTOU-safe deletion, removes resource subprocess work from asyncio, and latches late/duplicate `degraded` state until reset/new session. The review artifact records each correction.
+The first pipeline head `556d57eb` fixed `OBS-001`, `READY-001`, `FAIL-001`, and `DATA-001`; its fix review then reported the accepted `READY-002`, `OBS-002`, `PRIV-001`, `PERF-001`, and `DOC-001`. The follow-up pipelines refined those through `READY-004`, `OBS-010`, `PRIV-007`, `FAIL-002`, `DOC-003`, and final announcement/resource-correlation `REVIEW-001`–`REVIEW-004`. The final boundary classifies transport versus responding contract health independently, reconstructs every failure through one enrichment path, keeps terminal outcome counters exclusive, excludes abandoned/cancelled unpublished VAD candidates from admission counts, terminalizes hard media-publication setup failures before closing the session, measures first reasoning-or-visible provider token separately from first visible, deduplicates resource samples, enforces minimal-env monotonic expiry plus file-locked guardian custody/TOCTOU-safe deletion, removes resource subprocess work from asyncio, and latches late/duplicate `degraded` state until reset/new session. The review artifact records each correction.
 
 ## Validation
 
 | Command | Result | Notes |
 | --- | --- | --- |
 | `no-mistakes doctor` | PASS | Shared daemon healthy; not restarted/updated. |
-| `./verify-slice8` | PASS | 59 Python focused tests, safe process/resource/privacy verifier, 67 focused browser tests; 12-row matrix complete. |
-| `./verify` | PASS | 256 Python behavioral tests; network-denied deterministic root trace. |
+| `./verify-slice8` | PASS | 61 Python focused tests, safe process/resource/privacy verifier, 67 focused browser tests; 12-row matrix complete. |
+| `./verify` | PASS | 259 Python behavioral tests; network-denied deterministic root trace. |
 | `./verify-slice7` | PASS | 84 focused avatar/UI/browser tests plus production/review builds; replay hash unchanged. |
 | `./verify-local-lfm` | PASS | Exact local identity/hashes/2×32K slots, parallel/cancellation/recovery; no cloud/fallback. |
 | `./verify-silero-kseniya` | PASS | Exact-cache two-worker/native-48 focused real check; physical claims explicitly absent. |
-| `./verify-slice6` | PASS before the last focused additions | 251 Python + installed runtime + 86 web tests/builds + deterministic Firefox/official LiveKit regression; no browser/runtime composition changed afterward. Physical audibility not claimed. |
+| `./verify-slice6` | PASS | 259 Python + installed runtime + 86 web tests/builds + deterministic Firefox/official LiveKit regression. Physical audibility not claimed. |
 | `git diff --check` / Python compile / TypeScript typecheck | PASS | Clean whitespace/syntax/type boundaries at implementation checkpoint. |
 
 ## Unresolved uncertainty

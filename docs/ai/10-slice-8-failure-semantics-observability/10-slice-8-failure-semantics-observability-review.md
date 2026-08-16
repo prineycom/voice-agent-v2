@@ -36,7 +36,7 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | PASS | 256 network-denied Python behavioral tests after all follow-up regressions. |
+| `./verify` | PASS | 259 network-denied Python behavioral tests after all follow-up regressions. |
 | `./verify-slice8` | PASS | Full matrix/privacy/readiness/capture/process/resource and focused browser gate. |
 | `./verify-slice7` | PASS | Avatar/UI tests/builds. |
 | `./verify-local-lfm` | PASS | Exact real local provider and cancellation/recovery. |
@@ -56,7 +56,7 @@ The follow-up commit on top of the exact pipeline head closes every remaining re
 | `OBS-002`–`OBS-010` | `dependency_class` is closed; controller, publication, and control-publish terminal failures use correlated common enrichment; reconstruction retains matrix/stage/code/state. Resource percentiles consume canonical samples, every distribution reports actual N, and terminal replacement counters remain exclusive. Admission counting includes a publication attempt that reaches an enriched terminal but excludes an abandoned/cancelled unannounced VAD candidate with no public event. Provider TTFT includes partial first reasoning-or-visible token while first visible remains separate. |
 | `PRIV-001`–`PRIV-007` | [`architecture.md` §8.2](../../architecture.md#82-data-handling) owns the final retention contract. Only verified `/run/user/<uid>` tmpfs with lingering disabled is accepted; focused evidence exercises minimal-env monotonic expiry, four-slot custody across early deletion, locked owner-nonce deletion, and rejection of configurable persistent lookalikes. |
 | `PERF-001` | `/proc`/`nvidia-smi` sampling is serialized off the asyncio event loop via background `to_thread` tasks; endpoint admission has a timing regression proving it does not wait for a slow sampler. |
-| `FAIL-002` | Media-publication setup/identity/stream loss mapped to hard LiveKit unavailability publishes a correlated enriched failure where transport permits, closes/degrades the session, and refuses later inference admission; control-publication loss records the equivalent terminal replacement, while soft TTS prefix salvage remains turn-scoped. |
+| `FAIL-002` / `REVIEW-001`–`REVIEW-004` | Media setup/identity/stream loss uses the enriched hard-LiveKit boundary and refuses later admission; control loss records an equivalent terminal replacement, while soft TTS prefix salvage remains turn-scoped. Pre-publication cancellation rolls back admission; cancellation after `turn.listening` completes the bounded media boundary then publishes exactly one interruption. Delayed resource samples retain their original epoch. |
 | `DOC-001`–`DOC-003` | Late/duplicate control has the allowed `degraded` consequence via a dedicated session-scoped latch: strict drop, visible/diagnostic count, no phase/media action, and neither terminal interruption nor later valid turns clear it; only reset/new-session recovery does. |
 
 ## Recommendations
