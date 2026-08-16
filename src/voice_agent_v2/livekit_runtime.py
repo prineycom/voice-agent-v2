@@ -330,16 +330,10 @@ class LiveTurnRunner:
                 and isinstance(warmup.get("lfm"), dict)
                 and warmup["lfm"].get("discarded") is True
             )
-        process_ids = getattr(self.tts, "process_ids", None)
-        if process_ids is None:
-            process_id = getattr(self.tts, "process_id", None)
-            process_ids = () if process_id is None else (process_id,)
-        tts_alive = len(process_ids) > 0
-        tts_ready_check = getattr(self.tts, "ready_for_admission", None)
-        tts_ready = tts_alive and (
-            bool(tts_ready_check()) if tts_ready_check is not None else True
-        )
         if isinstance(self.tts, SileroKseniyaTTS):
+            tts_health = self.tts.health_snapshot()
+            tts_alive = tts_health.live_worker_count > 0
+            tts_ready = tts_health.ready_for_admission
             tts_compatible = (
                 self.tts.version == "voice-agent.tts.v2"
                 and isinstance(self.tts.identity, str)
@@ -347,6 +341,15 @@ class LiveTurnRunner:
                 and self.tts.speaker == self.tts_profile.speaker
             )
         else:
+            process_ids = getattr(self.tts, "process_ids", None)
+            if process_ids is None:
+                process_id = getattr(self.tts, "process_id", None)
+                process_ids = () if process_id is None else (process_id,)
+            tts_alive = len(process_ids) > 0
+            tts_ready_check = getattr(self.tts, "ready_for_admission", None)
+            tts_ready = tts_alive and (
+                bool(tts_ready_check()) if tts_ready_check is not None else True
+            )
             tts_compatible = (
                 getattr(self.tts, "version", None) in {
                     "voice-agent.tts.v1", "voice-agent.tts.v2"

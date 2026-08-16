@@ -14,7 +14,11 @@ from tests.test_checkpoint_ab import (
     load_runtime,
 )
 from tests.test_silero_tts import FakeSTT, FakeVisibleLLM, ProcessCoordinator
-from voice_agent_v2.silero_tts import SileroKseniyaTTS, SileroWorkerPool
+from voice_agent_v2.silero_tts import (
+    SileroKseniyaTTS,
+    SileroPoolHealth,
+    SileroWorkerPool,
+)
 from voice_agent_v2.tracer import CancellationToken
 
 
@@ -45,6 +49,64 @@ class PublishedLLMProfileTests(unittest.TestCase):
         runner.warmup_metadata["lfm_ready"]["selected_alias"] = "unverified-model"
         with self.assertRaisesRegex(RuntimeError, "verified local LLM identity is unavailable"):
             runner.public_llm_profile()
+
+
+class TTSHealthSnapshotTests(unittest.TestCase):
+    def test_runner_preserves_partial_and_total_pool_liveness(self) -> None:
+        runtime = load_runtime()
+
+        class Pool:
+            observations: list[dict[str, object]] = []
+
+            def __init__(self) -> None:
+                self.snapshot = SileroPoolHealth((3103,), 1, True)
+
+            def health_snapshot(self) -> SileroPoolHealth:
+                return self.snapshot
+
+            @property
+            def process_ids(self):
+                raise AssertionError("split process-id read is not allowed")
+
+            @property
+            def ready_count(self):
+                raise AssertionError("split readiness read is not allowed")
+
+        pool = Pool()
+        runner = runtime.LiveTurnRunner.__new__(runtime.LiveTurnRunner)
+        runner.stt = types.SimpleNamespace(
+            process_id=3101,
+            identity="local/test-stt",
+            version="voice-agent.stt.v1",
+        )
+        runner.llm = types.SimpleNamespace(
+            provider_mode="local",
+            provider_identity="local/test-llm",
+            version="voice-agent.llm-provider.v1",
+        )
+        runner.tts_profile = runtime.SileroVoiceProfile()
+        runner.tts = SileroKseniyaTTS(pool)
+        runner.warmup_metadata = {
+            "stt": {"discarded": True},
+            "lfm_ready": {"ready": True},
+            "lfm": {"discarded": True},
+            "tts": {"discarded": True},
+        }
+
+        partial = next(
+            component for component in runner.readiness_components()
+            if component.component == "tts"
+        )
+        self.assertEqual(partial.liveness, "alive")
+        self.assertEqual(partial.readiness, "unready")
+
+        pool.snapshot = SileroPoolHealth((), 0, True)
+        absent = next(
+            component for component in runner.readiness_components()
+            if component.component == "tts"
+        )
+        self.assertEqual(absent.liveness, "dead")
+        self.assertEqual(absent.readiness, "unready")
 
 
 class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):

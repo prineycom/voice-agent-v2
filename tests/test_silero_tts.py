@@ -903,6 +903,29 @@ class SileroPoolTests(unittest.TestCase):
         finally:
             pool.close()
 
+    def test_health_snapshot_distinguishes_partial_and_total_worker_loss(self) -> None:
+        coordinator = ProcessCoordinator()
+        pool = self.pool(coordinator)
+        tts = SileroKseniyaTTS(pool)
+        try:
+            coordinator.created[0].process.running = False
+
+            partial = tts.health_snapshot()
+
+            self.assertEqual(partial.live_worker_count, 1)
+            self.assertEqual(partial.ready_worker_count, 1)
+            self.assertFalse(partial.ready_for_admission)
+
+            coordinator.created[1].process.running = False
+
+            absent = tts.health_snapshot()
+
+            self.assertEqual(absent.live_worker_count, 0)
+            self.assertEqual(absent.ready_worker_count, 0)
+            self.assertFalse(absent.ready_for_admission)
+        finally:
+            pool.close()
+
     def test_failed_recovery_warmup_keeps_replacement_quarantined(self) -> None:
         coordinator = ProcessCoordinator()
         pool = self.pool(coordinator)

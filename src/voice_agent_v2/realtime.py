@@ -495,6 +495,14 @@ class RealtimeSession:
                 ComponentHealth("selected_llm", "alive", "ready", True, "configured-local-llm", "voice-agent.llm-provider.v1"),
                 ComponentHealth("tts", "alive", "ready", True, "configured-tts", TTS_V2_VERSION),
             ))
+            admission = getattr(self.runner, "ready_for_admission", None)
+            if (
+                failed_stage is None
+                and failure_code is None
+                and admission is not None
+                and not admission()
+            ):
+                failed_stage, failure_code = self._readiness_failure()
         else:
             reported = tuple(readiness_components())
             if not all(isinstance(component, ComponentHealth) for component in reported):
@@ -632,16 +640,9 @@ class RealtimeSession:
         ready_payload: dict[str, object] | None = None,
         reconnect_payload: dict[str, object] | None = None,
     ) -> bool:
-        admission = getattr(self.runner, "ready_for_admission", None)
-        failure = None
-        if admission is not None and not admission():
-            failure = self._readiness_failure()
-        health = self._health_report(
-            failed_stage=failure[0] if failure is not None else None,
-            failure_code=failure[1] if failure is not None else None,
-        )
+        health = self._health_report()
         if health.get("overall_readiness") != "ready":
-            stage, code = failure or self._health_failure(health)
+            stage, code = self._health_failure(health)
             await self._degrade_locked(stage, code, health=health)
             return False
         if reconnect_payload is not None:

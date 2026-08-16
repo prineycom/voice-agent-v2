@@ -1278,14 +1278,14 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(await session.ready())
-        self.assertEqual(failures, [("tts", "tts_backend_not_ready")])
+        self.assertEqual(failures, [("tts", "silero_pool_not_ready")])
         self.assertEqual(len(events.events), 1)
         degraded = events.events[0]
         self.assertEqual(degraded["schema_version"], CONTROL_EVENT_VERSION)
         self.assertEqual(degraded["session_id"], "session-ready-loss")
         self.assertEqual(degraded["type"], "session.degraded")
         self.assertEqual(degraded["payload"]["stage"], "tts")
-        self.assertEqual(degraded["payload"]["code"], "tts_backend_not_ready")
+        self.assertEqual(degraded["payload"]["code"], "silero_pool_not_ready")
         self.assertEqual(degraded["payload"]["user_state"], "degraded")
         self.assertEqual(degraded["payload"]["failure_matrix_id"], "tts_failure")
         self.assertEqual(degraded["payload"]["health"]["overall_readiness"], "unready")
@@ -1340,6 +1340,71 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tts_health["liveness"], "alive")
         self.assertEqual(tts_health["readiness"], "unready")
         self.assertEqual(tts_health["reason_code"], "silero_pool_not_ready")
+
+    async def test_ready_and_reconnect_gate_on_one_fresh_five_component_snapshot(self) -> None:
+        class SnapshotRunner:
+            def __init__(self) -> None:
+                self.snapshot_count = 0
+
+            def ready_for_admission(self) -> bool:
+                raise AssertionError("readiness must come from the health snapshot")
+
+            def readiness_components(self) -> tuple[ComponentHealth, ...]:
+                self.snapshot_count += 1
+                return (
+                    ComponentHealth(
+                        "stt", "alive", "ready", True,
+                        "stt", "voice-agent.stt.v1",
+                    ),
+                    ComponentHealth(
+                        "selected_llm", "alive", "ready", True,
+                        "llm", "voice-agent.llm-provider.v1",
+                    ),
+                    ComponentHealth(
+                        "tts", "alive", "ready", True,
+                        "silero", "voice-agent.tts.v2",
+                    ),
+                )
+
+        events = MemoryEvents()
+        runner = SnapshotRunner()
+        session = RealtimeSession(
+            session_id="session-single-health-snapshot",
+            runner=runner,
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        self.assertTrue(await session.ready())
+        self.assertEqual(runner.snapshot_count, 1)
+        self.assertEqual([event["type"] for event in events.events], ["session.ready"])
+        health = events.events[0]["payload"]["health"]
+        self.assertEqual(health["overall_readiness"], "ready")
+        self.assertEqual(
+            {component["component"] for component in health["components"]},
+            {"livekit", "controller", "stt", "selected_llm", "tts"},
+        )
+        self.assertEqual(len(health["components"]), 5)
+
+        request = json.dumps({
+            "schema_version": "voice-agent.client-control.v1",
+            "session_id": session.session_id,
+            "stream_epoch": 1,
+            "sequence": 1,
+            "type": "client.reconnected",
+        }).encode()
+        self.assertTrue(await session.handle_client_control(request))
+        self.assertEqual(runner.snapshot_count, 2)
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["session.ready", "session.reconnected", "session.ready"],
+        )
+        reconnect_health = events.events[-1]["payload"]["health"]
+        self.assertEqual(len(reconnect_health["components"]), 5)
+        self.assertEqual(
+            len({component["component"] for component in reconnect_health["components"]}),
+            5,
+        )
 
     async def test_reconnect_worker_loss_publishes_degradation_without_ready_ack(self) -> None:
         class ResetLosesReadinessRunner(StreamingRunner):
