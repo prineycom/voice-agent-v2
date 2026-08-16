@@ -316,7 +316,7 @@ class CaptureAndResourceTests(unittest.TestCase):
                     },
                     project_root=project,
                 )
-            with self.assertRaisesRegex(Slice6ConfigurationError, "private XDG runtime"):
+            with self.assertRaisesRegex(Slice6ConfigurationError, "lifetime-scoped"):
                 Slice6Settings.from_environment(
                     {
                         **environment,
@@ -326,20 +326,42 @@ class CaptureAndResourceTests(unittest.TestCase):
                     },
                     project_root=project,
                 )
-            enabled = Slice6Settings.from_environment(
-                {
-                    **environment,
-                    "VOICE_AGENT_DIAGNOSTIC_CAPTURE": "1",
-                    "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT": str(Path(directory) / "private"),
-                    "VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS": "600",
-                    "XDG_RUNTIME_DIR": directory,
-                },
-                project_root=project,
-            )
+            with patch(
+                "voice_agent_v2.slice6_config.require_lifetime_runtime_root",
+                side_effect=lambda path: path.expanduser().resolve(),
+            ):
+                enabled = Slice6Settings.from_environment(
+                    {
+                        **environment,
+                        "VOICE_AGENT_DIAGNOSTIC_CAPTURE": "1",
+                        "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT": str(Path(directory) / "private"),
+                        "VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS": "600",
+                        "XDG_RUNTIME_DIR": directory,
+                    },
+                    project_root=project,
+                )
             self.assertEqual(enabled.diagnostic_capture_ttl_seconds, 600)
             self.assertEqual(enabled.diagnostic_capture_root, Path(directory) / "private")
 
-    def test_capture_requires_opt_in_stays_outside_git_and_deletes(self) -> None:
+    def test_capture_rejects_persistent_private_directory(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            with self.assertRaisesRegex(ValueError, "lifetime-scoped"):
+                DiagnosticContentCapture(
+                    Path(directory) / "capture-root",
+                    "session-persistent",
+                    opt_in=True,
+                    ttl_seconds=60,
+                    guardian_factory=lambda *_arguments: None,
+                    runtime_root=Path(directory),
+                )
+
+    @patch(
+        "voice_agent_v2.diagnostics.require_lifetime_runtime_root",
+        side_effect=lambda path: path.expanduser().resolve(),
+    )
+    def test_capture_requires_opt_in_stays_outside_git_and_deletes(
+        self, _runtime_root
+    ) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             root = Path(directory) / "private"
             with self.assertRaisesRegex(ValueError, "explicit opt-in"):
@@ -362,7 +384,13 @@ class CaptureAndResourceTests(unittest.TestCase):
             self.assertTrue(DiagnosticContentCapture.delete_path(capture.path))
             self.assertFalse(capture.path.exists())
 
-    def test_capture_root_has_a_hard_aggregate_custody_bound(self) -> None:
+    @patch(
+        "voice_agent_v2.diagnostics.require_lifetime_runtime_root",
+        side_effect=lambda path: path.expanduser().resolve(),
+    )
+    def test_capture_root_has_a_hard_aggregate_custody_bound(
+        self, _runtime_root
+    ) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             root = Path(directory) / "captures"
             guardians: list[tuple[Path, str, float, float]] = []
@@ -415,7 +443,13 @@ class CaptureAndResourceTests(unittest.TestCase):
             )
             self.assertTrue(replacement.path.exists())
 
-    def test_capture_rejects_project_path_and_exercises_expiry(self) -> None:
+    @patch(
+        "voice_agent_v2.diagnostics.require_lifetime_runtime_root",
+        side_effect=lambda path: path.expanduser().resolve(),
+    )
+    def test_capture_rejects_project_path_and_exercises_expiry(
+        self, _runtime_root
+    ) -> None:
         with self.assertRaisesRegex(ValueError, "outside Git"):
             DiagnosticContentCapture(
                 ROOT / "captures", "session-forbidden", opt_in=True

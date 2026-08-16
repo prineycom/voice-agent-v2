@@ -69,6 +69,57 @@ CANCELLATION_CLEANUP_BOUND_MS = 1_000
 CONTROL_PUBLISH_BOUND_MS = 1_000
 MAX_UTTERANCE_BYTES = INPUT_MEDIA_MAX_BYTES
 TERMINAL_CONTROLLER_FAILURE_CODES = frozenset({"local_lfm_handoff_cleanup_failed"})
+CONTROL_OBSERVATION_PAYLOAD_FIELDS = (
+    "user_state",
+    "dependency_class",
+    "failure_matrix_id",
+    "outcome",
+    "admit_turn",
+    "voice_continues",
+    "text_salvageable",
+    "retry_count",
+    "retry_limit",
+    "operator_only",
+    "provider_switched",
+    "external_transfer_changed",
+    "stt_or_tts_moved_to_cloud",
+    "auth_changed",
+    "wake_changed",
+    "avatar_selection_changed",
+    "provider_mode",
+    "provider_identity",
+    "external_transfer",
+    "provider_request_id_available",
+    "provider_input_unit_count",
+    "provider_output_unit_count",
+    "provider_total_unit_count",
+    "endpoint_to_stt_final_ms",
+    "provider_time_to_first_token_ms",
+    "provider_completion_ms",
+    "tts_time_to_first_audio_ms",
+    "cancellation_latency_ms",
+    "endpoint_to_first_visible_ms",
+    "endpoint_to_first_accepted_pcm_ms",
+    "total_turn_ms",
+    "slowest_stage",
+    "output_bytes",
+    "output_padded_bytes",
+    "output_frames_submitted",
+    "server_pcm_queue_max_blocks",
+    "server_segment_queue_max_segments",
+    "turn_admission_count",
+    "turn_completion_count",
+    "turn_failure_count",
+    "turn_interruption_count",
+    "cancellation_count",
+    "stale_drop_count",
+    "client_control_drop_count",
+    "cpu_utilization_percent",
+    "host_ram_used_mib",
+    "process_rss_mib",
+    "gpu_vram_used_mib",
+    "gpu_utilization_percent",
+)
 
 
 class EventSink(Protocol):
@@ -138,6 +189,7 @@ class TurnContext:
     resource_terminal: dict[str, object] = field(default_factory=dict)
     resource_endpoint_started: bool = False
     resource_terminal_started: bool = False
+    transport_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -2044,6 +2096,31 @@ class RealtimeSession:
             "payload": payload,
         }
 
+    @staticmethod
+    def _control_observation_fields(
+        event: dict[str, object],
+        event_type: str,
+        payload: dict[str, object],
+        terminal: bool,
+    ) -> dict[str, object]:
+        observation_fields: dict[str, object] = {
+            "event_type": event_type,
+            "sequence": int(event["sequence"]),
+            "terminal": terminal,
+            "stream_epoch": int(event["stream_epoch"]),
+            "request_id": str(event["request_id"]),
+            "media_generation": int(event["media_generation"]),
+        }
+        for name in CONTROL_OBSERVATION_PAYLOAD_FIELDS:
+            value = payload.get(name)
+            if value is None or isinstance(value, (bool, int, float, str)):
+                observation_fields[name] = value
+        if isinstance(payload.get("stage"), str):
+            observation_fields["failure_stage"] = payload["stage"]
+        if isinstance(payload.get("code"), str):
+            observation_fields["failure_code"] = payload["code"]
+        return observation_fields
+
     async def _emit(
         self,
         turn_id: str,
@@ -2055,71 +2132,44 @@ class RealtimeSession:
         event = self._reserve_public_event(turn_id, event_type, payload, terminal=terminal)
         try:
             await self.event_sink.send(event)
-            observation_fields: dict[str, object] = {
-                "event_type": event_type,
-                "sequence": self._event_sequence,
-                "terminal": terminal,
-                "request_id": str(event["request_id"]),
-                "media_generation": int(event["media_generation"]),
-            }
-            for name in (
-                "user_state",
-                "dependency_class",
-                "failure_matrix_id",
-                "outcome",
-                "retry_count",
-                "retry_limit",
-                "provider_mode",
-                "provider_identity",
-                "external_transfer",
-                "provider_request_id_available",
-                "provider_input_unit_count",
-                "provider_output_unit_count",
-                "provider_total_unit_count",
-                "endpoint_to_stt_final_ms",
-                "provider_time_to_first_token_ms",
-                "provider_completion_ms",
-                "tts_time_to_first_audio_ms",
-                "cancellation_latency_ms",
-                "endpoint_to_first_visible_ms",
-                "endpoint_to_first_accepted_pcm_ms",
-                "total_turn_ms",
-                "slowest_stage",
-                "output_bytes",
-                "output_padded_bytes",
-                "output_frames_submitted",
-                "server_pcm_queue_max_blocks",
-                "server_segment_queue_max_segments",
-                "turn_admission_count",
-                "turn_completion_count",
-                "turn_failure_count",
-                "turn_interruption_count",
-                "cancellation_count",
-                "stale_drop_count",
-                "client_control_drop_count",
-                "cpu_utilization_percent",
-                "host_ram_used_mib",
-                "process_rss_mib",
-                "gpu_vram_used_mib",
-                "gpu_utilization_percent",
-            ):
-                value = payload.get(name)
-                if value is None or isinstance(value, (bool, int, float, str)):
-                    observation_fields[name] = value
-            if isinstance(payload.get("stage"), str):
-                observation_fields["failure_stage"] = payload["stage"]
-            if isinstance(payload.get("code"), str):
-                observation_fields["failure_code"] = payload["code"]
+            observation_fields = self._control_observation_fields(
+                event, event_type, payload, terminal
+            )
             self._trace(
                 "control", "published", turn_id=turn_id, **observation_fields
             )
         except Exception as error:
+            failure = {
+                "outcome": "failed",
+                "stage": "transport",
+                "code": "control_publish_failed",
+                **failure_payload("transport", "control_publish_failed"),
+            }
+            failed_event_type = event_type
+            failed_terminal = False
+            context = self._active
+            if (
+                turn_id != SESSION_TURN_ID
+                and context is not None
+                and context.turn_id == turn_id
+            ):
+                if not context.transport_failed:
+                    if event_type == "turn.completed" and self.turn_counts["completed"] > 0:
+                        self.turn_counts["completed"] -= 1
+                    if event_type != "turn.failed":
+                        self.turn_counts["failed"] += 1
+                    context.transport_failed = True
+                context.terminal = True
+                self._add_metrics(context, failure)
+                failed_event_type = "turn.failed"
+                failed_terminal = True
+            observation_fields = self._control_observation_fields(
+                event, failed_event_type, failure, failed_terminal
+            )
+            observation_fields["failed_event_type"] = event_type
+            observation_fields["failure_class"] = type(error).__name__
             self._trace(
-                "control",
-                "publish_failed",
-                event_type=event_type,
-                failure_class=type(error).__name__,
-                failure_code="control_publish_failed",
+                "control", "publish_failed", turn_id=turn_id, **observation_fields
             )
             self._closed = True
             self._report_failure("transport", "control_publish_failed")

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+import tempfile
 import threading
 import time
 import unittest
@@ -12,7 +15,8 @@ from tests.test_checkpoint_ab import (
     MemoryEvents,
     StreamingRunner,
 )
-from voice_agent_v2.observability import ResourceSnapshot
+from voice_agent_v2.diagnostics import PrivacySafeTrace, TraceIdentity
+from voice_agent_v2.observability import ResourceSnapshot, failure_payload, reconstruct_timelines
 from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES
 from voice_agent_v2.v2_contracts import EventEnvelopeV2
 from voice_agent_v2.realtime import (
@@ -73,6 +77,56 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published["dependency_class"], "hard")
         self.assertEqual(published["failure_matrix_id"], "controller_failure")
         self.assertEqual(published["user_state"], "unavailable")
+
+    async def test_publish_failure_records_correlated_enriched_failed_terminal(self) -> None:
+        class FailingTerminalEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.completed":
+                    raise RuntimeError("synthetic control transport failure")
+                await super().send(event)
+
+        with tempfile.TemporaryDirectory() as directory:
+            events = FailingTerminalEvents()
+            trace = PrivacySafeTrace(
+                Path(directory) / "trace.jsonl",
+                TraceIdentity("session-publish-failure"),
+            )
+            session = RealtimeSession(
+                session_id="session-publish-failure",
+                runner=StreamingRunner(),
+                event_sink=events,
+                audio_sink=MemoryAudio(),
+                trace_observer=trace.observe,
+            )
+
+            await session.submit_utterance(b"\0\0" * 320)
+            await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+
+            records = [
+                json.loads(line)
+                for line in trace.path.read_text(encoding="utf-8").splitlines()
+            ]
+            timeline = reconstruct_timelines(records)[0]
+            self.assertEqual(timeline.terminal_outcome, "failed")
+            self.assertEqual(timeline.failure_stage, "transport")
+            self.assertEqual(timeline.failure_code, "control_publish_failed")
+            self.assertEqual(timeline.failure_matrix_id, "livekit_unavailable")
+            self.assertEqual(timeline.dependency_class, "hard")
+            self.assertEqual(timeline.user_state, "retrying")
+            failed = next(
+                record for record in records if record["event"] == "publish_failed"
+            )
+            self.assertEqual(failed["turn_id"], "turn-00000001")
+            self.assertEqual(failed["fields"]["event_type"], "turn.failed")
+            self.assertTrue(failed["fields"]["terminal"])
+            self.assertEqual(failed["fields"]["failed_event_type"], "turn.completed")
+            for name, value in failure_payload(
+                "transport", "control_publish_failed"
+            ).items():
+                self.assertEqual(failed["fields"][name], value)
+            self.assertEqual(failed["fields"]["turn_completion_count"], 0)
+            self.assertEqual(failed["fields"]["turn_failure_count"], 1)
+            self.assertNotIn("turn.completed", [event["type"] for event in events.events])
 
     async def test_resource_sampling_never_blocks_endpoint_admission(self) -> None:
         class SlowSampler:

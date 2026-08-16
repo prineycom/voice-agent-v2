@@ -89,9 +89,9 @@ Run the focused bounded gate:
 ./verify-slice8
 ```
 
-It executes all architecture failure rows and their documented consequences, liveness-versus-compatible-readiness checks, a metadata-only correlated timeline and preregistered percentile report, default privacy rejection, opt-in capture plus the public deletion command, one disposable real-process recovery bound, a safe 16-MiB/100-ms pressure sample, and focused System/Timeline/avatar-render/browser state tests. It does not stop shared services, disconnect Tailscale, or exhaust RAM/VRAM.
+It executes all architecture failure rows and their documented consequences, liveness-versus-compatible-readiness checks, a metadata-only correlated timeline and preregistered percentile report, default privacy rejection, opt-in capture plus the public deletion command when the lifetime runtime is available (otherwise persistent-root fail-closed behavior), one disposable real-process recovery bound, a safe 16-MiB/100-ms pressure sample, and focused System/Timeline/avatar-render/browser state tests. It does not stop shared services, disconnect Tailscale, or exhaust RAM/VRAM.
 
-Default metadata diagnostics contain no conversation/media content, secrets, exception messages, or content-bearing identifiers. Explicit content capture is off by default. To enable it, add the exact settings documented in [`.env.slice6.example`](.env.slice6.example) to ignored server configuration; the capture root must remain outside Git beneath the private `XDG_RUNTIME_DIR`. Inspect or delete an owned capture without enumerating its content:
+Default metadata diagnostics contain no conversation/media content, secrets, exception messages, or content-bearing identifiers. Explicit content capture is off by default. To enable it, add the exact settings documented in [`.env.slice6.example`](.env.slice6.example) to ignored server configuration; the capture root must remain outside Git beneath the exact `/run/user/<uid>` `XDG_RUNTIME_DIR` tmpfs, with user lingering disabled. Inspect or delete an owned capture without enumerating its content:
 
 ```sh
 ./manage-diagnostics status <capture-directory>

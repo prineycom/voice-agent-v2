@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from voice_agent_v2.diagnostics import DiagnosticContentCapture, PrivacySafeTrace, TraceIdentity  # noqa: E402
+from voice_agent_v2.runtime_directory import require_lifetime_runtime_root  # noqa: E402
 from voice_agent_v2.observability import (  # noqa: E402
     FAILURE_MATRIX,
     ComponentHealth,
@@ -111,7 +112,17 @@ def resource_evidence() -> dict[str, object]:
 
 
 def metadata_timeline_and_capture_evidence() -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="voice-agent-slice8-", dir="/var/tmp") as directory:
+    runtime_candidate = Path(
+        os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    )
+    try:
+        runtime_root = require_lifetime_runtime_root(runtime_candidate)
+    except ValueError:
+        runtime_root = None
+    temporary_parent = runtime_root or Path("/var/tmp")
+    with tempfile.TemporaryDirectory(
+        prefix="voice-agent-slice8-", dir=temporary_parent
+    ) as directory:
         root = Path(directory)
         trace_path = root / "metadata" / "timeline.jsonl"
         trace = PrivacySafeTrace(
@@ -161,42 +172,64 @@ def metadata_timeline_and_capture_evidence() -> dict[str, object]:
         report = percentile_report(
             records, load_preregistration(ROOT / "config" / "observability-v1.json")
         )
-        capture = DiagnosticContentCapture(
-            root / "private-capture-root",
-            "session-slice8-capture",
-            opt_in=True,
-            ttl_seconds=60,
-            guardian_factory=lambda *_arguments: None,
-            runtime_root=root,
-        )
-        capture.capture("transcript", "synthetic private transcript")
-        capture.capture("prompt", "synthetic private prompt")
-        capture.capture("response", "synthetic private response")
-        capture.capture("raw-audio", b"synthetic raw bytes")
-        capture_path = capture.path
-        deletion = subprocess.run(
-            [str(ROOT / "manage-diagnostics"), "delete", str(capture_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "LANG": "C.UTF-8",
-                "LC_ALL": "C.UTF-8",
-                "PYTHON": sys.executable,
-            },
-        )
-        deletion_result = json.loads(deletion.stdout)
-        deleted = deletion_result.get("deleted") is True
+        capture_path = root / "private-capture-root" / "capture-session-slice8-capture"
+        deleted = False
+        exercised = 0
+        persistent_root_rejected = False
+        if runtime_root is None:
+            try:
+                DiagnosticContentCapture(
+                    root / "private-capture-root",
+                    "session-slice8-capture",
+                    opt_in=True,
+                    ttl_seconds=60,
+                    guardian_factory=lambda *_arguments: None,
+                    runtime_root=root,
+                )
+            except ValueError:
+                persistent_root_rejected = True
+            else:
+                raise AssertionError("persistent diagnostic capture root was accepted")
+        else:
+            capture = DiagnosticContentCapture(
+                root / "private-capture-root",
+                "session-slice8-capture",
+                opt_in=True,
+                ttl_seconds=60,
+                guardian_factory=lambda *_arguments: None,
+                runtime_root=runtime_root,
+            )
+            capture.capture("transcript", "synthetic private transcript")
+            capture.capture("prompt", "synthetic private prompt")
+            capture.capture("response", "synthetic private response")
+            capture.capture("raw-audio", b"synthetic raw bytes")
+            capture_path = capture.path
+            exercised = 4
+            deletion = subprocess.run(
+                [str(ROOT / "manage-diagnostics"), "delete", str(capture_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PYTHON": sys.executable,
+                },
+            )
+            deletion_result = json.loads(deletion.stdout)
+            deleted = deletion_result.get("deleted") is True and not capture_path.exists()
         return {
             "default_capture_enabled": False,
             "metadata_record_count": len(records),
             "trace_failure_counts": trace.failure_counts,
             "report": report,
-            "explicit_capture_files_exercised": 4,
+            "runtime_capture_available": runtime_root is not None,
+            "persistent_root_rejected": persistent_root_rejected,
+            "explicit_capture_files_exercised": exercised,
             "capture_outside_git": not str(capture_path).startswith(str(ROOT)),
-            "capture_deleted": deleted and not capture_path.exists(),
+            "capture_deleted": deleted,
         }
 
 

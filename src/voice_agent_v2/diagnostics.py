@@ -26,6 +26,7 @@ from .observability import (
     safe_observation_scalar,
     validate_observation,
 )
+from .runtime_directory import require_lifetime_runtime_root
 
 MAX_TRACE_BYTES = 8 * 1024 * 1024
 MAX_TRACE_RECORDS = 20_000
@@ -364,29 +365,21 @@ class DiagnosticContentCapture:
         if type(ttl_seconds) is not int or not MIN_CAPTURE_TTL_SECONDS <= ttl_seconds <= MAX_CAPTURE_TTL_SECONDS:
             raise ValueError("diagnostic capture TTL is outside bounds")
         resolved = root.expanduser().resolve()
+        if not resolved.is_absolute() or _inside_git_worktree(resolved):
+            raise ValueError(
+                "diagnostic content capture must remain outside Git in the private runtime root"
+            )
         configured_runtime_root = runtime_root or (
             Path(value) if (value := os.environ.get("XDG_RUNTIME_DIR")) else None
         )
         if configured_runtime_root is None:
-            raise ValueError("diagnostic content capture requires a private runtime root")
-        resolved_runtime_root = configured_runtime_root.expanduser().resolve()
-        try:
-            runtime_status = resolved_runtime_root.stat()
-        except OSError as error:
-            raise ValueError("diagnostic runtime root is unavailable") from error
-        if (
-            not resolved_runtime_root.is_dir()
-            or runtime_status.st_uid != os.getuid()
-            or runtime_status.st_mode & 0o077
-        ):
-            raise ValueError("diagnostic runtime root must be private and user-owned")
-        if (
-            not resolved.is_absolute()
-            or _inside_git_worktree(resolved)
-            or not _inside_directory(resolved, resolved_runtime_root)
-        ):
             raise ValueError(
-                "diagnostic content capture must remain outside Git in the private runtime root"
+                "diagnostic content capture requires the lifetime-scoped private runtime tmpfs"
+            )
+        resolved_runtime_root = require_lifetime_runtime_root(configured_runtime_root)
+        if not _inside_directory(resolved, resolved_runtime_root):
+            raise ValueError(
+                "diagnostic content capture must remain in the lifetime-scoped private runtime tmpfs"
             )
         self.root = resolved
         self.session_id = session_id

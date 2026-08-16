@@ -42,11 +42,12 @@ MAX_OBSERVATION_SEQUENCE = 1_000_000_000
 _FORBIDDEN_FIELD_WORDS = frozenset({
     "audio", "content", "pcm", "prompt", "response", "secret", "text", "token", "transcript",
 })
-_SAFE_COUNT_OR_TIMING_KEYS = frozenset({
+_SAFE_FIELD_KEYS_WITH_RESERVED_WORDS = frozenset({
     "provider_time_to_first_token_ms",
+    "server_pcm_queue_max_blocks",
+    "text_salvageable",
     "tts_time_to_first_audio_ms",
     "endpoint_to_first_accepted_pcm_ms",
-    "server_pcm_queue_max_blocks",
 })
 _SAFE_STRING_FIELD_KEYS = frozenset({
     "backend",
@@ -56,6 +57,7 @@ _SAFE_STRING_FIELD_KEYS = frozenset({
     "decision",
     "dependency_class",
     "event_type",
+    "failed_event_type",
     "failure_class",
     "failure_code",
     "failure_matrix_id",
@@ -80,7 +82,7 @@ def safe_observation_key(value: str) -> bool:
         bool(value)
         and len(value) <= 64
         and (
-            lowered in _SAFE_COUNT_OR_TIMING_KEYS
+            lowered in _SAFE_FIELD_KEYS_WITH_RESERVED_WORDS
             or not any(word in lowered for word in _FORBIDDEN_FIELD_WORDS)
         )
     )
