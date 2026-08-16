@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import configparser
 from contextlib import redirect_stderr
 import hashlib
 from io import StringIO
@@ -69,6 +68,23 @@ def write_configuration(path: Path, values: dict[str, str]) -> None:
     path.chmod(0o600)
 
 
+def normalized_systemd_unit(path: Path) -> dict[str, dict[str, list[str]]]:
+    result: dict[str, dict[str, list[str]]] = {}
+    section: dict[str, list[str]] | None = None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = result.setdefault(line[1:-1], {})
+            continue
+        if section is None or "=" not in line:
+            raise AssertionError("systemd unit is not normalized")
+        name, value = line.split("=", 1)
+        section.setdefault(name, []).append(value)
+    return result
+
+
 class OperationsManifestTests(unittest.TestCase):
     def test_manifest_closes_component_order_restart_and_external_cloud_boundaries(self) -> None:
         manifest = load_operations_manifest(ROOT / DEFAULT_MANIFEST_RELATIVE)
@@ -93,30 +109,43 @@ class OperationsManifestTests(unittest.TestCase):
                 load_operations_manifest(path)
 
     def test_systemd_unit_matches_executable_restart_and_process_custody_contract(self) -> None:
-        parser = configparser.ConfigParser(interpolation=None, strict=False)
-        parser.optionxform = str
-        parser.read(ROOT / "ops/systemd/voice-agent-v2.service")
-        service = parser["Service"]
-        unit = parser["Unit"]
-        self.assertEqual(unit["StartLimitBurst"], "2")
-        self.assertEqual(unit["StartLimitIntervalSec"], "600")
-        self.assertEqual(service["Type"], "notify")
-        self.assertEqual(service["NotifyAccess"], "main")
-        self.assertEqual(service["Restart"], "on-failure")
-        self.assertEqual(service["RestartPreventExitStatus"], "2")
-        self.assertEqual(service["TimeoutStopSec"], "75s")
-        self.assertEqual(service["KillMode"], "mixed")
-        self.assertEqual(service["User"], "priney")
-        self.assertIn("voice-agent-ops run", service["ExecStart"])
-        self.assertNotIn(".local/share/voice-agent-v2", service["ReadWritePaths"])
-        self.assertEqual(service["RuntimeDirectory"], "voice-agent-v2")
-        self.assertEqual(service["RuntimeDirectoryMode"], "0700")
-        self.assertEqual(service["RuntimeDirectoryPreserve"], "no")
-        self.assertEqual(
-            service["Environment"],
-            "PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache",
+        unit_path = ROOT / "ops/systemd/voice-agent-v2.service"
+        verification = subprocess.run(
+            ["systemd-analyze", "security", "--offline=yes", str(unit_path)],
+            capture_output=True, text=True, timeout=30, check=False,
         )
-        self.assertNotIn("LITELLM", "\n".join(service.values()))
+        self.assertEqual(verification.returncode, 0, verification.stderr)
+
+        document = normalized_systemd_unit(unit_path)
+        service = document["Service"]
+        unit = document["Unit"]
+        self.assertEqual(unit["StartLimitBurst"], ["2"])
+        self.assertEqual(unit["StartLimitIntervalSec"], ["600"])
+        self.assertEqual(service["Type"], ["notify"])
+        self.assertEqual(service["NotifyAccess"], ["main"])
+        self.assertEqual(service["Restart"], ["on-failure"])
+        self.assertEqual(service["RestartPreventExitStatus"], ["2"])
+        self.assertEqual(service["TimeoutStopSec"], ["75s"])
+        self.assertEqual(service["KillMode"], ["mixed"])
+        self.assertEqual(service["User"], ["priney"])
+        self.assertEqual(
+            service["ExecStart"],
+            ["%h/.local/share/voice-agent-v2/current/voice-agent-ops run"],
+        )
+        self.assertEqual(service["ReadWritePaths"], ["%h/.cache/voice-agent-v2"])
+        self.assertEqual(service["RuntimeDirectory"], ["voice-agent-v2"])
+        self.assertEqual(service["RuntimeDirectoryMode"], ["0700"])
+        self.assertEqual(service["RuntimeDirectoryPreserve"], ["no"])
+        environment = dict(
+            assignment.split("=", 1) for assignment in service["Environment"]
+        )
+        self.assertEqual(environment, {
+            "HOME": "%h",
+            "XDG_RUNTIME_DIR": "/run/voice-agent-v2",
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONPYCACHEPREFIX": "/run/voice-agent-v2/pycache",
+        })
+        self.assertFalse(any(name.startswith("LITELLM_") for name in environment))
 
 
 class ServiceApplicationTests(unittest.TestCase):
@@ -276,6 +305,39 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertTrue(
                 output.call_args.args[0]["release_service_apply_required"]
             )
+
+    def test_canonical_mutations_share_one_fail_fast_operations_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            deploy_arguments = SimpleNamespace(
+                state_root=state, config=state / "runtime.env",
+            )
+            service_arguments = SimpleNamespace(state_root=state, restart=False)
+            owner = ReleaseStore(state)
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "_systemctl_show") as systemctl_show,
+                patch.object(operations_cli, "_sudo") as sudo,
+                patch.object(operations_cli.ReleaseStore, "deploy") as deploy,
+            ):
+                for operation, arguments in (
+                    (operations_cli.command_deploy, deploy_arguments),
+                    (operations_cli.command_install_service, service_arguments),
+                    (operations_cli.command_rollback, service_arguments),
+                ):
+                    with (
+                        self.subTest(operation=operation.__name__),
+                        owner.locked(),
+                        self.assertRaisesRegex(
+                            OperationalError, "already in progress",
+                        ),
+                    ):
+                        operation(arguments)
+            systemctl_show.assert_not_called()
+            sudo.assert_not_called()
+            deploy.assert_not_called()
+            with ReleaseStore(state).locked():
+                pass
 
     def test_run_exit_status_retries_only_transient_tailnet_unavailability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -956,6 +1018,27 @@ class LifecycleAndSustainedTests(unittest.TestCase):
             evaluate_sustained_run(
                 manifest, turns=turns, avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
             )
+
+    def test_sustained_report_rejects_oversized_json_integer_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary) / "sustained.json"
+            evidence.write_text(
+                '{"turns":[{"total_turn_ms":' + "9" * 5000
+                + '}],"avatar":{}}',
+                encoding="utf-8",
+            )
+            stderr = StringIO()
+            with (
+                patch.object(
+                    sys, "argv",
+                    ["voice-agent-ops", "sustained-report", "--evidence", str(evidence)],
+                ),
+                redirect_stderr(stderr),
+            ):
+                status = operations_cli.main()
+            self.assertEqual(status, 2)
+            self.assertIn("sustained_report_invalid", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_sustained_acceptance_rejects_nonfinite_boolean_and_negative_values(self) -> None:
         manifest = load_operations_manifest(ROOT / DEFAULT_MANIFEST_RELATIVE)

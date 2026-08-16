@@ -121,15 +121,15 @@ def command_validate(arguments: argparse.Namespace) -> None:
 
 
 def command_deploy(arguments: argparse.Namespace) -> None:
-    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
-    service = _systemctl_show() if canonical else {"load": "not-applicable"}
-    result = ReleaseStore(arguments.state_root).deploy(
-        source_root=ROOT, config_path=arguments.config,
-    )
-    result["release_service_apply_required"] = bool(
-        result.get("changed") is True and service.get("load") == "loaded"
-    )
-    _print(result)
+    store = ReleaseStore(arguments.state_root)
+    with store.locked():
+        canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+        service = _systemctl_show() if canonical else {"load": "not-applicable"}
+        result = store.deploy(source_root=ROOT, config_path=arguments.config)
+        result["release_service_apply_required"] = bool(
+            result.get("changed") is True and service.get("load") == "loaded"
+        )
+        _print(result)
 
 
 def command_validate_deployment(arguments: argparse.Namespace) -> None:
@@ -241,6 +241,13 @@ def command_install_service(arguments: argparse.Namespace) -> None:
     if arguments.state_root.resolve() != DEFAULT_STATE_ROOT.resolve():
         raise OperationalError("systemd_install_failed", "system service supports only the canonical state root")
     store = ReleaseStore(arguments.state_root)
+    with store.locked():
+        _install_service_locked(arguments, store)
+
+
+def _install_service_locked(
+    arguments: argparse.Namespace, store: ReleaseStore,
+) -> None:
     current = store.current()
     if current is None:
         raise OperationalError("deployment_unavailable", "deploy a compatible release before installing systemd")
@@ -297,42 +304,44 @@ def command_install_service(arguments: argparse.Namespace) -> None:
 
 
 def command_rollback(arguments: argparse.Namespace) -> None:
-    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
-    service_loaded = canonical and _systemctl_show()["load"] == "loaded"
-    unit_boundary = (
-        SYSTEM_UNIT_PATH
-        if canonical and (service_loaded or SYSTEM_UNIT_PATH.exists())
-        else None
-    )
-    result = ReleaseStore(arguments.state_root).rollback(
-        required_system_unit=unit_boundary,
-    )
-    if service_loaded:
-        _sudo("systemctl", "restart", SERVICE_NAME)
-        active = _sudo("systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4)).returncode == 0
-        if not active:
-            raise OperationalError(
-                "rollback_restart_failed",
-                "rollback pointer changed but service did not become active",
-            )
-        try:
-            _wait_for_runtime_release(str(result["release_id"]))
-        except OperationalError as error:
-            raise OperationalError(
-                "rollback_restart_failed",
-                "rollback pointer changed but prior release did not become ready",
-            ) from error
-        result["service_restarted"] = True
-        result["service_ready"] = True
-    else:
-        result["service_restarted"] = False
-    _print(result)
+    store = ReleaseStore(arguments.state_root)
+    with store.locked():
+        canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+        service_loaded = canonical and _systemctl_show()["load"] == "loaded"
+        unit_boundary = (
+            SYSTEM_UNIT_PATH
+            if canonical and (service_loaded or SYSTEM_UNIT_PATH.exists())
+            else None
+        )
+        result = store.rollback(required_system_unit=unit_boundary)
+        if service_loaded:
+            _sudo("systemctl", "restart", SERVICE_NAME)
+            active = _sudo(
+                "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
+            ).returncode == 0
+            if not active:
+                raise OperationalError(
+                    "rollback_restart_failed",
+                    "rollback pointer changed but service did not become active",
+                )
+            try:
+                _wait_for_runtime_release(str(result["release_id"]))
+            except OperationalError as error:
+                raise OperationalError(
+                    "rollback_restart_failed",
+                    "rollback pointer changed but prior release did not become ready",
+                ) from error
+            result["service_restarted"] = True
+            result["service_ready"] = True
+        else:
+            result["service_restarted"] = False
+        _print(result)
 
 
 def command_sustained_report(arguments: argparse.Namespace) -> None:
     try:
         evidence = json.loads(arguments.evidence.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, ValueError) as error:
         raise OperationalError("sustained_report_invalid", "sustained evidence is unavailable or invalid") from error
     if not isinstance(evidence, dict) or not isinstance(evidence.get("turns"), list) or not isinstance(evidence.get("avatar"), dict):
         raise OperationalError("sustained_report_invalid", "sustained evidence shape is invalid")

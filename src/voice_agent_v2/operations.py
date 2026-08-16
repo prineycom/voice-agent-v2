@@ -805,6 +805,8 @@ class ReleaseStore:
         self.current_link = self.state_root / "current"
         self.previous_link = self.state_root / "previous"
         self.lock_path = self.state_root / "operations.lock"
+        self._lock_descriptor: int | None = None
+        self._lock_depth = 0
 
     def _initialize(self) -> None:
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -813,13 +815,35 @@ class ReleaseStore:
 
     def locked(self) -> Iterator[None]:
         self._initialize()
-        descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        store = self
 
         class _Lock:
             def __enter__(inner_self) -> None:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                if store._lock_depth:
+                    store._lock_depth += 1
+                    return
+                descriptor = os.open(
+                    store.lock_path, os.O_RDWR | os.O_CREAT, 0o600,
+                )
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    os.close(descriptor)
+                    raise OperationalError(
+                        "operations_busy",
+                        "another release or service operation is already in progress",
+                    ) from error
+                store._lock_descriptor = descriptor
+                store._lock_depth = 1
 
             def __exit__(inner_self, *_arguments: object) -> None:
+                store._lock_depth -= 1
+                if store._lock_depth:
+                    return
+                descriptor = store._lock_descriptor
+                store._lock_descriptor = None
+                if descriptor is None:
+                    return
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
                 finally:

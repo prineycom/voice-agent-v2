@@ -187,6 +187,56 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(closed, [False])
         self.assertEqual(registry._controllers, {})
 
+    async def test_cleanup_failure_cannot_leak_the_single_admission_slot(self) -> None:
+        runtime = load_runtime()
+        runner = types.SimpleNamespace(
+            public_llm_profile=lambda: {"provider_mode": "local"},
+            tts_profile=types.SimpleNamespace(public_metadata=lambda: {"profile": "test"}),
+        )
+        settings = types.SimpleNamespace(
+            max_sessions=1,
+            livekit_public_url="wss://voice.test.ts.net:7443",
+            room_token_ttl_seconds=300,
+            browser_join_timeout_seconds=30,
+        )
+        registry = runtime.SessionRegistry.__new__(runtime.SessionRegistry)
+        registry.settings = settings
+        registry.runner = runner
+        registry._controllers = {}
+        registry._lock = asyncio.Lock()
+        registry._accepting = True
+        health = iter((
+            {"overall_readiness": "ready"},
+            {"overall_readiness": "unready"},
+            {"overall_readiness": "ready"},
+            {"overall_readiness": "ready"},
+        ))
+        registry.operational_health = lambda: next(health)
+
+        async def cleanup_failure(*, notify: bool) -> None:
+            raise RuntimeError("room cleanup failed")
+
+        failed_controller = types.SimpleNamespace(
+            start=lambda: asyncio.sleep(0),
+            close=cleanup_failure,
+        )
+        replacement_controller = types.SimpleNamespace(
+            start=lambda: asyncio.sleep(0),
+            arm_browser_join_timeout=lambda: None,
+            browser_token=lambda: "replacement-token",
+        )
+        with patch.object(
+            runtime, "LiveKitRoomController",
+            side_effect=(failed_controller, replacement_controller),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "room cleanup failed"):
+                await registry.create()
+            self.assertEqual(registry._controllers, {})
+            capability = await registry.create()
+
+        self.assertEqual(capability["token"], "replacement-token")
+        self.assertEqual(len(registry._controllers), 1)
+
 
 class LiveTurnObservationTests(unittest.TestCase):
     def test_segment_reservations_reach_the_real_controller_before_synthesis(self) -> None:

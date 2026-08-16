@@ -1512,9 +1512,11 @@ class SessionRegistry:
             }
             controller.arm_browser_join_timeout()
         except BaseException:
-            await controller.close(notify=False)
-            async with self._lock:
-                self._controllers.pop(session_id, None)
+            try:
+                await controller.close(notify=False)
+            finally:
+                async with self._lock:
+                    self._controllers.pop(session_id, None)
             raise
         return capability
 
