@@ -6,6 +6,8 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1299,6 +1301,52 @@ class LocalSTTContractTests(unittest.TestCase):
 
 
 class AdapterProcessTests(unittest.TestCase):
+    def test_adapter_exits_when_its_owning_parent_is_killed(self) -> None:
+        parent_script = (
+            "import json,os,signal,sys,time; "
+            "from pathlib import Path; "
+            "from voice_agent_v2.process_adapter import AdapterProcess; "
+            "child=AdapterProcess([sys.executable,'-c',"
+            "\"import json,os,time; print(json.dumps({'event':'ready','pid':os.getpid()}),flush=True); time.sleep(30)\""
+            "],Path(sys.argv[1]),dict(os.environ)); "
+            "ready=child.start(2); print(ready['pid'],flush=True); "
+            "os.kill(os.getpid(),signal.SIGKILL)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            environment = dict(os.environ)
+            source_root = str(Path(__file__).resolve().parents[1] / "src")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                value for value in (source_root, environment.get("PYTHONPATH", "")) if value
+            )
+            parent = subprocess.Popen(
+                [sys.executable, "-c", parent_script, str(Path(directory) / "adapter.log")],
+                stdout=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            assert parent.stdout is not None
+            child_pid = int(parent.stdout.readline())
+            try:
+                parent.wait(timeout=2)
+                self.assertEqual(parent.returncode, -signal.SIGKILL)
+                deadline = time.monotonic() + 2
+                child_state = None
+                while time.monotonic() < deadline:
+                    try:
+                        child_state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
+                    except (FileNotFoundError, ProcessLookupError):
+                        child_state = None
+                    if child_state in {None, "Z"}:
+                        break
+                    time.sleep(0.02)
+                self.assertIn(child_state, {None, "Z"})
+            finally:
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                parent.stdout.close()
+
     def test_correlated_request_failure_keeps_resident_child_for_next_request(self) -> None:
         script = (
             "import json,os,sys; "

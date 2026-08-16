@@ -2,7 +2,7 @@
 
 - **Decision:** [ADR-0009](../adr/0009-silero-kseniya-tts-v2-native-48-private-evaluation.md)
 - **Checkpoint date:** 2026-08-14
-- **Status:** deterministic and focused exact-cache checks pass; Pasha physical acceptance, tailnet exercise, and full-stack resources remain open
+- **Status:** deterministic and focused exact-cache checks pass; Pasha physical acceptance and loopback full-stack resources remain open; external exposure is not an application gate
 - **Delivery boundary:** private unmerged test branch only; no production/commercial authority
 
 ## Exact identity and license boundary
@@ -108,29 +108,29 @@ TTS readiness, identity, capacity, synthesis, format, protocol, timeout, and res
 
 ## Official startup ownership
 
-`./run-slice6` discards only ambient inherited `LITELLM_BASE_URL` and `LITELLM_TOKEN_FILE` before it sources operator-owned `.env.slice6`; putting either name in that file remains an explicit fail-closed configuration error. It reads current Tailscale Serve status without credentials before mutation, including the CLI's per-client `Foreground` documents. Exact existing application/signaling mappings are externally owned and remain after shutdown, conflicts fail before any route starts, and absent routes start as foreground children serially only after a bounded exact-status check. Cleanup stops only children created by that invocation, so unrelated handlers (including HTTPS `443` → `127.0.0.1:3000`) and pre-existing exact mappings survive. There is no global reset, background route, service manager, retry, or blind startup sleep.
+`./run-slice6` discards only ambient inherited `LITELLM_BASE_URL` and `LITELLM_TOKEN_FILE` before it sources operator-owned `.env.slice6`; putting either name in that file remains an explicit fail-closed configuration error. It starts only loopback-local application processes and creates, mutates, monitors, and removes no external proxy or route. Optional exposure is entirely operator-owned and does not participate in readiness, cleanup, or acceptance.
 
-The corrected host smoke started the official wrapper with both forbidden names present only in the inherited ambient environment. The operator file did not configure them, so the fixed local-LFM gate admitted startup. Both initially absent Serve routes registered serially as two foreground children and remained supervised. The stable stack observed:
+The historical host smoke started the official wrapper with both forbidden names present only in the inherited ambient environment. The operator file did not configure them, so the fixed local-LFM gate admitted startup. Its then-configured external-route observations are no longer application evidence. The stable local stack observed:
 
-- loopback HTTP `8000`, LiveKit signaling TCP `7880`, tailnet WebRTC UDP `7882`, and local LFM HTTP `18080` listening on their documented addresses;
-- HTTP 200 from loopback `8000`, tailnet HTTPS `8443`, and signaling HTTPS `7443`, plus local LFM `{"status":"ok"}`;
+- loopback HTTP `8000`, LiveKit signaling TCP `7880`, WebRTC UDP `7882`, and local LFM HTTP `18080` on the host;
+- HTTP 200 from loopback `8000` plus local LFM `{"status":"ok"}`;
 - exactly two resident `silero_kseniya_worker.py` processes and the fixed Kseniya/native-48 identity printed by the runner;
 - unchanged unrelated HTTPS `443` → `127.0.0.1:3000` throughout;
 - clean Ctrl+C teardown, semantic equality of Serve status before/after, no `8443`/`7443` foreground entries, and no owned process or `8000`/`7880`/`7882`/`18080` listener remaining.
 
-This is startup, routing, identity, residency, and cleanup evidence only. It does not prove browser interaction, audibility, voice quality, physical barge-in, or second-client tailnet acceptance.
+This is local startup, identity, residency, and cleanup evidence only. It does not prove browser interaction, audibility, voice quality, or physical barge-in. External exposure is not an application acceptance requirement.
 
 ## Pasha manual acceptance — still required
 
 Keep captures outside Git and do not paste secrets or conversation content into a PR.
 
-1. Record the previous branch/commit. On the clean committed acceptance head run the focused `./verify-slice7` and existing fast `./verify-slice6`; fill ignored `.env.slice6`; start only `./run-review-stand start` after confirming no other stack occupies its loopback/service ports. Confirm the launcher reports that exact commit and the stable tailnet URL, and that Serve ownership for application HTTPS `8447` and signaling HTTPS `7443` is `owned` or intentionally `preexisting`; any conflict must fail closed. Do not change HTTPS/443, firewalld, or unrelated services.
+1. Record the previous branch/commit. On the clean committed acceptance head run the focused `./verify-slice7` and existing fast `./verify-slice6`; fill ignored `.env.slice6` with loopback defaults; start only `./run-review-stand start` after confirming no other stack occupies its local ports. Confirm the launcher reports that exact commit and loopback URL. Do not change firewalld, external exposure, or unrelated services.
 2. Open `https://priney-arch.darter-smoot.ts.net:8447/`. Before selecting **CONNECT**, confirm `DISCONNECTED`, `MIC DISCONNECTED`, empty history, and no capability, microphone-permission, or LiveKit work. Select **CONNECT** and confirm the same-origin capability/public LiveKit path plus visible `MIC PERMISSION`, `MIC PUBLISHING`, and `MIC LIVE`/`MIC LISTENING` transitions. Also exercise `MIC MUTED` and verify the exact Silero/Kseniya/native48/private-noncommercial/CC badge; any microphone failure must show `MIC ERROR`.
 3. Speak a normal Russian request. Confirm a useful visible original-LFM response and audible Kseniya speech; automation does not establish either physical fact.
 4. Exercise numbers, a `14.08.2026` date, `09:30`, `PDF`/`SSD`, `ё`, and an answer long enough for multiple sentence/clause segments. Confirm natural/intelligible pronunciation and joins. Join target is ≤120 ms; repeated >200-ms gaps or broken intonation fails. Confirm visible/history text did not change and contains no injected `+`.
 5. During audible multi-segment speech, begin another utterance. Confirm old sound stops within 250 ms of server speech-start detection, never resumes, and the replacement speaks. Interrupt that replacement again rapidly and confirm only the newest valid generation remains.
 6. Inject/observe one controlled TTS readiness or synthesis failure. Confirm explicit content-free failure, retained visible/accepted prefix, no later segments, no completion, no Qwen/cloud/fallback/retry, and no crash/OOM/rate mismatch.
-7. Capture redacted endpoint-to-visible/accepted-PCM timing, join timing, two Silero PIDs, total board/process VRAM/RAM/CPU with resident llama.cpp + Whisper + two Silero workers + LiveKit + browser, and safe reserve under overlap/barge-in. Test the configured tailnet browser separately without changing exposure.
+7. Capture redacted endpoint-to-visible/accepted-PCM timing, join timing, two Silero PIDs, total board/process VRAM/RAM/CPU with resident llama.cpp + Whisper + two Silero workers + LiveKit + local browser, and safe reserve under overlap/barge-in. External exposure is outside this acceptance.
 8. Record Pasha's pass/fail without inferring adjectives or granular scores not supplied.
 
 ## Rollback

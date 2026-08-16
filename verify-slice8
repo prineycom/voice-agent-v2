@@ -21,4 +21,4 @@ PYTHONPATH="$ROOT/src" "$PYTHON" -B "$ROOT/scripts/verify_slice8.py"
 )
 
 printf '%s\n' 'Slice 8 failure semantics and privacy-safe observability: PASS'
-printf '%s\n' 'Physical microphone/audibility/Raspberry Pi/tailnet-interface-loss/destructive OOM: NOT CLAIMED'
+printf '%s\n' 'Physical microphone/audibility/Raspberry Pi/destructive OOM: NOT CLAIMED'

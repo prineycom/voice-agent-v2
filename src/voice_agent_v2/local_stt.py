@@ -66,6 +66,10 @@ def _environment() -> dict[str, str]:
         "XDG_CACHE_HOME": str(Path(_TASK_RUNTIME_ROOT) / "stt-xdg") if _TASK_RUNTIME_ROOT else str(CACHE / "xdg"),
         "HF_HOME": str(CACHE / "huggingface"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        "PYTHONPYCACHEPREFIX": str(
+            Path(_TASK_RUNTIME_ROOT) / "stt-pycache"
+            if _TASK_RUNTIME_ROOT else CACHE / "pycache"
+        ),
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
         "LD_LIBRARY_PATH": ":".join(str(path) for path in libraries),
     }

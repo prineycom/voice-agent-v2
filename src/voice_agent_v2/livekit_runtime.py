@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+import http.client
 import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import threading
 import time
 from typing import Awaitable, Callable
+from urllib.parse import urlsplit
 
 from livekit import api, rtc
 
@@ -30,7 +33,7 @@ from .local_stt import WhisperSTT
 from .real_turn import RealTurnController
 from .silero_tts import SileroKseniyaTTS, SileroVoiceProfile
 from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
-from .observability import ComponentHealth, ResourceSampler
+from .observability import ComponentHealth, HealthReport, ResourceSampler
 from .realtime import (
     CLIENT_CONTROL_TOPIC,
     CONTROL_TOPIC,
@@ -39,7 +42,7 @@ from .realtime import (
     EventSink,
     RealtimeSession,
 )
-from .slice6_config import Slice6Settings
+from .slice6_config import Slice6Settings, supervised_process_alive
 from .tracer import CancellationToken, TraceResult
 
 AUDIO_FRAME_MS = 20
@@ -48,6 +51,61 @@ AUDIO_QUEUE_MS = 100
 BROWSER_CONTROL_QUEUE_SIZE = 32
 MAX_SESSION_OBSERVATIONS = 128
 TRACE_ROOT = Path.home() / ".cache/voice-agent-v2/slice-6/diagnostics"
+OPERATIONAL_PROBE_TIMEOUT_SECONDS = 0.1
+OPERATIONAL_PROBE_BODY_LIMIT_BYTES = 4_096
+LOCAL_LFM_HOST = "127.0.0.1"
+LOCAL_LFM_PORT = 18_080
+
+
+def livekit_endpoint_ready(url: str, timeout: float = OPERATIONAL_PROBE_TIMEOUT_SECONDS) -> bool:
+    endpoint = urlsplit(url)
+    if endpoint.scheme not in {"ws", "wss"} or endpoint.hostname is None:
+        return False
+    try:
+        port = endpoint.port or (443 if endpoint.scheme == "wss" else 80)
+    except ValueError:
+        return False
+    connection_type = (
+        http.client.HTTPSConnection
+        if endpoint.scheme == "wss"
+        else http.client.HTTPConnection
+    )
+    connection = connection_type(endpoint.hostname, port, timeout=timeout)
+    try:
+        connection.request("GET", "/", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(OPERATIONAL_PROBE_BODY_LIMIT_BYTES + 1)
+        return response.status == 200 and body == b"OK"
+    except (OSError, TimeoutError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+def local_lfm_endpoint_health(
+    host: str = LOCAL_LFM_HOST,
+    port: int = LOCAL_LFM_PORT,
+    timeout: float = OPERATIONAL_PROBE_TIMEOUT_SECONDS,
+) -> str:
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        connection.request("GET", "/health", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(OPERATIONAL_PROBE_BODY_LIMIT_BYTES + 1)
+        if response.status != 200 or len(body) > OPERATIONAL_PROBE_BODY_LIMIT_BYTES:
+            return "unready"
+        document = json.loads(body)
+        return (
+            "ready"
+            if isinstance(document, dict) and document.get("status") == "ok"
+            else "unready"
+        )
+    except (OSError, TimeoutError, http.client.HTTPException):
+        return "unavailable"
+    except (UnicodeError, json.JSONDecodeError):
+        return "unready"
+    finally:
+        connection.close()
 
 
 class SessionCapacityError(RuntimeError):
@@ -1394,9 +1452,11 @@ class SessionRegistry:
         )
         self._controllers: dict[str, LiveKitRoomController] = {}
         self._lock = asyncio.Lock()
+        self._accepting = False
 
     async def start(self) -> None:
         await asyncio.to_thread(self.runner.start)
+        self._accepting = True
         for component in self.runner.readiness_components():
             self.trace.emit(
                 "model",
@@ -1414,10 +1474,80 @@ class SessionRegistry:
     def active_count(self) -> int:
         return len(self._controllers)
 
+    @property
+    def accepting(self) -> bool:
+        return self._accepting
+
+    def operational_health(self) -> dict[str, object]:
+        accepting = self._accepting
+        development = (
+            self.settings.build_id == "development"
+            and self.settings.release_id == "development"
+        )
+
+        def parent_process_alive(identity: str | None) -> bool:
+            return development if identity is None else supervised_process_alive(identity)
+
+        livekit_alive = parent_process_alive(
+            self.settings.supervised_livekit_process
+        )
+        lfm_alive = parent_process_alive(self.settings.supervised_lfm_process)
+        livekit_ready = livekit_alive and livekit_endpoint_ready(
+            self.settings.livekit_internal_url
+        )
+        lfm_endpoint_health = (
+            local_lfm_endpoint_health() if lfm_alive else "unavailable"
+        )
+        runtime_components: list[ComponentHealth] = []
+        for component in self.runner.readiness_components():
+            if component.component == "selected_llm" and (
+                not lfm_alive or lfm_endpoint_health != "ready"
+            ):
+                component = ComponentHealth(
+                    component.component,
+                    "alive" if lfm_alive else "dead",
+                    "unready",
+                    component.compatible,
+                    component.identity,
+                    component.contract_version,
+                    (
+                        "local_lfm_health_failed"
+                        if lfm_alive and lfm_endpoint_health == "unready"
+                        else "local_lfm_unavailable"
+                    ),
+                    component.retry_count,
+                    component.retry_limit,
+                )
+            runtime_components.append(component)
+        components = (
+            ComponentHealth(
+                "livekit",
+                "alive" if livekit_alive else "dead",
+                "ready" if accepting and livekit_ready else "unready",
+                True,
+                "livekit-server-v1.13.5",
+                "voice-agent.realtime-control.v2",
+                None if accepting and livekit_ready
+                else "service_draining" if not accepting
+                else "livekit_unavailable",
+            ),
+            ComponentHealth(
+                "controller", "alive", "ready" if accepting else "unready", True,
+                "voice-agent-v2-controller", "voice-agent.realtime-control.v2",
+                None if accepting else "service_draining",
+            ),
+            *runtime_components,
+        )
+        return HealthReport(tuple(components)).as_dict()
+
     async def create(self) -> dict[str, object]:
         async with self._lock:
+            if not self._accepting:
+                raise RuntimeError("the voice stack is draining")
             if len(self._controllers) >= self.settings.max_sessions:
                 raise SessionCapacityError("the single measured Slice 6 session is in use")
+            if self.operational_health()["overall_readiness"] != "ready":
+                raise RuntimeError("the voice stack is unavailable")
             session_id = f"session-{secrets.token_hex(12)}"
             room_name = f"voice-{session_id}"
             browser_identity = f"browser-{session_id}"
@@ -1433,26 +1563,34 @@ class SessionRegistry:
         try:
             await controller.start()
             llm_profile = self.runner.public_llm_profile()
+            tts_profile = self.runner.tts_profile.public_metadata()
+            if self.operational_health()["overall_readiness"] != "ready":
+                raise RuntimeError("the voice stack became unavailable during admission")
+            capability = {
+                "session_id": session_id,
+                "stream_epoch": 1,
+                "livekit_url": self.settings.livekit_public_url,
+                "token": controller.browser_token(),
+                "expires_in_seconds": self.settings.room_token_ttl_seconds,
+                "admission_timeout_ms": min(
+                    self.settings.browser_join_timeout_seconds,
+                    self.settings.room_token_ttl_seconds,
+                ) * 1_000,
+                "control_version": "voice-agent.realtime-control.v2",
+                "llm_profile": llm_profile,
+                "tts_profile": tts_profile,
+            }
             controller.arm_browser_join_timeout()
+            if self.operational_health()["overall_readiness"] != "ready":
+                raise RuntimeError("the voice stack became unavailable before capability issue")
         except BaseException:
-            await controller.close(notify=False)
-            async with self._lock:
-                self._controllers.pop(session_id, None)
+            try:
+                await controller.close(notify=False)
+            finally:
+                async with self._lock:
+                    self._controllers.pop(session_id, None)
             raise
-        return {
-            "session_id": session_id,
-            "stream_epoch": 1,
-            "livekit_url": self.settings.livekit_public_url,
-            "token": controller.browser_token(),
-            "expires_in_seconds": self.settings.room_token_ttl_seconds,
-            "admission_timeout_ms": min(
-                self.settings.browser_join_timeout_seconds,
-                self.settings.room_token_ttl_seconds,
-            ) * 1_000,
-            "control_version": "voice-agent.realtime-control.v2",
-            "llm_profile": llm_profile,
-            "tts_profile": self.runner.tts_profile.public_metadata(),
-        }
+        return capability
 
     async def remove(self, session_id: str) -> None:
         async with self._lock:
@@ -1460,6 +1598,7 @@ class SessionRegistry:
 
     async def close(self) -> None:
         async with self._lock:
+            self._accepting = False
             controllers = list(self._controllers.values())
         results = await asyncio.gather(
             *(controller.close() for controller in controllers),

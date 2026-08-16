@@ -1,6 +1,6 @@
 # ADR-0001: Clean V2 repository and single-host topology
 
-- **Status:** Accepted
+- **Status:** Accepted; presentation/exposure wording is superseded by ADR-0013's loopback-local application boundary
 - **Date:** 2026-08-10
 - **Decision owner:** Voice Agent v2 project architecture
 
@@ -16,7 +16,7 @@ A measured cloud LLM may become an external dependency if local LLM candidates c
 
 Create `prineycom/voice-agent-v2` as a clean private repository.
 
-Every required self-hosted media, session-control, STT, TTS, application, and local-inference runtime runs on the canonical Arch PC. A tailnet browser is permitted as a presentation endpoint. If cloud LLM mode passes its separate gate, the one LiteLLM relay allowed by ADR-0004 may run on a user-operated tailnet node; it performs no STT/TTS or local response inference and cannot become a general orchestration plane.
+Every required self-hosted media, session-control, STT, TTS, application, and local-inference runtime runs on the canonical Arch PC. The active application is loopback-local; any optional presentation exposure is operator-owned and outside application runtime/readiness/acceptance. Historical ADR-0004 relay evidence remains a provider-boundary experiment, not an active application dependency.
 
 An explicitly selected managed cloud LLM is the only permitted external inference exception and is governed by [ADR-0003](0003-local-first-llm-with-explicit-cloud-option.md) and [ADR-0004](0004-tailnet-litellm-cloud-gateway-evaluation.md). It is not an automatic fallback or a return to the legacy Pi/Desktop inference topology.
 
@@ -30,12 +30,12 @@ Preserve the pinned legacy repository unchanged as provenance. Migrate only the 
 - The roadmap can measure end-to-end contention on the actual 12 GB GPU.
 - New documentation and tests do not need to reconcile obsolete Pi/Desktop paths.
 - Legacy work remains inspectable without becoming an implicit dependency.
-- A measured cloud LLM option can preserve product quality; the narrow tailnet gateway exception keeps inference and orchestration off the auxiliary node.
+- The historical measured cloud-LLM experiment preserved provider-boundary evidence without moving active inference/orchestration off the canonical host.
 
 ### Costs and risks
 
 - In local-LLM mode, the canonical PC is a single point of failure with a shared GPU budget.
-- In cloud-LLM mode, response generation adds external availability, credential, privacy, cost, and latency boundaries; the selected tailnet gateway also adds one user-operated relay dependency.
+- Any future cloud-LLM mode would add external availability, credential, privacy, cost, and latency boundaries and requires a new active decision; historical relay topology is not inherited.
 - Useful legacy components must be rediscovered and revalidated slice by slice.
 - A clean repository initially has fewer runnable capabilities than the legacy repository.
 - Moving other inference or control capabilities off-host later would require an explicit topology change and new failure/security analysis.

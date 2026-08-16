@@ -1,0 +1,310 @@
+step: review
+run: "01M05HK4AD6BX2QPYXDX0CASCQ"
+lines: 306 total
+log[306]{line}:
+  reviewing changes...
+  ""
+  pi started pid=730431
+  ""
+  "{\"findings\":[{\"id\":\"NM-R98\",\"severity\":\"warning\",\"file\":\"scripts/run_slice6.py\",\"line\":112,\"description\":\"Остановка не укладывается в заявленный жёсткий лимит: таймауты ролей дают 54+8+8=70 с, но `stop()` после каждого таймаута дополнительно ждёт до 5 с после SIGKILL, поэтому максимум достигает 85 с при `TimeoutStopSec=75s`. systemd может убить группу до завершения объявленного порядка. Используйте единый дедлайн короче 75 с либо включите ожидание SIGKILL в лимиты ролей.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R99\",\"severity\":\"warning\",\"file\":\"run-review-stand\",\"line\":57,\"description\":\"`start` и `status` считают любой HTTP 200 от `/api/status` успехом, хотя endpoint возвращает 200 и при `overall_readiness=unready` или `accepting=false`. При потере компонента во время двухсекундного grace-периода stand может сообщить `started`/`running` для неготового стека. Проверяйте JSON на точный build, `accepting=true` и `health.overall_readiness=ready`.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R100\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":250,\"description\":\"`status --state-root <disposable>` берёт release/compatibility из указанного хранилища, но всегда добавляет состояние канонического systemd-сервиса и процесса на 127.0.0.1:8000. Результат может объединить две несвязанные установки и вводить оператора в заблуждение. Для неканонического state root отклоняйте команду либо возвращайте service/runtime как `not-applicable`.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничениям review-фазы; выполнена только проверка истории, полного diff, окружающего кода, контрактов и тестов.\",\"risk_level\":\"medium\",\"risk_rationale\":\"Изменение в целом ограничено и сохраняет loopback/Tailscale-инварианты, но заявленный shutdown-бюджет и два пути операционной отчётности пока допускают недостоверное или неполное состояние.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=730431 status=success
+  ""
+  user-fix round starting after round 1 (3 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=745757
+  ""
+  "{\"summary\":\"Bound shutdown and enforce truthful operational readiness\"}"
+  pi exited pid=745757 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Bound shutdown and enforce truthful operational readiness"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=756685
+  ""
+  "{\"findings\":[{\"id\":\"NM-R101\",\"severity\":\"error\",\"file\":\"scripts/run_slice6.py\",\"line\":494,\"description\":\"SIGTERM/SIGINT лишь выставляет `stopping`, но три последовательных `wait_for_port()` не проверяют его, а следующие компоненты всё равно запускаются. Остановка во время зависшего старта может ждать 30+30+20 секунд, запускать LiveKit/gateway уже после запроса остановки и выйти за `TimeoutStopSec=75s` до упорядоченной очистки. Передайте отмену в ожидания и проверяйте её перед каждым запуском и публикацией READY.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R102\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":93,\"description\":\"Проверка unit-файла охватывает только часть lifecycle-полей, но не закрепляет заявленную sandbox/immutable-политику: изменения `ProtectSystem`, `ProtectHome`, `ReadWritePaths`, `NoNewPrivileges`, `PrivateTmp`, `RestrictAddressFamilies`, `WorkingDirectory` или `Environment` пройдут `systemd-analyze verify` и затем будут установлены от root. Валидируйте полный нормализованный контракт unit-файла до `sudo install`.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R103\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1053,\"description\":\"Rollback заменяет `current` и `previous` двумя отдельными fsync-операциями. Сбой процесса или питания между ними оставит обе ссылки на восстановленный release, поэтому следующий штатный rollback уже не сможет вернуть заменённый release, хотя его каталог сохранён. Используйте восстанавливаемую транзакцию или один атомарный документ состояния.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R104\",\"severity\":\"warning\",\"file\":\"docs/architecture.md\",\"line\":203,\"description\":\"Авторитетная документация продолжает заявлять общий 70-секундный shutdown budget, но текущий код дополнительно резервирует по 1 секунде на SIGKILL для трёх ролей, то есть полный предел равен 73 секундам. Уточните 70 секунд graceful / 73 секунды с forced-reap также в ADR и evidence.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[\"Тесты не запускались: review-фаза явно запрещает их запуск.\"],\"testing_summary\":\"Выполнен статический обзор истории, полного diff, runtime/service/release путей, контрактов, вызывающего кода и тестовых утверждений.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение нельзя безопасно сливать до исправления неотменяемого startup-path и неполной проверки устанавливаемой root systemd sandbox-политики.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=756685 status=success
+  ""
+  user-fix round starting after round 2 (4 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=773861
+  ""
+  "{\"summary\":\"Harden startup cancellation, systemd policy, and rollback recovery\"}"
+  pi exited pid=773861 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden startup cancellation, systemd policy, and rollback recovery"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=789138
+  ""
+  "{\"findings\":[{\"id\":\"NM-R105\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/slice6_config.py\",\"line\":34,\"description\":\"Критерий «retain loopback-only defaults with optional operator-owned external exposure» не выполняется для голосового пути: LiveKit жёстко публикует только `127.0.0.1`/`lo`, а ICE/TCP и TURN отключены. Разрешённые внешние WSS/HTTPS URL дадут прокси сигнализацию/UI, но удалённый браузер не получит достижимый ICE-кандидат для медиа. Уточните, должна ли внешняя экспозиция быть только UI/status; иначе нужен операторский advertised ICE/TURN параметр при сохранении loopback-default.\",\"action\":\"ask-user\",\"review_scope\":\"source\"},{\"id\":\"NM-R106\",\"severity\":\"error\",\"file\":\"ops/systemd/voice-agent-v2.service\",\"line\":25,\"description\":\"`TimeoutStartSec=120s` меньше поддерживаемого внутреннего startup budget: `execute_release` хеширует многогигабайтные артефакты и запускает два runtime-probe до 15 с каждый, runner повторно проверяет крупные LFM/Silero файлы, затем допускает последовательные ожидания 30+30+20=80 с. Валидный холодный или нагруженный хост может быть убит systemd до `READY=1`. Увеличьте границу либо продлевайте systemd startup timeout во время preflight по единому ограниченному дедлайну.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[\"Тесты не запускались: это запрещено условиями review-фазы.\"],\"testing_summary\":\"Выполнен статический обзор истории, полного diff и связанных runtime, operations, systemd, контрактных и тестовых путей.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение допускает преждевременное завершение корректного запуска systemd и не обеспечивает заявленную опциональную внешнюю работу голосового медиа без уточнения продуктового намерения.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=789138 status=success
+  ""
+  user-fix round starting after round 3 (1 finding selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=806848
+  ""
+  "{\"summary\":\"Extend and pin systemd startup budget\"}"
+  pi exited pid=806848 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Extend and pin systemd startup budget"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=811723
+  ""
+  "{\"findings\":[{\"id\":\"NM-R107\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":115,\"description\":\"`TimeoutStartSec=300s` допускает корректный запуск до 300 секунд, но `_sudo()` прерывает блокирующие `systemctl start/restart` уже через 210 секунд. Валидный запуск в интервале 210–300 секунд будет ошибочно объявлен неуспешным, хотя systemd может продолжить job. Согласуйте таймаут управляющей команды с заявленной границей запуска.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R108\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":911,\"description\":\"Заявленный durable fix с `O_NOFOLLOW` обходится публичным путём: `deploy` заранее вызывает `config_path.resolve()`, а CLI также разрешает относительный путь через `resolve()`. Поэтому `deploy --config <symlink>` следует по ссылке до `parse_server_configuration()` и принимает её. Сохраняйте лексический абсолютный путь до общей проверки дескриптором и добавьте регрессию через публичный deploy/CLI, а не только прямой вызов парсера.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R109\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":850,\"description\":\"Транзакция с `previous: null` пропускает обновление вместо удаления существующей ссылки. После deploy поверх несовместимого `current` старый `previous` остаётся доступным для rollback, хотя результат deploy сообщает `previous_release_id: null`. Обрабатывайте `null` как транзакционное удаление ссылки с fsync.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R110\",\"severity\":\"warning\",\"file\":\"docs/architecture.md\",\"line\":284,\"description\":\"Новая политика утверждает отсутствие fallback-представления, но тот же авторитетный документ на строке 174 и ADR-0002 всё ещё обещают настроенный static fallback. Это оставляет контракт avatar failure противоречивым после удаления fallback из production composition. Зафиксируйте supersession и согласуйте устаревшие формулировки с ADR-0013.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничению review-фазы; выполнен статический анализ истории, полного diff и связанных контрактов/вызовов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение не следует сливать до исправления преждевременного таймаута systemctl и обхода заявленной защиты конфигурации от symlink.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=811723 status=success
+  ""
+  user-fix round starting after round 4 (4 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=824476
+  ""
+  "{\"summary\":\"Harden operations and reconcile avatar fallback policy\"}"
+  pi exited pid=824476 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden operations and reconcile avatar fallback policy"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=833656
+  ""
+  "{\"findings\":[{\"id\":\"NM-R111\",\"severity\":\"error\",\"file\":\"ops/systemd/voice-agent-v2.service\",\"line\":5,\"description\":\"`StartLimitBurst=2` за 600 с не гарантирует заявленный единственный recovery: если сервис работал дольше окна, после сбоя systemd разрешит два автоматических запуска; два 300-секундных startup-timeout также сдвинут третью попытку примерно к 610-й секунде, когда первая уже выпадет из окна. Закрепите явный счётчик recovery на границе supervisor либо выберите политику, действительно ограничивающую поддерживаемый 300-секундный сценарий.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R112\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":939,\"description\":\"Durable-защита конфигурации обходится через symlink родительского каталога: путь `/tmp/repo-alias/.env`, где `repo-alias` указывает на source root, не считается относительным к `source_root`, а `O_NOFOLLOW` следует промежуточной ссылке. В результате tracked secret-файл принимается deploy. Проверяйте все компоненты пути без symlink на общей границе открытия и сопоставляйте фактический файл с tracked paths.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R113\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":409,\"description\":\"После `daemon-reload` проверяется только tracked main unit, но существующий `voice-agent-v2.service.d` drop-in может переопределить `User`, `ExecStart`, restart/timeout или sandbox-поля; install затем запускает сервис и сообщает успех при несовместимой эффективной политике. До запуска и rollback проверяйте `FragmentPath`, `DropInPaths` и нормализованные effective properties, отклоняя любые overrides.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R114\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":994,\"description\":\"Незавершённый `.stage-*` после SIGKILL или сбоя питания учитывается как сохранённый release. При двух действительных releases следующий deploy после такого сбоя постоянно получает `release_cache_pressure`, пока оператор вручную не удалит каталог. Под lock восстанавливайте или безопасно удаляйте только принадлежащие транзакции незавершённые stages и не считайте их releases.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[\"git diff --check 75bf77f98876eacda367c7c3d6960ebfa2a28b58..HEAD\"],\"testing_summary\":\"Тесты не запускались согласно правилам review-фазы; выполнены чтение истории, полного diff и статический аудит связанных контрактов и путей.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение пока не обеспечивает заявленный предел recovery и допускает обходы конфигурационной и эффективной systemd-политики, поэтому его нельзя безопасно сливать без исправлений.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=833656 status=success
+  ""
+  user-fix round starting after round 5 (4 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=855944
+  ""
+  "{\"summary\":\"Harden recovery, configuration custody, and systemd reconciliation\"}"
+  pi exited pid=855944 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden recovery, configuration custody, and systemd reconciliation"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=877913
+  ""
+  "{\"findings\":[{\"id\":\"NM-R115\",\"severity\":\"error\",\"file\":\"ops/systemd/voice-agent-v2.service\",\"line\":5,\"description\":\"`StartLimitBurst=2` с бесконечным интервалом считает все запуски, а не только автоматические восстановления. Начальный старт и поддерживаемый `install-service --restart`/перезапуск после deploy исчерпают лимит, поэтому следующая потеря процесса не получит обещанное одно восстановление; после уже выполненного recovery операторский restart также заблокируется. Сбрасывайте и корректно переустанавливайте allowance на границе поддерживаемых ручных операций либо ведите явный счётчик автоматического recovery в supervisor.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R116\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/livekit_runtime.py\",\"line\":1433,\"description\":\"Публичная «fresh» readiness для LiveKit и local LFM проверяет только существование PID-поколения. Если живой процесс перестал обслуживать порт или LFM `/health` вернул 503, кэшированный `LocalLFMProvider.runtime_health` остаётся ready, `/api/status` продолжает возвращать ready/accepting, а admission выдаёт capability. Добавьте ограниченные актуальные probes на общей operational-health/supervisor границе, чтобы недоступность живого процесса переводила стек в unready и запускала заявленное bounded recovery.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничению review-фазы; выполнен статический анализ diff, истории и связанных путей.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение нарушает заявленную гарантию одного автоматического восстановления после поддерживаемого ручного перезапуска и допускает ложную готовность недоступных LiveKit/LFM процессов.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=877913 status=success
+  ""
+  user-fix round starting after round 6 (2 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=892933
+  ""
+  "{\"summary\":\"Preserve recovery allowance and probe runtime readiness\"}"
+  pi exited pid=892933 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Preserve recovery allowance and probe runtime readiness"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=905319
+  ""
+  "{\"findings\":[{\"id\":\"NM-R117\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/livekit_runtime.py\",\"line\":60,\"description\":\"LiveKit readiness выполняет только TCP connect. После `SIGSTOP` процесс остаётся живым, а ядро продолжает завершать TCP handshake, поэтому `/api/status` остаётся ready и supervisor не запускает заявленное восстановление, хотя LiveKit уже не обслуживает запросы. Проверяйте ограниченный HTTP/WebSocket-ответ на общей operational-health границе и добавьте регрессию с принимающим, но не отвечающим listener.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R118\",\"severity\":\"error\",\"file\":\"scripts/run_slice6.py\",\"line\":541,\"description\":\"Потеря local LFM или LiveKit между `wait_for_port()` и `supervised_process_identity()` выбрасывает `Slice6ConfigurationError`, который на строке 636 преобразуется в exit 2. `RestartPreventExitStatus=2` затем запрещает обещанное восстановление обычного процессного сбоя. На этой runtime-границе преобразуйте потерю PID-поколения в `ServiceProcessFailure`/exit 1.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R119\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":452,\"description\":\"`install-service` заменяет root-owned unit до `daemon-reload` и проверки effective policy, но при ошибке не восстанавливает прежний файл. Drop-in или сбой проверки оставляет изменённый, потенциально уже enabled unit после команды, сообщившей неуспех. Сохраняйте прежнее состояние и транзакционно восстанавливайте его с повторным `daemon-reload`, либо отклоняйте overrides до замены.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R120\",\"severity\":\"warning\",\"file\":\"run-review-stand\",\"line\":20,\"description\":\"`start` и `status` вызывают `curl` без `--connect-timeout`/`--max-time`. Живой runner с зависшим gateway может навсегда повесить ручную команду и обойти заявленный bounded startup/status цикл. Добавьте короткий ограниченный таймаут ко всем readiness-запросам.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[\"Тесты не запускались согласно запрету review-фазы; выполнена статическая проверка истории, полного diff, call sites, контрактов и документации.\"],\"testing_summary\":\"Проведён полный статический review без выполнения тестов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение сохраняет достижимые пути ложной readiness, запрещённого восстановления процессного сбоя и частично применённой root-конфигурации, поэтому его нельзя сливать без исправлений.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=905319 status=success
+  ""
+  user-fix round starting after round 7 (4 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=919747
+  ""
+  "{\"summary\":\"Harden readiness probes and transactional service installation\"}"
+  pi exited pid=919747 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden readiness probes and transactional service installation"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=928391
+  ""
+  "{\"findings\":[{\"id\":\"NM-R121\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/livekit_runtime.py\",\"line\":78,\"description\":\"LiveKit probe принимает любой HTTP-статус 100–599, включая `503 Service Unavailable`, как готовность. Живой, но явно неготовый LiveKit поэтому оставляет `/api/status` ready и не запускает bounded recovery. Проверяйте точный успешный health/upgrade-контракт закреплённого LiveKit.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R122\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1082,\"description\":\"Deploy принимает конфигурацию из любого абсолютного пути, например `/tmp/runtime.env` или `/var/tmp/runtime.env`, но установленный unit использует `PrivateTmp=yes`. CLI успешно валидирует такой файл, после чего сервис не видит его в приватном mount namespace и завершает boot с exit 2. На общей границе preflight разрешайте только устойчивые пути, доступные внутри sandbox.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R123\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1264,\"description\":\"Новый stage переименовывается в конечный release и stage-транзакция завершается до финального `validate_release`. Если конфигурация или host state изменятся между preflight и этой проверкой, deploy завершится ошибкой, но оставит неактивированный release. При двух прежних releases повтор с новым fingerprint/ID затем упирается в лимит трёх releases. Сохраняйте владение новым target до успешной проверки и удаляйте только созданный этой операцией target при отказе.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R124\",\"severity\":\"error\",\"file\":\"scripts/run_slice6.py\",\"line\":608,\"description\":\"Supervisor ждёт весь `/api/status` только 0.2 с, тогда как endpoint последовательно выполняет LiveKit и LFM probes по 0.1 с каждый, причём socket timeout применяется отдельно к connect/read. Оба компонента могут успешно ответить внутри собственных лимитов, но внешний запрос стабильно истечёт, после чего здоровый стек будет перезапущен через двухсекундный grace. Используйте единый end-to-end deadline либо внешний лимит больше суммарного probe budget.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R125\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1167,\"description\":\"Версионный client build исполняет и подключает игнорируемый `web/node_modules` из рабочего дерева без сверки с committed `package-lock.json`. Чистый Git commit поэтому может выпустить другой код или выполнить посторонний build tool, сохранив при этом `build_id` этого commit. Стройте из lockfile в изолированном stage либо семантически проверяйте точное dependency tree/runtime до публикации.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничениям review-фазы; выполнена статическая проверка истории, diff, исходников, вызовов, контрактов и тестов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение всё ещё допускает ложную readiness и перезапуск здорового стека, неработоспособную после установки конфигурацию и отравление ограниченного release store после частичного deploy.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=928391 status=success
+  ""
+  user-fix round starting after round 8 (5 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=944133
+  ""
+  "{\"summary\":\"Harden release construction and operational readiness probes\"}"
+  pi exited pid=944133 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden release construction and operational readiness probes"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=968290
+  ""
+  "{\"findings\":[{\"id\":\"NM-R126\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":452,\"description\":\"Транзакция резервной копии заканчивается сразу после проверки unit-файла. Если последующие `enable`, `start`/`restart` или ожидание readiness завершаются ошибкой, команда сообщает неуспех, но новый root-owned unit остаётся установленным, а прежняя копия уже удалена. Держите резервную копию до полного успешного применения и восстанавливайте unit с `daemon-reload` и прежним enable/active-состоянием при любом последующем отказе.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R127\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":852,\"description\":\"Канонический `state_root` безусловно проходит через `resolve()`, поэтому symlink `~/.local/share/voice-agent-v2` на `/tmp` или `/var/tmp` принимается и deploy успешно пишет туда. Установленный unit использует исходный путь при `PrivateTmp=yes` и увидит другой namespace, поэтому не сможет выполнить release после якобы успешного deploy. На общей канонической границе отклоняйте symlink-компоненты и требуйте фактическое хранилище под home пользователя сервиса.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R128\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":239,\"description\":\"Закрытый operations-контракт проверяет только имена компонентов и семантику `cloud-llm`; остальные записи не валидируются. Clean commit может объявить `livekit` или `local-stt` внешним/браузерным, отключить `admission_required` либо сменить supervision, после чего validate/deploy всё равно сообщат совместимость с локальным bounded stack. Проверяйте точные ожидаемые записи всех компонентов в `load_operations_manifest()`.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались по требованию review-фазы; выполнены статическая проверка истории, полного diff и связанного кода.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение сохраняет достижимые пути к частично применённому systemd unit, недоступному сервису каноническому release и принятию несовместимой схемы supervision.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=968290 status=success
+  ""
+  user-fix round starting after round 9 (3 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=983209
+  ""
+  "{\"summary\":\"Harden manifest, state custody, and service rollback\"}"
+  pi exited pid=983209 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden manifest, state custody, and service rollback"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=995338
+  ""
+  "{\"findings\":[{\"id\":\"NM-R129\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":469,\"description\":\"Откат установки не сохраняет тип прежнего unit-файла: `cp` разыменует symlink, а восстановление через `install` всегда создаёт обычный root:root 0644 файл. Если сервис был masked (`voice-agent-v2.service -> /dev/null`) и последующая readiness-проверка провалится, команда уничтожит mask и «восстановит» пустой unit. Сохраняйте symlink/тип/метаданные точно либо отклоняйте не-regular unit до замены.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R130\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":316,\"description\":\"Закрытый manifest-контракт всё ещё проверяет у `python_runtimes` только имена, а у cache roots — только имя и лимит. Clean commit может указать `/usr/bin/python3` с `packages: {}` и пустые каталоги cache roots: runtime/cache preflight пройдёт, хотя фактические FastAPI/LiveKit/STT runtime и активные caches не проверены. Валидируйте точные нормализованные runtime и cache-root записи в `load_operations_manifest()`.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R131\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1695,\"description\":\"Sustained evaluator считает cancellation gate пройденным при полном отсутствии cancellation samples. Поэтому 20 завершённых turns без единого interruption получают `status=pass`, хотя Slice 9 требует interruption threshold. Требуйте хотя бы один допустимый cancellation sample до оценки его p95.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R132\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":523,\"description\":\"Preflight принимает `LIVEKIT_INTERNAL_URL=ws://[::1]:7880`, но генерируемый LiveKit конфиг слушает только `127.0.0.1`. Deploy объявит такую конфигурацию совместимой и активирует release, после чего gateway не сможет подключиться. Ограничьте внутренний endpoint фактически обслуживаемым IPv4 loopback либо добавьте согласованную IPv6-привязку.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничению review-фазы; выполнена статическая проверка истории, полного diff и связанных контрактов/вызовов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение пока может повредить прежнее systemd-состояние при неуспешной установке и ложно принять несовместимые runtime/cache declarations.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=995338 status=success
+  ""
+  user-fix round starting after round 10 (4 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=1010241
+  ""
+  "{\"summary\":\"Harden systemd rollback and operational acceptance contracts\"}"
+  pi exited pid=1010241 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden systemd rollback and operational acceptance contracts"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=1022087
+  ""
+  "{\"findings\":[{\"id\":\"NM-R133\",\"severity\":\"error\",\"file\":\"scripts/run_slice6.py\",\"line\":469,\"description\":\"`ProcessSupervisor` завершает только прямые `Popen`. Если gateway уже упал или принудительно убит после 54-секундного таймаута, `stop()` сразу возвращает, оставляя его STT/Silero-потомков; вне systemd `run-review-stand stop` при этом сообщает успех. Закрепите за каждой ролью process group и после неуспешного graceful drain уничтожайте всю группу, включая потомков.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R134\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":360,\"description\":\"Закрытый manifest-контракт фиксирует только имена артефактов и формат SHA-256. Clean commit может перенаправить LiveKit/VAD/Whisper на другие path/hash/size; preflight проверит эти файлы, хотя runner продолжит исполнять жёстко заданный канонический LiveKit path. Валидируйте точные нормализованные записи всех артефактов либо сверяйте manifest с фактическими runtime-владельцами.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R135\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1722,\"description\":\"Sustained evaluator не связывает cancellation с outcome: текущая синтетика помечает все turns `completed`, добавляет им cancellation latency и проходит при success ratio 1.0, тогда как честный `interrupted` turn снизит ratio и не сможет пройти. Требуйте согласованную семантику outcome/cancellation или вынесите cancellation samples отдельно и вычисляйте success ratio по заявленному основанию.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничению review-фазы; выполнена проверка истории, diff, связанных контрактов и call sites.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение оставляет достижимый путь к осиротевшим inference-процессам и позволяет operational preflight проверять не те артефакты, которые затем исполняются.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=1022087 status=success
+  ""
+  user-fix round starting after round 11 (3 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=1036512
+  ""
+  "{\"summary\":\"Harden descendant cleanup and operational evidence contracts\"}"
+  pi exited pid=1036512 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden descendant cleanup and operational evidence contracts"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=1048049
+  ""
+  "{\"findings\":[{\"id\":\"NM-R136\",\"severity\":\"error\",\"file\":\"scripts/run_slice6.py\",\"line\":493,\"description\":\"Исправление zero-orphan охватывает только process group прямого gateway. Его STT/TTS `AdapterProcess` запускаются с `start_new_session=True` (`process_adapter.py:51`), поэтому при SIGKILL/аварии gateway они покидают эту группу; `stop()` видит завершённый gateway и не уничтожает живые adapter-процессы. Закрепите завершение adapter-групп при смерти родителя на границе `AdapterProcess` и проверьте сценарий аварийного завершения gateway.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R137\",\"severity\":\"warning\",\"file\":\"run-review-stand\",\"line\":9,\"description\":\"Таймаут `0.25s` короче поддерживаемого времени `/api/status`: endpoint последовательно выполняет LiveKit и LFM probes с отдельными 0.1-секундными socket-бюджетами, поэтому готовый нагруженный стек может корректно ответить позже и быть объявлен `degraded` либо не запуститься за 300 секунд. Согласуйте curl с ограниченным внешним readiness-бюджетом, например 1 секундой.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[\"Тесты не запускались согласно запрету review-фазы; выполнен статический анализ истории, diff, вызывающих путей и инвариантов.\"],\"testing_summary\":\"Проверены изменения от base до HEAD и исправления предыдущих раундов без выполнения тестов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Заявленный zero-orphan контракт остаётся нарушимым при аварии gateway, оставляя процессы STT/TTS вне новой process-group очистки.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=1048049 status=success
+  ""
+  user-fix round starting after round 12 (2 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=1062643
+  ""
+  "{\"summary\":\"Kill orphaned adapters and bound readiness checks\"}"
+  pi exited pid=1062643 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Kill orphaned adapters and bound readiness checks"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=1067857
+  ""
+  "{\"findings\":[{\"id\":\"NM-R138\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":381,\"description\":\"Закрытый operations-контракт не проверяет `deployment.service_name` и `deployment.state_root`, а также допускает неизвестные поля в `deployment`, `lifecycle`, `restart_policy` и `disk`. Clean commit может объявить другой service/state root и всё равно пройти validate/deploy, хотя runtime продолжит использовать жёстко заданные `voice-agent-v2.service` и каноническое хранилище. Валидируйте точные нормализованные вложенные документы в `load_operations_manifest()`.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничению review-фазы; выполнен анализ истории, полного diff и связанных контрактов/вызовов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Изменение нельзя сливать, пока fail-closed проверка допускает несовместимый операционный manifest и активацию релиза с ложными lifecycle/deployment декларациями.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=1067857 status=success
+  ""
+  user-fix round starting after round 13 (1 finding selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=1081338
+  ""
+  "{\"summary\":\"Закрыть контракт deployment и вложенных operational-политик\"}"
+  pi exited pid=1081338 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Закрыть контракт deployment и вложенных operational-политик"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=1084586
+  ""
+  "{\"findings\":[{\"id\":\"NM-R139\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":460,\"description\":\"Сравнение JSON-словарей не различает `true` и `1`. Поэтому замена `\\\"executable\\\": true` на `1` проходит закрытый manifest-контракт, а `verify_artifacts()` затем пропускает проверку исполнимости из-за `is True`; deploy активирует release, который завершится при запуске. Выполняйте тип-строгое сравнение/валидацию всех полей manifest.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R140\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":543,\"description\":\"После неудачной активации ранее работавшего release A восстановление unit перезапускает текущий symlink, уже указывающий на release B. Оно также не проверяет exact-release readiness повторного запуска, поэтому команда может вернуть исходную ошибку, оставив B работающим вместо восстановления A. Сохраняйте прежний runtime release и восстанавливайте/проверяйте всю пару unit+release+readiness транзакционно.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R141\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1415,\"description\":\"`git archive` целиком накапливается в `archive.stdout`, а лимит release проверяется только после распаковки и web-build. Большой чистый commit может исчерпать RAM или временно превысить заявленный 1-GiB предел до отказа. Потоково извлекайте архив с жёстким byte limit до записи stage.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R142\",\"severity\":\"warning\",\"file\":\"scripts/run_slice6.py\",\"line\":493,\"description\":\"После SIGKILL process group `stop()` ждёт только прямой `Popen`; если родитель уже завершён, функция возвращается немедленно, пока потомки группы ещё живы. `run-review-stand stop` поэтому может сообщить успех до выполнения zero-orphan инварианта. В пределах `kill_timeout` дождитесь исчезновения группы и сообщайте ошибку, если она сохранилась.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[\"Тесты не запускались согласно ограничению review-фазы.\",\"Выполнен статический просмотр истории, полного diff, эксплуатационных контрактов, call sites и тестовых утверждений.\"],\"testing_summary\":\"Только статический review; выполнение тестов отложено для отдельной pipeline-фазы.\",\"risk_level\":\"high\",\"risk_rationale\":\"Закрытая проверка manifest обходится типами JSON, а неудачная установка способна оставить не тот release активным, поэтому изменение не следует сливать без исправлений.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=1084586 status=success
+  ""
+  user-fix round starting after round 14 (4 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=1098015
+  ""
+  "{\"summary\":\"Harden manifest, activation rollback, archives, and process cleanup\"}"
+  pi exited pid=1098015 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden manifest, activation rollback, archives, and process cleanup"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=1114533
+  ""
+  "{\"findings\":[{\"id\":\"NM-R143\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1198,\"description\":\"Канонический store проверяет symlink-компоненты только до `state_root`, но `releases.mkdir(exist_ok=True)` принимает существующий `releases`-symlink. Например, `~/.local/share/voice-agent-v2/releases -> /tmp/releases` позволяет deploy успешно активировать внешний release, который затем недоступен сервису с `PrivateTmp=yes`. В `_initialize()` проверяйте `state_root` и `releases` через `lstat`/`O_NOFOLLOW` как принадлежащие пользователю приватные каталоги; lock также открывайте без следования symlink.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"},{\"id\":\"NM-R144\",\"severity\":\"warning\",\"file\":\"src/voice_agent_v2/operations_cli.py\",\"line\":396,\"description\":\"`_runtime_status()` ограничивает ожидание 0.5 с, хотя `/api/status` последовательно выполняет LiveKit и LFM probes с отдельными 0.1-секундными socket-бюджетами для нескольких операций. Корректный нагруженный ответ может превысить 0.5 с, из-за чего `status` сообщит недоступность, а `install-service` не распознает или откатит здоровый release. Используйте единый end-to-end readiness budget либо согласованный внешний лимит не меньше уже принятой секундной границы.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничению review-фазы; выполнен анализ истории, diff и связанных контрактов/вызовов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Каноническое release-хранилище допускает symlink-обход custody и может сообщить успешный deploy для стека, который гарантированно не запустится в systemd sandbox.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=1114533 status=success
+  ""
+  user-fix round starting after round 15 (2 findings selected)
+  ""
+  asking agent to fix identified issues...
+  ""
+  agent pi does not support session resume; running cold
+  ""
+  pi started pid=1132694
+  ""
+  "{\"summary\":\"Harden release store custody and readiness timing\"}"
+  pi exited pid=1132694 status=success
+  ""
+  "committed agent fixes: no-mistakes(review): Harden release store custody and readiness timing"
+  ""
+  reviewing changes...
+  ""
+  pi started pid=1138937
+  ""
+  "{\"findings\":[{\"id\":\"NM-R145\",\"severity\":\"error\",\"file\":\"src/voice_agent_v2/operations.py\",\"line\":1502,\"description\":\"Проверка custody выполняется только через `locked()`, но `execute_release`, `status` и `validate-deployment` вызывают `current()` без неё. `_linked_release()` разрешает `self.releases.resolve()`, поэтому канонический `releases`-symlink на внешний каталог с валидным release принимается и systemd исполняет release вне защищённого store. Проверяйте существующие `state_root`/`releases` без следования symlink на общей read-boundary `_linked_release()` или до любого чтения указателей.\",\"action\":\"auto-fix\",\"review_scope\":\"source\"}],\"tested\":[],\"testing_summary\":\"Тесты не запускались согласно ограничениям review-фазы; выполнен статический анализ diff, истории и связанных контрактов.\",\"risk_level\":\"high\",\"risk_rationale\":\"Ключевой инвариант custody immutable-release store остаётся обходимым на фактическом пути запуска systemd-сервиса.\",\"risk_scope\":\"source-or-external\"}"
+  pi exited pid=1138937 status=success

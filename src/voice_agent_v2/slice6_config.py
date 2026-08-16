@@ -7,23 +7,23 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 
 from .runtime_directory import require_lifetime_runtime_root
 
 
-TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 LOOPBACK_APP_ORIGIN = "http://127.0.0.1:8000"
+BUILD_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{40})$")
+RELEASE_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{24})$")
+PROCESS_IDENTITY_PATTERN = re.compile(r"^[1-9][0-9]*:[1-9][0-9]*$")
 
 
 class Slice6ConfigurationError(ValueError):
     pass
 
 
-def livekit_server_config(node_ip: str) -> str:
-    address = ipaddress.ip_address(node_ip)
-    if address not in TAILSCALE_NETWORK:
-        raise Slice6ConfigurationError("SLICE6_LIVEKIT_NODE_IP must be this host's Tailscale IPv4 address")
+def livekit_server_config() -> str:
     config = {
         "port": 7880,
         "bind_addresses": ["127.0.0.1"],
@@ -31,9 +31,9 @@ def livekit_server_config(node_ip: str) -> str:
             "tcp_port": 0,
             "udp_port": 7882,
             "use_external_ip": False,
-            "node_ip": str(address),
-            "interfaces": {"includes": ["tailscale0"]},
-            "ips": {"includes": [f"{address}/32"]},
+            "node_ip": "127.0.0.1",
+            "interfaces": {"includes": ["lo"]},
+            "ips": {"includes": ["127.0.0.1/32"]},
         },
         "room": {
             "auto_create": True,
@@ -48,6 +48,39 @@ def livekit_server_config(node_ip: str) -> str:
 
 def app_origin_allowed(origin: str | None, app_public_url: str) -> bool:
     return origin in {LOOPBACK_APP_ORIGIN, app_public_url}
+
+
+def _process_stat(pid: str) -> tuple[str, str]:
+    content = (Path("/proc") / pid / "stat").read_text(encoding="utf-8")
+    closing = content.rfind(")")
+    if closing < 0:
+        raise ValueError("process stat is malformed")
+    fields = content[closing + 2:].split()
+    if len(fields) <= 19:
+        raise ValueError("process stat is incomplete")
+    return fields[0], fields[19]
+
+
+def supervised_process_identity(pid: int) -> str:
+    try:
+        state, start_time = _process_stat(str(pid))
+    except (OSError, ValueError) as error:
+        raise Slice6ConfigurationError("supervised process identity is unavailable") from error
+    identity = f"{pid}:{start_time}"
+    if state == "Z" or not PROCESS_IDENTITY_PATTERN.fullmatch(identity):
+        raise Slice6ConfigurationError("supervised process identity is invalid")
+    return identity
+
+
+def supervised_process_alive(identity: str) -> bool:
+    if not PROCESS_IDENTITY_PATTERN.fullmatch(identity):
+        return False
+    pid, expected_start_time = identity.split(":", 1)
+    try:
+        state, start_time = _process_stat(pid)
+    except (OSError, ValueError):
+        return False
+    return state != "Z" and start_time == expected_start_time
 
 
 def _required(environment: dict[str, str], name: str) -> str:
@@ -96,6 +129,10 @@ class Slice6Settings:
     max_sessions: int = 1
     diagnostic_capture_root: Path | None = None
     diagnostic_capture_ttl_seconds: int = 15 * 60
+    build_id: str = "development"
+    release_id: str = "development"
+    supervised_livekit_process: str | None = None
+    supervised_lfm_process: str | None = None
 
     @classmethod
     def from_environment(
@@ -112,23 +149,37 @@ class Slice6Settings:
         internal_url = _url(
             _required(values, "LIVEKIT_INTERNAL_URL"),
             name="LIVEKIT_INTERNAL_URL",
-            schemes={"ws", "wss"},
+            schemes={"ws"},
             loopback=True,
         )
+        internal_endpoint = urlsplit(internal_url)
+        if internal_endpoint.hostname != "127.0.0.1" or internal_endpoint.port != 7880:
+            raise Slice6ConfigurationError(
+                "LIVEKIT_INTERNAL_URL must match the IPv4 loopback listener"
+            )
         public_url = _url(
-            _required(values, "LIVEKIT_PUBLIC_URL"),
+            values.get("LIVEKIT_PUBLIC_URL", "ws://127.0.0.1:7880"),
             name="LIVEKIT_PUBLIC_URL",
-            schemes={"wss"},
+            schemes={"ws", "wss"},
         )
         app_public_url = _url(
-            _required(values, "SLICE6_APP_PUBLIC_URL"),
+            values.get("SLICE6_APP_PUBLIC_URL", LOOPBACK_APP_ORIGIN),
             name="SLICE6_APP_PUBLIC_URL",
-            schemes={"https"},
+            schemes={"http", "https"},
         )
-        if urlsplit(public_url).hostname != urlsplit(app_public_url).hostname:
-            raise Slice6ConfigurationError(
-                "application and LiveKit public URLs must use the same tailnet host"
-            )
+        for name, value, secure_scheme in (
+            ("LIVEKIT_PUBLIC_URL", public_url, "wss"),
+            ("SLICE6_APP_PUBLIC_URL", app_public_url, "https"),
+        ):
+            parsed = urlsplit(value)
+            try:
+                loopback = ipaddress.ip_address(str(parsed.hostname)).is_loopback
+            except ValueError:
+                loopback = parsed.hostname == "localhost"
+            if not loopback and parsed.scheme != secure_scheme:
+                raise Slice6ConfigurationError(
+                    f"non-loopback {name} must use {secure_scheme}"
+                )
         if any(name.startswith("LITELLM_") for name in values):
             raise Slice6ConfigurationError(
                 "LiteLLM configuration is forbidden in the local-LFM Slice 6 runtime"
@@ -179,6 +230,17 @@ class Slice6Settings:
                 raise Slice6ConfigurationError("invalid diagnostic capture TTL") from error
             if not 60 <= diagnostic_capture_ttl_seconds <= 3_600:
                 raise Slice6ConfigurationError("diagnostic capture TTL is outside 60..3600 seconds")
+        build_id = values.get("VOICE_AGENT_BUILD_ID", "development")
+        release_id = values.get("VOICE_AGENT_RELEASE_ID", "development")
+        if not BUILD_ID_PATTERN.fullmatch(build_id) or not RELEASE_ID_PATTERN.fullmatch(release_id):
+            raise Slice6ConfigurationError("operational build/release identity is invalid")
+        livekit_process = values.get("VOICE_AGENT_SUPERVISED_LIVEKIT_PROCESS")
+        lfm_process = values.get("VOICE_AGENT_SUPERVISED_LFM_PROCESS")
+        if any(
+            value is not None and not PROCESS_IDENTITY_PATTERN.fullmatch(value)
+            for value in (livekit_process, lfm_process)
+        ) or (livekit_process is None) != (lfm_process is None):
+            raise Slice6ConfigurationError("supervised process identity is invalid")
         return cls(
             livekit_api_key=api_key,
             livekit_api_secret=api_secret,
@@ -188,4 +250,8 @@ class Slice6Settings:
             web_dist=web_dist,
             diagnostic_capture_root=diagnostic_capture_root,
             diagnostic_capture_ttl_seconds=diagnostic_capture_ttl_seconds,
+            build_id=build_id,
+            release_id=release_id,
+            supervised_livekit_process=livekit_process,
+            supervised_lfm_process=lfm_process,
         )

@@ -54,6 +54,7 @@ def _environment() -> dict[str, str]:
         "HOME": str(CACHE / "home"), "XDG_CACHE_HOME": str(CACHE / "xdg"),
         "HF_HOME": str(CACHE / "huggingface"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        "PYTHONPYCACHEPREFIX": str(CACHE / "pycache"),
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
     }
 

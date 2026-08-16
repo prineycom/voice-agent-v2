@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Slice 8 controlled failure semantics, compatible readiness, privacy-safe timeline/percentile reconstruction, bounded diagnostic retention/deletion, disposable process loss, and safe resource pressure pass. Physical/shared/destructive acceptance remains explicitly open.** The private Silero/Kseniya native-48 path passes deterministic and focused exact-cache checks; Pasha's physical Firefox acceptance is still required. Slice 7 provides the bounded renderer-agnostic avatar host, original deterministic eye, and portrait-first UI shell, while physical Raspberry Pi/full-stack visual acceptance remains open. Active composition is fixed directly to cache-local Silero `v5_5_ru`, speaker `kseniya`, behind TTS v2. There is no TTS selector, Qwen adapter, co-start, hot switch, fallback, or cross-adapter retry. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`. The local LFM2.5 Q4_K_M path remains fixed and cloud-free.
+**Slice 9's deterministic and canonical-host operational boundaries pass: exact config/artifact/cache preflight, versioned immutable release, idempotent deploy, compatible rollback, declared drain, one systemd recovery, controlled full-stack/core-process loss, and no surviving inference process. Physical reboot and physical voice/avatar acceptance remain explicitly open, so core MVP physical sign-off is still pending.** The private Silero/Kseniya native-48 path remains fixed to exact cache-local `v5_5_ru` / `kseniya` behind TTS v2; the active LLM remains only local LFM2.5 Q4_K_M. There is no provider/model/TTS/avatar fallback, Qwen co-start, cloud supervision, wake, kiosk, or public exposure. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`.
 
 Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
@@ -58,7 +58,7 @@ Start the foreground development stack with:
 ./run-slice6
 ```
 
-Startup clears unrelated inherited `LITELLM_BASE_URL`/`LITELLM_TOKEN_FILE` before loading operator-owned `.env.slice6`; either forbidden name configured in that file still fails closed. It verifies the exact LFM and Silero identities before starting local llama.cpp, LiveKit, the gateway/controller, and Tailscale Serve. Exact existing HTTPS mappings to `127.0.0.1:8000`/`:7880` are treated as externally owned and survive shutdown; conflicts fail before mutation. Missing routes are created as foreground children one at a time, verified before the next launch, supervised, and removed only by stopping the children owned by that run. No global Serve reset is used, and unrelated handlers such as HTTPS `443` are untouched. The agent publishes one persistent 48-kHz LiveKit source; request/media generations determine when the browser may attach it. Microphone input remains explicitly 16 kHz. Shared services, firewall, and LiveKit server settings are not modified by setup or verification.
+Startup clears unrelated inherited `LITELLM_BASE_URL`/`LITELLM_TOKEN_FILE` before loading operator-owned `.env.slice6`; either forbidden name configured in that file still fails closed. It verifies the exact LFM and Silero identities before starting local llama.cpp, loopback-only LiveKit, and the loopback-only gateway/controller. It creates, mutates, monitors, and removes no reverse-proxy or private-network route. Optional external exposure is entirely operator-owned and must preserve appropriate private-network/access controls; the application behaves the same without it. The agent publishes one persistent 48-kHz LiveKit source; request/media generations determine when the browser may attach it. Microphone input remains explicitly 16 kHz. Shared services, firewall, and external exposure settings are not modified by setup or verification.
 
 ### Slice 7 avatar/UI verification and review stand
 
@@ -70,7 +70,7 @@ Run the intentionally focused browser boundary:
 
 It covers host/module compatibility and fallback, deterministic replay/bounds, UI state mapping, decoded-playout envelope normalization, microphone mute/reconnect semantics, both reduced-motion levels, the production build, and the separate review-fixture build. The browser evidence and explicit physical/full-stack gaps are recorded in [`docs/evidence/slice-7-ui-avatar.md`](docs/evidence/slice-7-ui-avatar.md).
 
-A clean committed head can be deployed for physical acceptance through the existing safe local runtime. The stable stand builds the ordinary production entry, starts local LFM, LiveKit, gateway/controller, STT/TTS, and owns only its explicit foreground Tailscale routes; it does not change HTTPS/443 or firewalld:
+A clean committed head can be deployed for physical acceptance through the existing safe local runtime. The stable stand builds the ordinary production entry and starts local LFM, loopback LiveKit, gateway/controller, and STT/TTS. It configures no external exposure, proxy, firewall, or private-network route:
 
 ```sh
 ./run-review-stand start
@@ -79,7 +79,7 @@ A clean committed head can be deployed for physical acceptance through the exist
 ./run-review-stand stop
 ```
 
-The launcher prints the exact compiled commit and stable tailnet URL. The first page is deliberately disconnected: select **CONNECT** to mint a same-origin room capability, join its validated public LiveKit endpoint, request microphone permission, and publish the microphone. Conversation history remains empty until genuine server events arrive, and the compact control visibly reports the real microphone lifecycle throughout admission, listening, mute, and failure. The synthetic `ReviewStand` is built only by `npm run build:review` under `web/review/dist`; it is never served by this launcher.
+The launcher prints the exact compiled commit and stable loopback URL. The first page is deliberately disconnected: select **CONNECT** to mint a same-origin room capability, join its validated LiveKit endpoint, request microphone permission, and publish the microphone. Conversation history remains empty until genuine server events arrive, and the compact control visibly reports the real microphone lifecycle throughout admission, listening, mute, and failure. The synthetic `ReviewStand` is built only by `npm run build:review` under `web/review/dist`; it is never served by this launcher.
 
 ### Slice 8 failure/observability verification
 
@@ -89,9 +89,9 @@ Run the focused bounded gate:
 ./verify-slice8
 ```
 
-It executes all architecture failure rows and their documented consequences, liveness-versus-compatible-readiness checks, a metadata-only correlated timeline and preregistered percentile report, default privacy rejection, opt-in capture plus the public deletion command when the lifetime runtime is available (otherwise persistent-root fail-closed behavior), one disposable real-process recovery bound, a safe 16-MiB/100-ms pressure sample, and focused System/Timeline/avatar-render/browser state tests. It does not stop shared services, disconnect Tailscale, or exhaust RAM/VRAM.
+It executes all application architecture failure rows and their documented consequences, liveness-versus-compatible-readiness checks, a metadata-only correlated timeline and preregistered percentile report, default privacy rejection, opt-in capture plus the public deletion command when the lifetime runtime is available (otherwise persistent-root fail-closed behavior), one disposable real-process recovery bound, a safe 16-MiB/100-ms pressure sample, and focused System/Timeline/avatar-render/browser state tests. It does not stop shared services, manipulate external exposure, or exhaust RAM/VRAM.
 
-Default metadata diagnostics contain no conversation/media content, secrets, exception messages, or content-bearing identifiers. Explicit content capture is off by default. To enable it, add the exact settings documented in [`.env.slice6.example`](.env.slice6.example) to ignored server configuration; the capture root must remain outside Git beneath the exact `/run/user/<uid>` `XDG_RUNTIME_DIR` tmpfs, with user lingering disabled. Read selected manifest status fields or delete a capture without enumerating its content. Deletion succeeds only while the capture still passes the lifetime-runtime, ownership, privacy-mode, manifest, and path guards:
+Default metadata diagnostics contain no conversation/media content, secrets, exception messages, or content-bearing identifiers. Explicit content capture is off by default. To enable it, add the exact settings documented in [`.env.slice6.example`](.env.slice6.example) to ignored server configuration. Development capture remains outside Git beneath the exact non-lingering `/run/user/<uid>` runtime tmpfs; the system service instead requires its systemd-owned `/run/voice-agent-v2` runtime directory so boot never depends on a user login. Read selected manifest status fields or delete a capture without enumerating its content. Deletion succeeds only while the capture still passes the lifetime-runtime, ownership, privacy-mode, manifest, and path guards:
 
 ```sh
 ./manage-diagnostics status <capture-directory>
@@ -100,9 +100,52 @@ Default metadata diagnostics contain no conversation/media content, secrets, exc
 
 [`docs/architecture.md` §8.2](docs/architecture.md#82-data-handling) owns the capture limits, expiry, and privacy contract. The complete exercised matrix, example redacted report, privacy evidence, and exact nonclaims are in [`docs/evidence/slice-8-failure-observability.md`](docs/evidence/slice-8-failure-observability.md).
 
+### Slice 9 single-host operations
+
+Run the CI-safe deterministic operational gate and, on the canonical host, the read-only exact-cache plus disposable transient-systemd preflight:
+
+```sh
+./verify-slice9
+"${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/runtime/venv/bin/python" \
+  ./scripts/verify_slice9_host.py
+```
+
+The second command starts no product service, uses no `sudo`, prints no secret, and touches only a uniquely named disposable user service. It creates a new private mode-`0700` deployment-state root under `/var/tmp`—not the smaller `XDG_RUNTIME_DIR` tmpfs to which the persistent 8-GiB bound does not apply—and deletes it on exit. It verifies exact selected artifacts/runtimes, ignored local configuration structure/mode, free-disk and active-cache bounds, then proves one completed restart and an actionable failed state. It does not inspect external exposure, reboot, or claim physical behavior. `--config <path>` may select a different mode-`0600` private file outside Git for a transitional read-only check.
+
+A private config retained from the retired Tailscale-coupled runtime needs a one-time explicit migration before normal validation or deployment: remove only `SLICE6_LIVEKIT_NODE_IP`, `SLICE6_APP_HTTPS_PORT`, `SLICE6_SIGNAL_HTTPS_PORT`, and `SLICE6_ENABLE_TAILSCALE_SERVE`; preserve all other names/values and mode `0600`, without logging secret values. If the product service is installed, run `./voice-agent-ops install-service --restart` afterward and confirm exact readiness with `status`. For transition-only host evidence, use a temporary mode-`0600` sanitized copy outside Git via `--config`, delete it afterward, and leave the original untouched.
+
+Operational activation is explicit. Keep the server configuration untracked and mode `0600`; no operation copies or prints its secret values:
+
+```sh
+./voice-agent-ops validate --config .env.slice6
+./voice-agent-ops deploy --config .env.slice6
+./voice-agent-ops install-service
+./voice-agent-ops status
+```
+
+`deploy` requires a clean committed source, rejects a selected private configuration tracked by that commit, requires canonical-service configuration beneath the service user's readable home, installs the committed `package-lock.json` dependency tree from the local npm cache in the isolated release stage with lifecycle scripts disabled, builds the ordinary client with the exact commit, and atomically activates an immutable release under `~/.local/share/voice-agent-v2`. The complete payload inventory includes empty directories and modes as well as file/symlink hashes and targets. Runtime bytecode/temp/output goes only to explicit private mutable runtime/cache roots; the systemd unit does not make the release store writable. Its mode-`0700` `/run/voice-agent-v2` directory is created at boot without a user manager and removed on every stop, including automatic restart, so diagnostic captures may expire early and cannot outlive their TTL or reboot. Reapplying the same source/config locator/public configuration reports `changed: false`. Reaching a cache, free-disk, release-count, or release-byte bound fails without deletion. `install-service` is the only privileged step and uses only `sudo -n`; it semantically verifies the exact restart/sandbox policy, reloads systemd, reconciles/restarts an already installed unit after a changed deploy, and returns success only after systemd `Type=notify`, exact-release five-component readiness, and supervised ownership of every local runtime listener. Reapplying the already ready release is a no-op. The unit depends on no external exposure daemon and changes no proxy, private-network route, firewall, or unrelated unit.
+
+LiveKit credentials remain only in the current-user mode-`0600` server configuration. Operational-release v2 stores no credential and no verifier derived from one; startup validates that file once and passes the exact parsed snapshot through the execution boundary. Secret changes are intentionally not detected by release identity or by an already-running process. For credential-only rotation, edit the mode-`0600` private configuration, run `./voice-agent-ops install-service --restart`, and confirm `./voice-agent-ops status`; that explicit command revalidates the active release and private configuration, restarts even at an unchanged release ID, and waits for exact-release readiness. Public configuration or release-payload changes still require `deploy`; its `release_service_apply_required` result refers only to release/unit payload changes, never credentials. This explicit restart limitation is part of the single-host contract, not automatic secret rotation.
+
+The unit has a 300-second hard startup boundary for exact release/artifact validation and sequential component readiness, then starts local LFM → loopback LiveKit → loopback gateway/controller-owned STT/TTS/provider adapter. Shutdown removes application admission first, drains the controller/workers within the bounded 54-second budget, then closes LiveKit and LFM; the complete ordered cleanup budget remains below the 75-second hard stop. A runtime loss gets at most one completed systemd restart before an explicit operator reset; configuration/artifact incompatibility never restarts. `status` reports the exact build/release, local provider, loopback boundary, browser avatar contract/MVP eye, and external-cloud-not-supervised facts without secrets.
+
+Rollback accepts only the recorded previous release and revalidates its complete inventory, referenced local configuration, exact external artifacts/runtimes, and disk/cache preflight before restarting. It does not inspect or alter optional external exposure. When the canonical service is installed, the prior release unit must also be byte-for-byte identical to the installed root-owned unit before either release pointer moves; a different lifecycle or sandbox policy requires a separate explicit service operation and rollback leaves the running service unchanged:
+
+```sh
+./voice-agent-ops rollback
+```
+
+It is not an arbitrary Git reset and never deletes a cache/release to force success. The narrow post-rollback deterministic check uses the same public Slice 1 tracer without recursively running the full test suite:
+
+```sh
+"$HOME/.local/share/voice-agent-v2/current/verify" --tracer-only
+```
+
+This focused recovery check is not a substitute for the ordinary full `./verify` gate. [`docs/evidence/slice-9-single-host-reliability.md`](docs/evidence/slice-9-single-host-reliability.md) records the exercised cases and exact remaining physical reboot/voice gaps.
+
 ### Pasha physical acceptance and rollback
 
-Follow the authoritative acceptance and rollback checklist in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](docs/evidence/silero-kseniya-48k-private-evaluation.md). It owns the required Kseniya audibility/quality/join, repeated barge-in, tailnet, full-stack resource, evidence-handling, and rollback procedure. Do not merge this branch until physical acceptance, separate licensing, and legal review are all complete.
+Follow the authoritative acceptance and rollback checklist in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](docs/evidence/silero-kseniya-48k-private-evaluation.md). It owns the required Kseniya audibility/quality/join, repeated barge-in, loopback full-stack resource, evidence-handling, and rollback procedure. Optional external exposure is not an application acceptance requirement. Do not merge this branch until physical acceptance, separate licensing, and legal review are all complete.
 
 ## Final Slice 5 human acceptance
 
@@ -118,10 +161,10 @@ Microphone capture is bounded to 1–30 seconds. The command removes temporary m
 
 ## Current scope
 
-- One Arch Linux host runs every media, orchestration, STT, TTS, application, and optional local-LLM process. ADR-0004 permits only one narrow auxiliary role: an allowlisted tailnet LiteLLM relay for a measured cloud path, never Pi-side inference/control.
+- One Arch Linux host runs every active media, orchestration, STT, TTS, application, and local-LLM process. Historical ADR-0004 evidence used an external relay for a superseded cloud measurement; it is not an active application dependency.
 - A private browser experience uses local LiveKit and local STT/TTS. LLM access uses one explicitly configured provider mode, with local preferred initially.
 - A cloud LLM may be selected only after local candidates fail preregistered resource, latency, or quality gates. It is never an automatic or silent fallback.
-- Tailscale membership is sufficient authorization during the current private stage.
+- The application defaults to loopback and relies on local-host access. Any optional external exposure and its private-network/access controls are entirely operator-owned.
 - The MVP uses a deterministic custom AI-eye module behind a renderer-agnostic avatar boundary.
 - The avatar runtime, never the LLM, owns pupil motion, blinking, speech-synchronous pulsing, palette/state behavior, interpolation, scheduling, and frames.
 - Interruption, explicit failure behavior, privacy-safe observability, and measured resource budgets are part of the supported product.
@@ -140,7 +183,7 @@ Microphone capture is bounded to 1–30 seconds. The command removes temporary m
 - Cloud STT/TTS or silent/automatic failover between local and cloud LLM providers.
 - Audio2Face (A2F) or Audio2Emotion (A2E) in the active V2 architecture.
 - Kiosk mode.
-- A separate application authorization subsystem before evidence shows that tailnet membership is insufficient.
+- Automatic exposure, proxy management, wildcard/public listeners, or weakened access controls.
 - Proprietary avatar assets, copied character design, or LLM-generated renderer parameters, keyframes, or per-frame animation data.
 
 ## Pinned legacy reference

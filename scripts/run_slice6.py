@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the pinned local LiveKit server, gateway/controller, and foreground tailnet HTTPS."""
+"""Start the pinned loopback-local LiveKit, gateway/controller, and inference stack."""
 
 from __future__ import annotations
 
@@ -7,22 +7,23 @@ import http.client
 import json
 import os
 from pathlib import Path
-import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
-from urllib.parse import urlsplit
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from voice_agent_v2.runtime_directory import SYSTEMD_RUNTIME_ROOT
 from voice_agent_v2.silero_tts import verify_silero_runtime
 from voice_agent_v2.slice6_config import (
     Slice6ConfigurationError,
     Slice6Settings,
     livekit_server_config,
+    supervised_process_identity,
 )
 
 LIVEKIT_VERSION = "1.13.5"
@@ -45,26 +46,100 @@ SERVER_SECRET_NAMES = frozenset({
     "LIVEKIT_KEYS",
 })
 FORBIDDEN_CLOUD_NAMES = frozenset({"LITELLM_BASE_URL", "LITELLM_TOKEN_FILE"})
-SERVE_READINESS_TIMEOUT_SECONDS = 5.0
-SERVE_STATUS_LIMIT_BYTES = 64 * 1024
+SERVICE_MAIN_PROCESS_NAME = "VOICE_AGENT_SYSTEMD_MAIN_PROCESS"
+OPERATIONAL_STATUS_LIMIT_BYTES = 64 * 1024
+OPERATIONAL_UNREADY_GRACE_SECONDS = 2.0
+RUNTIME_LISTENER_REQUIREMENTS = (
+    ("local-llm", "tcp", LLAMA_PORT),
+    ("livekit", "tcp", SIGNAL_PORT),
+    ("livekit", "udp", RTC_UDP_PORT),
+    ("gateway-controller-stt-tts-provider", "tcp", GATEWAY_PORT),
+)
+
+
+SHUTDOWN_ORDER = (
+    "gateway-controller-stt-tts-provider",
+    "livekit",
+    "local-llm",
+)
+STOP_BUDGETS = {
+    "gateway-controller-stt-tts-provider": (54.0, 1.0),
+    "livekit": (8.0, 1.0),
+    "local-llm": (8.0, 1.0),
+}
+SHUTDOWN_TIMEOUT_SECONDS = sum(
+    graceful_timeout + kill_timeout
+    for graceful_timeout, kill_timeout in STOP_BUDGETS.values()
+)
+
+
+class ServiceProcessFailure(RuntimeError):
+    pass
+
+
+class ServiceStopRequested(RuntimeError):
+    pass
 
 
 class ProcessSupervisor:
-    """Own and stop only child processes started by this runner."""
+    """Own child processes and stop them in the declared safe drain order."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, stop_requested: Callable[[], bool] | None = None,
+    ) -> None:
         self.processes: list[subprocess.Popen] = []
+        self._roles: dict[int, str] = {}
+        self._process_groups: dict[int, int] = {}
+        self._stop_requested = stop_requested
 
-    def start(self, command: list[str], **kwargs: object) -> subprocess.Popen:
-        process = subprocess.Popen(command, **kwargs)
+    def start(
+        self, command: list[str], *, role: str | None = None, **kwargs: object,
+    ) -> subprocess.Popen:
+        if self._stop_requested is not None and self._stop_requested():
+            raise ServiceStopRequested
+        if "start_new_session" in kwargs:
+            raise ServiceProcessFailure("supervised session ownership cannot be overridden")
+        try:
+            process = subprocess.Popen(command, start_new_session=True, **kwargs)
+        except OSError as error:
+            raise ServiceProcessFailure("supervised component could not start") from error
         self.processes.append(process)
+        process_pid = getattr(process, "pid", None)
+        if type(process_pid) is int and process_pid > 0:
+            self._process_groups[id(process)] = process_pid
+        if role is not None:
+            if role in self._roles.values():
+                stop(process, process_group=self._process_groups.get(id(process)))
+                raise RuntimeError(f"duplicate supervised role: {role}")
+            self._roles[id(process)] = role
         return process
 
-    def close(self) -> None:
+    def role(self, process: subprocess.Popen) -> str:
+        return self._roles.get(id(process), "unclassified-child")
+
+    def close(self, order: tuple[str, ...] | None = None) -> None:
         first_error: BaseException | None = None
-        for process in reversed(self.processes):
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
+        ordered: list[subprocess.Popen] = []
+        if order is not None:
+            for role in order:
+                ordered.extend(
+                    process for process in self.processes
+                    if self._roles.get(id(process)) == role and process not in ordered
+                )
+        ordered.extend(process for process in reversed(self.processes) if process not in ordered)
+        for process in ordered:
             try:
-                stop(process)
+                graceful_timeout, kill_timeout = STOP_BUDGETS.get(
+                    self.role(process), (4.0, 1.0),
+                )
+                stop(
+                    process,
+                    timeout=graceful_timeout,
+                    kill_timeout=kill_timeout,
+                    deadline=deadline,
+                    process_group=self._process_groups.get(id(process)),
+                )
             except BaseException as error:
                 if first_error is None:
                     first_error = error
@@ -72,30 +147,14 @@ class ProcessSupervisor:
             raise first_error
 
 
-def required(name: str) -> str:
-    value = os.environ.get(name)
-    if value is None or not value or value != value.strip():
-        raise Slice6ConfigurationError(f"required server configuration is missing or invalid: {name}")
-    return value
+def systemd_service_main_process(environment: dict[str, str]) -> str | None:
+    if environment.get("XDG_RUNTIME_DIR") != str(SYSTEMD_RUNTIME_ROOT):
+        return None
+    return supervised_process_identity(os.getpid())
 
 
 def without_server_secrets(environment: dict[str, str]) -> dict[str, str]:
     return {name: value for name, value in environment.items() if name not in SERVER_SECRET_NAMES}
-
-
-def validate_tailnet_identity(document: object, *, node_ip: str, hostname: str) -> None:
-    if not isinstance(document, dict) or not isinstance(document.get("Self"), dict):
-        raise Slice6ConfigurationError("Tailscale self status is unavailable")
-    self_status = document["Self"]
-    dns_name = self_status.get("DNSName")
-    addresses = self_status.get("TailscaleIPs")
-    online = self_status.get("Online")
-    if not isinstance(dns_name, str) or not isinstance(addresses, list):
-        raise Slice6ConfigurationError("Tailscale self status is unavailable")
-    if not online or dns_name.removesuffix(".") != hostname or node_ip not in addresses:
-        raise Slice6ConfigurationError(
-            "configured Slice 6 URLs/node IP do not match this online Tailscale host"
-        )
 
 
 def sha256_file(path: Path) -> str:
@@ -166,228 +225,306 @@ def local_lfm_health_ready(port: int, timeout: float) -> bool:
         connection.close()
 
 
-def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: float = 30) -> None:
+def systemd_notify_ready() -> None:
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    notifier = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        notifier.settimeout(1.0)
+        notifier.connect(address)
+        notifier.sendall(b"READY=1\nSTATUS=Voice Agent exact release ready\n")
+    except OSError as error:
+        raise ServiceProcessFailure("systemd readiness notification failed") from error
+    finally:
+        notifier.close()
+
+
+def gateway_operational_ready(
+    timeout: float = 1.0, *, expected_build_id: str | None = None,
+    expected_release_id: str | None = None,
+) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", GATEWAY_PORT, timeout=timeout)
+    try:
+        connection.request("GET", "/api/status", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(OPERATIONAL_STATUS_LIMIT_BYTES + 1)
+        if response.status != 200 or len(body) > OPERATIONAL_STATUS_LIMIT_BYTES:
+            return False
+        document = json.loads(body)
+        health = document.get("health") if isinstance(document, dict) else None
+        return bool(
+            isinstance(health, dict)
+            and health.get("overall_readiness") == "ready"
+            and document.get("accepting") is True
+            and document.get("provider_mode") == "local"
+            and document.get("external_provider_supervised") is False
+            and document.get("automatic_fallback") is False
+            and (
+                expected_build_id is None
+                or document.get("build_id") == expected_build_id
+            )
+            and (
+                expected_release_id is None
+                or document.get("release_id") == expected_release_id
+            )
+        )
+    except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError):
+        return False
+    finally:
+        connection.close()
+
+
+def require_runtime_ports_free(proc_root: Path = Path("/proc")) -> None:
+    occupied: set[int] = set()
+    for name, listening_state in (
+        ("tcp", "0A"), ("tcp6", "0A"), ("udp", None), ("udp6", None),
+    ):
+        try:
+            lines = (proc_root / "net" / name).read_text(encoding="ascii").splitlines()
+        except OSError as error:
+            raise ServiceProcessFailure("runtime port custody is unavailable") from error
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 4 or (
+                listening_state is not None and fields[3] != listening_state
+            ):
+                continue
+            try:
+                occupied.add(int(fields[1].rsplit(":", 1)[1], 16))
+            except (IndexError, ValueError) as error:
+                raise ServiceProcessFailure("runtime port custody is invalid") from error
+    for port in (LLAMA_PORT, SIGNAL_PORT, GATEWAY_PORT, RTC_UDP_PORT):
+        if port in occupied:
+            raise ServiceProcessFailure(f"required runtime port is already owned: {port}")
+
+
+def _listener_inodes(
+    protocol: str, port: int, *, proc_root: Path,
+) -> set[str]:
+    names = ("tcp", "tcp6") if protocol == "tcp" else ("udp", "udp6")
+    inodes: set[str] = set()
+    for name in names:
+        try:
+            lines = (proc_root / "net" / name).read_text(encoding="ascii").splitlines()
+        except OSError as error:
+            raise ServiceProcessFailure("runtime listener custody is unavailable") from error
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 10:
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError) as error:
+                raise ServiceProcessFailure("runtime listener custody is invalid") from error
+            if local_port != port or (protocol == "tcp" and fields[3] != "0A"):
+                continue
+            if not fields[9].isdigit() or fields[9] == "0":
+                raise ServiceProcessFailure("runtime listener custody is invalid")
+            inodes.add(fields[9])
+    return inodes
+
+
+def _process_tree_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
+    pending = [pid]
+    observed: set[int] = set()
+    inodes: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in observed:
+            continue
+        observed.add(current)
+        process_root = proc_root / str(current)
+        try:
+            children = (
+                process_root / "task" / str(current) / "children"
+            ).read_text(encoding="ascii").split()
+            descriptors = tuple((process_root / "fd").iterdir())
+        except OSError as error:
+            raise ServiceProcessFailure("supervised listener owner is unavailable") from error
+        for child in children:
+            if not child.isdigit() or int(child) <= 0:
+                raise ServiceProcessFailure("supervised listener owner is invalid")
+            pending.append(int(child))
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise ServiceProcessFailure("supervised listener custody is unavailable") from error
+            if target.startswith("socket:[") and target.endswith("]"):
+                inode = target[8:-1]
+                if inode.isdigit() and inode != "0":
+                    inodes.add(inode)
+    return inodes
+
+
+def require_runtime_listener_custody(
+    supervisor: ProcessSupervisor,
+    *,
+    proc_root: Path = Path("/proc"),
+    requirements: tuple[tuple[str, str, int], ...] = RUNTIME_LISTENER_REQUIREMENTS,
+) -> None:
+    processes_by_role = {
+        role: [process for process in supervisor.processes if supervisor.role(process) == role]
+        for role, _protocol, _port in requirements
+    }
+    owned_by_role: dict[str, set[str]] = {}
+    for role, processes in processes_by_role.items():
+        if len(processes) != 1:
+            raise ServiceProcessFailure(f"supervised listener owner is ambiguous: {role}")
+        process = processes[0]
+        pid = getattr(process, "pid", None)
+        if type(pid) is not int or pid <= 0 or process.poll() is not None:
+            raise ServiceProcessFailure(f"supervised listener owner is unavailable: {role}")
+        owned_by_role[role] = _process_tree_socket_inodes(pid, proc_root=proc_root)
+    for role, protocol, port in requirements:
+        listeners = _listener_inodes(protocol, port, proc_root=proc_root)
+        if not listeners or not listeners.issubset(owned_by_role[role]):
+            raise ServiceProcessFailure(
+                f"runtime listener is not owned by the supervised component: {protocol}/{port}"
+            )
+
+
+def require_supervised_children_alive(
+    supervisor: ProcessSupervisor, *, phase: str,
+) -> None:
+    for process in supervisor.processes:
+        if process.poll() is not None:
+            raise ServiceProcessFailure(
+                f"supervised component exited {phase}: {supervisor.role(process)}"
+            )
+
+
+def supervised_child_identity(process: subprocess.Popen, name: str) -> str:
+    if process.poll() is not None:
+        raise ServiceProcessFailure(f"{name} exited before process identity publication")
+    try:
+        return supervised_process_identity(process.pid)
+    except Slice6ConfigurationError as error:
+        raise ServiceProcessFailure(
+            f"{name} process identity was lost during startup"
+        ) from error
+
+
+def publish_systemd_readiness(
+    supervisor: ProcessSupervisor,
+    *,
+    build_id: str,
+    release_id: str,
+    stop_requested: Callable[[], bool] | None = None,
+) -> None:
+    if stop_requested is not None and stop_requested():
+        raise ServiceStopRequested
+    require_supervised_children_alive(supervisor, phase="before readiness")
+    require_runtime_listener_custody(supervisor)
+    if not gateway_operational_ready(
+        timeout=1.0,
+        expected_build_id=build_id,
+        expected_release_id=release_id,
+    ):
+        raise ServiceProcessFailure(
+            "gateway did not expose exact operational readiness after local startup"
+        )
+    require_supervised_children_alive(supervisor, phase="before readiness")
+    require_runtime_listener_custody(supervisor)
+    if stop_requested is not None and stop_requested():
+        raise ServiceStopRequested
+    systemd_notify_ready()
+
+
+def wait_for_port(
+    process: subprocess.Popen,
+    port: int,
+    name: str,
+    timeout: float = 30,
+    *,
+    stop_requested: Callable[[], bool] | None = None,
+) -> bool:
     deadline = time.monotonic() + timeout
     require_lfm_health = port == LLAMA_PORT and name == "local LFM"
     while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested():
+            return False
         if process.poll() is not None:
-            raise RuntimeError(f"{name} exited before readiness")
+            raise ServiceProcessFailure(f"{name} exited before readiness")
         remaining = deadline - time.monotonic()
         if require_lfm_health:
             if local_lfm_health_ready(port, min(0.2, remaining)):
-                return
+                return True
         else:
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=min(0.2, remaining)):
-                    return
+                    return True
             except OSError:
                 pass
         time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
     readiness = "become healthy" if require_lfm_health else "listen"
-    raise RuntimeError(f"{name} did not {readiness} within {timeout:.0f}s")
+    raise ServiceProcessFailure(f"{name} did not {readiness} within {timeout:.0f}s")
 
 
-def stop(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
+def _process_group_exists(process_group: int) -> bool:
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
-def read_tailscale_serve_status(
-    environment: dict[str, str], *, timeout: float = 5.0,
-) -> dict[str, object]:
-    try:
-        status = subprocess.run(
-            ["tailscale", "serve", "status", "--json"],
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable") from error
-    if status.returncode != 0 or len(status.stdout.encode("utf-8")) > SERVE_STATUS_LIMIT_BYTES:
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
-    try:
-        document = json.loads(status.stdout)
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable") from error
-    if not isinstance(document, dict):
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
-    return document
-
-
-def serve_route_state(
-    document: dict[str, object], *, hostname: str, https_port: int, target: str,
-) -> str:
-    configurations: list[dict[str, object]] = [document]
-    foreground = document.get("Foreground", {})
-    if not isinstance(foreground, dict):
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
-    for configuration in foreground.values():
-        if not isinstance(configuration, dict):
-            raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
-        configurations.append(configuration)
-
-    port_key = str(https_port)
-    web_key = f"{hostname}:{https_port}"
-    port_suffix = f":{https_port}"
-    exact_found = False
-    conflicting_use_found = False
-    for configuration in configurations:
-        tcp = configuration.get("TCP", {})
-        web = configuration.get("Web", {})
-        if not isinstance(tcp, dict) or not isinstance(web, dict):
-            raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
-        tcp_entry = tcp.get(port_key)
-        web_entry = web.get(web_key)
-        handlers = web_entry.get("Handlers") if isinstance(web_entry, dict) else None
-        root_handler = handlers.get("/") if isinstance(handlers, dict) else None
-        exact = (
-            isinstance(tcp_entry, dict)
-            and tcp_entry.get("HTTPS") is True
-            and isinstance(root_handler, dict)
-            and root_handler.get("Proxy") == target
-        )
-        web_uses_port = any(
-            isinstance(key, str) and (key == port_key or key.endswith(port_suffix))
-            for key in web
-        )
-        uses_port = tcp_entry is not None or web_uses_port
-        exact_found = exact_found or exact
-        conflicting_use_found = conflicting_use_found or (uses_port and not exact)
-
-    if exact_found and not conflicting_use_found:
-        return "preexisting"
-    if not exact_found and not conflicting_use_found:
-        return "absent"
-    return "conflict"
-
-
-def wait_for_serve_route(
-    process: subprocess.Popen,
-    *,
-    environment: dict[str, str],
-    hostname: str,
-    https_port: int,
-    target: str,
-    timeout: float = SERVE_READINESS_TIMEOUT_SECONDS,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
-        if process.poll() is not None:
-            raise RuntimeError(f"Tailscale Serve HTTPS/{https_port} exited before readiness")
+def _wait_for_process_group_exit(process_group: int, *, deadline: float) -> None:
+    while _process_group_exists(process_group):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError(
-                f"Tailscale Serve HTTPS/{https_port} did not register within {timeout:.0f}s"
-            )
-        try:
-            document = read_tailscale_serve_status(
-                environment, timeout=min(1.0, remaining),
-            )
-        except Slice6ConfigurationError:
-            document = {}
-        if document and serve_route_state(
-            document, hostname=hostname, https_port=https_port, target=target,
-        ) == "preexisting":
-            if process.poll() is not None:
-                raise RuntimeError(f"Tailscale Serve HTTPS/{https_port} exited before readiness")
-            return
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            raise ServiceProcessFailure("supervised process group survived forced stop")
+        time.sleep(min(0.01, remaining))
 
 
-def reconcile_serve_routes(
+def stop(
+    process: subprocess.Popen,
     *,
-    supervisor: ProcessSupervisor,
-    environment: dict[str, str],
-    hostname: str,
-    routes: tuple[tuple[int, str], ...],
-    timeout: float = SERVE_READINESS_TIMEOUT_SECONDS,
-) -> dict[int, str]:
-    document = read_tailscale_serve_status(environment)
-    states = {
-        https_port: serve_route_state(
-            document, hostname=hostname, https_port=https_port, target=target,
-        )
-        for https_port, target in routes
-    }
-    conflicts = [str(port) for port, state in states.items() if state == "conflict"]
-    if conflicts:
-        raise Slice6ConfigurationError(
-            "conflicting Tailscale Serve mapping on HTTPS/" + ", HTTPS/".join(conflicts)
-        )
-
-    for https_port, target in routes:
-        if states[https_port] == "preexisting":
-            continue
-        process = supervisor.start([
-            "tailscale", "serve", "--yes", f"--https={https_port}", target,
-        ], env=environment)
-        wait_for_serve_route(
-            process,
-            environment=environment,
-            hostname=hostname,
-            https_port=https_port,
-            target=target,
-            timeout=timeout,
-        )
-        states[https_port] = "owned"
-    return states
+    timeout: float = 5.0,
+    kill_timeout: float = 1.0,
+    deadline: float | None = None,
+    process_group: int | None = None,
+) -> None:
+    if deadline is None:
+        deadline = time.monotonic() + timeout + kill_timeout
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=min(timeout, max(0.0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+    group_alive = process_group is not None and _process_group_exists(process_group)
+    forced_deadline = min(deadline, time.monotonic() + kill_timeout)
+    if group_alive:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
+        process.kill()
+    if process.poll() is None:
+        process.wait(timeout=max(0.0, forced_deadline - time.monotonic()))
+    if process_group is not None:
+        _wait_for_process_group_exit(process_group, deadline=forced_deadline)
 
 
 def main() -> int:
     if any(name in os.environ for name in FORBIDDEN_CLOUD_NAMES):
         raise Slice6ConfigurationError("LiteLLM configuration is forbidden in the local-LFM runtime")
     settings = Slice6Settings.from_environment(project_root=ROOT)
-    node_ip = required("SLICE6_LIVEKIT_NODE_IP")
-    app_https_port = int(required("SLICE6_APP_HTTPS_PORT"))
-    signal_https_port = int(required("SLICE6_SIGNAL_HTTPS_PORT"))
-    app_public_url = settings.app_public_url
-    app_public = urlsplit(app_public_url)
-    signal_public = urlsplit(settings.livekit_public_url)
-    for port in (app_https_port, signal_https_port):
-        if not 1 <= port <= 65535:
-            raise Slice6ConfigurationError("tailnet HTTPS port is outside bounds")
-    if (
-        app_public.scheme != "https" or not app_public.hostname
-        or app_public.username is not None or app_public.password is not None
-        or app_public.path not in {"", "/"} or app_public.query or app_public.fragment
-        or app_public.port != app_https_port
-    ):
-        raise Slice6ConfigurationError("SLICE6_APP_PUBLIC_URL must be exact HTTPS with the configured port")
-    if signal_public.port != signal_https_port:
-        raise Slice6ConfigurationError("LIVEKIT_PUBLIC_URL must use SLICE6_SIGNAL_HTTPS_PORT")
-    if os.environ.get("SLICE6_ENABLE_TAILSCALE_SERVE") != "1":
-        raise Slice6ConfigurationError("SLICE6_ENABLE_TAILSCALE_SERVE must be exactly 1")
-    if shutil.which("tailscale") is None:
-        raise RuntimeError("the required tailscale CLI is unavailable")
-    tailscale_environment = without_server_secrets(dict(os.environ))
-    status = subprocess.run(
-        ["tailscale", "status", "--json"],
-        env=tailscale_environment,
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    if status.returncode != 0:
-        raise Slice6ConfigurationError("Tailscale self status is unavailable")
-    try:
-        status_document = json.loads(status.stdout)
-    except json.JSONDecodeError as error:
-        raise Slice6ConfigurationError("Tailscale self status is unavailable") from error
-    validate_tailnet_identity(
-        status_document,
-        node_ip=node_ip,
-        hostname=str(app_public.hostname),
-    )
+    stopping = False
+
+    def request_stop(_signum=None, _frame=None) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
 
     cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "voice-agent-v2" / "slice-6"
     binary = cache / "tooling" / f"livekit-server-v{LIVEKIT_VERSION}"
@@ -398,17 +535,18 @@ def main() -> int:
         raise RuntimeError("Slice 6 web build is missing; run ./setup-slice6")
     verify_local_lfm_artifacts()
     silero_metadata = verify_silero_runtime()
+    require_runtime_ports_free()
 
     gateway_environment = dict(os.environ)
     gateway_environment["PYTHONPATH"] = str(ROOT / "src")
     gateway_environment.pop("LIVEKIT_CONFIG", None)
     gateway_environment.pop("LIVEKIT_KEYS", None)
+    gateway_environment.pop(SERVICE_MAIN_PROCESS_NAME, None)
     livekit_environment = without_server_secrets(gateway_environment)
-    livekit_environment["LIVEKIT_CONFIG"] = livekit_server_config(node_ip)
+    livekit_environment["LIVEKIT_CONFIG"] = livekit_server_config()
     livekit_environment["LIVEKIT_KEYS"] = (
         f"{settings.livekit_api_key}: {settings.livekit_api_secret}"
     )
-    tailscale_environment = without_server_secrets(gateway_environment)
     llama_environment = without_server_secrets(gateway_environment)
     for name in tuple(llama_environment):
         if name.startswith("LITELLM_"):
@@ -416,55 +554,74 @@ def main() -> int:
     llama_environment["HOME"] = str(LFM_CACHE / "runtime" / "home")
     llama_environment["XDG_CACHE_HOME"] = str(LFM_CACHE / "runtime" / "home" / ".cache")
     llama_environment["LD_LIBRARY_PATH"] = f"{CUDA_OVERLAY}:{LLAMA_BIN_DIRECTORY}"
-    supervisor = ProcessSupervisor()
-    stopping = False
-
-    def request_stop(_signum=None, _frame=None) -> None:
-        nonlocal stopping
-        stopping = True
-
-    signal.signal(signal.SIGINT, request_stop)
-    signal.signal(signal.SIGTERM, request_stop)
+    supervisor = ProcessSupervisor(stop_requested=lambda: stopping)
 
     try:
+        if stopping:
+            return 0
         llama_log = LFM_CACHE / "logs" / "slice6-local-lfm.log"
         llama_log.parent.mkdir(parents=True, exist_ok=True)
         llama_output = llama_log.open("ab", buffering=0)
         local_lfm = supervisor.start(
-            llama_command(), cwd=LFM_CACHE, env=llama_environment,
+            llama_command(), role="local-llm", cwd=LFM_CACHE, env=llama_environment,
             stdout=llama_output, stderr=subprocess.STDOUT,
         )
-        wait_for_port(local_lfm, LLAMA_PORT, "local LFM", timeout=30)
+        if not wait_for_port(
+            local_lfm, LLAMA_PORT, "local LFM", timeout=30,
+            stop_requested=lambda: stopping,
+        ):
+            return 0
+        if stopping:
+            return 0
 
-        livekit = supervisor.start([str(binary)], cwd=ROOT, env=livekit_environment)
-        wait_for_port(livekit, SIGNAL_PORT, "LiveKit")
+        livekit = supervisor.start(
+            [str(binary)], role="livekit", cwd=ROOT, env=livekit_environment,
+        )
+        if not wait_for_port(
+            livekit, SIGNAL_PORT, "LiveKit", stop_requested=lambda: stopping,
+        ):
+            return 0
+        if stopping:
+            return 0
 
+        gateway_environment["VOICE_AGENT_SUPERVISED_LFM_PROCESS"] = (
+            supervised_child_identity(local_lfm, "local LFM")
+        )
+        gateway_environment["VOICE_AGENT_SUPERVISED_LIVEKIT_PROCESS"] = (
+            supervised_child_identity(livekit, "LiveKit")
+        )
+        service_main_process = systemd_service_main_process(dict(os.environ))
+        if service_main_process is not None:
+            gateway_environment[SERVICE_MAIN_PROCESS_NAME] = service_main_process
         gateway = supervisor.start(
             [
-                str(python), "-m", "uvicorn", "voice_agent_v2.slice6_gateway:app",
+                str(python), "-B", "-m", "uvicorn", "voice_agent_v2.slice6_gateway:app",
                 "--host", "127.0.0.1", "--port", str(GATEWAY_PORT),
                 "--no-access-log", "--log-level", "info",
             ],
+            role="gateway-controller-stt-tts-provider",
             cwd=ROOT,
             env=gateway_environment,
         )
-        wait_for_port(gateway, GATEWAY_PORT, "Slice 6 gateway", timeout=20)
+        if not wait_for_port(
+            gateway, GATEWAY_PORT, "Slice 6 gateway", timeout=20,
+            stop_requested=lambda: stopping,
+        ):
+            return 0
+        if stopping:
+            return 0
 
-        serve_states = reconcile_serve_routes(
-            supervisor=supervisor,
-            environment=tailscale_environment,
-            hostname=str(app_public.hostname),
-            routes=(
-                (app_https_port, f"http://127.0.0.1:{GATEWAY_PORT}"),
-                (signal_https_port, f"http://127.0.0.1:{SIGNAL_PORT}"),
-            ),
+        publish_systemd_readiness(
+            supervisor,
+            build_id=settings.build_id,
+            release_id=settings.release_id,
+            stop_requested=lambda: stopping,
         )
         print("Voice Agent v2 Slice 6 local-LFM development app started")
-        print(f"loopback: http://127.0.0.1:{GATEWAY_PORT}")
-        print(f"tailnet: {app_public_url}")
+        print(f"application: http://127.0.0.1:{GATEWAY_PORT}")
         print(
-            f"LiveKit paths: signaling HTTPS/{signal_https_port}, "
-            f"WebRTC UDP/{RTC_UDP_PORT} on tailscale0; ICE/TCP and TURN disabled"
+            f"LiveKit: loopback signaling ws://127.0.0.1:{SIGNAL_PORT}, "
+            f"WebRTC UDP/{RTC_UDP_PORT} on loopback; ICE/TCP and TURN disabled"
         )
         print(
             f"local LFM: {LOCAL_LFM_ALIAS}, loopback-only HTTP/{LLAMA_PORT}, "
@@ -475,32 +632,53 @@ def main() -> int:
             f"{silero_metadata['workers']} isolated workers; private noncommercial only"
         )
         print(
-            "Tailscale Serve ownership: "
-            + ", ".join(
-                f"HTTPS/{port}={serve_states[port]}"
-                for port in (app_https_port, signal_https_port)
-            )
+            "External network exposure is optional and entirely operator-owned; "
+            "the application manages no proxy or route."
         )
         print("Press Ctrl+C to stop this development run.")
 
+        operational_unready_since: float | None = None
         while not stopping:
-            for process in supervisor.processes:
-                if process.poll() is not None:
-                    raise RuntimeError("a Slice 6 development process exited unexpectedly")
+            require_supervised_children_alive(supervisor, phase="during runtime")
+            if gateway_operational_ready(
+                expected_build_id=settings.build_id,
+                expected_release_id=settings.release_id,
+            ):
+                operational_unready_since = None
+            elif operational_unready_since is None:
+                operational_unready_since = time.monotonic()
+            elif time.monotonic() - operational_unready_since >= OPERATIONAL_UNREADY_GRACE_SECONDS:
+                raise ServiceProcessFailure(
+                    "gateway-owned capability remained unready beyond the recovery grace"
+                )
             time.sleep(0.25)
+    except ServiceStopRequested:
+        return 0
     finally:
+        active_failure = sys.exc_info()[0] is not None
         try:
-            supervisor.close()
+            supervisor.close(SHUTDOWN_ORDER)
+        except BaseException as cleanup_error:
+            if not active_failure:
+                raise ServiceProcessFailure("supervised component cleanup failed") from cleanup_error
+            print("Voice Agent cleanup also failed within the systemd hard-stop bound", file=sys.stderr)
         finally:
             llama_output_object = locals().get("llama_output")
             if llama_output_object is not None:
-                llama_output_object.close()
+                try:
+                    llama_output_object.close()
+                except OSError as cleanup_error:
+                    if not active_failure:
+                        raise ServiceProcessFailure("local LFM log cleanup failed") from cleanup_error
     return 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except ServiceProcessFailure as error:
+        print(f"Voice Agent service failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
     except (Slice6ConfigurationError, RuntimeError, OSError, ValueError) as error:
         print(f"Slice 6 startup failed: {error}", file=sys.stderr)
         raise SystemExit(2)

@@ -6,17 +6,7 @@ PID_FILE="$ROOT/tmp/review-stand.pid"
 LOG_FILE="$ROOT/tmp/review-stand.log"
 LOOPBACK_URL='http://127.0.0.1:8000/'
 LOOPBACK_STATUS='http://127.0.0.1:8000/api/status'
-TAILNET_PORT=8447
-
-hostname() {
-  tailscale status --json | python3 -c '
-import json, sys
-name = json.load(sys.stdin)["Self"]["DNSName"].rstrip(".")
-if not name:
-    raise SystemExit("Tailscale DNS name is unavailable")
-print(name)
-'
-}
+CURL_TIMEOUT='1'
 
 running() {
   [ -f "$PID_FILE" ] || return 1
@@ -24,6 +14,28 @@ running() {
   [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null || return 1
   [ -r "/proc/$PID/cmdline" ] || return 1
   tr '\000' ' ' < "/proc/$PID/cmdline" | grep -F "$ROOT/scripts/run_slice6.py" >/dev/null
+}
+
+operational_ready() {
+  EXPECTED_BUILD=$1
+  STATUS_DOCUMENT=$(curl --connect-timeout "$CURL_TIMEOUT" --max-time "$CURL_TIMEOUT" --fail --silent --show-error "$LOOPBACK_STATUS") || return 1
+  printf '%s\n' "$STATUS_DOCUMENT" | python3 -c '
+import json
+import sys
+
+try:
+    status = json.load(sys.stdin)
+except (OSError, UnicodeError, ValueError):
+    raise SystemExit(1)
+health = status.get("health") if isinstance(status, dict) else None
+ready = (
+    isinstance(health, dict)
+    and status.get("build_id") == sys.argv[1]
+    and status.get("accepting") is True
+    and health.get("overall_readiness") == "ready"
+)
+raise SystemExit(0 if ready else 1)
+' "$EXPECTED_BUILD"
 }
 
 start() {
@@ -42,8 +54,6 @@ start() {
     exit 2
   }
   BUILD=$(git -C "$ROOT" rev-parse HEAD)
-  HOSTNAME=$(hostname)
-  TAILNET_URL="https://$HOSTNAME:$TAILNET_PORT/"
   mkdir -p "$ROOT/tmp"
   (
     cd "$ROOT/web"
@@ -56,8 +66,7 @@ start() {
   DEPLOY_DIST=$(mktemp -d "$ROOT/tmp/review-stand-dist.$BUILD.XXXXXX")
   cp -a "$ROOT/web/dist/." "$DEPLOY_DIST/"
   nohup env \
-    VOICE_AGENT_APP_PUBLIC_URL_OVERRIDE="$TAILNET_URL" \
-    VOICE_AGENT_APP_HTTPS_PORT_OVERRIDE="$TAILNET_PORT" \
+    VOICE_AGENT_BUILD_ID="$BUILD" \
     VOICE_AGENT_WEB_DIST_OVERRIDE="$DEPLOY_DIST" \
     "$ROOT/run-slice6" >"$LOG_FILE" 2>&1 &
   PID=$!
@@ -68,14 +77,12 @@ start() {
       rm -f "$PID_FILE"
       exit 1
     fi
-    if curl --fail --silent --show-error "$LOOPBACK_URL" >/dev/null \
-      && curl --fail --silent --show-error "$LOOPBACK_STATUS" >/dev/null \
-      && curl --fail --silent --show-error "$TAILNET_URL" >/dev/null \
-      && curl --fail --silent --show-error "${TAILNET_URL}api/status" >/dev/null; then
+    if curl --connect-timeout "$CURL_TIMEOUT" --max-time "$CURL_TIMEOUT" --fail --silent --show-error "$LOOPBACK_URL" >/dev/null \
+      && operational_ready "$BUILD"; then
       echo "Live review stand started"
       echo "commit: $BUILD"
-      echo "loopback: $LOOPBACK_URL"
-      echo "tailnet: $TAILNET_URL"
+      echo "local: $LOOPBACK_URL"
+      echo "external exposure: optional and operator-owned"
       echo "runtime log: $LOG_FILE"
       return
     fi
@@ -107,17 +114,16 @@ stop() {
 }
 
 status() {
-  HOSTNAME=$(hostname)
-  TAILNET_URL="https://$HOSTNAME:$TAILNET_PORT/"
   if running; then
     PID=$(cat "$PID_FILE")
-    if curl --fail --silent --show-error "$LOOPBACK_STATUS" >/dev/null \
-      && curl --fail --silent --show-error "${TAILNET_URL}api/status" >/dev/null; then
+    BUILD=$(git -C "$ROOT" rev-parse HEAD)
+    if operational_ready "$BUILD"; then
       echo "running: PID $PID"
-      echo "tailnet: $TAILNET_URL"
+      echo "commit: $BUILD"
+      echo "local: $LOOPBACK_URL"
       return
     fi
-    echo "degraded: PID $PID is alive but the application API is unreachable" >&2
+    echo "degraded: PID $PID is alive but exact-build readiness is unavailable" >&2
     exit 1
   fi
   echo "stopped"

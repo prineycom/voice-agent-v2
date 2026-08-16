@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PYTHON=${PYTHON:-python3}
+PYTHONPATH="$ROOT/src" exec "$PYTHON" -B -m voice_agent_v2.operations_cli "$@"

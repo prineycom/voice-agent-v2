@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 import os
 import threading
 import unittest
@@ -16,6 +17,59 @@ class RunningProcess:
 
 
 class BackendReadinessTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("VOICE_AGENT_VERIFY_SLICE6_RUNTIME") == "1",
+        "requires the Slice 6 runtime verification phase",
+    )
+    def test_operational_monitor_requires_ready_local_no_fallback_report(self) -> None:
+        report = {
+            "provider_mode": "local",
+            "external_provider_supervised": False,
+            "automatic_fallback": False,
+            "build_id": "a" * 40,
+            "release_id": "b" * 24,
+            "accepting": True,
+            "health": {"overall_readiness": "ready"},
+        }
+
+        class StatusHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = json.dumps(report).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_arguments: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StatusHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(run_slice6, "GATEWAY_PORT", server.server_address[1]):
+                self.assertTrue(run_slice6.gateway_operational_ready())
+                self.assertTrue(run_slice6.gateway_operational_ready(
+                    expected_build_id="a" * 40,
+                    expected_release_id="b" * 24,
+                ))
+                self.assertFalse(run_slice6.gateway_operational_ready(
+                    expected_build_id="c" * 40,
+                    expected_release_id="b" * 24,
+                ))
+                report["health"] = {"overall_readiness": "unready"}
+                self.assertFalse(run_slice6.gateway_operational_ready())
+                report["health"] = {"overall_readiness": "ready"}
+                report["accepting"] = False
+                self.assertFalse(run_slice6.gateway_operational_ready())
+                report["accepting"] = True
+                report["automatic_fallback"] = True
+                self.assertFalse(run_slice6.gateway_operational_ready())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     @unittest.skipUnless(
         os.environ.get("VOICE_AGENT_VERIFY_SLICE6_RUNTIME") == "1",
         "requires the Slice 6 runtime verification phase",

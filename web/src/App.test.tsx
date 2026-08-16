@@ -505,6 +505,35 @@ describe('Slice 7 modular shell', () => {
     },
   )
 
+  it('keeps the avatar empty and visibly failed when the MVP eye cannot mount', async () => {
+    const user = userEvent.setup()
+    const failedHost = new AvatarHostV1([() => ({
+      manifest: {
+        interfaceVersion: AVATAR_HOST_INTERFACE_VERSION,
+        id: 'mvp-eye-svg-v1',
+        displayName: 'MVP Eye',
+        capabilities: AVATAR_REQUIRED_CAPABILITIES,
+        deterministic: true,
+      },
+      setFailureHandler: vi.fn(),
+      mount(container) {
+        container.append(document.createElement('img'))
+        throw new Error('synthetic MVP-eye mount failure')
+      },
+      update: vi.fn(),
+      cancel: vi.fn(),
+      dispose: vi.fn(),
+    })])
+
+    render(<ReviewStand avatarHost={failedHost} buildVersion="build-test" />)
+
+    expect(screen.getByTestId('avatar-viewport').children).toHaveLength(0)
+    await user.click(screen.getByRole('button', { name: 'Open menu' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: /STATUS/ }))
+    expect(screen.getByText('AVATAR HOST').nextElementSibling?.textContent).toBe('FAILED')
+    expect(screen.getByText('AVATAR MODULE').nextElementSibling?.textContent).toBe('UNAVAILABLE')
+  })
+
   it('shows speech-envelope degradation without reporting the avatar ready', async () => {
     const user = userEvent.setup()
     const audioContainerRef = createRef<HTMLDivElement>()

@@ -56,7 +56,25 @@ async def security_headers(request: Request, call_next):
 @app.get("/api/status")
 async def status(request: Request) -> dict[str, object]:
     registry: SessionRegistry = request.app.state.registry
-    return {"available": registry.active_count == 0, "session_limit": 1}
+    settings: Slice6Settings = request.app.state.settings
+    health = registry.operational_health()
+    return {
+        "schema_version": "voice-agent.public-operational-status.v1",
+        "available": (
+            registry.accepting and registry.active_count == 0
+            and health["overall_readiness"] == "ready"
+        ),
+        "accepting": registry.accepting,
+        "session_limit": 1,
+        "build_id": settings.build_id,
+        "release_id": settings.release_id,
+        "provider_mode": "local",
+        "external_provider_supervised": False,
+        "automatic_fallback": False,
+        "avatar_host_contract": "voice-agent.avatar-host.v1",
+        "selected_avatar_module": "mvp-eye-svg-v1",
+        "health": health,
+    }
 
 
 @app.post("/api/session")

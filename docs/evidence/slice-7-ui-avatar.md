@@ -42,7 +42,7 @@ The committed historical capture is [`slice-7-review-portrait.png`](slice-7-revi
 
 ## Live review stand
 
-The launcher builds the current clean commit's ordinary production entry, verifies its embedded SHA, copies it to an immutable ignored per-run directory, then reuses the safe Slice 6 foreground runtime: local LFM, LiveKit, gateway/controller, STT/TTS, loopback gateway `8000`, and explicit owned Tailscale Serve routes. The stable application route overrides only the configured application origin/port to HTTPS `8447`; LiveKit's public signaling URL remains operator-configured and is returned through the typed capability. It does not change HTTPS/443, firewalld, public exposure, or unrelated services.
+The launcher builds the current clean commit's ordinary production entry, verifies its embedded SHA, copies it to an immutable ignored per-run directory, then reuses the safe loopback Slice 6 foreground runtime: local LFM, LiveKit, gateway/controller, STT/TTS, and gateway `127.0.0.1:8000`. It creates or changes no proxy, firewall, private-network route, public exposure, or unrelated service.
 
 The page starts `DISCONNECTED`; **CONNECT** is the user gesture that requests the same-origin session capability, joins the capability's validated public LiveKit endpoint, requests microphone permission, and publishes the microphone. History is empty until genuine server control events. The microphone overlay reports disconnected, permission, publication, live/listening, muted, or error state explicitly.
 
@@ -53,7 +53,7 @@ The page starts `DISCONNECTED`; **CONNECT** is the user gesture that requests th
 ./run-review-stand stop
 ```
 
-Tailnet URL: `https://priney-arch.darter-smoot.ts.net:8447/`
+Local URL: `http://127.0.0.1:8000/`
 
 ## Explicit gaps
 
@@ -63,5 +63,5 @@ Not tested or claimed here:
 - physical microphone, decoded-speaker audibility, or Kseniya quality;
 - physical end-to-end llama.cpp + Whisper + Silero + LiveKit speech/listening acceptance (the deployed runtime is real, while automation uses synthetic audio/inference fixtures);
 - physical rapid barge-in/return-to-neutral timing;
-- second tailnet browser acceptance;
+- external exposure is not part of application acceptance;
 - human approval beyond the recorded headless visual inspection.

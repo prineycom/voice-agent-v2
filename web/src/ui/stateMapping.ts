@@ -8,7 +8,7 @@ import type {
 } from '../state'
 
 export type MicrophoneVisualState = 'idle' | 'listening' | 'muted' | 'error'
-export type ComponentHealth = 'READY' | 'CONNECTING' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN'
+export type ComponentHealth = 'READY' | 'CONNECTING' | 'DEGRADED' | 'UNAVAILABLE' | 'FAILED' | 'UNKNOWN'
 
 export interface UiSystemComponent {
   id: 'livekit' | 'controller' | 'stt' | 'selected_llm' | 'tts' | 'avatar_host' | 'active_module'
@@ -136,11 +136,14 @@ export function mapVoiceStateToUi(
       ? state.availability.toUpperCase()
       : 'CONNECTION LOST',
   }
-  const avatarComponentHealth: ComponentHealth = avatarHealth.status === 'failed'
-    ? 'UNAVAILABLE'
+  const avatarHostHealth: ComponentHealth = avatarHealth.status === 'failed'
+    ? 'FAILED'
     : avatarHealth.status === 'degraded' || state.speechEnvelopeStatus === 'unavailable'
       ? 'DEGRADED'
       : 'READY'
+  const avatarModuleHealth: ComponentHealth = avatarHealth.status === 'failed'
+    ? 'UNAVAILABLE'
+    : avatarHostHealth
 
   return {
     connection: state.connection,
@@ -162,14 +165,14 @@ export function mapVoiceStateToUi(
       observedServerComponent(state, 'selected_llm', 'SELECTED LLM'),
       observedServerComponent(state, 'tts', 'TTS'),
       {
-        id: 'avatar_host', label: 'AVATAR HOST', health: avatarComponentHealth,
+        id: 'avatar_host', label: 'AVATAR HOST', health: avatarHostHealth,
         liveness: avatarHealth.status === 'failed' ? 'DEAD' : 'ALIVE',
         readiness: avatarHealth.status === 'ready' ? 'READY' : avatarHealth.status === 'degraded' ? 'DEGRADED' : 'UNREADY',
         compatible: avatarHealth.status !== 'failed',
         reason: avatarHealth.status === 'failed' ? 'avatar_host_unavailable' : null,
       },
       {
-        id: 'active_module', label: 'ACTIVE MODULE', health: avatarComponentHealth,
+        id: 'active_module', label: 'ACTIVE MODULE', health: avatarModuleHealth,
         liveness: avatarHealth.status === 'failed' ? 'DEAD' : 'ALIVE',
         readiness: avatarHealth.status === 'ready' ? 'READY' : avatarHealth.status === 'degraded' ? 'DEGRADED' : 'UNREADY',
         compatible: avatarHealth.activeModuleId !== null,

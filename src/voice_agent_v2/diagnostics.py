@@ -26,7 +26,8 @@ from .observability import (
     safe_observation_scalar,
     validate_observation,
 )
-from .runtime_directory import require_lifetime_runtime_root
+from .runtime_directory import SYSTEMD_RUNTIME_ROOT, require_lifetime_runtime_root
+from .slice6_config import PROCESS_IDENTITY_PATTERN
 
 MAX_TRACE_BYTES = 8 * 1024 * 1024
 MAX_TRACE_RECORDS = 20_000
@@ -72,6 +73,26 @@ def _uptime_seconds() -> float:
     return time.monotonic()
 
 
+def _private_runtime_pycache(runtime_root: Path) -> Path:
+    """Return an owned mutable bytecode root outside the immutable release tree."""
+    parent = runtime_root / "voice-agent-v2"
+    pycache = parent / "pycache"
+    for path in (parent, pycache):
+        try:
+            path.mkdir(mode=0o700, exist_ok=True)
+            status = path.lstat()
+        except OSError as error:
+            raise ValueError("private runtime bytecode root is unavailable") from error
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.getuid()
+            or status.st_mode & 0o077
+        ):
+            raise ValueError("private runtime bytecode root is not owned")
+    return pycache
+
+
 def _spawn_expiry_guardian(
     path: Path,
     owner_nonce: str,
@@ -90,6 +111,12 @@ def _spawn_expiry_guardian(
         or document.get("expires_unix_seconds") != expires_unix_seconds
     ):
         raise ValueError("diagnostic capture guardian does not own this path")
+    service_main_process: str | None = None
+    if verified_runtime_root == SYSTEMD_RUNTIME_ROOT:
+        candidate = os.environ.get("VOICE_AGENT_SYSTEMD_MAIN_PROCESS", "")
+        if not PROCESS_IDENTITY_PATTERN.fullmatch(candidate):
+            raise ValueError("systemd service process identity is unavailable")
+        service_main_process = candidate
     lease = resolved_path.parent / f".capture-guardian-{owner_nonce}.lease"
     lease_descriptor = os.open(
         lease, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
@@ -105,26 +132,36 @@ def _spawn_expiry_guardian(
         fcntl.flock(lease_descriptor, fcntl.LOCK_EX)
         os.ftruncate(lease_descriptor, 0)
         os.write(lease_descriptor, b"managed\n")
+        command = [
+            sys.executable,
+            str(Path(__file__).with_name("diagnostic_expiry.py")),
+            "--path",
+            str(resolved_path),
+            "--owner-nonce",
+            owner_nonce,
+            "--expires-unix-seconds",
+            str(expires_unix_seconds),
+            "--expires-uptime-seconds",
+            str(expires_uptime_seconds),
+            "--runtime-root",
+            str(verified_runtime_root),
+        ]
+        if service_main_process is not None:
+            command.extend(("--service-main-process", service_main_process))
         process = subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).with_name("diagnostic_expiry.py")),
-                "--path",
-                str(resolved_path),
-                "--owner-nonce",
-                owner_nonce,
-                "--expires-unix-seconds",
-                str(expires_unix_seconds),
-                "--expires-uptime-seconds",
-                str(expires_uptime_seconds),
-            ],
+            command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
             pass_fds=(lease_descriptor,),
-            env={"PYTHONUTF8": "1"},
+            env={
+                "PYTHONUTF8": "1",
+                "PYTHONPYCACHEPREFIX": str(
+                    _private_runtime_pycache(verified_runtime_root)
+                ),
+            },
         )
     finally:
         os.close(lease_descriptor)

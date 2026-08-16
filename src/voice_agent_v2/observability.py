@@ -206,7 +206,7 @@ class HealthReport:
     automatic_fallback: bool = False
     stt_location: str = "local"
     tts_location: str = "local"
-    auth_boundary: str = "tailnet"
+    auth_boundary: str = "loopback"
     wake_enabled: bool = False
     selected_avatar_module: str = "mvp-eye-svg-v1"
 
@@ -222,7 +222,7 @@ class HealthReport:
             or self.automatic_fallback
             or self.stt_location != "local"
             or self.tts_location != "local"
-            or self.auth_boundary != "tailnet"
+            or self.auth_boundary != "loopback"
             or self.wake_enabled
             or self.selected_avatar_module != "mvp-eye-svg-v1"
         ):
@@ -313,7 +313,6 @@ FAILURE_MATRIX: tuple[FailureMatrixCase, ...] = (
     FailureMatrixCase("avatar_runtime_failure", "Avatar module or runtime failure", "active_module", "render_loop_failed", FailureDisposition("avatar_runtime_failure", "soft", "degraded", True, True, True), "controlled_render_fault"),
     FailureMatrixCase("client_disconnect", "Client disconnect", "client", "client_disconnected", FailureDisposition("client_disconnect", "hard", "interrupted", False, False, False), "controlled_transport_loss"),
     FailureMatrixCase("local_inference_crash", "GPU out of memory or local model process crash", "local_inference", "gpu_allocation_failed", FailureDisposition("local_inference_crash", "hard", "unavailable", False, False, False), "controlled_allocation_or_process_loss"),
-    FailureMatrixCase("tailscale_unavailable", "Tailscale unavailable", "tailscale", "tailscale_unavailable", FailureDisposition("tailscale_unavailable", "soft", "degraded", True, True, True), "controlled_remote_path_loss"),
     FailureMatrixCase("late_duplicate_event", "Late or duplicate event", "control", "late_or_duplicate_event", FailureDisposition("late_duplicate_event", "soft", "degraded", True, True, True), "duplicate_event"),
 )
 
@@ -344,7 +343,6 @@ _RUNTIME_ALIASES = {
     "model_process_crashed": "local_inference_crash",
     "render_loop_failed": "avatar_runtime_failure",
     "avatar_input_invalid": "avatar_input_invalid",
-    "tailscale_unavailable": "tailscale_unavailable",
     "late_or_duplicate_event": "late_duplicate_event",
 }
 

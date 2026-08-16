@@ -1,6 +1,6 @@
 # ADR-0007: Use a low-level LiveKit and React boundary for Slice 6 realtime voice
 
-- **Status:** Accepted for Slice 6; active provider/TTS/control composition superseded by ADR-0008 and ADR-0009
+- **Status:** Accepted for Slice 6; active provider/TTS/control composition superseded by ADR-0008/0009, and the historical Tailscale exposure portion is superseded by ADR-0013's loopback-local boundary
 - **Date:** 2026-08-11
 - **Decision owner:** Pasha
 
@@ -8,7 +8,7 @@
 
 Slice 6 must add real browser media, visible correlated state, agent audio, reconnection safety, and full barge-in without creating a second voice pipeline or prematurely designing the Slice 7 avatar contract. The implementation must remain a deliberately small development application, keep inference and credentials server-only, and preserve the Slice 5 resource reserve and every failed provider result.
 
-The recovery session verified that LiveKit Server 1.13.5 can restrict signaling to loopback while advertising one Tailscale IPv4 for UDP media. Current official Python RTC/API and browser client surfaces cover the required low-level room, track, data, and capability operations without adopting a higher-level competing agent framework.
+The original recovery session verified LiveKit Server 1.13.5 and the official Python RTC/API and browser client surfaces required for low-level room, track, data, and capability operations without adopting a competing agent framework. Its external-network observation is historical; the active application is now entirely loopback-local.
 
 ## Decision
 
@@ -30,7 +30,7 @@ Media and control remain separate:
 
 Barge-in and reconnection preserve this ADR's low-level LiveKit ownership; ADR-0009 owns the active request/turn/media-generation invalidation and persistent-publication attachment rules. Reconnection resets in-memory conversation context rather than risk replay or conditioning on an answer not known to have played.
 
-The development bind is intentionally narrow: gateway TCP `8000` and LiveKit signaling TCP `7880` on loopback; explicit Tailscale Serve HTTPS ports for application/signaling (example `8443`/`7443`); and LiveKit media only on the host Tailscale IPv4 UDP `7882`. ICE/TCP media (`7881`) and TURN are disabled. Before changing Serve state, the foreground runner accepts exact existing application/signaling mappings as externally owned, rejects conflicts, and starts absent foreground mappings serially with a bounded status check. It supervises and stops only children it created, preserving exact pre-existing mappings and every unrelated handler; a global Serve reset is forbidden. The foreground runner is not production supervision.
+The active development bind is intentionally loopback-only: gateway TCP `8000`, LiveKit signaling TCP `7880`, and LiveKit media UDP `7882` on loopback. ICE/TCP media (`7881`) and TURN are disabled. The foreground runner starts no exposure/proxy process and never inspects or changes external routes. Optional exposure is entirely operator-owned and outside this ADR's application contract.
 
 No avatar component, state, contract, semantic input, design system, public endpoint, separate authorization system, wake behavior, or deployment service is introduced.
 
@@ -49,7 +49,7 @@ No avatar component, state, contract, semantic input, design system, public endp
 - Silero decisions and levels are content-free diagnostics. Real microphone false-positive/miss quality still requires the physical browser gate.
 - One session and no TURN/TCP media are deliberate measured limits. A different topology requires evidence, not an implicit fallback.
 - Resetting context on reconnect reduces continuity.
-- Real browser audio, the second tailnet client, the 250 ms stop bound, and combined resource reserve are not proven by deterministic tests.
+- Real local-browser audio, the 250 ms stop bound, and combined resource reserve are not proven by deterministic tests. External exposure is not an application acceptance requirement.
 - Historical ADR-0006 provider failures remain failed evidence; ADR-0008 supersedes that provider in the active Slice 6 runtime.
 
 ## Alternatives considered
@@ -58,5 +58,5 @@ No avatar component, state, contract, semantic input, design system, public endp
 - **Next.js or broad client state/design frameworks:** rejected because the private single-page path needs no server rendering or additional state platform.
 - **WebSocket control beside LiveKit:** rejected because it would add a second reconnect/correlation transport when reliable LiveKit data already satisfies the bounded contract.
 - **Keep provider context across reconnect:** rejected because the server cannot prove that an offline browser heard a completed answer.
-- **TURN or ICE/TCP by default:** rejected because the restricted Tailscale UDP smoke succeeded and no measured client has demonstrated the need.
+- **TURN or ICE/TCP by default:** rejected because the current loopback-local topology does not require them; a different operator-owned topology needs separate evidence outside the application contract.
 - **Design an avatar seam now:** rejected; Design Gate V remains mandatory after Slice 6 acceptance.

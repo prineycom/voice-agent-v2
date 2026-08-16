@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+RUNTIME=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6/runtime/venv/bin/python
+PYTHON=${PYTHON:-$RUNTIME}
+[ -x "$PYTHON" ] || PYTHON=${PYTHON_FALLBACK:-python3}
+
+VOICE_AGENT_VERIFY_SLICE6_RUNTIME=1 PYTHONPATH="$ROOT/src:$ROOT" \
+  "$PYTHON" -B -m unittest \
+  tests.test_operations \
+  tests.test_slice6_startup \
+  tests.test_backend_readiness \
+  tests.test_slice9_runtime
+PYTHONPATH="$ROOT/src:$ROOT" "$PYTHON" -B "$ROOT/scripts/verify_slice9.py"
+(
+  cd "$ROOT/web"
+  npm run typecheck
+  npm test -- --run \
+    src/avatar/avatar.test.ts \
+    src/avatar/eye/eyeModel.test.ts \
+    src/App.test.tsx \
+    src/state.test.ts
+)
+
+printf '%s\n' 'Slice 9 deterministic operations/recovery/idempotence/rollback/resource boundaries: PASS'
+printf '%s\n' 'Physical reboot/microphone/audibility/Raspberry Pi/full-stack soak: NOT CLAIMED'
