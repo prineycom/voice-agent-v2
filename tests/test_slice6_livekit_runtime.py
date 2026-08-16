@@ -507,6 +507,78 @@ class ReconnectMicrophoneGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(model.reset_calls, 4)
         self.assertEqual(controller.session.failures, [])
 
+    async def test_handled_publication_failure_is_not_relabelled_as_microphone_failure(self) -> None:
+        runtime = load_runtime()
+
+        class Model:
+            def reset(self) -> None:
+                return None
+
+        class Endpoint:
+            def __init__(self, _model, **_kwargs) -> None:
+                return None
+
+            def feed(self, _pcm: bytes):
+                return (
+                    types.SimpleNamespace(kind="speech_started", payload=None),
+                    types.SimpleNamespace(kind="utterance", payload=b"\0\0" * 320),
+                )
+
+            def flush(self):
+                return ()
+
+            def reset(self) -> None:
+                return None
+
+        class Stream:
+            async def __aiter__(self):
+                yield types.SimpleNamespace(frame=types.SimpleNamespace(data=b"\0\0" * 320))
+
+            async def aclose(self) -> None:
+                return None
+
+        class Session:
+            stream_epoch = 2
+
+            def __init__(self) -> None:
+                self.closed = False
+                self.failures: list[tuple[str, str]] = []
+
+            async def start_utterance(self, *, announce: bool = True) -> str:
+                self.assert_unannounced = not announce
+                return "turn-candidate"
+
+            async def finish_utterance(self, _payload: bytes, **_kwargs) -> None:
+                self.closed = True
+                raise RuntimeError("publication unavailable")
+
+            async def abandon_unannounced_utterance(self, _turn_id: str) -> bool:
+                return False
+
+            async def fail(self, stage: str, code: str) -> None:
+                self.failures.append((stage, code))
+
+        runtime.SileroSpeechEndpoint = Endpoint
+        runtime.rtc.AudioStream = types.SimpleNamespace(
+            from_track=lambda **_kwargs: Stream()
+        )
+        controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
+        controller.session_id = "session-test"
+        controller.session = Session()
+        controller.trace = None
+        controller._closed = False
+        controller._capture_invalidated = False
+        controller._microphone_muted = False
+        controller._microphone_generation = 1
+        controller._vad_model = Model()
+        task = asyncio.create_task(controller._consume_microphone(object(), 1))
+        controller._audio_task = task
+
+        await asyncio.wait_for(task, 0.5)
+
+        self.assertTrue(controller.session.assert_unannounced)
+        self.assertEqual(controller.session.failures, [])
+
     async def test_current_generation_setup_failure_fails_closed_with_trace(self) -> None:
         runtime = load_runtime()
 

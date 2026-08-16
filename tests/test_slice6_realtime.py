@@ -209,7 +209,13 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.events, [])
         self.assertTrue(await session.abandon_unannounced_utterance(turn_id))
         self.assertEqual(events.events, [])
+        self.assertEqual(session.turn_counts["admitted"], 0)
         self.assertIsNone(session.active_turn_id)
+
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+        completed = next(event for event in events.events if event["type"] == "turn.completed")
+        self.assertEqual(completed["payload"]["turn_admission_count"], 1)
 
     async def test_cancelled_candidate_announcement_cannot_launch_a_turn(self) -> None:
         class BlockingEvents:
@@ -237,6 +243,7 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(session.active_turn_id)
         self.assertIsNone(session._active)
+        self.assertEqual(session.turn_counts["admitted"], 0)
 
 
 class OverlapRunner:

@@ -190,6 +190,8 @@ class TurnContext:
     resource_endpoint_started: bool = False
     resource_terminal_started: bool = False
     transport_failed: bool = False
+    admission_counted: bool = False
+    public_event_published: bool = False
 
 
 @dataclass(frozen=True)
@@ -433,6 +435,25 @@ class RealtimeSession:
     def active_turn_id(self) -> str | None:
         return self._active.turn_id if self._active and not self._active.terminal else None
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _count_admission(self, context: TurnContext) -> None:
+        if context.admission_counted:
+            return
+        context.admission_counted = True
+        self.turn_counts["admitted"] += 1
+
+    def _rollback_unpublished_admission(self, context: TurnContext) -> None:
+        if (
+            context.admission_counted
+            and not context.public_event_published
+            and not context.transport_failed
+        ):
+            context.admission_counted = False
+            self.turn_counts["admitted"] -= 1
+
     def _health_report(
         self, *, failed_stage: str | None = None, failure_code: str | None = None
     ) -> dict[str, object]:
@@ -620,12 +641,12 @@ class RealtimeSession:
             announced=announce,
         )
         self._active = context
-        self.turn_counts["admitted"] += 1
         if announce:
             try:
                 await self._announce_context_locked(context)
             except BaseException:
                 context.terminal = True
+                self._rollback_unpublished_admission(context)
                 if self._active is context:
                     self._active = None
                 if context.media_publication_id is not None:
@@ -643,14 +664,37 @@ class RealtimeSession:
                     prepare(context.turn_id, context.media_generation),
                     CONTROL_PUBLISH_BOUND_MS / 1000,
                 )
-            except BaseException:
+            except asyncio.CancelledError:
                 await self._abandon_audio(context.turn_id)
                 raise
+            except Exception:
+                self._count_admission(context)
+                await self._terminate_failed_turn_locked(
+                    context,
+                    "turn.failed",
+                    {
+                        "outcome": "failed",
+                        "stage": "publication",
+                        "code": "audio_publication_unavailable",
+                    },
+                    abandon_audio=True,
+                )
+                raise
         if not isinstance(publication_id, str) or not publication_id or len(publication_id) > 128:
-            if prepare is not None:
-                await self._abandon_audio(context.turn_id)
+            self._count_admission(context)
+            await self._terminate_failed_turn_locked(
+                context,
+                "turn.failed",
+                {
+                    "outcome": "failed",
+                    "stage": "publication",
+                    "code": "audio_publication_identity_invalid",
+                },
+                abandon_audio=True,
+            )
             raise RuntimeError("audio publication has no bounded identity")
         context.media_publication_id = publication_id
+        self._count_admission(context)
         await self._emit(context.turn_id, "turn.listening", {"state": "listening"})
         tts_profile = getattr(self.runner, "tts_profile", None)
         metadata = tts_profile.public_metadata() if tts_profile is not None else {
@@ -713,6 +757,7 @@ class RealtimeSession:
                     await self._announce_context_locked(context)
                 except BaseException:
                     context.terminal = True
+                    self._rollback_unpublished_admission(context)
                     if self._active is context:
                         self._active = None
                     if context.media_publication_id is not None:
@@ -1696,13 +1741,15 @@ class RealtimeSession:
         context: TurnContext,
         event_type: str,
         payload: dict[str, object],
+        *,
+        abandon_audio: bool = False,
     ) -> None:
         if context.terminal or self._closed or self._active is not context:
             return
-        if payload.get("stage") == "publication":
-            drain_error, publication_id = await self._clear_audio(context.turn_id)
-        else:
+        if abandon_audio or payload.get("stage") != "publication":
             drain_error, publication_id = await self._abandon_audio(context.turn_id)
+        else:
+            drain_error, publication_id = await self._clear_audio(context.turn_id)
         context.rollback_error = await self._rollback_context(context)
         context.terminal = True
         self.turn_counts["failed"] += 1
@@ -2134,6 +2181,13 @@ class RealtimeSession:
         event = self._reserve_public_event(turn_id, event_type, payload, terminal=terminal)
         try:
             await self.event_sink.send(event)
+            context = self._active
+            if (
+                turn_id != SESSION_TURN_ID
+                and context is not None
+                and context.turn_id == turn_id
+            ):
+                context.public_event_published = True
             observation_fields = self._control_observation_fields(
                 event, event_type, payload, terminal
             )

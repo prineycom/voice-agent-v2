@@ -1209,6 +1209,8 @@ class LiveKitRoomController:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if getattr(self.session, "closed", False):
+                return
             failure_code = "microphone_stream_failed"
             if trace is not None:
                 trace.emit(
@@ -1225,6 +1227,7 @@ class LiveKitRoomController:
                 and not self._capture_invalidated
                 and not self._microphone_muted
                 and not self._closed
+                and not getattr(self.session, "closed", False)
             )
             try:
                 if not current_generation:
