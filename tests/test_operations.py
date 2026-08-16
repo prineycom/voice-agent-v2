@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr
 import hashlib
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 import json
 import os
@@ -11,6 +13,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -357,6 +361,46 @@ class OperationsManifestTests(unittest.TestCase):
 
 
 class ServiceApplicationTests(unittest.TestCase):
+    def test_runtime_status_accepts_a_valid_response_within_the_public_budget(self) -> None:
+        payload = json.dumps({"release_id": "a" * 24}).encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                time.sleep(0.6)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, _format: str, *_arguments: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        actual_connection = http.client.HTTPConnection
+
+        def redirected_connection(
+            _host: str, _port: int, *, timeout: float,
+        ) -> http.client.HTTPConnection:
+            return actual_connection(
+                "127.0.0.1", server.server_port, timeout=timeout,
+            )
+
+        try:
+            with patch.object(
+                operations_cli.http.client,
+                "HTTPConnection",
+                side_effect=redirected_connection,
+            ):
+                document = operations_cli._runtime_status()
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join()
+
+        self.assertEqual(document, {"release_id": "a" * 24})
+
     def test_systemd_start_and_restart_allow_the_full_bounded_job(self) -> None:
         calls: list[dict[str, object]] = []
 
@@ -1176,6 +1220,37 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
 
 
 class ReleaseAndRollbackTests(unittest.TestCase):
+    def test_canonical_release_store_rejects_symlinked_releases_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "voice-agent-v2"
+            outside = root / "outside"
+            state.mkdir()
+            outside.mkdir()
+            (state / "releases").symlink_to(outside, target_is_directory=True)
+            with (
+                patch.object(operations, "DEFAULT_STATE_ROOT", state),
+                self.assertRaisesRegex(OperationalError, "directory custody"),
+            ):
+                with ReleaseStore(state).locked():
+                    pass
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertFalse((state / "operations.lock").exists())
+
+    def test_release_store_rejects_a_symlinked_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "voice-agent-v2"
+            state.mkdir()
+            target = root / "lock-target"
+            target.write_text("retained", encoding="utf-8")
+            (state / "operations.lock").symlink_to(target)
+            with self.assertRaisesRegex(OperationalError, "lock custody"):
+                with ReleaseStore(state).locked():
+                    pass
+            self.assertEqual(target.read_text(encoding="utf-8"), "retained")
+            self.assertTrue((state / "operations.lock").is_symlink())
+
     def test_canonical_release_store_rejects_symlinked_storage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

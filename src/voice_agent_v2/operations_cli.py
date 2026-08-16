@@ -32,6 +32,7 @@ SERVICE_NAME = "voice-agent-v2.service"
 SYSTEM_UNIT_PATH = Path("/etc/systemd/system") / SERVICE_NAME
 SYSTEMD_JOB_TIMEOUT_SECONDS = 390
 SYSTEM_COMMAND_TIMEOUT_SECONDS = 30
+RUNTIME_STATUS_TIMEOUT_SECONDS = 1.0
 SYSTEMD_UNIT_CONTRACT = {
     "Unit": {
         "Description": ["Voice Agent v2 loopback-local single-host stack"],
@@ -393,7 +394,9 @@ def command_status(arguments: argparse.Namespace) -> None:
 
 
 def _runtime_status() -> dict[str, object] | None:
-    connection = http.client.HTTPConnection("127.0.0.1", 8000, timeout=0.5)
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", 8000, timeout=RUNTIME_STATUS_TIMEOUT_SECONDS,
+    )
     try:
         connection.request("GET", "/api/status", headers={"Connection": "close"})
         response = connection.getresponse()

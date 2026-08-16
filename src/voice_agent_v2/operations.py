@@ -624,6 +624,44 @@ def _require_canonical_state_root_custody(path: Path) -> Path:
     return lexical
 
 
+def _ensure_private_store_directory(path: Path, *, parents: bool) -> None:
+    try:
+        path.mkdir(parents=parents, exist_ok=True, mode=0o700)
+        lexical_metadata = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise OperationalError(
+            "release_state_invalid", "release store directory custody is unavailable",
+        ) from error
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+        if not (
+            stat.S_ISDIR(lexical_metadata.st_mode)
+            and stat.S_ISDIR(descriptor_metadata.st_mode)
+            and lexical_metadata.st_dev == descriptor_metadata.st_dev
+            and lexical_metadata.st_ino == descriptor_metadata.st_ino
+            and descriptor_metadata.st_uid == os.geteuid()
+        ):
+            raise OperationalError(
+                "release_state_invalid", "release store directory custody changed",
+            )
+        os.fchmod(descriptor, 0o700)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+            raise OperationalError(
+                "release_state_invalid", "release store directory is not private",
+            )
+    except OSError as error:
+        raise OperationalError(
+            "release_state_invalid", "release store directory custody is unavailable",
+        ) from error
+    finally:
+        os.close(descriptor)
+
+
 def _require_service_configuration_path(path: Path, *, state_root: Path) -> None:
     if not _is_canonical_state_root(state_root):
         return
@@ -1193,9 +1231,8 @@ class ReleaseStore:
 
     def _initialize(self) -> None:
         self.state_root = _require_canonical_state_root_custody(self.state_root)
-        self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.state_root, 0o700)
-        self.releases.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _ensure_private_store_directory(self.state_root, parents=True)
+        _ensure_private_store_directory(self.releases, parents=False)
 
     def locked(self) -> Iterator[None]:
         self._initialize()
@@ -1206,17 +1243,46 @@ class ReleaseStore:
                 if store._lock_depth:
                     store._lock_depth += 1
                     return
-                descriptor = os.open(
-                    store.lock_path, os.O_RDWR | os.O_CREAT, 0o600,
-                )
+                descriptor: int | None = None
                 try:
+                    descriptor = os.open(
+                        store.lock_path,
+                        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_CLOEXEC", 0),
+                        0o600,
+                    )
+                    metadata = os.fstat(descriptor)
+                    if not (
+                        stat.S_ISREG(metadata.st_mode)
+                        and metadata.st_uid == os.geteuid()
+                        and metadata.st_nlink == 1
+                    ):
+                        raise OperationalError(
+                            "release_state_invalid", "release store lock custody changed",
+                        )
+                    os.fchmod(descriptor, 0o600)
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as error:
-                    os.close(descriptor)
+                    if descriptor is not None:
+                        os.close(descriptor)
                     raise OperationalError(
                         "operations_busy",
                         "another release or service operation is already in progress",
                     ) from error
+                except OperationalError:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                    raise
+                except OSError as error:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                    raise OperationalError(
+                        "release_state_invalid", "release store lock custody is unavailable",
+                    ) from error
+                if descriptor is None:
+                    raise OperationalError(
+                        "release_state_invalid", "release store lock custody is unavailable",
+                    )
                 store._lock_descriptor = descriptor
                 store._lock_depth = 1
                 try:
