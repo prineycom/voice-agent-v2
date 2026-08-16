@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import fcntl
 import glob
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -121,6 +122,7 @@ class ValidationReport:
     cache_bytes: dict[str, int]
     disk_available_bytes: int
     configuration_fingerprint: str
+    configuration_revision: str
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -427,9 +429,13 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
     public_values = {
         name: value for name, value in values.items() if name not in SECRET_CONFIGURATION_NAMES
     }
+    configuration_revision = hmac.new(
+        api_secret.encode("utf-8"), _canonical_json(dict(values)), hashlib.sha256,
+    ).hexdigest()
     return {
         "public_values": public_values,
         "public_fingerprint": _sha256_bytes(_canonical_json(public_values)),
+        "configuration_revision": configuration_revision,
         "tailnet_hostname": app.hostname,
         "tailnet_node_ip": node_ip,
         "diagnostic_capture_ttl_seconds": ttl,
@@ -678,6 +684,7 @@ def validate_host(
         cache_bytes=caches,
         disk_available_bytes=available,
         configuration_fingerprint=str(configuration["public_fingerprint"]),
+        configuration_revision=str(configuration["configuration_revision"]),
     )
 
 
@@ -846,7 +853,7 @@ class ReleaseStore:
         if status:
             raise OperationalError("source_dirty", "deployment requires an exact clean committed source")
         commit = _run_git(source_root, "rev-parse", "HEAD")
-        tree = _run_git(source_root, "rev-parse", "HEAD^{tree}")
+        tree = _run_git(source_root, "rev-parse", f"{commit}^{{tree}}")
         if not BUILD_ID.fullmatch(commit) or not BUILD_ID.fullmatch(tree):
             raise OperationalError("source_unavailable", "committed source identity is invalid")
         host_report = validate_host(
@@ -873,6 +880,8 @@ class ReleaseStore:
                     current_release.get("configuration_locator_sha256") == locator_digest,
                     current_release.get("configuration_fingerprint")
                     == host_report.configuration_fingerprint,
+                    current_release.get("configuration_revision")
+                    == host_report.configuration_revision,
                 )):
                     return {
                         "schema_version": "voice-agent.deployment-result.v1",
@@ -882,13 +891,12 @@ class ReleaseStore:
                         "build_id": current_release["build_id"],
                     }
 
-            maximum_count, maximum_bytes = self._release_limit(manifest)
             existing = [path for path in self.releases.iterdir() if path.is_dir()]
             existing_bytes = sum(directory_size(path) for path in existing)
             stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=self.releases))
             try:
                 archive = subprocess.run(
-                    ["git", "-C", str(source_root), "archive", "--format=tar", "HEAD"],
+                    ["git", "-C", str(source_root), "archive", "--format=tar", commit],
                     capture_output=True, timeout=60, check=False,
                     env={
                         "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
@@ -900,9 +908,26 @@ class ReleaseStore:
                     )
                 with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
                     bundle.extractall(stage, filter="data")
-                web_dist = stage / "web" / "dist"
+                host_report = validate_host(
+                    source_root=stage, config_path=config_path, state_root=self.state_root,
+                )
+                manifest = load_operations_manifest(stage / DEFAULT_MANIFEST_RELATIVE)
+                manifest_digest = sha256_file(stage / DEFAULT_MANIFEST_RELATIVE)
+                maximum_count, maximum_bytes = self._release_limit(manifest)
+                web_root = stage / "web"
+                web_dist = web_root / "dist"
                 if web_dist.exists():
                     shutil.rmtree(web_dist)
+                dependencies = source_root / "web" / "node_modules"
+                dependency_link = web_root / "node_modules"
+                if (
+                    not dependencies.is_dir()
+                    or dependency_link.exists()
+                    or dependency_link.is_symlink()
+                ):
+                    raise OperationalError(
+                        "release_build_failed", "versioned client dependencies are unavailable",
+                    )
                 environment = {
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                     "HOME": str(Path.home()),
@@ -910,14 +935,18 @@ class ReleaseStore:
                     "LC_ALL": "C.UTF-8",
                     "VITE_APP_VERSION": commit,
                 }
-                build = subprocess.run(
-                    [
-                        "npm", "run", "build", "--", "--outDir", str(web_dist),
-                        "--emptyOutDir",
-                    ],
-                    cwd=source_root / "web", env=environment,
-                    capture_output=True, text=True, timeout=180, check=False,
-                )
+                os.symlink(dependencies, dependency_link, target_is_directory=True)
+                try:
+                    build = subprocess.run(
+                        [
+                            "npm", "run", "build", "--", "--outDir", str(web_dist),
+                            "--emptyOutDir",
+                        ],
+                        cwd=web_root, env=environment,
+                        capture_output=True, text=True, timeout=180, check=False,
+                    )
+                finally:
+                    dependency_link.unlink(missing_ok=True)
                 if build.returncode != 0:
                     raise OperationalError(
                         "release_build_failed", "versioned client build failed",
@@ -942,7 +971,7 @@ class ReleaseStore:
                     commit=commit,
                     tree=tree,
                     manifest=manifest_digest,
-                    configuration=host_report.configuration_fingerprint,
+                    configuration=host_report.configuration_revision,
                     configuration_locator=locator_digest,
                     release_tree=tree_digest,
                 )
@@ -957,6 +986,7 @@ class ReleaseStore:
                     "configuration_path": str(config_path),
                     "configuration_locator_sha256": locator_digest,
                     "configuration_fingerprint": host_report.configuration_fingerprint,
+                    "configuration_revision": host_report.configuration_revision,
                     "provider_mode": "local",
                     "external_provider_supervised": False,
                     "automatic_fallback": False,
@@ -1054,8 +1084,8 @@ def validate_release(
     required = {
         "schema_version", "release_id", "build_id", "source_tree", "operations_schema",
         "operations_manifest_sha256", "configuration_path", "configuration_locator_sha256",
-        "configuration_fingerprint", "provider_mode", "external_provider_supervised",
-        "automatic_fallback", "release_tree_sha256",
+        "configuration_fingerprint", "configuration_revision", "provider_mode",
+        "external_provider_supervised", "automatic_fallback", "release_tree_sha256",
     }
     _require_exact_keys(
         document, required, label="release manifest", code="release_incompatible",
@@ -1073,6 +1103,8 @@ def validate_release(
         and SHA256.fullmatch(str(document["configuration_locator_sha256"]))
         and isinstance(document.get("configuration_fingerprint"), str)
         and SHA256.fullmatch(str(document["configuration_fingerprint"]))
+        and isinstance(document.get("configuration_revision"), str)
+        and SHA256.fullmatch(str(document["configuration_revision"]))
         and isinstance(document.get("release_tree_sha256"), str)
         and SHA256.fullmatch(str(document["release_tree_sha256"]))
         and document.get("operations_schema") == OPERATIONS_SCHEMA
@@ -1085,7 +1117,7 @@ def validate_release(
         commit=document["build_id"],
         tree=document["source_tree"],
         manifest=document["operations_manifest_sha256"],
-        configuration=document["configuration_fingerprint"],
+        configuration=document["configuration_revision"],
         configuration_locator=document["configuration_locator_sha256"],
         release_tree=document["release_tree_sha256"],
     )
@@ -1102,7 +1134,10 @@ def validate_release(
         raise OperationalError("release_incompatible", "release configuration locator changed")
     values = parse_server_configuration(config_path)
     configuration = validate_server_configuration(values)
-    if configuration["public_fingerprint"] != document.get("configuration_fingerprint"):
+    if not (
+        configuration["public_fingerprint"] == document.get("configuration_fingerprint")
+        and configuration["configuration_revision"] == document.get("configuration_revision")
+    ):
         raise OperationalError("release_incompatible", "prior configuration is no longer compatible")
     web_dist = release_root / "web" / "dist"
     if not (web_dist / "index.html").is_file():

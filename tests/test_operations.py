@@ -21,6 +21,7 @@ from voice_agent_v2.operations import (
     ValidationReport,
     _canonical_json,
     _operational_release_id,
+    _run_git,
     _sha256_bytes,
     evaluate_sustained_run,
     load_operations_manifest,
@@ -176,7 +177,7 @@ class ServiceApplicationTests(unittest.TestCase):
 
 
 class ConfigurationAndArtifactTests(unittest.TestCase):
-    def test_config_is_mode_guarded_and_secret_rotation_never_changes_public_fingerprint(self) -> None:
+    def test_config_is_mode_guarded_and_secret_rotation_changes_private_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "runtime.env"
             first = configuration_values("a" * 16)
@@ -186,8 +187,13 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
             write_configuration(path, second)
             second_report = validate_server_configuration(parse_server_configuration(path))
             self.assertEqual(first_report["public_fingerprint"], second_report["public_fingerprint"])
+            self.assertNotEqual(
+                first_report["configuration_revision"],
+                second_report["configuration_revision"],
+            )
             serialized = json.dumps(first_report)
             self.assertNotIn(first["LIVEKIT_API_SECRET"], serialized)
+            self.assertNotIn(second["LIVEKIT_API_SECRET"], json.dumps(second_report))
             link = Path(temporary) / "runtime-link.env"
             link.symlink_to(path)
             with self.assertRaisesRegex(OperationalError, "unavailable"):
@@ -366,7 +372,10 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             target = state / "releases" / release_id
             target.mkdir(parents=True)
             (state / "current").symlink_to(f"releases/{release_id}")
-            report = ValidationReport(None, None, "local", 1, {}, 10**12, fingerprint)
+            revision = "d" * 64
+            report = ValidationReport(
+                None, None, "local", 1, {}, 10**12, fingerprint, revision,
+            )
             document = {
                 "build_id": commit,
                 "release_id": release_id,
@@ -375,6 +384,7 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                 "configuration_path": str(config.resolve()),
                 "configuration_locator_sha256": locator_digest,
                 "configuration_fingerprint": fingerprint,
+                "configuration_revision": revision,
             }
             git_values = iter(["", commit, tree])
             with (
@@ -386,6 +396,99 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             self.assertEqual(result["status"], "no-op")
             self.assertFalse(result["changed"])
             self.assertEqual((state / "current").resolve(), target.resolve())
+
+    def test_release_archives_and_builds_the_captured_commit_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config").mkdir()
+            shutil.copy2(
+                ROOT / DEFAULT_MANIFEST_RELATIVE,
+                source / DEFAULT_MANIFEST_RELATIVE,
+            )
+            web = source / "web"
+            (web / "src").mkdir(parents=True)
+            (web / "src" / "build-marker.txt").write_text("committed", encoding="utf-8")
+            (web / "package.json").write_text(
+                '{"scripts":{"build":"fixture"}}\n', encoding="utf-8",
+            )
+            (source / ".gitignore").write_text("web/node_modules/\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.name", "Release Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.email", "release@test.invalid"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "commit", "-qm", "captured"], check=True,
+            )
+            captured_commit = subprocess.run(
+                ["git", "-C", str(source), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            (web / "node_modules").mkdir()
+
+            tools = root / "tools"
+            tools.mkdir()
+            npm = tools / "npm"
+            npm.write_text(
+                "#!/usr/bin/python3\n"
+                "import os, pathlib, sys\n"
+                "out = pathlib.Path(sys.argv[sys.argv.index('--outDir') + 1])\n"
+                "(out / 'assets').mkdir(parents=True, exist_ok=True)\n"
+                "(out / 'index.html').write_text('<main></main>')\n"
+                "marker = (pathlib.Path.cwd() / 'src/build-marker.txt').read_text()\n"
+                "(out / 'assets/app.js').write_text(os.environ['VITE_APP_VERSION'] + marker)\n",
+                encoding="utf-8",
+            )
+            npm.chmod(0o755)
+            config = root / "runtime.env"
+            write_configuration(config, configuration_values())
+            state = root / "state"
+            report = ValidationReport(
+                None, None, "local", 1, {}, 10**12, "c" * 64, "d" * 64,
+            )
+            raced = False
+
+            def run_git_with_head_change(path: Path, *arguments: str) -> str:
+                nonlocal raced
+                result = _run_git(path, *arguments)
+                if not raced and arguments == ("rev-parse", f"{captured_commit}^{{tree}}"):
+                    raced = True
+                    (web / "src" / "build-marker.txt").write_text("raced", encoding="utf-8")
+                    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+                    subprocess.run(
+                        ["git", "-C", str(source), "commit", "-qm", "concurrent"],
+                        check=True,
+                    )
+                return result
+
+            environment = dict(os.environ)
+            environment["PATH"] = f"{tools}:{environment['PATH']}"
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch(
+                    "voice_agent_v2.operations._run_git",
+                    side_effect=run_git_with_head_change,
+                ),
+                patch("voice_agent_v2.operations.validate_host", return_value=report),
+                patch("voice_agent_v2.operations.validate_release", return_value={}),
+            ):
+                result = ReleaseStore(state).deploy(
+                    source_root=source, config_path=config,
+                )
+            release = (state / "current").resolve()
+            built_asset = next((release / "web" / "dist" / "assets").glob("*.js"))
+            self.assertTrue(raced)
+            self.assertEqual(result["build_id"], captured_commit)
+            self.assertIn(captured_commit, built_asset.read_text(encoding="utf-8"))
+            self.assertIn("committed", built_asset.read_text(encoding="utf-8"))
+            self.assertNotIn("raced", built_asset.read_text(encoding="utf-8"))
 
     def test_rollback_rejects_incompatible_previous_without_moving_current(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

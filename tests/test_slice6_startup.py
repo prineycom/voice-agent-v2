@@ -69,6 +69,14 @@ class FakeProcess:
 
 
 class SystemdReadinessTests(unittest.TestCase):
+    def test_supervised_core_exit_before_readiness_is_recoverable(self) -> None:
+        with self.assertRaisesRegex(
+            run_slice6.ServiceProcessFailure, "LiveKit exited before readiness",
+        ):
+            run_slice6.wait_for_port(
+                FakeProcess(returncode=1), run_slice6.SIGNAL_PORT, "LiveKit", timeout=0.1,
+            )
+
     def test_exact_ready_notification_reaches_systemd_socket(self) -> None:
         class Notifier:
             address: str | None = None
@@ -285,7 +293,9 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             patch.object(run_slice6, "read_tailscale_serve_status", return_value=serve_document()),
             patch.object(run_slice6.subprocess, "Popen", return_value=exited),
         ):
-            with self.assertRaisesRegex(RuntimeError, "exited before readiness"):
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "exited before readiness",
+            ):
                 try:
                     run_slice6.reconcile_serve_routes(
                         supervisor=supervisor,
@@ -310,7 +320,10 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             ),
             patch.object(run_slice6.subprocess, "Popen", side_effect=[first, second]),
         ):
-            with self.assertRaisesRegex(RuntimeError, "HTTPS/7443 exited before readiness"):
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure,
+                "HTTPS/7443 exited before readiness",
+            ):
                 try:
                     run_slice6.reconcile_serve_routes(
                         supervisor=supervisor,
@@ -330,7 +343,9 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             patch.object(run_slice6, "read_tailscale_serve_status", return_value=serve_document()),
             patch.object(run_slice6.subprocess, "Popen", return_value=process),
         ):
-            with self.assertRaisesRegex(RuntimeError, "did not register"):
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "did not register",
+            ):
                 try:
                     run_slice6.reconcile_serve_routes(
                         supervisor=supervisor,
@@ -343,7 +358,7 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
                     supervisor.close()
         self.assertTrue(process.terminated)
 
-    def test_exception_starting_second_route_cleans_only_the_first_owned_child(self) -> None:
+    def test_exception_starting_second_route_is_recoverable_and_cleans_first_child(self) -> None:
         first = FakeProcess()
         statuses = iter([serve_document(), foreground_serve_document((8443, APP_TARGET))])
         supervisor = run_slice6.ProcessSupervisor()
@@ -351,7 +366,9 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             patch.object(run_slice6, "read_tailscale_serve_status", side_effect=lambda *_args, **_kwargs: next(statuses)),
             patch.object(run_slice6.subprocess, "Popen", side_effect=[first, OSError("launch failed")]),
         ):
-            with self.assertRaisesRegex(OSError, "launch failed"):
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "could not start",
+            ):
                 try:
                     run_slice6.reconcile_serve_routes(
                         supervisor=supervisor,

@@ -81,7 +81,10 @@ class ProcessSupervisor:
     def start(
         self, command: list[str], *, role: str | None = None, **kwargs: object,
     ) -> subprocess.Popen:
-        process = subprocess.Popen(command, **kwargs)
+        try:
+            process = subprocess.Popen(command, **kwargs)
+        except OSError as error:
+            raise ServiceProcessFailure("supervised component could not start") from error
         self.processes.append(process)
         if role is not None:
             if role in self._roles.values():
@@ -253,7 +256,7 @@ def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: floa
     require_lfm_health = port == LLAMA_PORT and name == "local LFM"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"{name} exited before readiness")
+            raise ServiceProcessFailure(f"{name} exited before readiness")
         remaining = deadline - time.monotonic()
         if require_lfm_health:
             if local_lfm_health_ready(port, min(0.2, remaining)):
@@ -266,7 +269,7 @@ def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: floa
                 pass
         time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
     readiness = "become healthy" if require_lfm_health else "listen"
-    raise RuntimeError(f"{name} did not {readiness} within {timeout:.0f}s")
+    raise ServiceProcessFailure(f"{name} did not {readiness} within {timeout:.0f}s")
 
 
 def stop(process: subprocess.Popen, *, timeout: float = 5.0) -> None:
@@ -364,10 +367,12 @@ def wait_for_serve_route(
     deadline = time.monotonic() + timeout
     while True:
         if process.poll() is not None:
-            raise RuntimeError(f"Tailscale Serve HTTPS/{https_port} exited before readiness")
+            raise ServiceProcessFailure(
+                f"Tailscale Serve HTTPS/{https_port} exited before readiness"
+            )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError(
+            raise ServiceProcessFailure(
                 f"Tailscale Serve HTTPS/{https_port} did not register within {timeout:.0f}s"
             )
         try:
@@ -380,7 +385,9 @@ def wait_for_serve_route(
             document, hostname=hostname, https_port=https_port, target=target,
         ) == "preexisting":
             if process.poll() is not None:
-                raise RuntimeError(f"Tailscale Serve HTTPS/{https_port} exited before readiness")
+                raise ServiceProcessFailure(
+                    f"Tailscale Serve HTTPS/{https_port} exited before readiness"
+                )
             return
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
