@@ -105,7 +105,7 @@ class OperationsManifestTests(unittest.TestCase):
         restart = manifest["lifecycle"]["restart_policy"]
         self.assertEqual(restart["automatic_recoveries_per_failure_window"], 1)
         self.assertEqual(restart["restart_seconds"], 5)
-        self.assertEqual(restart["start_limit_interval_seconds"], 600)
+        self.assertEqual(restart["start_limit_interval_seconds"], "infinity")
         self.assertEqual(manifest["lifecycle"]["startup_hard_seconds"], 300)
         self.assertEqual(manifest["lifecycle"]["graceful_drain_seconds"], 54)
         self.assertEqual(manifest["disk"]["cleanup_policy"], "refuse-without-deleting")
@@ -132,7 +132,7 @@ class OperationsManifestTests(unittest.TestCase):
         self.assertEqual(unit["After"], ["local-fs.target"])
         self.assertNotIn("Wants", unit)
         self.assertEqual(unit["StartLimitBurst"], ["2"])
-        self.assertEqual(unit["StartLimitIntervalSec"], ["600"])
+        self.assertEqual(unit["StartLimitIntervalSec"], ["infinity"])
         self.assertEqual(service["Type"], ["notify"])
         self.assertEqual(service["NotifyAccess"], ["main"])
         self.assertEqual(service["Restart"], ["on-failure"])
@@ -188,6 +188,32 @@ class OperationsManifestTests(unittest.TestCase):
                     ):
                         operations_cli._validate_systemd_unit(candidate)
 
+    def test_effective_systemd_validation_rejects_dropins_and_policy_overrides(self) -> None:
+        baseline = dict(operations_cli.EFFECTIVE_SYSTEMD_CONTRACT)
+        baseline["FragmentPath"] = str(operations_cli.SYSTEM_UNIT_PATH)
+
+        def result(values: dict[str, str]) -> SimpleNamespace:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="".join(f"{name}={value}\n" for name, value in values.items()),
+            )
+
+        with patch.object(operations_cli, "_sudo", return_value=result(baseline)):
+            operations_cli._validate_effective_systemd_service()
+        for name, value in (
+            ("DropInPaths", "/etc/systemd/system/voice-agent-v2.service.d/override.conf"),
+            ("User", "root"),
+            ("ProtectSystem", "full"),
+        ):
+            changed = dict(baseline)
+            changed[name] = value
+            with (
+                self.subTest(property=name),
+                patch.object(operations_cli, "_sudo", return_value=result(changed)),
+                self.assertRaisesRegex(OperationalError, "effective systemd"),
+            ):
+                operations_cli._validate_effective_systemd_service()
+
 
 class ServiceApplicationTests(unittest.TestCase):
     def test_systemd_start_and_restart_allow_the_full_bounded_job(self) -> None:
@@ -237,6 +263,7 @@ class ServiceApplicationTests(unittest.TestCase):
                 patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
                 patch.object(operations_cli, "validate_release", return_value={}),
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
                 patch.object(
                     operations_cli, "_runtime_status",
                     return_value={"release_id": release.name},
@@ -271,6 +298,7 @@ class ServiceApplicationTests(unittest.TestCase):
                 patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
                 patch.object(operations_cli, "validate_release", return_value={}),
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
                 patch.object(
                     operations_cli, "_runtime_status",
                     return_value={"release_id": release.name},
@@ -301,6 +329,7 @@ class ServiceApplicationTests(unittest.TestCase):
                 patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
                 patch.object(operations_cli, "validate_release", return_value={}),
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
                 patch.object(
                     operations_cli, "_runtime_status",
                     return_value={"release_id": "b" * 24},
@@ -329,6 +358,7 @@ class ServiceApplicationTests(unittest.TestCase):
                 patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
                 patch.object(operations_cli, "validate_release", return_value={}) as validate,
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
                 patch.object(
                     operations_cli, "_runtime_status",
                     return_value={"release_id": release.name},
@@ -563,6 +593,7 @@ class ServiceApplicationTests(unittest.TestCase):
                     side_effect=lambda path, **_kwargs: {"build_id": path.name[0] * 40},
                 ),
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
                 patch.object(operations_cli, "_wait_for_runtime_release"),
                 patch.object(operations_cli, "_print"),
             ):
@@ -588,10 +619,7 @@ class ServiceApplicationTests(unittest.TestCase):
                 installed_bytes
             )
             (previous / "ops/systemd/voice-agent-v2.service").write_bytes(
-                installed_bytes.replace(
-                    b"Description=Voice Agent v2 loopback-local single-host stack",
-                    b"Description=Voice Agent v2 prior compatible single-host stack",
-                )
+                installed_bytes + b"\n"
             )
             (state / "current").symlink_to(f"releases/{current.name}")
             (state / "previous").symlink_to(f"releases/{previous.name}")
@@ -610,6 +638,7 @@ class ServiceApplicationTests(unittest.TestCase):
                     side_effect=lambda path, **_kwargs: {"build_id": path.name[0] * 40},
                 ),
                 patch.object(operations_cli, "_sudo") as sudo,
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
                 self.assertRaisesRegex(OperationalError, "differs from the installed unit"),
             ):
                 operations_cli.command_rollback(arguments)
@@ -821,7 +850,21 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                 ReleaseStore(root / "state").deploy(
                     source_root=source, config_path=config,
                 )
+            hardlink = root / "private-hardlink.env"
+            os.link(config, hardlink)
+            with self.assertRaisesRegex(OperationalError, "configuration is tracked"):
+                ReleaseStore(root / "hardlink-state").deploy(
+                    source_root=source, config_path=hardlink,
+                )
+            alias = root / "source-alias"
+            alias.symlink_to(source, target_is_directory=True)
+            with self.assertRaisesRegex(OperationalError, "configuration is unavailable"):
+                ReleaseStore(root / "alias-state").deploy(
+                    source_root=source, config_path=alias / "private.env",
+                )
             self.assertFalse((root / "state" / "current").exists())
+            self.assertFalse((root / "hardlink-state" / "current").exists())
+            self.assertFalse((root / "alias-state" / "current").exists())
 
     @staticmethod
     def _complete_inventory(root: Path) -> bytes:
@@ -960,6 +1003,7 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             git_values = iter(["", commit, tree])
             with (
                 patch("voice_agent_v2.operations._run_git", side_effect=lambda *_args: next(git_values)),
+                patch("voice_agent_v2.operations._run_git_bytes", return_value=b""),
                 patch("voice_agent_v2.operations.validate_host", return_value=report),
                 patch("voice_agent_v2.operations.validate_release", return_value=document),
             ):
@@ -1228,6 +1272,29 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             self.assertFalse((state / "link-transaction.json").exists())
             self.assertEqual((state / "current").resolve(), previous.resolve())
             self.assertEqual((state / "previous").resolve(), current.resolve())
+
+    def test_locked_store_recovers_only_its_recorded_incomplete_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            store = ReleaseStore(state)
+            store._initialize()
+            owned = store.releases / (".stage-" + "a" * 32)
+            unrelated = store.releases / (".stage-" + "b" * 32)
+            owned.mkdir(mode=0o700)
+            unrelated.mkdir(mode=0o700)
+            (owned / "partial").write_bytes(b"partial")
+            (unrelated / "retained").write_bytes(b"retained")
+            operations._atomic_json(store.stage_transaction_path, {
+                "schema_version": "voice-agent.release-stage.v1",
+                "stage": owned.name,
+            })
+
+            with store.locked():
+                pass
+
+            self.assertFalse(owned.exists())
+            self.assertTrue((unrelated / "retained").is_file())
+            self.assertFalse(store.stage_transaction_path.exists())
 
     def test_recovered_activation_removes_a_stale_previous_link(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

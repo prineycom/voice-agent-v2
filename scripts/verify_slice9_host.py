@@ -62,7 +62,7 @@ def systemd_recovery_bound(state_root: Path) -> dict[str, object]:
             "systemd-run", "--user", f"--unit={unit}",
             "--property=Restart=on-failure",
             "--property=RestartSec=100ms",
-            "--property=StartLimitIntervalSec=600",
+            "--property=StartLimitIntervalSec=infinity",
             "--property=StartLimitBurst=2",
             "--property=RestartPreventExitStatus=2",
             "/bin/sh", "-c", 'printf x >> "$1"; exit 17',

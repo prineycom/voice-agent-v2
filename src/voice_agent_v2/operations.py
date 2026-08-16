@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -226,7 +227,7 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     if not (
         restart.get("mode") == "on-failure"
         and restart.get("restart_seconds") == 5
-        and restart.get("start_limit_interval_seconds") == 600
+        and restart.get("start_limit_interval_seconds") == "infinity"
         and restart.get("start_limit_burst") == 2
         and restart.get("automatic_recoveries_per_failure_window") == 1
         and restart.get("configuration_exit_status") == CONFIGURATION_EXIT_STATUS
@@ -299,11 +300,34 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     return manifest
 
 
-def parse_server_configuration(path: Path) -> dict[str, str]:
+def _open_path_without_symlinks(path: Path) -> int:
+    if not path.is_absolute() or len(path.parts) < 2:
+        raise OperationalError("configuration_unavailable", "server configuration is unavailable")
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        parent = os.open(path.anchor, directory_flags)
+        try:
+            for component in path.parts[1:-1]:
+                child = os.open(component, directory_flags, dir_fd=parent)
+                os.close(parent)
+                parent = child
+            return os.open(path.name, file_flags, dir_fd=parent)
+        finally:
+            os.close(parent)
     except OSError as error:
-        raise OperationalError("configuration_unavailable", "server configuration is unavailable") from error
+        raise OperationalError(
+            "configuration_unavailable", "server configuration is unavailable",
+        ) from error
+
+
+def _read_server_configuration(path: Path) -> tuple[dict[str, str], os.stat_result]:
+    descriptor = _open_path_without_symlinks(path)
     try:
         metadata = os.fstat(descriptor)
     except OSError as error:
@@ -342,7 +366,38 @@ def parse_server_configuration(path: Path) -> dict[str, str]:
         values[name] = value
     if not REQUIRED_CONFIGURATION_NAMES.issubset(values):
         raise OperationalError("configuration_invalid", "required server configuration is missing")
+    return values, metadata
+
+
+def parse_server_configuration(path: Path) -> dict[str, str]:
+    values, _metadata = _read_server_configuration(path)
     return values
+
+
+def _configuration_matches_tracked_file(
+    *, source_root: Path, commit: str, metadata: os.stat_result,
+) -> bool:
+    tracked = _run_git_bytes(
+        source_root, "ls-tree", "-r", "-z", "--name-only", commit,
+    )
+    identity = (metadata.st_dev, metadata.st_ino)
+    for name in tracked.split(b"\0"):
+        if not name:
+            continue
+        relative = Path(os.fsdecode(name))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise OperationalError("source_unavailable", "committed source identity is invalid")
+        try:
+            candidate = (source_root / relative).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise OperationalError(
+                "source_unavailable", "committed source identity is unavailable",
+            ) from error
+        if stat.S_ISREG(candidate.st_mode) and (candidate.st_dev, candidate.st_ino) == identity:
+            return True
+    return False
 
 
 def _validated_url(
@@ -769,6 +824,17 @@ def _run_git(source_root: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def _run_git_bytes(source_root: Path, *arguments: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(source_root), *arguments], capture_output=True,
+        timeout=30, check=False,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+    )
+    if result.returncode != 0 or len(result.stdout) > MAX_COMMAND_OUTPUT_BYTES:
+        raise OperationalError("source_unavailable", "committed source identity is unavailable")
+    return result.stdout
+
+
 class ReleaseStore:
     def __init__(self, state_root: Path = DEFAULT_STATE_ROOT) -> None:
         self.state_root = state_root.expanduser().resolve()
@@ -776,6 +842,7 @@ class ReleaseStore:
         self.current_link = self.state_root / "current"
         self.previous_link = self.state_root / "previous"
         self.transaction_path = self.state_root / "link-transaction.json"
+        self.stage_transaction_path = self.state_root / "stage-transaction.json"
         self.lock_path = self.state_root / "operations.lock"
         self._lock_descriptor: int | None = None
         self._lock_depth = 0
@@ -809,6 +876,7 @@ class ReleaseStore:
                 store._lock_depth = 1
                 try:
                     store._recover_link_transaction()
+                    store._recover_stage_transaction()
                 except BaseException:
                     store._lock_descriptor = None
                     store._lock_depth = 0
@@ -897,6 +965,81 @@ class ReleaseStore:
         self.transaction_path.unlink()
         _fsync_directory(self.state_root)
 
+    def _recover_stage_transaction(self) -> None:
+        try:
+            metadata = self.stage_transaction_path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", "release stage transaction is unavailable",
+            ) from error
+        if not (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid == os.geteuid()
+            and stat.S_IMODE(metadata.st_mode) == 0o600
+        ):
+            raise OperationalError(
+                "release_state_invalid", "release stage transaction custody changed",
+            )
+        transaction = _json_object(
+            self.stage_transaction_path, code="release_state_invalid",
+        )
+        _require_exact_keys(
+            transaction, {"schema_version", "stage"},
+            label="release stage transaction", code="release_state_invalid",
+        )
+        stage_name = transaction.get("stage")
+        if (
+            transaction.get("schema_version") != "voice-agent.release-stage.v1"
+            or not isinstance(stage_name, str)
+            or re.fullmatch(r"\.stage-[0-9a-f]{32}", stage_name) is None
+        ):
+            raise OperationalError(
+                "release_state_invalid", "release stage transaction is invalid",
+            )
+        stage = self.releases / stage_name
+        try:
+            stage_metadata = stage.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", "release stage is unavailable",
+            ) from error
+        else:
+            if not (
+                stat.S_ISDIR(stage_metadata.st_mode)
+                and stage_metadata.st_uid == os.geteuid()
+                and stat.S_IMODE(stage_metadata.st_mode) == 0o700
+            ):
+                raise OperationalError(
+                    "release_state_invalid", "release stage custody changed",
+                )
+            shutil.rmtree(stage)
+            _fsync_directory(self.releases)
+        self.stage_transaction_path.unlink()
+        _fsync_directory(self.state_root)
+
+    def _create_stage(self) -> Path:
+        stage = self.releases / f".stage-{secrets.token_hex(16)}"
+        _atomic_json(self.stage_transaction_path, {
+            "schema_version": "voice-agent.release-stage.v1",
+            "stage": stage.name,
+        })
+        try:
+            stage.mkdir(mode=0o700)
+            _fsync_directory(self.releases)
+        except BaseException:
+            self.stage_transaction_path.unlink(missing_ok=True)
+            _fsync_directory(self.state_root)
+            raise
+        return stage
+
+    def _finish_stage(self) -> None:
+        self.stage_transaction_path.unlink()
+        _fsync_directory(self.state_root)
+
     def _commit_links(
         self, *, current: str, previous: str | None = None,
     ) -> None:
@@ -946,13 +1089,11 @@ class ReleaseStore:
         tree = _run_git(source_root, "rev-parse", f"{commit}^{{tree}}")
         if not BUILD_ID.fullmatch(commit) or not BUILD_ID.fullmatch(tree):
             raise OperationalError("source_unavailable", "committed source identity is invalid")
-        try:
-            configuration_relative = config_path.relative_to(source_root).as_posix()
-        except ValueError:
-            configuration_relative = None
-        if configuration_relative is not None and _run_git(
-            source_root, "ls-tree", "-r", "--name-only", commit, "--",
-            configuration_relative,
+        configuration_values, configuration_metadata = _read_server_configuration(
+            config_path,
+        )
+        if _configuration_matches_tracked_file(
+            source_root=source_root, commit=commit, metadata=configuration_metadata,
         ):
             raise OperationalError(
                 "configuration_tracked",
@@ -960,6 +1101,7 @@ class ReleaseStore:
             )
         host_report = validate_host(
             source_root=source_root, config_path=config_path, state_root=self.state_root,
+            configuration_values=configuration_values,
         )
         manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
         manifest_digest = sha256_file(source_root / DEFAULT_MANIFEST_RELATIVE)
@@ -991,9 +1133,12 @@ class ReleaseStore:
                         "build_id": current_release["build_id"],
                     }
 
-            existing = [path for path in self.releases.iterdir() if path.is_dir()]
+            existing = [
+                path for path in self.releases.iterdir()
+                if path.is_dir() and RELEASE_ID.fullmatch(path.name)
+            ]
             existing_bytes = sum(directory_size(path) for path in existing)
-            stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=self.releases))
+            stage = self._create_stage()
             try:
                 archive = subprocess.run(
                     ["git", "-C", str(source_root), "archive", "--format=tar", commit],
@@ -1010,6 +1155,7 @@ class ReleaseStore:
                     bundle.extractall(stage, filter="data")
                 host_report = validate_host(
                     source_root=stage, config_path=config_path, state_root=self.state_root,
+                    configuration_values=configuration_values,
                 )
                 manifest = load_operations_manifest(stage / DEFAULT_MANIFEST_RELATIVE)
                 manifest_digest = sha256_file(stage / DEFAULT_MANIFEST_RELATIVE)
@@ -1109,8 +1255,11 @@ class ReleaseStore:
                         )
                     os.rename(stage, target)
                     _fsync_directory(self.releases)
+                self._finish_stage()
             except BaseException:
                 shutil.rmtree(stage, ignore_errors=True)
+                self.stage_transaction_path.unlink(missing_ok=True)
+                _fsync_directory(self.state_root)
                 raise
             validate_release(target, state_root=self.state_root, verify_host_state=True)
             retained_previous: str | None = None

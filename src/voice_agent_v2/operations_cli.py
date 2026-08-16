@@ -38,7 +38,7 @@ SYSTEMD_UNIT_CONTRACT = {
             "https://github.com/prineycom/voice-agent-v2/blob/main/docs/architecture.md"
         ],
         "After": ["local-fs.target"],
-        "StartLimitIntervalSec": ["600"],
+        "StartLimitIntervalSec": ["infinity"],
         "StartLimitBurst": ["2"],
     },
     "Service": {
@@ -89,6 +89,23 @@ SYSTEMD_UNIT_CONTRACT = {
         "LimitNOFILE": ["16384"],
     },
     "Install": {"WantedBy": ["multi-user.target"]},
+}
+EFFECTIVE_SYSTEMD_CONTRACT = {
+    "FragmentPath": str(SYSTEM_UNIT_PATH),
+    "DropInPaths": "",
+    "User": "priney",
+    "Group": "priney",
+    "Type": "notify",
+    "NotifyAccess": "main",
+    "Restart": "on-failure",
+    "RestartUSec": "5s",
+    "TimeoutStartUSec": "5min",
+    "TimeoutStopUSec": "1min 15s",
+    "KillMode": "mixed",
+    "NoNewPrivileges": "yes",
+    "PrivateTmp": "yes",
+    "ProtectSystem": "strict",
+    "ProtectHome": "read-only",
 }
 
 
@@ -184,6 +201,26 @@ def _validate_systemd_unit(path: Path) -> None:
             raise OperationalError(
                 "systemd_unit_incompatible", "systemd rejected the release unit",
             )
+
+
+def _validate_effective_systemd_service() -> None:
+    expected = dict(EFFECTIVE_SYSTEMD_CONTRACT)
+    expected["FragmentPath"] = str(SYSTEM_UNIT_PATH)
+    properties = ",".join(expected)
+    result = _sudo("systemctl", "show", SERVICE_NAME, f"--property={properties}")
+    output = getattr(result, "stdout", "")
+    if not isinstance(output, str) or len(output.encode("utf-8")) > 64 * 1024:
+        raise OperationalError(
+            "systemd_unit_incompatible", "effective systemd policy is unavailable",
+        )
+    observed = dict(
+        line.split("=", 1) for line in output.splitlines() if "=" in line
+    )
+    if observed != expected:
+        raise OperationalError(
+            "systemd_unit_incompatible",
+            "effective systemd lifecycle or sandbox policy is incompatible",
+        )
 
 
 def _systemctl_show() -> dict[str, object]:
@@ -407,6 +444,7 @@ def _install_service_locked(
     if changed:
         _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(unit), str(SYSTEM_UNIT_PATH))
     _sudo("systemctl", "daemon-reload")
+    _validate_effective_systemd_service()
     unit_changed = changed
     enabled = _sudo(
         "systemctl", "is-enabled", SERVICE_NAME, allowed=(0, 1, 3, 4),
@@ -462,6 +500,8 @@ def command_rollback(arguments: argparse.Namespace) -> None:
         previous = store.previous()
         if unit_boundary is not None and previous is not None:
             _validate_systemd_unit(previous / "ops/systemd/voice-agent-v2.service")
+        if service_loaded:
+            _validate_effective_systemd_service()
         result = store.rollback(required_system_unit=unit_boundary)
         if service_loaded:
             _sudo("systemctl", "daemon-reload")

@@ -28,7 +28,7 @@
     "restart_policy": {
       "mode": "on-failure",
       "restart_seconds": 5,
-      "start_limit_interval_seconds": 600,
+      "start_limit_interval_seconds": "infinity",
       "start_limit_burst": 2,
       "automatic_recoveries_per_failure_window": 1,
       "configuration_exit_status": 2

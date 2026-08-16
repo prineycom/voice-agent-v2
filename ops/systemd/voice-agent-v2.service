@@ -2,7 +2,7 @@
 Description=Voice Agent v2 loopback-local single-host stack
 Documentation=https://github.com/prineycom/voice-agent-v2/blob/main/docs/architecture.md
 After=local-fs.target
-StartLimitIntervalSec=600
+StartLimitIntervalSec=infinity
 StartLimitBurst=2
 
 [Service]
