@@ -64,27 +64,50 @@ def _sudo(*arguments: str, allowed: tuple[int, ...] = (0,)) -> subprocess.Comple
 
 
 def _systemctl_show() -> dict[str, object]:
-    result = subprocess.run(
-        [
-            "systemctl", "show", SERVICE_NAME,
-            "--property=LoadState,ActiveState,SubState,Result,NRestarts,ExecMainStatus",
-        ],
-        capture_output=True, text=True, timeout=10, check=False,
-        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
-    )
+    try:
+        result = subprocess.run(
+            [
+                "systemctl", "show", SERVICE_NAME,
+                "--property=LoadState,ActiveState,SubState,Result,NRestarts,ExecMainStatus",
+            ],
+            capture_output=True, text=True, timeout=10, check=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OperationalError(
+            "systemd_status_failed", "system service state could not be queried",
+        ) from error
+    if result.returncode != 0:
+        raise OperationalError(
+            "systemd_status_failed", "system service state could not be queried",
+        )
     values: dict[str, str] = {}
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                name, value = line.split("=", 1)
-                values[name] = value
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            name, value = line.split("=", 1)
+            values[name] = value
+    required = {
+        "LoadState", "ActiveState", "SubState", "Result", "NRestarts",
+        "ExecMainStatus",
+    }
+    if not required.issubset(values):
+        raise OperationalError(
+            "systemd_status_failed", "system service returned incomplete state",
+        )
+    try:
+        restart_count = int(values["NRestarts"] or "0")
+        main_exit_status = int(values["ExecMainStatus"] or "0")
+    except ValueError as error:
+        raise OperationalError(
+            "systemd_status_failed", "system service returned invalid state",
+        ) from error
     return {
-        "load": values.get("LoadState", "not-found"),
-        "active": values.get("ActiveState", "inactive"),
-        "substate": values.get("SubState", "dead"),
-        "result": values.get("Result", "unknown"),
-        "restart_count": int(values.get("NRestarts", "0") or "0"),
-        "main_exit_status": int(values.get("ExecMainStatus", "0") or "0"),
+        "load": values["LoadState"],
+        "active": values["ActiveState"],
+        "substate": values["SubState"],
+        "result": values["Result"],
+        "restart_count": restart_count,
+        "main_exit_status": main_exit_status,
     }
 
 

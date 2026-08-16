@@ -248,6 +248,95 @@ class ServiceApplicationTests(unittest.TestCase):
                 ), redirect_stderr(StringIO()):
                     self.assertEqual(operations_cli.main(), expected)
 
+    def test_canonical_rollback_fails_closed_when_systemd_state_query_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            releases = state / "releases"
+            current = releases / ("1" * 24)
+            previous = releases / ("2" * 24)
+            current.mkdir(parents=True)
+            previous.mkdir()
+            (state / "current").symlink_to(f"releases/{current.name}")
+            (state / "previous").symlink_to(f"releases/{previous.name}")
+            arguments = SimpleNamespace(state_root=state)
+            failures = (
+                OSError("systemctl unavailable"),
+                subprocess.TimeoutExpired(["systemctl", "show"], 10),
+                subprocess.CompletedProcess(
+                    ["systemctl", "show"], 1,
+                    "LoadState=not-found\n", "state query failed",
+                ),
+                subprocess.CompletedProcess(
+                    ["systemctl", "show"], 0,
+                    "ActiveState=inactive\n", "",
+                ),
+            )
+
+            for failure in failures:
+                run_result = (
+                    {"side_effect": failure}
+                    if isinstance(failure, BaseException)
+                    else {"return_value": failure}
+                )
+                with (
+                    self.subTest(failure=type(failure).__name__),
+                    patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                    patch.object(operations_cli.subprocess, "run", **run_result),
+                    patch.object(operations_cli, "_sudo") as sudo,
+                    self.assertRaisesRegex(
+                        OperationalError,
+                        "state could not be queried|incomplete state",
+                    ),
+                ):
+                    operations_cli.command_rollback(arguments)
+                self.assertEqual((state / "current").resolve(), current.resolve())
+                self.assertEqual((state / "previous").resolve(), previous.resolve())
+                sudo.assert_not_called()
+
+    def test_canonical_rollback_accepts_confirmed_absent_systemd_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            releases = state / "releases"
+            current = releases / ("1" * 24)
+            previous = releases / ("2" * 24)
+            current.mkdir(parents=True)
+            previous.mkdir()
+            (state / "current").symlink_to(f"releases/{current.name}")
+            (state / "previous").symlink_to(f"releases/{previous.name}")
+            arguments = SimpleNamespace(state_root=state)
+            systemd_state = "\n".join((
+                "LoadState=not-found",
+                "ActiveState=inactive",
+                "SubState=dead",
+                "Result=success",
+                "NRestarts=0",
+                "ExecMainStatus=0",
+            ))
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", root / "absent.service"),
+                patch.object(
+                    operations_cli.subprocess, "run",
+                    return_value=subprocess.CompletedProcess(
+                        ["systemctl", "show"], 0, systemd_state, "",
+                    ),
+                ),
+                patch(
+                    "voice_agent_v2.operations.validate_release",
+                    side_effect=lambda path, **_kwargs: {"build_id": path.name[0] * 40},
+                ),
+                patch.object(operations_cli, "_sudo") as sudo,
+                patch.object(operations_cli, "_print") as output,
+            ):
+                operations_cli.command_rollback(arguments)
+
+            self.assertEqual((state / "current").resolve(), previous.resolve())
+            self.assertEqual((state / "previous").resolve(), current.resolve())
+            self.assertFalse(output.call_args.args[0]["service_restarted"])
+            sudo.assert_not_called()
+
     def test_installed_service_rollback_rejects_a_different_prior_unit_before_swap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
