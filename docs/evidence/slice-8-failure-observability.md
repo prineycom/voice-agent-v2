@@ -43,7 +43,7 @@ The authoritative dispositions and admission/retry consequences are in [`archite
 | `client_disconnect` | Existing session disconnect cleanup case | Pass against §7.1. |
 | `local_inference_crash` | Controlled GPU failure mapping plus real disposable process loss | Pass against §7.1. |
 | `tailscale_unavailable` | Controlled remote-path loss policy | Pass against §7.1. |
-| `late_duplicate_event` | Strict gate replay plus reducer consequence | Pass against §7.1: degraded/count only, with no phase/media action. |
+| `late_duplicate_event` | Strict gate replay plus reducer consequence | Pass against §7.1; focused reducer cases retain the session latch across interruption, completion, reconnect, and later valid turns until reset/new session, with no dropped-event phase/media action. |
 
 A safe real-process case starts a task-owned disposable Python worker, kills it, observes lost liveness, permits exactly one test-only recovery, kills it again, and proves the second restart is blocked. It touches no shared service. The real product runtime is stricter in Slice 8: it performs zero automatic inference request retry and zero automatic service restart; service supervision remains Slice 9. This cannot form an admission/restart loop.
 

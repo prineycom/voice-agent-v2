@@ -337,6 +337,20 @@ describe('checkpoint A browser state', () => {
     expect(state.availability).toBe('degraded')
     expect(state.failureCode).toBe('late_or_duplicate_event')
 
+    state = voiceReducer(state, { type: 'connection', connection: 'reconnecting' })
+    state = voiceReducer(state, {
+      type: 'control',
+      event: event(6, 'session.reconnected', 'session', { state: 'ready' }, 2),
+    })
+    state = voiceReducer(state, {
+      type: 'control',
+      event: event(7, 'session.ready', 'session', {}, 2),
+    })
+    expect(state.connection).toBe('ready')
+    expect(state.availability).toBe('degraded')
+    expect(state.failureCode).toBe('late_or_duplicate_event')
+    expect(state.lateControlDegraded).toBe(true)
+
     state = voiceReducer(state, { type: 'session-created', capability })
     expect(state.lateControlDegraded).toBe(false)
     expect(state.failureCode).toBeNull()
