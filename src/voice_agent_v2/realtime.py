@@ -689,7 +689,8 @@ class RealtimeSession:
         cancellation_requested = False
         while True:
             try:
-                await asyncio.shield(announcement)
+                await asyncio.wait((announcement,))
+                await announcement
                 break
             except asyncio.CancelledError:
                 if announcement.done():
@@ -2248,7 +2249,9 @@ class RealtimeSession:
     ) -> None:
         event = self._reserve_public_event(turn_id, event_type, payload, terminal=terminal)
         try:
-            await self.event_sink.send(event)
+            await asyncio.wait_for(
+                self.event_sink.send(event), CONTROL_PUBLISH_BOUND_MS / 1000
+            )
             context = self._active
             if (
                 turn_id != SESSION_TURN_ID

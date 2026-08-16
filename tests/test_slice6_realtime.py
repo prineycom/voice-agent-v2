@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from tests.test_checkpoint_ab import (
     CapacityAudio,
@@ -201,6 +202,67 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(session.turn_counts["admitted"], 1)
         self.assertEqual(session.turn_counts["interrupted"], 1)
+
+    async def test_cancelled_announcement_media_timeout_closes_session(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-timeout",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        with patch("voice_agent_v2.realtime.CONTROL_PUBLISH_BOUND_MS", 20):
+            finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+            await asyncio.wait_for(events.media_started.wait(), 0.5)
+            finish.cancel()
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(finish, 0.5)
+
+        self.assertEqual([event["type"] for event in events.events], ["turn.listening"])
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        self.assertTrue(session.closed)
+
+    async def test_interruption_publication_timeout_closes_session(self) -> None:
+        class BlockingInterruptEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.interrupted":
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingInterruptEvents()
+        session = RealtimeSession(
+            session_id="session-interruption-timeout",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance()
+
+        with patch("voice_agent_v2.realtime.CONTROL_PUBLISH_BOUND_MS", 20):
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(session.interrupt(), 0.5)
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.media-ready"],
+        )
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        self.assertTrue(session.closed)
 
     async def test_cancelled_announcement_finishes_media_boundary_then_terminalizes(self) -> None:
         class BlockingMediaEvents(MemoryEvents):
