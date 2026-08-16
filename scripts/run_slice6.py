@@ -50,6 +50,12 @@ SERVE_READINESS_TIMEOUT_SECONDS = 5.0
 SERVE_STATUS_LIMIT_BYTES = 64 * 1024
 OPERATIONAL_STATUS_LIMIT_BYTES = 64 * 1024
 OPERATIONAL_UNREADY_GRACE_SECONDS = 2.0
+RUNTIME_LISTENER_REQUIREMENTS = (
+    ("local-llm", "tcp", LLAMA_PORT),
+    ("livekit", "tcp", SIGNAL_PORT),
+    ("livekit", "udp", RTC_UDP_PORT),
+    ("gateway-controller-stt-tts-provider", "tcp", GATEWAY_PORT),
+)
 
 
 SHUTDOWN_ORDER = (
@@ -130,15 +136,21 @@ def without_server_secrets(environment: dict[str, str]) -> dict[str, str]:
 
 
 def validate_tailnet_identity(document: object, *, node_ip: str, hostname: str) -> None:
-    if not isinstance(document, dict) or not isinstance(document.get("Self"), dict):
-        raise Slice6ConfigurationError("Tailscale self status is unavailable")
-    self_status = document["Self"]
+    if not isinstance(document, dict):
+        raise ServiceProcessFailure("Tailscale self status is unavailable")
+    if document.get("BackendState") == "NeedsLogin":
+        raise Slice6ConfigurationError("Tailscale authentication is incompatible")
+    self_status = document.get("Self")
+    if not isinstance(self_status, dict) or self_status.get("Online") is not True:
+        raise ServiceProcessFailure("Tailscale self is not online")
     dns_name = self_status.get("DNSName")
     addresses = self_status.get("TailscaleIPs")
-    online = self_status.get("Online")
-    if not isinstance(dns_name, str) or not isinstance(addresses, list):
-        raise Slice6ConfigurationError("Tailscale self status is unavailable")
-    if not online or dns_name.removesuffix(".") != hostname or node_ip not in addresses:
+    if (
+        not isinstance(dns_name, str)
+        or not isinstance(addresses, list)
+        or dns_name.removesuffix(".") != hostname
+        or node_ip not in addresses
+    ):
         raise Slice6ConfigurationError(
             "configured Slice 6 URLs/node IP do not match this online Tailscale host"
         )
@@ -287,6 +299,94 @@ def require_runtime_ports_free(proc_root: Path = Path("/proc")) -> None:
             raise ServiceProcessFailure(f"required runtime port is already owned: {port}")
 
 
+def _listener_inodes(
+    protocol: str, port: int, *, proc_root: Path,
+) -> set[str]:
+    names = ("tcp", "tcp6") if protocol == "tcp" else ("udp", "udp6")
+    inodes: set[str] = set()
+    for name in names:
+        try:
+            lines = (proc_root / "net" / name).read_text(encoding="ascii").splitlines()
+        except OSError as error:
+            raise ServiceProcessFailure("runtime listener custody is unavailable") from error
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 10:
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError) as error:
+                raise ServiceProcessFailure("runtime listener custody is invalid") from error
+            if local_port != port or (protocol == "tcp" and fields[3] != "0A"):
+                continue
+            if not fields[9].isdigit() or fields[9] == "0":
+                raise ServiceProcessFailure("runtime listener custody is invalid")
+            inodes.add(fields[9])
+    return inodes
+
+
+def _process_tree_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
+    pending = [pid]
+    observed: set[int] = set()
+    inodes: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in observed:
+            continue
+        observed.add(current)
+        process_root = proc_root / str(current)
+        try:
+            children = (
+                process_root / "task" / str(current) / "children"
+            ).read_text(encoding="ascii").split()
+            descriptors = tuple((process_root / "fd").iterdir())
+        except OSError as error:
+            raise ServiceProcessFailure("supervised listener owner is unavailable") from error
+        for child in children:
+            if not child.isdigit() or int(child) <= 0:
+                raise ServiceProcessFailure("supervised listener owner is invalid")
+            pending.append(int(child))
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise ServiceProcessFailure("supervised listener custody is unavailable") from error
+            if target.startswith("socket:[") and target.endswith("]"):
+                inode = target[8:-1]
+                if inode.isdigit() and inode != "0":
+                    inodes.add(inode)
+    return inodes
+
+
+def require_runtime_listener_custody(
+    supervisor: ProcessSupervisor,
+    *,
+    proc_root: Path = Path("/proc"),
+    requirements: tuple[tuple[str, str, int], ...] = RUNTIME_LISTENER_REQUIREMENTS,
+) -> None:
+    processes_by_role = {
+        role: [process for process in supervisor.processes if supervisor.role(process) == role]
+        for role, _protocol, _port in requirements
+    }
+    owned_by_role: dict[str, set[str]] = {}
+    for role, processes in processes_by_role.items():
+        if len(processes) != 1:
+            raise ServiceProcessFailure(f"supervised listener owner is ambiguous: {role}")
+        process = processes[0]
+        pid = getattr(process, "pid", None)
+        if type(pid) is not int or pid <= 0 or process.poll() is not None:
+            raise ServiceProcessFailure(f"supervised listener owner is unavailable: {role}")
+        owned_by_role[role] = _process_tree_socket_inodes(pid, proc_root=proc_root)
+    for role, protocol, port in requirements:
+        listeners = _listener_inodes(protocol, port, proc_root=proc_root)
+        if not listeners or not listeners.issubset(owned_by_role[role]):
+            raise ServiceProcessFailure(
+                f"runtime listener is not owned by the supervised component: {protocol}/{port}"
+            )
+
+
 def require_supervised_children_alive(
     supervisor: ProcessSupervisor, *, phase: str,
 ) -> None:
@@ -301,6 +401,7 @@ def publish_systemd_readiness(
     supervisor: ProcessSupervisor, *, build_id: str, release_id: str,
 ) -> None:
     require_supervised_children_alive(supervisor, phase="before readiness")
+    require_runtime_listener_custody(supervisor)
     if not gateway_operational_ready(
         timeout=1.0,
         expected_build_id=build_id,
@@ -310,6 +411,7 @@ def publish_systemd_readiness(
             "gateway did not expose exact operational readiness after route startup"
         )
     require_supervised_children_alive(supervisor, phase="before readiness")
+    require_runtime_listener_custody(supervisor)
     systemd_notify_ready()
 
 
@@ -357,16 +459,16 @@ def read_tailscale_serve_status(
             timeout=timeout,
             check=False,
         )
-    except subprocess.TimeoutExpired as error:
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable") from error
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
+        raise ServiceProcessFailure("Tailscale Serve status is unavailable") from error
     if status.returncode != 0 or len(status.stdout.encode("utf-8")) > SERVE_STATUS_LIMIT_BYTES:
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+        raise ServiceProcessFailure("Tailscale Serve status is unavailable")
     try:
         document = json.loads(status.stdout)
     except (UnicodeError, json.JSONDecodeError) as error:
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable") from error
+        raise ServiceProcessFailure("Tailscale Serve status is unavailable") from error
     if not isinstance(document, dict):
-        raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+        raise ServiceProcessFailure("Tailscale Serve status is unavailable")
     return document
 
 
@@ -441,7 +543,7 @@ def wait_for_serve_route(
             document = read_tailscale_serve_status(
                 environment, timeout=min(1.0, remaining),
             )
-        except Slice6ConfigurationError:
+        except ServiceProcessFailure:
             document = {}
         if document and serve_route_state(
             document, hostname=hostname, https_port=https_port, target=target,
@@ -462,6 +564,9 @@ def reconcile_serve_routes(
     routes: tuple[tuple[int, str], ...],
     timeout: float = SERVE_READINESS_TIMEOUT_SECONDS,
 ) -> dict[int, str]:
+    route_ports = [https_port for https_port, _target in routes]
+    if len(route_ports) != len(set(route_ports)):
+        raise Slice6ConfigurationError("application and signaling HTTPS ports must differ")
     document = read_tailscale_serve_status(environment)
     states = {
         https_port: serve_route_state(
@@ -510,6 +615,8 @@ def main() -> int:
     for port in (app_https_port, signal_https_port):
         if not 1 <= port <= 65535:
             raise Slice6ConfigurationError("tailnet HTTPS port is outside bounds")
+    if app_https_port == signal_https_port:
+        raise Slice6ConfigurationError("application and signaling HTTPS ports must differ")
     if (
         app_public.scheme != "https" or not app_public.hostname
         or app_public.username is not None or app_public.password is not None
@@ -524,20 +631,27 @@ def main() -> int:
     if shutil.which("tailscale") is None:
         raise RuntimeError("the required tailscale CLI is unavailable")
     tailscale_environment = without_server_secrets(dict(os.environ))
-    status = subprocess.run(
-        ["tailscale", "status", "--json"],
-        env=tailscale_environment,
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    if status.returncode != 0:
-        raise Slice6ConfigurationError("Tailscale self status is unavailable")
+    try:
+        status = subprocess.run(
+            ["tailscale", "status", "--json"],
+            env=tailscale_environment,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
+        raise ServiceProcessFailure("Tailscale self status is unavailable") from error
+    if len(status.stdout.encode("utf-8")) > SERVE_STATUS_LIMIT_BYTES:
+        raise ServiceProcessFailure("Tailscale self status is unavailable")
     try:
         status_document = json.loads(status.stdout)
-    except json.JSONDecodeError as error:
-        raise Slice6ConfigurationError("Tailscale self status is unavailable") from error
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ServiceProcessFailure("Tailscale self status is unavailable") from error
+    if isinstance(status_document, dict) and status_document.get("BackendState") == "NeedsLogin":
+        raise Slice6ConfigurationError("Tailscale authentication is incompatible")
+    if status.returncode != 0:
+        raise ServiceProcessFailure("Tailscale self status is unavailable")
     validate_tailnet_identity(
         status_document,
         node_ip=node_ip,

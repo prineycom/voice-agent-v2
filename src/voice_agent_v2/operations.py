@@ -24,6 +24,8 @@ import tempfile
 from typing import Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
+from .runtime_directory import SYSTEMD_RUNTIME_ROOT
+
 
 OPERATIONS_SCHEMA = "voice-agent.operations.v1"
 RELEASE_SCHEMA = "voice-agent.operational-release.v2"
@@ -390,6 +392,8 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
     signal_port = _bounded_port(values["SLICE6_SIGNAL_HTTPS_PORT"], name="signaling HTTPS port")
     if public.hostname != app.hostname or public.port != signal_port or app.port != app_port:
         raise OperationalError("configuration_invalid", "tailnet URL/port identity is inconsistent")
+    if app_port == signal_port:
+        raise OperationalError("configuration_invalid", "application and signaling HTTPS ports must differ")
     if internal.hostname not in {"127.0.0.1", "localhost", "::1"} or internal.port != 7880:
         raise OperationalError("configuration_invalid", "LiveKit internal endpoint changed")
     node_ip = values["SLICE6_LIVEKIT_NODE_IP"]
@@ -409,7 +413,7 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
     if capture not in {"0", "1"} or (capture == "0" and capture_root is not None):
         raise OperationalError("configuration_invalid", "diagnostic capture opt-in is invalid")
     if capture == "1":
-        runtime_root = Path(f"/run/user/{os.geteuid()}")
+        runtime_root = SYSTEMD_RUNTIME_ROOT
         configured_capture_root = Path(capture_root) if capture_root else None
         if (
             configured_capture_root is None or not configured_capture_root.is_absolute()
@@ -627,21 +631,29 @@ def verify_tailnet(configuration: Mapping[str, object]) -> None:
             timeout=5, check=False,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except FileNotFoundError as error:
+        raise OperationalError("tailnet_incompatible", "Tailscale CLI is unavailable") from error
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
         raise OperationalError("tailnet_unavailable", "Tailscale readiness is unavailable") from error
-    if result.returncode != 0 or len(result.stdout.encode("utf-8")) > MAX_COMMAND_OUTPUT_BYTES:
+    if len(result.stdout.encode("utf-8")) > MAX_COMMAND_OUTPUT_BYTES:
         raise OperationalError("tailnet_unavailable", "Tailscale readiness is unavailable")
     try:
         document = json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise OperationalError("tailnet_unavailable", "Tailscale readiness is invalid") from error
-    self_status = document.get("Self") if isinstance(document, dict) else None
-    if not isinstance(self_status, dict):
-        raise OperationalError("tailnet_unavailable", "Tailscale self readiness is unavailable")
+    if not isinstance(document, dict):
+        raise OperationalError("tailnet_unavailable", "Tailscale readiness is invalid")
+    if document.get("BackendState") == "NeedsLogin":
+        raise OperationalError("tailnet_incompatible", "Tailscale authentication is incompatible")
+    if result.returncode != 0:
+        raise OperationalError("tailnet_unavailable", "Tailscale readiness is unavailable")
+    self_status = document.get("Self")
+    if not isinstance(self_status, dict) or self_status.get("Online") is not True:
+        raise OperationalError("tailnet_unavailable", "Tailscale self is not online")
     dns_name = self_status.get("DNSName")
     addresses = self_status.get("TailscaleIPs")
     if not (
-        self_status.get("Online") is True and isinstance(dns_name, str)
+        isinstance(dns_name, str)
         and dns_name.removesuffix(".") == configuration["tailnet_hostname"]
         and isinstance(addresses, list) and configuration["tailnet_node_ip"] in addresses
     ):
@@ -1188,7 +1200,7 @@ def execute_release(state_root: Path = DEFAULT_STATE_ROOT) -> None:
     }
     environment.update(values)
     pycache = _prepare_mutable_runtime_directory(
-        Path(f"/run/user/{os.geteuid()}") / "voice-agent-v2" / "pycache"
+        SYSTEMD_RUNTIME_ROOT / "pycache"
     )
     environment.pop("PYTHONDONTWRITEBYTECODE", None)
     environment["PYTHONPYCACHEPREFIX"] = str(pycache)
@@ -1207,7 +1219,10 @@ def _finite_measurement(
 ) -> bool:
     if type(value) not in {int, float}:
         return False
-    numeric = float(value)
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return False
     return (
         math.isfinite(numeric)
         and numeric >= minimum

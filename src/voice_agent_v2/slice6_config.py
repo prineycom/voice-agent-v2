@@ -170,6 +170,10 @@ class Slice6Settings:
             raise Slice6ConfigurationError(
                 "application and LiveKit public URLs must use the same tailnet host"
             )
+        if urlsplit(public_url).port == urlsplit(app_public_url).port:
+            raise Slice6ConfigurationError(
+                "application and LiveKit public HTTPS ports must differ"
+            )
         if any(name.startswith("LITELLM_") for name in values):
             raise Slice6ConfigurationError(
                 "LiteLLM configuration is forbidden in the local-LFM Slice 6 runtime"

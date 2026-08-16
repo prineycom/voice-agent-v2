@@ -12,9 +12,11 @@ import sys
 import time
 
 from .operations import (
+    CONFIGURATION_EXIT_STATUS,
     DEFAULT_MANIFEST_RELATIVE,
     DEFAULT_STATE_ROOT,
     OperationalError,
+    RUNTIME_FAILURE_EXIT_STATUS,
     ReleaseStore,
     evaluate_sustained_run,
     execute_release,
@@ -355,7 +357,9 @@ def main() -> int:
         arguments.function(arguments)
     except OperationalError as error:
         print(f"voice-agent-ops failed: {error.code}: {error}", file=sys.stderr)
-        return 2
+        if arguments.command == "run" and error.code == "tailnet_unavailable":
+            return RUNTIME_FAILURE_EXIT_STATUS
+        return CONFIGURATION_EXIT_STATUS
     except KeyboardInterrupt:
         print("voice-agent-ops failed: interrupted", file=sys.stderr)
         return 130

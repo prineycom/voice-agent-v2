@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import configparser
+from contextlib import redirect_stderr
 import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -32,8 +35,10 @@ from voice_agent_v2.operations import (
     validate_server_configuration,
     verify_artifacts,
     verify_disk_policy,
+    verify_tailnet,
     verify_tracked_manifest_alignment,
 )
+from voice_agent_v2.runtime_directory import SYSTEMD_RUNTIME_ROOT
 from voice_agent_v2.schema import validate as validate_schema
 from voice_agent_v2.slice6_config import Slice6Settings
 
@@ -104,9 +109,12 @@ class OperationsManifestTests(unittest.TestCase):
         self.assertEqual(service["User"], "priney")
         self.assertIn("voice-agent-ops run", service["ExecStart"])
         self.assertNotIn(".local/share/voice-agent-v2", service["ReadWritePaths"])
+        self.assertEqual(service["RuntimeDirectory"], "voice-agent-v2")
+        self.assertEqual(service["RuntimeDirectoryMode"], "0700")
+        self.assertEqual(service["RuntimeDirectoryPreserve"], "restart")
         self.assertEqual(
             service["Environment"],
-            "PYTHONPYCACHEPREFIX=/run/user/1000/voice-agent-v2/pycache",
+            "PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache",
         )
         self.assertNotIn("LITELLM", "\n".join(service.values()))
 
@@ -176,6 +184,19 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertTrue(output.call_args.args[0]["changed"])
             self.assertTrue(output.call_args.args[0]["ready"])
 
+    def test_run_exit_status_retries_only_transient_tailnet_unavailability(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            arguments = [
+                "voice-agent-ops", "run", "--state-root", str(Path(temporary).resolve()),
+            ]
+            for code, expected in (("tailnet_unavailable", 1), ("tailnet_incompatible", 2)):
+                with self.subTest(code=code), patch.object(sys, "argv", arguments), patch.object(
+                    operations_cli,
+                    "execute_release",
+                    side_effect=OperationalError(code, "content-free failure"),
+                ), redirect_stderr(StringIO()):
+                    self.assertEqual(operations_cli.main(), expected)
+
 
 class ConfigurationAndArtifactTests(unittest.TestCase):
     def test_config_is_mode_guarded_without_persistable_secret_verifier(self) -> None:
@@ -200,6 +221,67 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
             path.chmod(0o644)
             with self.assertRaisesRegex(OperationalError, "ownership or mode"):
                 parse_server_configuration(path)
+
+    def test_operational_capture_requires_the_systemd_runtime_boundary(self) -> None:
+        values = configuration_values()
+        values.update({
+            "VOICE_AGENT_DIAGNOSTIC_CAPTURE": "1",
+            "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT": str(
+                SYSTEMD_RUNTIME_ROOT / "private-captures"
+            ),
+        })
+        report = validate_server_configuration(values)
+        self.assertEqual(report["diagnostic_capture_ttl_seconds"], 900)
+        values["VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT"] = (
+            f"/run/user/{os.geteuid()}/voice-agent-v2/private-captures"
+        )
+        with self.assertRaisesRegex(OperationalError, "capture root is invalid"):
+            validate_server_configuration(values)
+
+    def test_equal_public_https_ports_are_rejected(self) -> None:
+        values = configuration_values()
+        values["LIVEKIT_PUBLIC_URL"] = f"wss://{HOSTNAME}:8443"
+        values["SLICE6_SIGNAL_HTTPS_PORT"] = "8443"
+        with self.assertRaisesRegex(OperationalError, "ports must differ"):
+            validate_server_configuration(values)
+
+    def test_tailnet_temporarily_offline_is_retryable_but_identity_and_auth_are_static(self) -> None:
+        configuration = {
+            "tailnet_hostname": HOSTNAME,
+            "tailnet_node_ip": "100.64.0.10",
+        }
+        offline = subprocess.CompletedProcess(
+            [], 0, json.dumps({
+                "BackendState": "Running",
+                "Self": {
+                    "Online": False,
+                    "DNSName": HOSTNAME,
+                    "TailscaleIPs": ["100.64.0.10"],
+                },
+            }), "",
+        )
+        with patch("voice_agent_v2.operations.subprocess.run", return_value=offline):
+            with self.assertRaises(OperationalError) as unavailable:
+                verify_tailnet(configuration)
+        self.assertEqual(unavailable.exception.code, "tailnet_unavailable")
+        for document in (
+            {"BackendState": "NeedsLogin"},
+            {
+                "BackendState": "Running",
+                "Self": {
+                    "Online": True,
+                    "DNSName": "other.example.ts.net",
+                    "TailscaleIPs": ["100.64.0.10"],
+                },
+            },
+        ):
+            result = subprocess.CompletedProcess([], 0, json.dumps(document), "")
+            with self.subTest(document=document), patch(
+                "voice_agent_v2.operations.subprocess.run", return_value=result,
+            ):
+                with self.assertRaises(OperationalError) as incompatible:
+                    verify_tailnet(configuration)
+            self.assertEqual(incompatible.exception.code, "tailnet_incompatible")
 
     def test_unknown_provider_configuration_is_rejected_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -525,7 +607,7 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                 patch(
                     "voice_agent_v2.operations._prepare_mutable_runtime_directory",
                     side_effect=lambda path: path,
-                ),
+                ) as prepare_runtime,
                 patch("voice_agent_v2.operations.os.chdir"),
                 patch("voice_agent_v2.operations.os.execve", side_effect=execute),
             ):
@@ -534,6 +616,7 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             environment = captured["environment"]
             self.assertIsInstance(environment, dict)
             self.assertEqual(environment["LIVEKIT_API_SECRET"], "snapshot-secret-value")
+            prepare_runtime.assert_called_once_with(SYSTEMD_RUNTIME_ROOT / "pycache")
 
     def test_rollback_rejects_incompatible_previous_without_moving_current(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -654,6 +737,7 @@ class LifecycleAndSustainedTests(unittest.TestCase):
             ("process_rss_mib", -1),
             ("gpu_vram_used_mib", float("inf")),
             ("cancellation_latency_ms", float("nan")),
+            ("total_turn_ms", 10**400),
         ):
             turns = [dict(turn) for turn in baseline]
             turns[0][field] = value

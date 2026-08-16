@@ -13,9 +13,12 @@ User=priney
 Group=priney
 WorkingDirectory=%h/.local/share/voice-agent-v2/current
 Environment=HOME=%h
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_RUNTIME_DIR=/run/voice-agent-v2
 Environment=PYTHONUNBUFFERED=1
-Environment=PYTHONPYCACHEPREFIX=/run/user/1000/voice-agent-v2/pycache
+Environment=PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache
+RuntimeDirectory=voice-agent-v2
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 ExecStart=%h/.local/share/voice-agent-v2/current/voice-agent-ops run
 Restart=on-failure
 RestartSec=5s
@@ -30,7 +33,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.cache/voice-agent-v2 -/run/user/1000
+ReadWritePaths=%h/.cache/voice-agent-v2
 ProtectClock=yes
 ProtectControlGroups=yes
 ProtectKernelLogs=yes

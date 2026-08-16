@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
+import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -90,6 +92,7 @@ class SystemdReadinessTests(unittest.TestCase):
         supervisor.processes.append(child)
         with (
             patch.object(run_slice6, "gateway_operational_ready", return_value=True) as ready,
+            patch.object(run_slice6, "require_runtime_listener_custody") as custody,
             patch.object(run_slice6, "systemd_notify_ready") as notify,
         ):
             with self.assertRaisesRegex(
@@ -103,6 +106,7 @@ class SystemdReadinessTests(unittest.TestCase):
             expected_build_id="a" * 40,
             expected_release_id="b" * 24,
         )
+        custody.assert_called_once_with(supervisor)
         notify.assert_not_called()
 
     def test_exact_ready_notification_reaches_systemd_socket(self) -> None:
@@ -148,6 +152,42 @@ class ParentProcessIdentityTests(unittest.TestCase):
 
 
 class RuntimePortCustodyTests(unittest.TestCase):
+    def test_final_listener_custody_rejects_an_unrelated_live_owner(self) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        owned = FakeProcess()
+        owned.pid = os.getpid()
+        supervisor = run_slice6.ProcessSupervisor()
+        supervisor.processes.append(owned)
+        supervisor._roles[id(owned)] = "fixture"
+        try:
+            run_slice6.require_runtime_listener_custody(
+                supervisor, requirements=(("fixture", "tcp", port),),
+            )
+            unrelated = subprocess.Popen(
+                [sys.executable, "-I", "-c", "import time; time.sleep(30)"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            supervisor.processes[0] = unrelated
+            supervisor._roles = {id(unrelated): "fixture"}
+            try:
+                with self.assertRaisesRegex(
+                    run_slice6.ServiceProcessFailure, "not owned",
+                ):
+                    run_slice6.require_runtime_listener_custody(
+                        supervisor, requirements=(("fixture", "tcp", port),),
+                    )
+            finally:
+                unrelated.terminate()
+                unrelated.wait(timeout=5)
+        finally:
+            listener.close()
+
     def test_preexisting_runtime_listener_fails_before_child_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             proc = Path(temporary)
@@ -230,6 +270,48 @@ class Slice6WrapperEnvironmentTests(unittest.TestCase):
 
 
 class TailscaleServeOwnershipTests(unittest.TestCase):
+    def test_transient_offline_state_is_recoverable_but_identity_and_auth_are_static(self) -> None:
+        with self.assertRaisesRegex(
+            run_slice6.ServiceProcessFailure, "not online",
+        ):
+            run_slice6.validate_tailnet_identity(
+                {"BackendState": "Running", "Self": {"Online": False}},
+                node_ip="100.64.0.10",
+                hostname=HOSTNAME,
+            )
+        for document in (
+            {"BackendState": "NeedsLogin"},
+            {
+                "BackendState": "Running",
+                "Self": {
+                    "Online": True,
+                    "DNSName": "other.example.ts.net",
+                    "TailscaleIPs": ["100.64.0.10"],
+                },
+            },
+        ):
+            with self.subTest(document=document), self.assertRaises(
+                Slice6ConfigurationError,
+            ):
+                run_slice6.validate_tailnet_identity(
+                    document,
+                    node_ip="100.64.0.10",
+                    hostname=HOSTNAME,
+                )
+
+    def test_duplicate_route_ports_fail_before_status_or_mutation(self) -> None:
+        supervisor = run_slice6.ProcessSupervisor()
+        with patch.object(run_slice6, "read_tailscale_serve_status") as read_status:
+            with self.assertRaisesRegex(Slice6ConfigurationError, "ports must differ"):
+                run_slice6.reconcile_serve_routes(
+                    supervisor=supervisor,
+                    environment={},
+                    hostname=HOSTNAME,
+                    routes=((8443, APP_TARGET), (8443, SIGNAL_TARGET)),
+                )
+        read_status.assert_not_called()
+        self.assertEqual(supervisor.processes, [])
+
     def test_route_states_accept_exact_reject_conflict_and_preserve_unrelated(self) -> None:
         original = serve_document((8443, APP_TARGET))
         document = copy.deepcopy(original)
