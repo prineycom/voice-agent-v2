@@ -316,6 +316,32 @@ describe('checkpoint A browser state', () => {
     expect(state.failureCode).toBeNull()
   })
 
+  it('keeps the late-control latch through interruption until a new session', () => {
+    let state = apply([
+      event(1, 'session.ready'),
+      event(2, 'turn.listening'),
+      event(3, 'turn.media-ready'),
+    ])
+    state = voiceReducer(state, { type: 'drop' })
+    state = voiceReducer(state, {
+      type: 'control',
+      event: event(4, 'turn.interrupted', undefined, { outcome: 'interrupted' }),
+    })
+    expect(state.availability).toBe('interrupted')
+    expect(state.lateControlDegraded).toBe(true)
+
+    state = voiceReducer(state, {
+      type: 'control',
+      event: event(5, 'turn.listening', 'turn-00000002'),
+    })
+    expect(state.availability).toBe('degraded')
+    expect(state.failureCode).toBe('late_or_duplicate_event')
+
+    state = voiceReducer(state, { type: 'session-created', capability })
+    expect(state.lateControlDegraded).toBe(false)
+    expect(state.failureCode).toBeNull()
+  })
+
   it('keeps effective microphone truth and bounded transition errors in UI state', () => {
     let state = configured()
     state = voiceReducer(state, { type: 'microphone-lifecycle', status: 'live' })

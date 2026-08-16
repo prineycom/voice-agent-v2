@@ -52,7 +52,7 @@ A safe real-process case starts a task-owned disposable Python worker, kills it,
 `config/observability-v1.json` preregisters nearest-rank p50/p95/p99 for:
 
 - endpoint → STT final;
-- selected-provider time to first token and completion;
+- selected-provider time to first non-empty reasoning-or-visible token (separate from first visible content) and completion;
 - TTS time to first accepted audio;
 - cancellation latency when interruption occurs;
 - total turn;
@@ -81,7 +81,7 @@ The bounded verifier emits one synthetic metadata-only turn and reconstructs, wi
 }
 ```
 
-The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance-percentile claim. A failed-turn regression reconstructs terminal outcome, `hard|soft` dependency class, failure-matrix ID, failure stage/code, and allowed user state from the emitted metadata. The same correlated stream also carries provider mode/identity, `external_transfer=false`, usage-unit counts when the local runtime supplies them, PCM/segment queue high-water marks, cancellation/stale/control-drop counts, and independently emitted endpoint/terminal resource samples. The public terminal control exposes the latest resource sample only when one has already completed; a missing or late sample remains optional metadata. The percentile report consumes the correlated observation stream for its reconstructed timing timeline and timing/resource percentiles. Runtime-level content-free model `loaded`/`unloaded` events are recorded separately.
+The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance-percentile claim. A failed-turn regression reconstructs terminal outcome, `hard|soft` dependency class, failure-matrix ID, failure stage/code, and allowed user state from the emitted metadata. A late protocol-failure regression retains first-provider-token timing from partial reasoning without manufacturing it from the later visible event. The same correlated stream also carries provider mode/identity, `external_transfer=false`, usage-unit counts when the local runtime supplies them, PCM/segment queue high-water marks, cancellation/stale/control-drop counts, and independently emitted endpoint/terminal resource samples. The public terminal control exposes the latest resource sample only when one has already completed; a missing or late sample remains optional metadata. The percentile report consumes the correlated observation stream for its reconstructed timing timeline and timing/resource percentiles. Runtime-level content-free model `loaded`/`unloaded` events are recorded separately.
 
 ## Default-log privacy review and capture deletion
 

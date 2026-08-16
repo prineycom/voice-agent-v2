@@ -174,6 +174,7 @@ export interface VoiceState {
   retryLimit: number
   health: HealthReadinessReport | null
   droppedEvents: number
+  lateControlDegraded: boolean
   audioBlocked: boolean
   speechEnvelopeStatus: SpeechEnvelopeStatus
   microphoneStatus: MicrophoneLifecycle
@@ -208,6 +209,7 @@ export const initialVoiceState: VoiceState = {
   retryLimit: 0,
   health: null,
   droppedEvents: 0,
+  lateControlDegraded: false,
   audioBlocked: false,
   speechEnvelopeStatus: 'unknown',
   microphoneStatus: 'disconnected',
@@ -488,18 +490,20 @@ export function parseCapability(value: unknown): SessionCapability | null {
 }
 
 function drop(state: VoiceState): VoiceState {
+  const activeSession = state.sessionId !== null
   const readySession = state.connection === 'ready'
   return {
     ...state,
     availability: readySession ? 'degraded' : state.availability,
-    failureStage: readySession ? 'controller' : state.failureStage,
-    failureCode: readySession ? 'late_or_duplicate_event' : state.failureCode,
+    failureStage: activeSession ? 'controller' : state.failureStage,
+    failureCode: activeSession ? 'late_or_duplicate_event' : state.failureCode,
+    lateControlDegraded: activeSession || state.lateControlDegraded,
     droppedEvents: state.droppedEvents + 1,
   }
 }
 
 function hasLateControlDegradation(state: VoiceState): boolean {
-  return state.availability === 'degraded' && state.failureCode === 'late_or_duplicate_event'
+  return state.lateControlDegraded
 }
 
 function validTurnTransition(previous: ControlEventType | null, next: ControlEventType): boolean {

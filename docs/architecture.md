@@ -281,7 +281,7 @@ Every turn must be diagnosable without recording its private content by default.
 - Session and turn correlation IDs. Concurrent TTS segment observations are selected by full session/epoch/turn/generation/request identity, never by temporal slices of shared adapter history.
 - State transitions and one terminal outcome per turn; failed-turn reconstruction retains dependency class, failure-matrix ID, failure stage/code, and allowed user state.
 - Audio duration/bytes, not raw audio.
-- Endpoint-to-STT-final, selected-provider time-to-first-token and completion, TTS time-to-first-audio, first programmatically observed browser audio signal, and total-turn timing; physical audibility/timing is recorded only by manual acceptance.
+- Endpoint-to-STT-final, selected-provider time to its first non-empty reasoning-or-visible token and completion, independently measured first visible response, TTS time-to-first-audio, first programmatically observed browser audio signal, and total-turn timing; partial provider failures retain observed TTFT, while physical audibility/timing is recorded only by manual acceptance.
 - Cloud external-transfer fact, provider request ID, usage/token and cost data when available, and error class—never prompt/response content.
 - Cancellation latency and stale/duplicate/drop counts.
 - Per-service/provider request counts, failures, queue depth, and readiness changes.

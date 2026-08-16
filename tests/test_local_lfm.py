@@ -179,6 +179,7 @@ class LocalLFMProviderTests(unittest.TestCase):
         health._body = b'{"status":"ok"}'
         health.read = lambda limit=None: health._body
         malformed = StubResponse([
+            stream_event(reasoning="Скрытый токен."),
             {"model": MODEL_ALIAS, "choices": "invalid"},
         ])
         factory, _created = self.factory([health, malformed])
@@ -199,6 +200,10 @@ class LocalLFMProviderTests(unittest.TestCase):
             "compatible": False,
             "reason_code": "selected_provider_protocol_error",
         })
+        self.assertIsInstance(
+            provider.observations[-1]["provider_first_token_ms"], float
+        )
+        self.assertNotIn("visible_first_content_ms", provider.observations[-1])
 
     def test_health_body_transport_loss_is_dead_not_a_contract_mismatch(self) -> None:
         health = StubResponse([])

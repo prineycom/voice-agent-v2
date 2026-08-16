@@ -1852,13 +1852,6 @@ class RealtimeSession:
                 max(0.0, (observed - context.endpoint_monotonic) * 1000), 3
             )
             public_payload["endpoint_to_first_visible_ms"] = context.first_visible_ms
-            if context.llm_started_monotonic is not None:
-                context.provider_first_token_ms = round(
-                    max(0.0, (observed - context.llm_started_monotonic) * 1000), 3
-                )
-                public_payload["provider_time_to_first_token_ms"] = (
-                    context.provider_first_token_ms
-                )
         await self._emit(context.turn_id, str(event_type), public_payload)
 
     async def handle_client_control(self, payload: bytes) -> bool:

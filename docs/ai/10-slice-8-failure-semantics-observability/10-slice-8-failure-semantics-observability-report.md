@@ -30,19 +30,19 @@
 
 ## No-mistakes follow-up
 
-The first pipeline head `556d57eb` fixed `OBS-001`, `READY-001`, `FAIL-001`, and `DATA-001`; its fix review then reported the accepted `READY-002`, `OBS-002`, `PRIV-001`, `PERF-001`, and `DOC-001`. The follow-up pipelines refined those into `READY-003/004`, `OBS-003`, and `PRIV-002/003/004`. The final boundary classifies transport versus responding contract health independently, reconstructs all failure metadata, enforces independent minimal-env monotonic expiry plus aggregate custody bounds, removes resource subprocess work from the asyncio path, and gives late/duplicate events the executable `degraded` consequence. The review artifact records each correction.
+The first pipeline head `556d57eb` fixed `OBS-001`, `READY-001`, `FAIL-001`, and `DATA-001`; its fix review then reported the accepted `READY-002`, `OBS-002`, `PRIV-001`, `PERF-001`, and `DOC-001`. The follow-up pipelines refined those through `READY-004`, `OBS-007`, `PRIV-006`, and `DOC-003`. The final boundary classifies transport versus responding contract health independently, reconstructs every failure through one enrichment path, measures first reasoning-or-visible provider token separately from first visible, deduplicates resource samples, enforces minimal-env monotonic expiry plus file-locked guardian custody/TOCTOU-safe deletion, removes resource subprocess work from asyncio, and latches late/duplicate `degraded` state until a new session. The review artifact records each correction.
 
 ## Validation
 
 | Command | Result | Notes |
 | --- | --- | --- |
 | `no-mistakes doctor` | PASS | Shared daemon healthy; not restarted/updated. |
-| `./verify-slice8` | PASS | 53 Python focused tests, safe process/resource/privacy verifier, 66 focused browser tests; 12-row matrix complete. |
-| `./verify` | PASS | 250 Python behavioral tests; network-denied deterministic root trace. |
+| `./verify-slice8` | PASS | 54 Python focused tests, safe process/resource/privacy verifier, 67 focused browser tests; 12-row matrix complete. |
+| `./verify` | PASS | 251 Python behavioral tests; network-denied deterministic root trace. |
 | `./verify-slice7` | PASS | 84 focused avatar/UI/browser tests plus production/review builds; replay hash unchanged. |
 | `./verify-local-lfm` | PASS | Exact local identity/hashes/2×32K slots, parallel/cancellation/recovery; no cloud/fallback. |
 | `./verify-silero-kseniya` | PASS | Exact-cache two-worker/native-48 focused real check; physical claims explicitly absent. |
-| `./verify-slice6` | PASS | 250 Python + installed runtime + 85 web tests/builds + deterministic Firefox/official LiveKit regression. Physical audibility not claimed. |
+| `./verify-slice6` | PASS | 251 Python + installed runtime + 86 web tests/builds + deterministic Firefox/official LiveKit regression. Physical audibility not claimed. |
 | `git diff --check` / Python compile / TypeScript typecheck | PASS | Clean whitespace/syntax/type boundaries at implementation checkpoint. |
 
 ## Unresolved uncertainty

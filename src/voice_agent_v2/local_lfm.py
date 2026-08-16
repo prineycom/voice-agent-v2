@@ -373,6 +373,7 @@ class LocalLFMProvider:
         deadline: float,
         handoff: Callable[[str], None] | None,
         visible_observer: Callable[[str], None] | None,
+        provider_token_observer: Callable[[float], None] | None,
     ) -> dict[str, object]:
         connection = self._register_connection(
             generation, max(0.001, deadline - time.monotonic())
@@ -523,8 +524,12 @@ class LocalLFMProvider:
                     raise StageFailure(
                         "llm_provider", "selected_provider_protocol_error"
                     )
-                if reasoning or content:
-                    provider_first_token = provider_first_token or time.monotonic()
+                if (reasoning or content) and provider_first_token is None:
+                    provider_first_token = time.monotonic()
+                    if provider_token_observer is not None:
+                        provider_token_observer(
+                            max(0.0, (provider_first_token - started) * 1_000)
+                        )
                 reasoning_chars += len(reasoning)
                 if reasoning_chars > MAX_REASONING_CHARS:
                     raise StageFailure(
@@ -633,6 +638,12 @@ class LocalLFMProvider:
             if cancellation is not None
             else lambda: None
         )
+        provider_first_token_ms: float | None = None
+
+        def observe_provider_token(value: float) -> None:
+            nonlocal provider_first_token_ms
+            provider_first_token_ms = value
+
         def record_failure(error: StageFailure) -> None:
             self._record_runtime_failure(error.code)
             self.observations.append({
@@ -643,6 +654,7 @@ class LocalLFMProvider:
                 "external_transfer": False,
                 "success": False,
                 "error_class": error.code,
+                "provider_first_token_ms": provider_first_token_ms,
                 "completion_ms": (time.monotonic() - started) * 1_000,
             })
 
@@ -772,6 +784,7 @@ class LocalLFMProvider:
                     deadline,
                     enqueue_handoff if on_sentence is not None else None,
                     on_visible_sentence,
+                    observe_provider_token,
                 )
                 text = result["text"]
                 if not isinstance(text, str):

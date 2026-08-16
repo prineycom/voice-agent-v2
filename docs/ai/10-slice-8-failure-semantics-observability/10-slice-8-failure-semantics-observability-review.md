@@ -36,7 +36,7 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | PASS | 250 network-denied Python behavioral tests after all follow-up regressions. |
+| `./verify` | PASS | 251 network-denied Python behavioral tests after all follow-up regressions. |
 | `./verify-slice8` | PASS | Full matrix/privacy/readiness/capture/process/resource and focused browser gate. |
 | `./verify-slice7` | PASS | Avatar/UI tests/builds. |
 | `./verify-local-lfm` | PASS | Exact real local provider and cancellation/recovery. |
@@ -53,10 +53,10 @@ The follow-up commit on top of the exact pipeline head closes every remaining re
 | Finding | Final correction |
 | --- | --- |
 | `READY-002` / `READY-003` / `READY-004` | Local LFM owns separate live/ready/compatible/reason state. Header/body I/O loss is dead/unready but remains independently compatible; a responding identity/protocol/health-contract failure is alive/unready/incompatible. Both block admission and success is the only compatibility recovery. |
-| `OBS-002` / `OBS-003` | `dependency_class` is a closed `hard|soft` observation scalar; failed-turn reconstruction/report retains dependency class, matrix ID, failure stage/code, and user state from emitted metadata. |
-| `PRIV-001` / `PRIV-002` / `PRIV-003` / `PRIV-004` | Capture is restricted to private user-owned `XDG_RUNTIME_DIR`; creation fails closed unless it launches a detached manifest-owner expiry process with a boot-time monotonic deadline and minimal non-secret environment. A file-locked root admits at most four captures / 4 MiB, bounding retained data, guardians, and reapers; workers exit promptly after early deletion. Independent executable/clock-rollback/aggregate paths are tested, manifest purge is defense in depth, and runtime tmpfs removes data over logout/reboot. |
+| `OBS-002`–`OBS-007` | `dependency_class` is closed; every terminal failure uses the common enrichment boundary; reconstruction retains matrix/stage/code/state; resource percentiles consume only canonical resource samples. Provider TTFT is the first reasoning-or-visible token (including partial late-failure observations), while first visible remains separate. |
+| `PRIV-001`–`PRIV-006` | Capture is restricted to private user-owned `XDG_RUNTIME_DIR`; creation fails closed unless it launches a minimal-env detached manifest-owner expiry process with a boot-time monotonic deadline. File-locked root custody leases retain one of four slots until guardian exit, bounding data/processes/reapers even across early delete; creation and nonce revalidation plus removal share the root lock. Independent expiry/rollback/aggregate/TOCTOU paths are tested. |
 | `PERF-001` | `/proc`/`nvidia-smi` sampling is serialized off the asyncio event loop via background `to_thread` tasks; endpoint admission has a timing regression proving it does not wait for a slow sampler. |
-| `DOC-001` | Late/duplicate control now has the allowed `degraded` consequence: strict drop, visible/diagnostic count, no phase/media action, with new-session recovery. Executable mapper, reducer, System mapping, tests, architecture, and evidence agree. |
+| `DOC-001`–`DOC-003` | Late/duplicate control has the allowed `degraded` consequence via a dedicated session-scoped latch: strict drop, visible/diagnostic count, no phase/media action, and neither terminal interruption nor later valid turns clear it; only reset/new-session recovery does. |
 
 ## Recommendations
 
