@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from voice_agent_v2 import operations_cli
+from voice_agent_v2 import operations, operations_cli
 from voice_agent_v2.operations import (
     DEFAULT_MANIFEST_RELATIVE,
     OperationalError,
@@ -158,6 +158,33 @@ class OperationsManifestTests(unittest.TestCase):
             "PYTHONPYCACHEPREFIX": "/run/voice-agent-v2/pycache",
         })
         self.assertFalse(any(name.startswith("LITELLM_") for name in environment))
+
+    def test_systemd_install_validation_rejects_any_sandbox_contract_drift(self) -> None:
+        source = ROOT / "ops/systemd/voice-agent-v2.service"
+        mutations = {
+            "ProtectSystem=strict": "ProtectSystem=full",
+            "ProtectHome=read-only": "ProtectHome=no",
+            "ReadWritePaths=%h/.cache/voice-agent-v2": "ReadWritePaths=%h",
+            "NoNewPrivileges=yes": "NoNewPrivileges=no",
+            "PrivateTmp=yes": "PrivateTmp=no",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK": (
+                "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET"
+            ),
+            "WorkingDirectory=%h/.local/share/voice-agent-v2/current": "WorkingDirectory=%h",
+            "Environment=HOME=%h": "Environment=HOME=/tmp",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            original = source.read_text(encoding="utf-8")
+            for expected, changed in mutations.items():
+                with self.subTest(directive=expected.split("=", 1)[0]):
+                    candidate = Path(temporary) / "voice-agent-v2.service"
+                    candidate.write_text(
+                        original.replace(expected, changed), encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        OperationalError, "sandbox policy is incompatible",
+                    ):
+                        operations_cli._validate_systemd_unit(candidate)
 
 
 class ServiceApplicationTests(unittest.TestCase):
@@ -1089,6 +1116,48 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             self.assertEqual((state / "previous").resolve(), current.resolve())
             self.assertFalse(result["replaced_release_compatible"])
             self.assertIsNone(result["replaced_build_id"])
+
+    def test_interrupted_rollback_link_swap_recovers_from_persisted_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            releases = state / "releases"
+            current = releases / ("9" * 24)
+            previous = releases / ("a" * 24)
+            current.mkdir(parents=True)
+            previous.mkdir()
+            (state / "current").symlink_to(f"releases/{current.name}")
+            (state / "previous").symlink_to(f"releases/{previous.name}")
+            actual_atomic_symlink = operations._atomic_symlink
+            calls = 0
+
+            def interrupt_after_first_link(path: Path, target: str) -> None:
+                nonlocal calls
+                calls += 1
+                actual_atomic_symlink(path, target)
+                if calls == 1:
+                    raise OSError("simulated process interruption")
+
+            with (
+                patch(
+                    "voice_agent_v2.operations.validate_release",
+                    side_effect=lambda path, **_kwargs: {"build_id": path.name[0] * 40},
+                ),
+                patch(
+                    "voice_agent_v2.operations._atomic_symlink",
+                    side_effect=interrupt_after_first_link,
+                ),
+                self.assertRaisesRegex(OSError, "simulated process interruption"),
+            ):
+                ReleaseStore(state).rollback()
+
+            self.assertTrue((state / "link-transaction.json").is_file())
+            self.assertEqual((state / "current").resolve(), current.resolve())
+            self.assertEqual((state / "previous").resolve(), current.resolve())
+            with ReleaseStore(state).locked():
+                pass
+            self.assertFalse((state / "link-transaction.json").exists())
+            self.assertEqual((state / "current").resolve(), previous.resolve())
+            self.assertEqual((state / "previous").resolve(), current.resolve())
 
     def test_verified_rollback_swaps_only_current_and_previous(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

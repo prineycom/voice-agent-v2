@@ -752,6 +752,7 @@ class ReleaseStore:
         self.releases = self.state_root / "releases"
         self.current_link = self.state_root / "current"
         self.previous_link = self.state_root / "previous"
+        self.transaction_path = self.state_root / "link-transaction.json"
         self.lock_path = self.state_root / "operations.lock"
         self._lock_descriptor: int | None = None
         self._lock_depth = 0
@@ -783,6 +784,16 @@ class ReleaseStore:
                     ) from error
                 store._lock_descriptor = descriptor
                 store._lock_depth = 1
+                try:
+                    store._recover_link_transaction()
+                except BaseException:
+                    store._lock_descriptor = None
+                    store._lock_depth = 0
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    finally:
+                        os.close(descriptor)
+                    raise
 
             def __exit__(inner_self, *_arguments: object) -> None:
                 store._lock_depth -= 1
@@ -798,6 +809,74 @@ class ReleaseStore:
                     os.close(descriptor)
 
         return _Lock()  # type: ignore[return-value]
+
+    def _recover_link_transaction(self) -> None:
+        try:
+            metadata = self.transaction_path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", "release link transaction is unavailable",
+            ) from error
+        if not (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid == os.geteuid()
+            and stat.S_IMODE(metadata.st_mode) == 0o600
+        ):
+            raise OperationalError(
+                "release_state_invalid", "release link transaction custody changed",
+            )
+        transaction = _json_object(
+            self.transaction_path, code="release_state_invalid",
+        )
+        _require_exact_keys(
+            transaction,
+            {"schema_version", "current", "previous"},
+            label="release link transaction",
+            code="release_state_invalid",
+        )
+        if transaction.get("schema_version") != "voice-agent.release-links.v1":
+            raise OperationalError(
+                "release_state_invalid", "release link transaction is incompatible",
+            )
+        updates: list[tuple[Path, str]] = []
+        for name, link in (
+            ("previous", self.previous_link),
+            ("current", self.current_link),
+        ):
+            target = transaction.get(name)
+            if target is None:
+                continue
+            if not isinstance(target, str):
+                raise OperationalError(
+                    "release_state_invalid", "release link transaction is invalid",
+                )
+            target_path = (self.state_root / target).resolve()
+            if (
+                target != f"releases/{target_path.name}"
+                or target_path.parent != self.releases.resolve()
+                or not RELEASE_ID.fullmatch(target_path.name)
+                or not target_path.is_dir()
+            ):
+                raise OperationalError(
+                    "release_state_invalid", "release link transaction target is invalid",
+                )
+            updates.append((link, target))
+        for link, target in updates:
+            _atomic_symlink(link, target)
+        self.transaction_path.unlink()
+        _fsync_directory(self.state_root)
+
+    def _commit_links(
+        self, *, current: str, previous: str | None = None,
+    ) -> None:
+        _atomic_json(self.transaction_path, {
+            "schema_version": "voice-agent.release-links.v1",
+            "current": current,
+            "previous": previous,
+        })
+        self._recover_link_transaction()
 
     def _linked_release(self, link: Path) -> Path | None:
         if not link.is_symlink():
@@ -1006,10 +1085,13 @@ class ReleaseStore:
                 raise
             validate_release(target, state_root=self.state_root, verify_host_state=True)
             retained_previous: str | None = None
+            previous_target: str | None = None
             if current is not None and current != target and current_release is not None:
-                _atomic_symlink(self.previous_link, f"releases/{current.name}")
+                previous_target = f"releases/{current.name}"
                 retained_previous = current.name
-            _atomic_symlink(self.current_link, f"releases/{target.name}")
+            self._commit_links(
+                current=f"releases/{target.name}", previous=previous_target,
+            )
             return {
                 "schema_version": "voice-agent.deployment-result.v1",
                 "status": "activated",
@@ -1050,8 +1132,10 @@ class ReleaseStore:
                 )
             except OperationalError:
                 current_document = None
-            _atomic_symlink(self.current_link, f"releases/{previous.name}")
-            _atomic_symlink(self.previous_link, f"releases/{current.name}")
+            self._commit_links(
+                current=f"releases/{previous.name}",
+                previous=f"releases/{current.name}",
+            )
             return {
                 "schema_version": "voice-agent.rollback-result.v1",
                 "status": "rolled-back",

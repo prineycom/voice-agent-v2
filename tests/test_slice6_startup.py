@@ -44,6 +44,22 @@ class SystemdReadinessTests(unittest.TestCase):
                 FakeProcess(returncode=1), run_slice6.SIGNAL_PORT, "LiveKit", timeout=0.1,
             )
 
+    def test_startup_wait_stops_immediately_when_shutdown_is_requested(self) -> None:
+        process = FakeProcess()
+        with patch.object(
+            run_slice6.socket, "create_connection",
+            side_effect=AssertionError("cancelled startup must not poll the port"),
+        ):
+            ready = run_slice6.wait_for_port(
+                process,
+                run_slice6.SIGNAL_PORT,
+                "LiveKit",
+                timeout=80,
+                stop_requested=lambda: True,
+            )
+        self.assertFalse(ready)
+        self.assertIsNone(process.returncode)
+
     def test_final_ready_boundary_repolls_owned_children_after_exact_status(self) -> None:
         class ExitsAfterStatus(FakeProcess):
             polls = 0
@@ -72,6 +88,18 @@ class SystemdReadinessTests(unittest.TestCase):
             expected_release_id="b" * 24,
         )
         custody.assert_called_once_with(supervisor)
+        notify.assert_not_called()
+
+    def test_shutdown_request_prevents_systemd_ready_publication(self) -> None:
+        supervisor = run_slice6.ProcessSupervisor()
+        with patch.object(run_slice6, "systemd_notify_ready") as notify:
+            with self.assertRaises(run_slice6.ServiceStopRequested):
+                run_slice6.publish_systemd_readiness(
+                    supervisor,
+                    build_id="a" * 40,
+                    release_id="b" * 24,
+                    stop_requested=lambda: True,
+                )
         notify.assert_not_called()
 
     def test_exact_ready_notification_reaches_systemd_socket(self) -> None:
@@ -258,6 +286,18 @@ class Slice6WrapperEnvironmentTests(unittest.TestCase):
 
 
 class SupervisorLifecycleTests(unittest.TestCase):
+    def test_supervisor_refuses_new_children_after_shutdown_request(self) -> None:
+        supervisor = run_slice6.ProcessSupervisor(stop_requested=lambda: True)
+        with (
+            patch.object(
+                run_slice6.subprocess, "Popen",
+                side_effect=AssertionError("shutdown must prevent child launch"),
+            ),
+            self.assertRaises(run_slice6.ServiceStopRequested),
+        ):
+            supervisor.start(["fixture"], role="livekit")
+        self.assertEqual(supervisor.processes, [])
+
     def test_ctrl_c_path_stops_owned_children_without_touching_external_exposure(self) -> None:
         first = FakeProcess()
         second = FakeProcess()

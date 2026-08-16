@@ -29,6 +29,65 @@ from .operations import (
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_NAME = "voice-agent-v2.service"
 SYSTEM_UNIT_PATH = Path("/etc/systemd/system") / SERVICE_NAME
+SYSTEMD_UNIT_CONTRACT = {
+    "Unit": {
+        "Description": ["Voice Agent v2 loopback-local single-host stack"],
+        "Documentation": [
+            "https://github.com/prineycom/voice-agent-v2/blob/main/docs/architecture.md"
+        ],
+        "After": ["local-fs.target"],
+        "StartLimitIntervalSec": ["600"],
+        "StartLimitBurst": ["2"],
+    },
+    "Service": {
+        "Type": ["notify"],
+        "NotifyAccess": ["main"],
+        "User": ["priney"],
+        "Group": ["priney"],
+        "WorkingDirectory": ["%h/.local/share/voice-agent-v2/current"],
+        "Environment": [
+            "HOME=%h",
+            "XDG_RUNTIME_DIR=/run/voice-agent-v2",
+            "PYTHONUNBUFFERED=1",
+            "PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache",
+        ],
+        "RuntimeDirectory": ["voice-agent-v2"],
+        "RuntimeDirectoryMode": ["0700"],
+        "RuntimeDirectoryPreserve": ["no"],
+        "ExecStart": [
+            "%h/.local/share/voice-agent-v2/current/voice-agent-ops run"
+        ],
+        "Restart": ["on-failure"],
+        "RestartSec": ["5s"],
+        "RestartPreventExitStatus": ["2"],
+        "TimeoutStartSec": ["120s"],
+        "TimeoutStopSec": ["75s"],
+        "KillMode": ["mixed"],
+        "KillSignal": ["SIGTERM"],
+        "FinalKillSignal": ["SIGKILL"],
+        "UMask": ["0077"],
+        "NoNewPrivileges": ["yes"],
+        "PrivateTmp": ["yes"],
+        "ProtectSystem": ["strict"],
+        "ProtectHome": ["read-only"],
+        "ReadWritePaths": ["%h/.cache/voice-agent-v2"],
+        "ProtectClock": ["yes"],
+        "ProtectControlGroups": ["yes"],
+        "ProtectKernelLogs": ["yes"],
+        "ProtectKernelModules": ["yes"],
+        "ProtectKernelTunables": ["yes"],
+        "ProtectHostname": ["yes"],
+        "ProtectProc": ["invisible"],
+        "RestrictAddressFamilies": ["AF_UNIX AF_INET AF_INET6 AF_NETLINK"],
+        "RestrictRealtime": ["yes"],
+        "RestrictSUIDSGID": ["yes"],
+        "LockPersonality": ["yes"],
+        "MemoryDenyWriteExecute": ["no"],
+        "TasksMax": ["256"],
+        "LimitNOFILE": ["16384"],
+    },
+    "Install": {"WantedBy": ["multi-user.target"]},
+}
 
 
 def _state_root(value: str) -> Path:
@@ -90,30 +149,10 @@ def _normalized_unit(path: Path) -> dict[str, dict[str, list[str]]]:
 
 def _validate_systemd_unit(path: Path) -> None:
     unit = _normalized_unit(path)
-    required = {
-        ("Unit", "After"): ["local-fs.target"],
-        ("Unit", "StartLimitIntervalSec"): ["600"],
-        ("Unit", "StartLimitBurst"): ["2"],
-        ("Service", "Type"): ["notify"],
-        ("Service", "NotifyAccess"): ["main"],
-        ("Service", "User"): ["priney"],
-        ("Service", "Group"): ["priney"],
-        ("Service", "RuntimeDirectory"): ["voice-agent-v2"],
-        ("Service", "RuntimeDirectoryMode"): ["0700"],
-        ("Service", "RuntimeDirectoryPreserve"): ["no"],
-        ("Service", "ExecStart"): [
-            "%h/.local/share/voice-agent-v2/current/voice-agent-ops run"
-        ],
-        ("Service", "Restart"): ["on-failure"],
-        ("Service", "RestartSec"): ["5s"],
-        ("Service", "RestartPreventExitStatus"): ["2"],
-        ("Service", "TimeoutStopSec"): ["75s"],
-        ("Service", "KillMode"): ["mixed"],
-        ("Service", "UMask"): ["0077"],
-    }
-    if any(unit.get(section, {}).get(name) != expected for (section, name), expected in required.items()):
+    if unit != SYSTEMD_UNIT_CONTRACT:
         raise OperationalError(
-            "systemd_unit_incompatible", "release systemd lifecycle policy is incompatible",
+            "systemd_unit_incompatible",
+            "release systemd lifecycle or sandbox policy is incompatible",
         )
     with tempfile.TemporaryDirectory(prefix="voice-agent-unit-") as temporary:
         disposable = Path(temporary) / SERVICE_NAME

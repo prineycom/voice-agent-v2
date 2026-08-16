@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -76,16 +77,25 @@ class ServiceProcessFailure(RuntimeError):
     pass
 
 
+class ServiceStopRequested(RuntimeError):
+    pass
+
+
 class ProcessSupervisor:
     """Own child processes and stop them in the declared safe drain order."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, stop_requested: Callable[[], bool] | None = None,
+    ) -> None:
         self.processes: list[subprocess.Popen] = []
         self._roles: dict[int, str] = {}
+        self._stop_requested = stop_requested
 
     def start(
         self, command: list[str], *, role: str | None = None, **kwargs: object,
     ) -> subprocess.Popen:
+        if self._stop_requested is not None and self._stop_requested():
+            raise ServiceStopRequested
         try:
             process = subprocess.Popen(command, **kwargs)
         except OSError as error:
@@ -383,8 +393,14 @@ def require_supervised_children_alive(
 
 
 def publish_systemd_readiness(
-    supervisor: ProcessSupervisor, *, build_id: str, release_id: str,
+    supervisor: ProcessSupervisor,
+    *,
+    build_id: str,
+    release_id: str,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> None:
+    if stop_requested is not None and stop_requested():
+        raise ServiceStopRequested
     require_supervised_children_alive(supervisor, phase="before readiness")
     require_runtime_listener_custody(supervisor)
     if not gateway_operational_ready(
@@ -397,23 +413,34 @@ def publish_systemd_readiness(
         )
     require_supervised_children_alive(supervisor, phase="before readiness")
     require_runtime_listener_custody(supervisor)
+    if stop_requested is not None and stop_requested():
+        raise ServiceStopRequested
     systemd_notify_ready()
 
 
-def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: float = 30) -> None:
+def wait_for_port(
+    process: subprocess.Popen,
+    port: int,
+    name: str,
+    timeout: float = 30,
+    *,
+    stop_requested: Callable[[], bool] | None = None,
+) -> bool:
     deadline = time.monotonic() + timeout
     require_lfm_health = port == LLAMA_PORT and name == "local LFM"
     while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested():
+            return False
         if process.poll() is not None:
             raise ServiceProcessFailure(f"{name} exited before readiness")
         remaining = deadline - time.monotonic()
         if require_lfm_health:
             if local_lfm_health_ready(port, min(0.2, remaining)):
-                return
+                return True
         else:
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=min(0.2, remaining)):
-                    return
+                    return True
             except OSError:
                 pass
         time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
@@ -444,6 +471,14 @@ def main() -> int:
     if any(name in os.environ for name in FORBIDDEN_CLOUD_NAMES):
         raise Slice6ConfigurationError("LiteLLM configuration is forbidden in the local-LFM runtime")
     settings = Slice6Settings.from_environment(project_root=ROOT)
+    stopping = False
+
+    def request_stop(_signum=None, _frame=None) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
 
     cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "voice-agent-v2" / "slice-6"
     binary = cache / "tooling" / f"livekit-server-v{LIVEKIT_VERSION}"
@@ -473,17 +508,11 @@ def main() -> int:
     llama_environment["HOME"] = str(LFM_CACHE / "runtime" / "home")
     llama_environment["XDG_CACHE_HOME"] = str(LFM_CACHE / "runtime" / "home" / ".cache")
     llama_environment["LD_LIBRARY_PATH"] = f"{CUDA_OVERLAY}:{LLAMA_BIN_DIRECTORY}"
-    supervisor = ProcessSupervisor()
-    stopping = False
-
-    def request_stop(_signum=None, _frame=None) -> None:
-        nonlocal stopping
-        stopping = True
-
-    signal.signal(signal.SIGINT, request_stop)
-    signal.signal(signal.SIGTERM, request_stop)
+    supervisor = ProcessSupervisor(stop_requested=lambda: stopping)
 
     try:
+        if stopping:
+            return 0
         llama_log = LFM_CACHE / "logs" / "slice6-local-lfm.log"
         llama_log.parent.mkdir(parents=True, exist_ok=True)
         llama_output = llama_log.open("ab", buffering=0)
@@ -491,12 +520,23 @@ def main() -> int:
             llama_command(), role="local-llm", cwd=LFM_CACHE, env=llama_environment,
             stdout=llama_output, stderr=subprocess.STDOUT,
         )
-        wait_for_port(local_lfm, LLAMA_PORT, "local LFM", timeout=30)
+        if not wait_for_port(
+            local_lfm, LLAMA_PORT, "local LFM", timeout=30,
+            stop_requested=lambda: stopping,
+        ):
+            return 0
+        if stopping:
+            return 0
 
         livekit = supervisor.start(
             [str(binary)], role="livekit", cwd=ROOT, env=livekit_environment,
         )
-        wait_for_port(livekit, SIGNAL_PORT, "LiveKit")
+        if not wait_for_port(
+            livekit, SIGNAL_PORT, "LiveKit", stop_requested=lambda: stopping,
+        ):
+            return 0
+        if stopping:
+            return 0
 
         gateway_environment["VOICE_AGENT_SUPERVISED_LFM_PROCESS"] = (
             supervised_process_identity(local_lfm.pid)
@@ -517,12 +557,19 @@ def main() -> int:
             cwd=ROOT,
             env=gateway_environment,
         )
-        wait_for_port(gateway, GATEWAY_PORT, "Slice 6 gateway", timeout=20)
+        if not wait_for_port(
+            gateway, GATEWAY_PORT, "Slice 6 gateway", timeout=20,
+            stop_requested=lambda: stopping,
+        ):
+            return 0
+        if stopping:
+            return 0
 
         publish_systemd_readiness(
             supervisor,
             build_id=settings.build_id,
             release_id=settings.release_id,
+            stop_requested=lambda: stopping,
         )
         print("Voice Agent v2 Slice 6 local-LFM development app started")
         print(f"application: http://127.0.0.1:{GATEWAY_PORT}")
@@ -559,6 +606,8 @@ def main() -> int:
                     "gateway-owned capability remained unready beyond the recovery grace"
                 )
             time.sleep(0.25)
+    except ServiceStopRequested:
+        return 0
     finally:
         active_failure = sys.exc_info()[0] is not None
         try:
