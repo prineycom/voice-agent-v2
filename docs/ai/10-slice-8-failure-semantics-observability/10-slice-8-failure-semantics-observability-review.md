@@ -36,7 +36,7 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | PASS | 259 network-denied Python behavioral tests after all follow-up regressions. |
+| `./verify` | PASS | Network-denied cumulative Python behavioral suite after all follow-up regressions. |
 | `./verify-slice8` | PASS | Full matrix/privacy/readiness/capture/process/resource and focused browser gate. |
 | `./verify-slice7` | PASS | Avatar/UI tests/builds. |
 | `./verify-local-lfm` | PASS | Exact real local provider and cancellation/recovery. |

@@ -37,12 +37,12 @@ The first pipeline head `556d57eb` fixed `OBS-001`, `READY-001`, `FAIL-001`, and
 | Command | Result | Notes |
 | --- | --- | --- |
 | `no-mistakes doctor` | PASS | Shared daemon healthy; not restarted/updated. |
-| `./verify-slice8` | PASS | 61 Python focused tests, safe process/resource/privacy verifier, 67 focused browser tests; 12-row matrix complete. |
-| `./verify` | PASS | 259 Python behavioral tests; network-denied deterministic root trace. |
-| `./verify-slice7` | PASS | 84 focused avatar/UI/browser tests plus production/review builds; replay hash unchanged. |
+| `./verify-slice8` | PASS | Focused Python/browser suites, safe process/resource/privacy verifier, and the complete 12-row matrix. |
+| `./verify` | PASS | Cumulative Python behavioral suite and network-denied deterministic root trace. |
+| `./verify-slice7` | PASS | Focused avatar/UI/browser suite plus production/review builds; replay hash unchanged. |
 | `./verify-local-lfm` | PASS | Exact local identity/hashes/2×32K slots, parallel/cancellation/recovery; no cloud/fallback. |
 | `./verify-silero-kseniya` | PASS | Exact-cache two-worker/native-48 focused real check; physical claims explicitly absent. |
-| `./verify-slice6` | PASS | 259 Python + installed runtime + 86 web tests/builds + deterministic Firefox/official LiveKit regression. Physical audibility not claimed. |
+| `./verify-slice6` | PASS | Cumulative Python/browser suites, installed runtime/builds, and deterministic Firefox/official LiveKit regression. Physical audibility not claimed. |
 | `git diff --check` / Python compile / TypeScript typecheck | PASS | Clean whitespace/syntax/type boundaries at implementation checkpoint. |
 
 ## Unresolved uncertainty
