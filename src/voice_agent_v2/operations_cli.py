@@ -121,6 +121,12 @@ def _configuration(value: str) -> Path:
     return Path(os.path.abspath(path))
 
 
+def _is_canonical_state_root(path: Path) -> bool:
+    return Path(os.path.abspath(path.expanduser())) == Path(
+        os.path.abspath(DEFAULT_STATE_ROOT.expanduser())
+    )
+
+
 def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2))
 
@@ -290,7 +296,7 @@ def command_validate(arguments: argparse.Namespace) -> None:
 def command_deploy(arguments: argparse.Namespace) -> None:
     store = ReleaseStore(arguments.state_root)
     with store.locked():
-        canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+        canonical = _is_canonical_state_root(arguments.state_root)
         service = _systemctl_show() if canonical else {"load": "not-applicable"}
         result = store.deploy(source_root=ROOT, config_path=arguments.config)
         result["release_service_apply_required"] = bool(
@@ -337,7 +343,7 @@ def command_status(arguments: argparse.Namespace) -> None:
                 "build_id": document["build_id"],
                 "provider_mode": document["provider_mode"],
             }
-    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+    canonical = _is_canonical_state_root(arguments.state_root)
     if canonical:
         service = {"applicable": True, **_systemctl_show()}
         public_status = _runtime_status() if service["active"] == "active" else None
@@ -427,7 +433,7 @@ def _wait_for_runtime_release(release_id: str, *, timeout: float = 90.0) -> None
 
 
 def command_install_service(arguments: argparse.Namespace) -> None:
-    if arguments.state_root.resolve() != DEFAULT_STATE_ROOT.resolve():
+    if not _is_canonical_state_root(arguments.state_root):
         raise OperationalError("systemd_install_failed", "system service supports only the canonical state root")
     store = ReleaseStore(arguments.state_root)
     with store.locked():
@@ -446,61 +452,89 @@ def _install_service_locked(
         raise OperationalError("systemd_unit_incompatible", "release systemd unit is missing")
     _validate_systemd_unit(unit)
     exists = _sudo("test", "-e", str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
-    identical = exists and _sudo("cmp", "-s", str(unit), str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
-    changed = not identical
-    if changed:
-        with tempfile.TemporaryDirectory(prefix="voice-agent-unit-backup-") as temporary:
-            backup = Path(temporary) / SERVICE_NAME
-            if exists:
-                _sudo("cp", "--preserve=mode,ownership,timestamps", str(SYSTEM_UNIT_PATH), str(backup))
+    identical = exists and _sudo(
+        "cmp", "-s", str(unit), str(SYSTEM_UNIT_PATH), allowed=(0, 1),
+    ).returncode == 0
+    unit_changed = not identical
+    enabled_before = _sudo(
+        "systemctl", "is-enabled", SERVICE_NAME, allowed=(0, 1, 3, 4),
+    ).returncode == 0
+    active_before = _sudo(
+        "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
+    ).returncode == 0
+    changed = unit_changed
+    service_restarted = False
+    with tempfile.TemporaryDirectory(prefix="voice-agent-unit-backup-") as temporary:
+        backup = Path(temporary) / SERVICE_NAME
+        if unit_changed and exists:
+            _sudo(
+                "cp", "--preserve=mode,ownership,timestamps",
+                str(SYSTEM_UNIT_PATH), str(backup),
+            )
+        unit_attempted = False
+        enable_attempted = False
+        activation_attempted = False
+        try:
+            if unit_changed:
+                unit_attempted = True
+                _sudo(
+                    "install", "-o", "root", "-g", "root", "-m", "0644",
+                    str(unit), str(SYSTEM_UNIT_PATH),
+                )
+            _sudo("systemctl", "daemon-reload")
+            _validate_effective_systemd_service()
+            running = _runtime_status() if active_before else None
+            release_changed = running is None or running.get("release_id") != current.name
+            if not enabled_before:
+                enable_attempted = True
+                _sudo("systemctl", "enable", SERVICE_NAME)
+                changed = True
+            if arguments.restart or (
+                active_before and (unit_changed or release_changed)
+            ):
+                activation_attempted = True
+                _start_service_with_recovery_allowance("restart")
+                changed = True
+                service_restarted = True
+            elif not active_before:
+                activation_attempted = True
+                _start_service_with_recovery_allowance("start")
+                changed = True
+            active = _sudo(
+                "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
+            ).returncode == 0
+            if not active:
+                raise OperationalError(
+                    "systemd_install_failed", "system service did not reach active state",
+                )
+            _wait_for_runtime_release(current.name)
+        except BaseException:
             try:
-                _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(unit), str(SYSTEM_UNIT_PATH))
-                _sudo("systemctl", "daemon-reload")
-                _validate_effective_systemd_service()
-            except BaseException:
-                try:
+                if unit_attempted:
                     if exists:
-                        _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(backup), str(SYSTEM_UNIT_PATH))
+                        _sudo(
+                            "install", "-o", "root", "-g", "root", "-m", "0644",
+                            str(backup), str(SYSTEM_UNIT_PATH),
+                        )
                     else:
                         _sudo("rm", "-f", str(SYSTEM_UNIT_PATH))
                     _sudo("systemctl", "daemon-reload")
-                except BaseException as restore_error:
-                    raise OperationalError(
-                        "systemd_install_failed",
-                        "systemd unit installation failed and prior state could not be restored",
-                    ) from restore_error
-                raise
-    else:
-        _sudo("systemctl", "daemon-reload")
-        _validate_effective_systemd_service()
-    unit_changed = changed
-    enabled = _sudo(
-        "systemctl", "is-enabled", SERVICE_NAME, allowed=(0, 1, 3, 4),
-    ).returncode == 0
-    active = _sudo(
-        "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
-    ).returncode == 0
-    running = _runtime_status() if active else None
-    release_changed = running is None or running.get("release_id") != current.name
-    if not enabled:
-        _sudo("systemctl", "enable", SERVICE_NAME)
-        changed = True
-    service_restarted = False
-    if arguments.restart or (active and (unit_changed or release_changed)):
-        _start_service_with_recovery_allowance("restart")
-        changed = True
-        service_restarted = True
-    elif not active:
-        _start_service_with_recovery_allowance("start")
-        changed = True
-    active = _sudo(
-        "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
-    ).returncode == 0
-    if not active:
-        raise OperationalError(
-            "systemd_install_failed", "system service did not reach active state",
-        )
-    _wait_for_runtime_release(current.name)
+                if enable_attempted:
+                    _sudo(
+                        "systemctl", "enable" if enabled_before else "disable",
+                        SERVICE_NAME,
+                    )
+                if activation_attempted:
+                    if active_before:
+                        _start_service_with_recovery_allowance("restart")
+                    else:
+                        _sudo("systemctl", "stop", SERVICE_NAME)
+            except BaseException as restore_error:
+                raise OperationalError(
+                    "systemd_install_failed",
+                    "system service application failed and prior state could not be restored",
+                ) from restore_error
+            raise
     _print({
         "schema_version": "voice-agent.systemd-install-result.v1",
         "status": "installed",
@@ -518,7 +552,7 @@ def _install_service_locked(
 def command_rollback(arguments: argparse.Namespace) -> None:
     store = ReleaseStore(arguments.state_root)
     with store.locked():
-        canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+        canonical = _is_canonical_state_root(arguments.state_root)
         service_loaded = canonical and _systemctl_show()["load"] == "loaded"
         unit_boundary = (
             SYSTEM_UNIT_PATH

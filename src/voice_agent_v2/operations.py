@@ -43,6 +43,51 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_PROVIDER_IDENTITY = (
     "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M"
 )
+EXPECTED_COMPONENTS = {
+    "livekit": {
+        "name": "livekit", "location": "host",
+        "supervision": "owned-child-process", "admission_required": True,
+    },
+    "web-gateway": {
+        "name": "web-gateway", "location": "host",
+        "supervision": "gateway-process", "admission_required": True,
+    },
+    "controller": {
+        "name": "controller", "location": "host",
+        "supervision": "gateway-process", "admission_required": True,
+    },
+    "local-stt": {
+        "name": "local-stt", "location": "host",
+        "supervision": "controller-owned-process", "admission_required": True,
+    },
+    "local-tts": {
+        "name": "local-tts", "location": "host",
+        "supervision": "controller-owned-process-pool", "admission_required": True,
+    },
+    "selected-local-llm": {
+        "name": "selected-local-llm", "location": "host",
+        "supervision": "owned-child-process", "admission_required": True,
+    },
+    "provider-adapter": {
+        "name": "provider-adapter", "location": "host",
+        "supervision": "gateway-process", "admission_required": True,
+    },
+    "avatar-host": {
+        "name": "avatar-host", "location": "browser",
+        "supervision": "versioned-client-build-and-readiness",
+        "admission_required": False,
+    },
+    "mvp-eye": {
+        "name": "mvp-eye", "location": "browser",
+        "supervision": "versioned-client-build-and-readiness",
+        "admission_required": False,
+    },
+    "cloud-llm": {
+        "name": "cloud-llm", "location": "external",
+        "supervision": "external-readiness-only", "admission_required": False,
+        "active": False,
+    },
+}
 EXPECTED_CONTRACTS = {
     "stt": "voice-agent.stt.v1",
     "llm_provider": "voice-agent.llm-provider.v1",
@@ -244,20 +289,11 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         if name in by_name:
             raise OperationalError("operations_manifest_invalid", "component declaration is duplicated")
         by_name[name] = component
-    required_components = {
-        "livekit", "web-gateway", "controller", "local-stt", "local-tts",
-        "selected-local-llm", "provider-adapter", "avatar-host", "mvp-eye", "cloud-llm",
-    }
-    if set(by_name) != required_components:
-        raise OperationalError("operations_manifest_incompatible", "operational component set is incompatible")
-    cloud = by_name["cloud-llm"]
-    if not (
-        cloud.get("location") == "external"
-        and cloud.get("supervision") == "external-readiness-only"
-        and cloud.get("active") is False
-        and cloud.get("admission_required") is False
-    ):
-        raise OperationalError("operations_manifest_incompatible", "cloud supervision boundary is invalid")
+    if by_name != EXPECTED_COMPONENTS:
+        raise OperationalError(
+            "operations_manifest_incompatible",
+            "operational component supervision boundary changed",
+        )
     contracts = manifest.get("contracts")
     artifacts = manifest.get("artifacts")
     runtimes = manifest.get("python_runtimes")
@@ -374,9 +410,47 @@ def parse_server_configuration(path: Path) -> dict[str, str]:
     return values
 
 
+def _absolute_lexical_path(path: Path) -> Path:
+    return Path(os.path.abspath(path.expanduser()))
+
+
+def _is_canonical_state_root(path: Path) -> bool:
+    return _absolute_lexical_path(path) == _absolute_lexical_path(DEFAULT_STATE_ROOT)
+
+
+def _require_canonical_state_root_custody(path: Path) -> Path:
+    lexical = _absolute_lexical_path(path)
+    if not _is_canonical_state_root(lexical):
+        return lexical
+    service_home = _absolute_lexical_path(Path.home())
+    configured_default = _absolute_lexical_path(DEFAULT_STATE_ROOT)
+    expected_default = service_home / ".local/share/voice-agent-v2"
+    if configured_default == expected_default and not lexical.is_relative_to(service_home):
+        raise OperationalError(
+            "release_state_invalid", "canonical release state must remain beneath the service user home",
+        )
+    current = Path(lexical.anchor)
+    for part in lexical.parts[1:]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", "canonical release state custody is unavailable",
+            ) from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OperationalError(
+                "release_state_invalid", "canonical release state cannot contain symlinks",
+            )
+    return lexical
+
+
 def _require_service_configuration_path(path: Path, *, state_root: Path) -> None:
-    if state_root.expanduser().resolve() != DEFAULT_STATE_ROOT.resolve():
+    if not _is_canonical_state_root(state_root):
         return
+    _require_canonical_state_root_custody(state_root)
     service_home = Path.home().resolve()
     if path == service_home or not path.is_relative_to(service_home):
         raise OperationalError(
@@ -682,6 +756,7 @@ def validate_host(
     verify_artifact_state: bool = True,
     configuration_values: Mapping[str, str] | None = None,
 ) -> ValidationReport:
+    state_root = _require_canonical_state_root_custody(state_root)
     _require_service_configuration_path(config_path, state_root=state_root)
     manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
     verify_tracked_manifest_alignment(
@@ -696,7 +771,7 @@ def validate_host(
     if verify_artifact_state:
         artifact_count = verify_artifacts(manifest, home=Path.home())
         verify_python_runtimes(manifest, home=Path.home())
-    state_root_parent = state_root.expanduser().resolve().parent
+    state_root_parent = state_root.parent
     filesystem_path = state_root_parent
     while not filesystem_path.exists() and filesystem_path != filesystem_path.parent:
         filesystem_path = filesystem_path.parent
@@ -849,7 +924,7 @@ def _run_git_bytes(source_root: Path, *arguments: str) -> bytes:
 
 class ReleaseStore:
     def __init__(self, state_root: Path = DEFAULT_STATE_ROOT) -> None:
-        self.state_root = state_root.expanduser().resolve()
+        self.state_root = _require_canonical_state_root_custody(state_root)
         self.releases = self.state_root / "releases"
         self.current_link = self.state_root / "current"
         self.previous_link = self.state_root / "previous"
@@ -860,6 +935,7 @@ class ReleaseStore:
         self._lock_depth = 0
 
     def _initialize(self) -> None:
+        self.state_root = _require_canonical_state_root_custody(self.state_root)
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.state_root, 0o700)
         self.releases.mkdir(parents=True, exist_ok=True, mode=0o700)

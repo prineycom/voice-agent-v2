@@ -117,6 +117,37 @@ class OperationsManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(OperationalError, "unknown fields"):
                 load_operations_manifest(path)
 
+    def test_manifest_rejects_drift_in_every_component_supervision_entry(self) -> None:
+        manifest = json.loads(
+            (ROOT / DEFAULT_MANIFEST_RELATIVE).read_text(encoding="utf-8")
+        )
+        mutations = (
+            ("livekit", "location", "external"),
+            ("web-gateway", "supervision", "owned-child-process"),
+            ("controller", "admission_required", False),
+            ("local-stt", "location", "browser"),
+            ("local-tts", "supervision", "controller-owned-process"),
+            ("selected-local-llm", "admission_required", False),
+            ("provider-adapter", "location", "external"),
+            ("avatar-host", "admission_required", True),
+            ("mvp-eye", "supervision", "external-readiness-only"),
+            ("cloud-llm", "active", True),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "operations.json"
+            for name, field, value in mutations:
+                with self.subTest(component=name, field=field):
+                    changed = json.loads(json.dumps(manifest))
+                    component = next(
+                        item for item in changed["components"] if item["name"] == name
+                    )
+                    component[field] = value
+                    path.write_text(json.dumps(changed), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        OperationalError, "component supervision boundary",
+                    ):
+                        load_operations_manifest(path)
+
     def test_systemd_unit_matches_executable_restart_and_process_custody_contract(self) -> None:
         unit_path = ROOT / "ops/systemd/voice-agent-v2.service"
         verification = subprocess.run(
@@ -419,6 +450,61 @@ class ServiceApplicationTests(unittest.TestCase):
                 }
                 for command in calls
             ))
+
+    def test_readiness_failure_restores_unit_enablement_and_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, _release, arguments = self._fixture(root)
+            installed = root / "installed.service"
+            installed.write_text("prior unit\n", encoding="utf-8")
+            calls: list[tuple[str, ...]] = []
+            active_queries = 0
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                nonlocal active_queries
+                calls.append(command)
+                if command[:2] == ("cmp", "-s"):
+                    return SimpleNamespace(returncode=1)
+                if command[:2] == ("systemctl", "is-enabled"):
+                    return SimpleNamespace(returncode=1)
+                if command[:2] == ("systemctl", "is-active"):
+                    active_queries += 1
+                    return SimpleNamespace(returncode=3 if active_queries == 1 else 0)
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(operations_cli, "validate_release", return_value={}),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
+                patch.object(
+                    operations_cli, "_wait_for_runtime_release",
+                    side_effect=OperationalError(
+                        "systemd_install_failed", "fixture readiness failure",
+                    ),
+                ),
+                self.assertRaisesRegex(OperationalError, "readiness failure"),
+            ):
+                operations_cli.command_install_service(arguments)
+
+            installs = [command for command in calls if command[:1] == ("install",)]
+            self.assertEqual(len(installs), 2)
+            self.assertEqual(
+                calls.count(("systemctl", "daemon-reload")), 2,
+            )
+            self.assertIn(("systemctl", "enable", operations_cli.SERVICE_NAME), calls)
+            self.assertIn(("systemctl", "disable", operations_cli.SERVICE_NAME), calls)
+            self.assertIn(("systemctl", "start", operations_cli.SERVICE_NAME), calls)
+            self.assertIn(("systemctl", "stop", operations_cli.SERVICE_NAME), calls)
+            reloads = [
+                index for index, command in enumerate(calls)
+                if command == ("systemctl", "daemon-reload")
+            ]
+            self.assertLess(
+                reloads[1],
+                calls.index(("systemctl", "stop", operations_cli.SERVICE_NAME)),
+            )
 
     def test_explicit_restart_revalidates_and_restarts_the_unchanged_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -869,6 +955,20 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
 
 
 class ReleaseAndRollbackTests(unittest.TestCase):
+    def test_canonical_release_store_rejects_symlinked_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "outside"
+            outside.mkdir()
+            state = root / "voice-agent-v2"
+            state.symlink_to(outside, target_is_directory=True)
+            with (
+                patch.object(operations, "DEFAULT_STATE_ROOT", state),
+                self.assertRaisesRegex(OperationalError, "cannot contain symlinks"),
+            ):
+                ReleaseStore(state)
+            self.assertEqual(list(outside.iterdir()), [])
+
     def test_canonical_deploy_rejects_config_outside_service_home(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
