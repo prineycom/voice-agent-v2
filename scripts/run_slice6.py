@@ -50,6 +50,8 @@ FORBIDDEN_CLOUD_NAMES = frozenset({"LITELLM_BASE_URL", "LITELLM_TOKEN_FILE"})
 SERVICE_MAIN_PROCESS_NAME = "VOICE_AGENT_SYSTEMD_MAIN_PROCESS"
 SERVE_READINESS_TIMEOUT_SECONDS = 5.0
 SERVE_STATUS_LIMIT_BYTES = 64 * 1024
+SERVE_PROCESS_OUTPUT_LIMIT_BYTES = 64 * 1024
+SERVE_PROCESS_READY_MARKER = b"Press Ctrl+C to exit."
 OPERATIONAL_STATUS_LIMIT_BYTES = 64 * 1024
 OPERATIONAL_UNREADY_GRACE_SECONDS = 2.0
 RUNTIME_LISTENER_REQUIREMENTS = (
@@ -480,24 +482,24 @@ def read_tailscale_serve_status(
     return document
 
 
-def serve_route_state(
+def serve_route_ownership(
     document: dict[str, object], *, hostname: str, https_port: int, target: str,
-) -> str:
-    configurations: list[dict[str, object]] = [document]
+) -> tuple[tuple[str, ...], bool]:
+    configurations: list[tuple[str, dict[str, object]]] = [("background", document)]
     foreground = document.get("Foreground", {})
     if not isinstance(foreground, dict):
         raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
-    for configuration in foreground.values():
-        if not isinstance(configuration, dict):
+    for session_id, configuration in foreground.items():
+        if not isinstance(session_id, str) or not session_id or not isinstance(configuration, dict):
             raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
-        configurations.append(configuration)
+        configurations.append((f"foreground:{session_id}", configuration))
 
     port_key = str(https_port)
     web_key = f"{hostname}:{https_port}"
     port_suffix = f":{https_port}"
-    exact_found = False
+    owners: list[str] = []
     conflicting_use_found = False
-    for configuration in configurations:
+    for owner, configuration in configurations:
         tcp = configuration.get("TCP", {})
         web = configuration.get("Web", {})
         if not isinstance(tcp, dict) or not isinstance(web, dict):
@@ -517,12 +519,22 @@ def serve_route_state(
             for key in web
         )
         uses_port = tcp_entry is not None or web_uses_port
-        exact_found = exact_found or exact
-        conflicting_use_found = conflicting_use_found or (uses_port and not exact)
+        if exact:
+            owners.append(owner)
+        elif uses_port:
+            conflicting_use_found = True
+    return tuple(owners), conflicting_use_found
 
-    if exact_found and not conflicting_use_found:
+
+def serve_route_state(
+    document: dict[str, object], *, hostname: str, https_port: int, target: str,
+) -> str:
+    owners, conflicting = serve_route_ownership(
+        document, hostname=hostname, https_port=https_port, target=target,
+    )
+    if owners and not conflicting:
         return "preexisting"
-    if not exact_found and not conflicting_use_found:
+    if not owners and not conflicting:
         return "absent"
     return "conflict"
 
@@ -534,10 +546,30 @@ def wait_for_serve_route(
     hostname: str,
     https_port: int,
     target: str,
+    foreground_before: frozenset[str],
     timeout: float = SERVE_READINESS_TIMEOUT_SECONDS,
 ) -> None:
+    if process.stdout is None:
+        raise ServiceProcessFailure("Tailscale Serve readiness output is unavailable")
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+    except (AttributeError, OSError):
+        pass
+    output = bytearray()
+    acknowledged = False
     deadline = time.monotonic() + timeout
     while True:
+        try:
+            chunk = process.stdout.read(4096)
+        except BlockingIOError:
+            chunk = None
+        if chunk:
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+            output.extend(chunk)
+            if len(output) > SERVE_PROCESS_OUTPUT_LIMIT_BYTES:
+                raise ServiceProcessFailure("Tailscale Serve readiness output is invalid")
+            acknowledged = SERVE_PROCESS_READY_MARKER in output
         if process.poll() is not None:
             raise ServiceProcessFailure(
                 f"Tailscale Serve HTTPS/{https_port} exited before readiness"
@@ -553,14 +585,25 @@ def wait_for_serve_route(
             )
         except ServiceProcessFailure:
             document = {}
-        if document and serve_route_state(
-            document, hostname=hostname, https_port=https_port, target=target,
-        ) == "preexisting":
-            if process.poll() is not None:
+        if document:
+            owners, conflicting = serve_route_ownership(
+                document, hostname=hostname, https_port=https_port, target=target,
+            )
+            new_foreground_owners = tuple(
+                owner for owner in owners
+                if owner.startswith("foreground:")
+                and owner.removeprefix("foreground:") not in foreground_before
+            )
+            if conflicting or len(owners) > 1 or (owners and not new_foreground_owners):
                 raise ServiceProcessFailure(
-                    f"Tailscale Serve HTTPS/{https_port} exited before readiness"
+                    f"Tailscale Serve HTTPS/{https_port} ownership collision"
                 )
-            return
+            if acknowledged and len(owners) == len(new_foreground_owners) == 1:
+                if process.poll() is not None:
+                    raise ServiceProcessFailure(
+                        f"Tailscale Serve HTTPS/{https_port} exited before readiness"
+                    )
+                return
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
 
@@ -590,19 +633,31 @@ def reconcile_serve_routes(
         )
 
     for https_port, target in routes:
+        launch_document = read_tailscale_serve_status(environment)
+        if serve_route_state(
+            launch_document, hostname=hostname, https_port=https_port, target=target,
+        ) != "absent":
+            raise Slice6ConfigurationError(
+                f"required Tailscale Serve route became externally owned or conflicting on HTTPS/{https_port}"
+            )
+        foreground = launch_document.get("Foreground", {})
+        if not isinstance(foreground, dict):
+            raise Slice6ConfigurationError("Tailscale Serve status is unavailable")
+        foreground_before = frozenset(foreground)
         role = (
             "tailnet-app-route" if target.endswith(f":{GATEWAY_PORT}")
             else "tailnet-signal-route"
         )
         process = supervisor.start([
             "tailscale", "serve", "--yes", f"--https={https_port}", target,
-        ], role=role, env=environment)
+        ], role=role, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
         wait_for_serve_route(
             process,
             environment=environment,
             hostname=hostname,
             https_port=https_port,
             target=target,
+            foreground_before=foreground_before,
             timeout=timeout,
         )
         states[https_port] = "owned"

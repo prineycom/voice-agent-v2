@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import os
 from pathlib import Path
 import socket
@@ -48,10 +49,13 @@ def foreground_serve_document(*routes: tuple[int, str]) -> dict[str, object]:
 
 
 class FakeProcess:
-    def __init__(self, *, returncode: int | None = None) -> None:
+    def __init__(
+        self, *, returncode: int | None = None, output: bytes = run_slice6.SERVE_PROCESS_READY_MARKER,
+    ) -> None:
         self.returncode = returncode
         self.terminated = False
         self.killed = False
+        self.stdout = io.BytesIO(output)
 
     def poll(self) -> int | None:
         return self.returncode
@@ -390,6 +394,8 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
         signal_process = FakeProcess()
         statuses = iter([
             serve_document(),
+            serve_document(),
+            foreground_serve_document((8443, APP_TARGET)),
             foreground_serve_document((8443, APP_TARGET)),
             foreground_serve_document(*ROUTES),
         ])
@@ -417,7 +423,10 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             )
         self.assertEqual(
             events,
-            ["status", "start-8443", "status", "start-7443", "status"],
+            [
+                "status", "status", "start-8443", "status",
+                "status", "start-7443", "status",
+            ],
         )
         self.assertEqual(states, {8443: "owned", 7443: "owned"})
         self.assertEqual(commands, [
@@ -428,6 +437,58 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
         supervisor.close()
         self.assertTrue(app_process.terminated)
         self.assertTrue(signal_process.terminated)
+
+    def test_external_route_appearing_before_launch_blocks_the_child(self) -> None:
+        statuses = iter([
+            serve_document(),
+            foreground_serve_document((8443, APP_TARGET)),
+        ])
+        supervisor = run_slice6.ProcessSupervisor()
+        with (
+            patch.object(
+                run_slice6, "read_tailscale_serve_status",
+                side_effect=lambda *_args, **_kwargs: next(statuses),
+            ),
+            patch.object(run_slice6.subprocess, "Popen") as popen,
+            self.assertRaisesRegex(
+                Slice6ConfigurationError, "became externally owned",
+            ),
+        ):
+            run_slice6.reconcile_serve_routes(
+                supervisor=supervisor,
+                environment={},
+                hostname=HOSTNAME,
+                routes=ROUTES,
+            )
+        popen.assert_not_called()
+        self.assertEqual(supervisor.processes, [])
+
+    def test_external_route_cannot_satisfy_spawned_child_readiness(self) -> None:
+        process = FakeProcess(output=b"")
+        external = foreground_serve_document((8443, APP_TARGET))
+        supervisor = run_slice6.ProcessSupervisor()
+        statuses = [serve_document(), serve_document()]
+
+        def read_status(*_args: object, **_kwargs: object) -> dict[str, object]:
+            if statuses:
+                return statuses.pop(0)
+            return external
+
+        with (
+            patch.object(run_slice6, "read_tailscale_serve_status", side_effect=read_status),
+            patch.object(run_slice6.subprocess, "Popen", return_value=process),
+            self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "did not register",
+            ),
+        ):
+            run_slice6.reconcile_serve_routes(
+                supervisor=supervisor,
+                environment={},
+                hostname=HOSTNAME,
+                routes=ROUTES,
+                timeout=0.01,
+            )
+        self.assertEqual(supervisor.processes, [process])
 
     def test_conflicting_second_route_blocks_all_mutation(self) -> None:
         document = serve_document((7443, "http://127.0.0.1:9999"))
@@ -471,7 +532,12 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
     def test_second_route_etag_exit_cleans_the_first_owned_route(self) -> None:
         first = FakeProcess()
         second = FakeProcess(returncode=1)
-        statuses = iter([serve_document(), foreground_serve_document((8443, APP_TARGET))])
+        statuses = iter([
+            serve_document(),
+            serve_document(),
+            foreground_serve_document((8443, APP_TARGET)),
+            foreground_serve_document((8443, APP_TARGET)),
+        ])
         supervisor = run_slice6.ProcessSupervisor()
         with (
             patch.object(
@@ -521,7 +587,12 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
 
     def test_exception_starting_second_route_is_recoverable_and_cleans_first_child(self) -> None:
         first = FakeProcess()
-        statuses = iter([serve_document(), foreground_serve_document((8443, APP_TARGET))])
+        statuses = iter([
+            serve_document(),
+            serve_document(),
+            foreground_serve_document((8443, APP_TARGET)),
+            foreground_serve_document((8443, APP_TARGET)),
+        ])
         supervisor = run_slice6.ProcessSupervisor()
         with (
             patch.object(run_slice6, "read_tailscale_serve_status", side_effect=lambda *_args, **_kwargs: next(statuses)),
