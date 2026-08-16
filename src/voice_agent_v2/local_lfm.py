@@ -394,6 +394,7 @@ class LocalLFMProvider:
         handoff_offset = 0
         published_visible = ""
         visible_chars = visible_bytes = reasoning_chars = stream_events = 0
+        provider_first_token: float | None = None
         visible_first: float | None = None
         finish_reason: str | None = None
         response_models: set[str] = set()
@@ -522,6 +523,8 @@ class LocalLFMProvider:
                     raise StageFailure(
                         "llm_provider", "selected_provider_protocol_error"
                     )
+                if reasoning or content:
+                    provider_first_token = provider_first_token or time.monotonic()
                 reasoning_chars += len(reasoning)
                 if reasoning_chars > MAX_REASONING_CHARS:
                     raise StageFailure(
@@ -572,6 +575,9 @@ class LocalLFMProvider:
             completed = time.monotonic()
             result = {
                 "text": output,
+                "provider_first_token_ms": (
+                    (provider_first_token or completed) - started
+                ) * 1_000,
                 "visible_first_content_ms": (
                     (visible_first or completed) - started
                 ) * 1_000,
@@ -828,6 +834,7 @@ class LocalLFMProvider:
                 "external_transfer": False,
                 "success": True,
                 "error_class": None,
+                "provider_first_token_ms": result.get("provider_first_token_ms"),
                 "visible_first_content_ms": result.get("visible_first_content_ms"),
                 "completion_ms": result.get("completion_ms"),
                 "reasoning_chars": result.get("reasoning_chars"),

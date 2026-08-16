@@ -36,6 +36,44 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         session._trace("control", "published", turn_id="turn-test")
         self.assertEqual(session.diagnostic_failure_counts["observer"], 1)
 
+    async def test_context_commit_failure_uses_terminal_failure_metadata_boundary(self) -> None:
+        class CommitFailingRunner(StreamingRunner):
+            def turn_delivered(self, _session_id: str, _turn_id: str) -> None:
+                raise RuntimeError("synthetic commit failure")
+
+        events = MemoryEvents()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+        session = RealtimeSession(
+            session_id="session-commit-failure",
+            runner=CommitFailingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+
+        failed = next(event for event in events.events if event["type"] == "turn.failed")
+        self.assertEqual(failed["payload"]["outcome"], "failed")
+        self.assertEqual(failed["payload"]["dependency_class"], "hard")
+        self.assertEqual(failed["payload"]["failure_matrix_id"], "controller_failure")
+        self.assertEqual(failed["payload"]["user_state"], "unavailable")
+        self.assertEqual(failed["payload"]["turn_failure_count"], 1)
+        published = next(
+            fields for stage, event, fields in observations
+            if stage == "control"
+            and event == "published"
+            and fields.get("event_type") == "turn.failed"
+        )
+        self.assertEqual(published["failure_stage"], "controller")
+        self.assertEqual(published["failure_code"], "context_commit_failed")
+        self.assertEqual(published["dependency_class"], "hard")
+        self.assertEqual(published["failure_matrix_id"], "controller_failure")
+        self.assertEqual(published["user_state"], "unavailable")
+
     async def test_resource_sampling_never_blocks_endpoint_admission(self) -> None:
         class SlowSampler:
             def sample(self) -> ResourceSnapshot:

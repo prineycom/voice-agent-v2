@@ -498,6 +498,10 @@ function drop(state: VoiceState): VoiceState {
   }
 }
 
+function hasLateControlDegradation(state: VoiceState): boolean {
+  return state.availability === 'degraded' && state.failureCode === 'late_or_duplicate_event'
+}
+
 function validTurnTransition(previous: ControlEventType | null, next: ControlEventType): boolean {
   if (next === 'turn.interrupted' || next === 'turn.failed') return previous !== null
   const predecessors = TURN_PREDECESSOR.get(next)
@@ -588,7 +592,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       return {
         ...state,
         connection: 'reconnecting',
-        availability: 'retrying',
+        availability: hasLateControlDegradation(state) ? 'degraded' : 'retrying',
         retryCount: Math.min(state.retryCount + 1, 10),
         retryLimit: 10,
         currentTurnTerminal: true,
@@ -609,7 +613,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
           ? state.availability
           : 'unavailable'
         : action.connection === 'ready'
-          ? 'available'
+          ? hasLateControlDegradation(state) ? 'degraded' : 'available'
           : state.availability,
       error: action.error ?? (action.connection === 'failed' ? 'Соединение недоступно' : null),
     }
@@ -629,12 +633,15 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       || event.media_generation !== 0
     ) return drop(state)
     const degraded = event.type === 'session.degraded'
+    const preserveLateDegradation = !degraded && hasLateControlDegradation(state)
     const health = degraded ? parseHealthReadinessReport(event.payload.health) : state.health
     if (degraded && health === null) return drop(state)
     return {
       ...state,
       connection: degraded ? 'failed' : 'reconnecting',
-      availability: degraded ? visibleState(event.payload, 'unavailable') : 'retrying',
+      availability: degraded
+        ? visibleState(event.payload, 'unavailable')
+        : hasLateControlDegradation(state) ? 'degraded' : 'retrying',
       streamEpoch: event.stream_epoch,
       lastSequence: event.sequence,
       currentTurnId: null,
@@ -645,8 +652,12 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       lastTurnEvent: null,
       phase: 'idle',
       error: degraded ? 'Не удалось безопасно восстановить сессию' : null,
-      failureStage: degraded ? failureCode(event.payload, 'stage', 'session') : null,
-      failureCode: degraded ? failureCode(event.payload, 'code', 'degraded') : null,
+      failureStage: degraded
+        ? failureCode(event.payload, 'stage', 'session')
+        : preserveLateDegradation ? state.failureStage : null,
+      failureCode: degraded
+        ? failureCode(event.payload, 'code', 'degraded')
+        : preserveLateDegradation ? state.failureCode : null,
       retryCount: degraded ? count(event.payload, 'retry_count') ?? 0 : state.retryCount,
       retryLimit: degraded ? count(event.payload, 'retry_limit') ?? 0 : state.retryLimit,
       health,
@@ -662,16 +673,17 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     ) return drop(state)
     const health = parseHealthReadinessReport(event.payload.health)
     if (health === null || health.overall_readiness !== 'ready') return drop(state)
+    const preserveLateDegradation = hasLateControlDegradation(state)
     return {
       ...state,
       connection: 'ready',
-      availability: 'available',
+      availability: preserveLateDegradation ? 'degraded' : 'available',
       lastSequence: event.sequence,
       error: null,
-      failureStage: null,
-      failureCode: null,
-      retryCount: 0,
-      retryLimit: 0,
+      failureStage: preserveLateDegradation ? state.failureStage : null,
+      failureCode: preserveLateDegradation ? state.failureCode : null,
+      retryCount: preserveLateDegradation ? state.retryCount : 0,
+      retryLimit: preserveLateDegradation ? state.retryLimit : 0,
       health,
     }
   }
@@ -684,22 +696,38 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       || event.media_generation !== 0
     ) return drop(state)
     if (event.type === 'session.reconnected') {
-      return { ...state, connection: 'reconnecting', availability: 'retrying', lastSequence: event.sequence }
+      return {
+        ...state,
+        connection: 'reconnecting',
+        availability: hasLateControlDegradation(state) ? 'degraded' : 'retrying',
+        lastSequence: event.sequence,
+      }
     }
     const health = parseHealthReadinessReport(event.payload.health)
     if (health === null) return drop(state)
     const degraded = event.type === 'session.degraded'
     if (!degraded && health.overall_readiness !== 'ready') return drop(state)
+    const preserveLateDegradation = !degraded && hasLateControlDegradation(state)
     return {
       ...state,
       connection: degraded ? 'failed' : 'ready',
-      availability: degraded ? visibleState(event.payload, 'unavailable') : 'available',
+      availability: degraded
+        ? visibleState(event.payload, 'unavailable')
+        : preserveLateDegradation ? 'degraded' : 'available',
       lastSequence: event.sequence,
       error: degraded ? 'Локальный голосовой путь недоступен' : null,
-      failureStage: degraded ? failureCode(event.payload, 'stage', 'session') : null,
-      failureCode: degraded ? failureCode(event.payload, 'code', 'degraded') : null,
-      retryCount: degraded ? count(event.payload, 'retry_count') ?? 0 : 0,
-      retryLimit: degraded ? count(event.payload, 'retry_limit') ?? 0 : 0,
+      failureStage: degraded
+        ? failureCode(event.payload, 'stage', 'session')
+        : preserveLateDegradation ? state.failureStage : null,
+      failureCode: degraded
+        ? failureCode(event.payload, 'code', 'degraded')
+        : preserveLateDegradation ? state.failureCode : null,
+      retryCount: degraded
+        ? count(event.payload, 'retry_count') ?? 0
+        : preserveLateDegradation ? state.retryCount : 0,
+      retryLimit: degraded
+        ? count(event.payload, 'retry_limit') ?? 0
+        : preserveLateDegradation ? state.retryLimit : 0,
       health,
     }
   }
@@ -716,6 +744,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       endpointToFirstVisibleMs: null,
       endpointToFirstAcceptedPcmMs: null,
     }
+    const preserveLateDegradation = hasLateControlDegradation(state)
     next = {
       ...state,
       currentTurnId: event.turn_id,
@@ -725,15 +754,15 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       currentTurnTerminal: false,
       lastTurnEvent: event.type,
       phase: 'listening',
-      availability: 'available',
+      availability: preserveLateDegradation ? 'degraded' : 'available',
       transcript: '',
       response: '',
       history: [...state.history, item],
       error: null,
-      failureStage: null,
-      failureCode: null,
-      retryCount: 0,
-      retryLimit: 0,
+      failureStage: preserveLateDegradation ? state.failureStage : null,
+      failureCode: preserveLateDegradation ? state.failureCode : null,
+      retryCount: preserveLateDegradation ? state.retryCount : 0,
+      retryLimit: preserveLateDegradation ? state.retryLimit : 0,
       lastSequence: event.sequence,
     }
     return next
@@ -807,7 +836,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     ? `Ошибка ответа: ${failureCode(event.payload, 'stage', 'controller')}/${failureCode(event.payload, 'code', 'unknown_failure')}`
     : state.error
   const availability = event.type === 'turn.completed'
-    ? 'available'
+    ? hasLateControlDegradation(state) ? 'degraded' : 'available'
     : event.type === 'turn.interrupted'
       ? 'interrupted'
       : event.type === 'turn.failed'

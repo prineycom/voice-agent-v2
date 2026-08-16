@@ -297,6 +297,23 @@ describe('checkpoint A browser state', () => {
     expect(state.failureStage).toBe('controller')
     expect(state.failureCode).toBe('late_or_duplicate_event')
     expect(state.droppedEvents).toBe(1)
+
+    for (const control of [
+      event(4, 'stt.final', undefined, { transcript: 'Тест.' }),
+      event(5, 'turn.thinking'),
+      event(6, 'llm.visible', undefined, { response: 'Ответ.' }),
+      event(7, 'turn.speaking'),
+      event(8, 'turn.completed', undefined, { outcome: 'completed' }),
+    ]) {
+      state = voiceReducer(state, { type: 'control', event: control })
+    }
+    expect(state.phase).toBe('idle')
+    expect(state.availability).toBe('degraded')
+    expect(state.failureCode).toBe('late_or_duplicate_event')
+
+    state = voiceReducer(state, { type: 'reset' })
+    expect(state.availability).toBe('unavailable')
+    expect(state.failureCode).toBeNull()
   })
 
   it('keeps effective microphone truth and bounded transition errors in UI state', () => {

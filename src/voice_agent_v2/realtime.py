@@ -1561,15 +1561,15 @@ class RealtimeSession:
                     async with self._runner_lock:
                         await asyncio.to_thread(delivered, self.session_id, context.turn_id)
                 except Exception:
-                    context.terminal = True
-                    payload = {
-                        "outcome": "failed",
-                        "stage": "controller",
-                        "code": "context_commit_failed",
-                    }
-                    self._add_metrics(context, payload)
-                    await self._emit(context.turn_id, "turn.failed", payload, terminal=True)
-                    await self._degrade_locked("controller", "context_commit_failed")
+                    await self._terminate_failed_turn_locked(
+                        context,
+                        "turn.failed",
+                        {
+                            "outcome": "failed",
+                            "stage": "controller",
+                            "code": "context_commit_failed",
+                        },
+                    )
                     return
             context.terminal = True
             self.turn_counts["completed"] += 1
@@ -1637,39 +1637,52 @@ class RealtimeSession:
         payload: dict[str, object],
     ) -> None:
         async with self._lock:
-            if context.terminal or self._closed or self._active is not context:
-                return
-            if payload.get("stage") == "publication":
-                drain_error, publication_id = await self._clear_audio(context.turn_id)
-            else:
-                drain_error, publication_id = await self._abandon_audio(context.turn_id)
-            context.rollback_error = await self._rollback_context(context)
-            context.terminal = True
-            self.turn_counts["failed"] += 1
-            public_payload = dict(payload)
-            stage = str(public_payload.get("stage", "controller"))
-            code = str(public_payload.get("code", "unknown_failure"))
-            public_payload.update(failure_payload(stage, code))
-            if publication_id is not None:
-                public_payload["server_media_publication_id"] = publication_id
-            self._add_metrics(context, public_payload)
-            await self._emit(context.turn_id, event_type, public_payload, terminal=True)
-            terminal_code = payload.get("code")
-            terminal_controller_failure = (
-                payload.get("stage") == "llm_provider"
-                and isinstance(terminal_code, str)
-                and terminal_code in TERMINAL_CONTROLLER_FAILURE_CODES
-            )
-            admission = getattr(self.runner, "ready_for_admission", None)
-            if terminal_controller_failure:
-                await self._degrade_locked("llm_provider", terminal_code)
-            elif admission is not None and not admission():
-                readiness_stage, readiness_code = self._readiness_failure()
-                await self._degrade_locked(readiness_stage, readiness_code)
-            elif drain_error is not None:
-                await self._degrade_locked("publication", drain_error)
-            elif context.rollback_error is not None:
-                await self._degrade_locked("controller", context.rollback_error)
+            await self._terminate_failed_turn_locked(context, event_type, payload)
+
+    async def _terminate_failed_turn_locked(
+        self,
+        context: TurnContext,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        if context.terminal or self._closed or self._active is not context:
+            return
+        if payload.get("stage") == "publication":
+            drain_error, publication_id = await self._clear_audio(context.turn_id)
+        else:
+            drain_error, publication_id = await self._abandon_audio(context.turn_id)
+        context.rollback_error = await self._rollback_context(context)
+        context.terminal = True
+        self.turn_counts["failed"] += 1
+        public_payload = dict(payload)
+        stage = str(public_payload.get("stage", "controller"))
+        code = str(public_payload.get("code", "unknown_failure"))
+        public_payload.update(failure_payload(stage, code))
+        if publication_id is not None:
+            public_payload["server_media_publication_id"] = publication_id
+        self._add_metrics(context, public_payload)
+        await self._emit(context.turn_id, event_type, public_payload, terminal=True)
+        terminal_code = payload.get("code")
+        terminal_controller_failure = (
+            payload.get("stage") == "llm_provider"
+            and isinstance(terminal_code, str)
+            and terminal_code in TERMINAL_CONTROLLER_FAILURE_CODES
+        )
+        admission = getattr(self.runner, "ready_for_admission", None)
+        if terminal_controller_failure:
+            await self._degrade_locked("llm_provider", terminal_code)
+        elif (
+            payload.get("stage") == "controller"
+            and terminal_code == "context_commit_failed"
+        ):
+            await self._degrade_locked("controller", terminal_code)
+        elif admission is not None and not admission():
+            readiness_stage, readiness_code = self._readiness_failure()
+            await self._degrade_locked(readiness_stage, readiness_code)
+        elif drain_error is not None:
+            await self._degrade_locked("publication", drain_error)
+        elif context.rollback_error is not None:
+            await self._degrade_locked("controller", context.rollback_error)
 
     async def _relay_queued_pcm(self, item: PcmPumpItem) -> None:
         context = item.request

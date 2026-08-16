@@ -232,7 +232,7 @@ class LiveTurnRunner:
                             "failure_count": 0 if llm_observation.get("success") else 1,
                             "failure_code": llm_observation.get("error_class"),
                             "provider_time_to_first_token_ms": llm_observation.get(
-                                "visible_first_content_ms"
+                                "provider_first_token_ms"
                             ),
                             "provider_completion_ms": llm_observation.get("completion_ms"),
                             "input_unit_count": usage.get("prompt_tokens"),

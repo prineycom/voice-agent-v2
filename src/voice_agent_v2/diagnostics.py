@@ -77,28 +77,47 @@ def _spawn_expiry_guardian(
     expires_unix_seconds: float,
     expires_uptime_seconds: float,
 ) -> None:
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            str(Path(__file__).with_name("diagnostic_expiry.py")),
-            "--path",
-            str(path),
-            "--owner-nonce",
-            owner_nonce,
-            "--expires-unix-seconds",
-            str(expires_unix_seconds),
-            "--expires-uptime-seconds",
-            str(expires_uptime_seconds),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-        env={"PYTHONUTF8": "1"},
+    lease = path.parent / f".capture-guardian-{owner_nonce}.lease"
+    lease_descriptor = os.open(
+        lease, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     )
+    try:
+        lease_status = os.fstat(lease_descriptor)
+        if not stat.S_ISREG(lease_status.st_mode) or lease_status.st_uid != os.getuid():
+            raise ValueError("diagnostic capture guardian lease is not owned")
+        fcntl.flock(lease_descriptor, fcntl.LOCK_EX)
+        os.ftruncate(lease_descriptor, 0)
+        os.write(lease_descriptor, b"managed\n")
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("diagnostic_expiry.py")),
+                "--path",
+                str(path),
+                "--owner-nonce",
+                owner_nonce,
+                "--expires-unix-seconds",
+                str(expires_unix_seconds),
+                "--expires-uptime-seconds",
+                str(expires_uptime_seconds),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+            pass_fds=(lease_descriptor,),
+            env={"PYTHONUTF8": "1"},
+        )
+    finally:
+        os.close(lease_descriptor)
+
+    def reap() -> None:
+        process.wait()
+        DiagnosticContentCapture._release_guardian_lease(path.parent, owner_nonce)
+
     threading.Thread(
-        target=process.wait,
+        target=reap,
         name=f"capture-expiry-reaper-{process.pid}",
         daemon=True,
     ).start()
@@ -383,14 +402,7 @@ class DiagnosticContentCapture:
         self._lock = threading.RLock()
         self.purge_expired(resolved, now=now)
         with _capture_root_lock(resolved):
-            owned = 0
-            for directory in resolved.glob("capture-*"):
-                try:
-                    self._owned_manifest(directory)
-                except ValueError:
-                    continue
-                owned += 1
-            if owned >= MAX_CAPTURE_DIRECTORIES:
+            if self._custody_slots_locked(resolved) >= MAX_CAPTURE_DIRECTORIES:
                 raise RuntimeError("diagnostic capture root limit reached")
             self.path.mkdir(exist_ok=False, mode=0o700)
             try:
@@ -411,6 +423,7 @@ class DiagnosticContentCapture:
                     "manifest.json",
                     json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
                 )
+                self._create_guardian_lease_locked(resolved, self._owner_nonce)
                 guardian_factory(
                     self.path,
                     self._owner_nonce,
@@ -418,6 +431,9 @@ class DiagnosticContentCapture:
                     self._expires_uptime,
                 )
             except BaseException:
+                self._guardian_lease_path(resolved, self._owner_nonce).unlink(
+                    missing_ok=True
+                )
                 shutil.rmtree(self.path, ignore_errors=True)
                 raise
         self._files = 0
@@ -502,22 +518,106 @@ class DiagnosticContentCapture:
         return resolved, document
 
     @staticmethod
+    def _guardian_lease_path(root: Path, owner_nonce: str) -> Path:
+        return root / f".capture-guardian-{owner_nonce}.lease"
+
+    @staticmethod
+    def _create_guardian_lease_locked(root: Path, owner_nonce: str) -> None:
+        path = DiagnosticContentCapture._guardian_lease_path(root, owner_nonce)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        os.close(descriptor)
+
+    @staticmethod
+    def _release_guardian_lease(root: Path, owner_nonce: str) -> None:
+        try:
+            with _capture_root_lock(root):
+                path = DiagnosticContentCapture._guardian_lease_path(root, owner_nonce)
+                try:
+                    status = path.lstat()
+                except FileNotFoundError:
+                    return
+                if (
+                    path.is_symlink()
+                    or not stat.S_ISREG(status.st_mode)
+                    or status.st_uid != os.getuid()
+                ):
+                    return
+                path.unlink()
+        except (OSError, ValueError):
+            return
+
+    @staticmethod
+    def _custody_slots_locked(root: Path) -> int:
+        nonces: set[str] = set()
+        for lease in root.glob(".capture-guardian-*.lease"):
+            name = lease.name
+            nonce = name.removeprefix(".capture-guardian-").removesuffix(".lease")
+            try:
+                status = lease.lstat()
+            except OSError:
+                continue
+            if (
+                len(nonce) != 32
+                or any(character not in "0123456789abcdef" for character in nonce)
+                or lease.is_symlink()
+                or not stat.S_ISREG(status.st_mode)
+                or status.st_uid != os.getuid()
+            ):
+                continue
+            try:
+                managed = lease.read_bytes() == b"managed\n"
+            except OSError:
+                managed = False
+            if managed:
+                descriptor = os.open(
+                    lease, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(descriptor)
+                    nonces.add(nonce)
+                    continue
+                os.close(descriptor)
+                lease.unlink(missing_ok=True)
+                continue
+            nonces.add(nonce)
+        for directory in root.glob("capture-*"):
+            try:
+                _resolved, document = DiagnosticContentCapture._owned_manifest(directory)
+            except ValueError:
+                continue
+            nonce = document.get("owner_nonce")
+            if isinstance(nonce, str):
+                nonces.add(nonce)
+        return len(nonces)
+
+    @staticmethod
     def delete_path(
         path: Path,
         *,
         expected_owner_nonce: str | None = None,
         expected_expires_unix_seconds: float | None = None,
     ) -> bool:
-        resolved, document = DiagnosticContentCapture._owned_manifest(path)
-        if (
-            expected_owner_nonce is not None
-            and document["owner_nonce"] != expected_owner_nonce
-        ) or (
-            expected_expires_unix_seconds is not None
-            and document.get("expires_unix_seconds") != expected_expires_unix_seconds
-        ):
-            raise ValueError("diagnostic capture manifest does not own this path")
-        shutil.rmtree(resolved)
+        resolved, initial_document = DiagnosticContentCapture._owned_manifest(path)
+        guarded_nonce = expected_owner_nonce or str(initial_document["owner_nonce"])
+        guarded_expiry = (
+            expected_expires_unix_seconds
+            if expected_expires_unix_seconds is not None
+            else initial_document.get("expires_unix_seconds")
+        )
+        with _capture_root_lock(resolved.parent):
+            resolved, document = DiagnosticContentCapture._owned_manifest(resolved)
+            if (
+                document["owner_nonce"] != guarded_nonce
+                or document.get("expires_unix_seconds") != guarded_expiry
+            ):
+                raise ValueError("diagnostic capture manifest does not own this path")
+            shutil.rmtree(resolved)
         return True
 
     @staticmethod
@@ -541,7 +641,11 @@ class DiagnosticContentCapture:
                 continue
             if explicitly_enabled and expires <= current_time:
                 try:
-                    DiagnosticContentCapture.delete_path(directory)
+                    DiagnosticContentCapture.delete_path(
+                        directory,
+                        expected_owner_nonce=str(document.get("owner_nonce", "")),
+                        expected_expires_unix_seconds=expires,
+                    )
                 except (OSError, ValueError):
                     continue
                 removed += 1

@@ -274,6 +274,10 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertNotIn("Скрытое", text + "".join(handed_off))
         self.assertFalse(provider.observations[-1]["external_transfer"])
         self.assertGreater(provider.observations[-1]["reasoning_chars"], 0)
+        self.assertLessEqual(
+            provider.observations[-1]["provider_first_token_ms"],
+            provider.observations[-1]["visible_first_content_ms"],
+        )
 
     def test_decimal_split_across_stream_events_stays_exact_for_visibility_and_handoff(self) -> None:
         response = StubResponse([

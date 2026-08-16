@@ -168,20 +168,31 @@ class ObservationContractTests(unittest.TestCase):
             self.assertEqual(records[0]["fields"]["dependency_class"], "hard")
 
     def test_one_turn_and_percentiles_reconstruct_only_from_metadata(self) -> None:
+        resource_sample = observation(5, 415.0, "resource.sample", {
+            "resource_phase": "terminal",
+            "cpu_utilization_percent": 35.0,
+            "host_ram_used_mib": 4096.0,
+            "process_rss_mib": 512.0,
+            "gpu_vram_used_mib": 2900.0,
+            "gpu_utilization_percent": 40.0,
+        })
+        resource_sample["stage"] = "resource"
+        resource_sample["event"] = "sample"
         records = [
             observation(1, 100.0, "turn.listening"),
             observation(2, 190.0, "stt.final", {"endpoint_to_stt_final_ms": 90.0}),
             observation(3, 240.0, "llm.visible", {"provider_time_to_first_token_ms": 50.0}),
             observation(4, 310.0, "turn.speaking", {"tts_time_to_first_audio_ms": 20.0}),
-            observation(5, 420.0, "turn.completed", {
+            resource_sample,
+            observation(6, 420.0, "turn.completed", {
                 "outcome": "completed",
                 "provider_completion_ms": 120.0,
                 "total_turn_ms": 320.0,
-                "cpu_utilization_percent": 35.0,
-                "host_ram_used_mib": 4096.0,
-                "process_rss_mib": 512.0,
-                "gpu_vram_used_mib": 2900.0,
-                "gpu_utilization_percent": 40.0,
+                "cpu_utilization_percent": 99.0,
+                "host_ram_used_mib": 9999.0,
+                "process_rss_mib": 9999.0,
+                "gpu_vram_used_mib": 9999.0,
+                "gpu_utilization_percent": 99.0,
             }),
         ]
         timeline = reconstruct_timelines(records)
@@ -377,6 +388,23 @@ class CaptureAndResourceTests(unittest.TestCase):
                     runtime_root=Path(directory),
                 )
             self.assertTrue(captures[0].delete())
+            with self.assertRaisesRegex(RuntimeError, "root limit"):
+                DiagnosticContentCapture(
+                    root,
+                    "session-bounded-replacement",
+                    opt_in=True,
+                    ttl_seconds=60,
+                    guardian_factory=lambda *arguments: guardians.append(arguments),
+                    runtime_root=Path(directory),
+                )
+            self.assertFalse(expire_capture(
+                *guardians[0],
+                uptime_now=lambda: 0.0,
+                sleep=lambda _delay: self.fail("deleted capture guardian must exit"),
+            ))
+            DiagnosticContentCapture._release_guardian_lease(
+                guardians[0][0].parent, guardians[0][1]
+            )
             replacement = DiagnosticContentCapture(
                 root,
                 "session-bounded-replacement",
@@ -432,16 +460,25 @@ class CaptureAndResourceTests(unittest.TestCase):
             def wait() -> int:
                 return 0
 
-        with patch.dict(os.environ, {"LIVEKIT_API_SECRET": "private-secret"}), patch(
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, patch.dict(
+            os.environ, {"LIVEKIT_API_SECRET": "private-secret"}
+        ), patch(
             "voice_agent_v2.diagnostics.subprocess.Popen",
             return_value=FinishedProcess(),
         ) as spawn:
+            root = Path(directory)
+            (root / f".capture-guardian-{'a' * 32}.lease").touch(mode=0o600)
             _spawn_expiry_guardian(
-                Path("/private/capture-session"),
+                root / "capture-session",
                 "a" * 32,
                 1060.0,
                 560.0,
             )
+            lease = root / f".capture-guardian-{'a' * 32}.lease"
+            deadline = time.monotonic() + 0.5
+            while lease.exists() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertFalse(lease.exists())
 
         environment = spawn.call_args.kwargs["env"]
         self.assertEqual(environment, {"PYTHONUTF8": "1"})

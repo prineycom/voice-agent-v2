@@ -663,6 +663,12 @@ def percentile_report(
         document = validate_observation(record)
         fields = document["fields"]
         assert isinstance(fields, dict)
+        if (
+            document["stage"] != "resource"
+            or document["event"] != "sample"
+            or fields.get("resource_phase") not in {"endpoint", "terminal"}
+        ):
+            continue
         for name in resource_values:
             value = fields.get(name)
             if type(value) in {int, float} and math.isfinite(value):
