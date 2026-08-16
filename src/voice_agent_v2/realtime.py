@@ -2343,14 +2343,25 @@ class RealtimeSession:
             if cancellation_after_success:
                 raise asyncio.CancelledError
         except asyncio.CancelledError as error:
-            if terminal and not cancellation_after_success:
+            if not cancellation_after_success:
                 context = self._active
-                if (
+                correlated_turn = (
                     turn_id != SESSION_TURN_ID
                     and context is not None
                     and context.turn_id == turn_id
+                )
+                cancelled_terminal = (
+                    terminal
+                    and correlated_turn
+                    and (context.public_event_published or context.admission_counted)
+                )
+                cancelled_post_announcement = (
+                    not terminal
+                    and event_type != "turn.media-ready"
+                    and correlated_turn
                     and context.public_event_published
-                ):
+                )
+                if cancelled_terminal or cancelled_post_announcement:
                     self._record_control_publish_failure(
                         event, turn_id, event_type, error
                     )

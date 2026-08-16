@@ -177,6 +177,79 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await session.start_utterance()
 
+    async def test_cancelled_initial_failure_terminal_closes_admission(self) -> None:
+        class BlockingFailureEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.failure_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.failed":
+                    self.failure_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        class FailingPrepareAudio(MemoryAudio):
+            async def prepare(self, _turn_id: str, _media_generation: int) -> str:
+                raise RuntimeError("synthetic publication setup failure")
+
+        events = BlockingFailureEvents()
+        session = RealtimeSession(
+            session_id="session-initial-terminal-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=FailingPrepareAudio(),
+        )
+        admission = asyncio.create_task(session.start_utterance())
+        await asyncio.wait_for(events.failure_started.wait(), 0.5)
+        admission.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await admission
+
+        self.assertTrue(session.closed)
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
+    async def test_cancelled_post_announcement_control_becomes_transport_failure(self) -> None:
+        class BlockingSttEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stt_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "stt.final":
+                    self.stt_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingSttEvents()
+        session = RealtimeSession(
+            session_id="session-nonterminal-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        turn_id = await session.start_utterance()
+        control = asyncio.create_task(
+            session._emit(turn_id, "stt.final", {"transcript": "Синтетика."})
+        )
+        await asyncio.wait_for(events.stt_started.wait(), 0.5)
+        control.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await control
+
+        self.assertTrue(session.closed)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        context = session._active
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertTrue(context.transport_failed)
+        self.assertTrue(context.terminal)
+
     async def test_completed_control_send_commits_before_cancellation_propagates(self) -> None:
         holder: dict[str, asyncio.Task[None]] = {}
 
