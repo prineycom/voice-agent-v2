@@ -33,7 +33,7 @@ class ReviewStandStatusTests(unittest.TestCase):
             curl.write_text(
                 "#!/bin/sh\n"
                 "case \" $* \" in\n"
-                "  *\" --connect-timeout 0.25 --max-time 0.25 \"*) ;;\n"
+                "  *\" --connect-timeout 1 --max-time 1 \"*) ;;\n"
                 "  *) exit 64 ;;\n"
                 "esac\n"
                 "printf '%s\\n' \"$STATUS_DOCUMENT\"\n",

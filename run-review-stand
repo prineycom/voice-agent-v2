@@ -6,7 +6,7 @@ PID_FILE="$ROOT/tmp/review-stand.pid"
 LOG_FILE="$ROOT/tmp/review-stand.log"
 LOOPBACK_URL='http://127.0.0.1:8000/'
 LOOPBACK_STATUS='http://127.0.0.1:8000/api/status'
-CURL_TIMEOUT='0.25'
+CURL_TIMEOUT='1'
 
 running() {
   [ -f "$PID_FILE" ] || return 1

@@ -8,6 +8,7 @@ from pathlib import Path
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Callable, Iterator
@@ -46,8 +47,10 @@ class AdapterProcess:
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log = self.log_path.open("x", encoding="utf-8")
+            guardian = Path(__file__).with_name("adapter_guardian.py")
             process = subprocess.Popen(
-                self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
+                [sys.executable, "-B", str(guardian), str(os.getpid()), *self.command],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
                 text=True, bufsize=1, start_new_session=True, env=self.environment,
             )
             self.process = process
