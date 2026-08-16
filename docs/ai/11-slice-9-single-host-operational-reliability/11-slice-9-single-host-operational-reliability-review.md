@@ -21,6 +21,7 @@
 | Minor | NM-009 accepted boolean, negative, non-finite, or out-of-range sustained values | Invalid evidence could pass scalar thresholds | Validate every measurement before percentile/growth calculations | Fixed with regression |
 | Minor | NM-010 left the avatar failure wording ambiguous | Documentation could imply a forbidden replacement representation | State that MVP-eye failure stays visibly degraded with no alternate representation, selector, or fallback | Fixed |
 | Minor | Release/link writes did not explicitly fsync their durability boundary | Crash durability relied on normal writeback | fsync payload/files/directories and atomic metadata/link parent directories | Fixed |
+| Critical | NM-R145: `_linked_release()` followed a substituted `releases` directory outside locked mutation paths | execute/status/validate-deployment could read or execute a valid-looking release outside the custodied store | Apply lstat/no-follow directory, lock, pointer, and target validation at every read boundary and reject pointer races | Fixed once after bounded loop recovery, with executable regressions |
 
 ## Fixed issues
 
@@ -33,6 +34,7 @@
 | Config and host-validator custody | `operations.py`, `verify_slice9_host.py`, tests | Symlink refusal, one validated execution snapshot, no persisted credential verifier, and final canonical-host gate |
 | Exact readiness and health custody | `run_slice6.py`, `slice6_config.py`, `livekit_runtime.py`, tests | Exact build/release match, occupied-port refusal, READY child repolls, fresh LiveKit/LFM PID generations |
 | Sustained/avatar boundary clarity | `operations.py`, ADR-0013, architecture, tests | Invalid scalar rejection and explicit no-alternate-avatar failure wording |
+| NM-R145 immutable-store read custody | `operations.py`, operations/CLI tests | current/previous and public run/status/validate-deployment reject external stores, symlinked locks/targets, and pointer replacement races; private disposable stores still work |
 
 ## Skipped issues
 
@@ -44,17 +46,21 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | ✅ | 332 behavioral tests, deterministic trace/PCM |
+| `./verify` | ✅ | 380 behavioral tests, deterministic trace/PCM |
 | `./verify-slice6` | ✅ | Runtime contract, 88 web tests, builds, Firefox/LiveKit synthetic media |
 | `./verify-slice7` | ✅ | 87 focused web tests/builds |
 | `./verify-slice8` | ✅ | 90 Python + 69 web loopback failure/privacy checks |
-| `./verify-slice9` | ✅ | 52 Python + 50 web loopback operational checks |
+| `./verify-slice9` | ✅ | 98 Python + 50 web loopback operational checks |
 | `./verify-local-lfm` | ✅ | Exact real local LFM runtime/model/parallel/cancellation |
 | `./verify-silero-kseniya` | ✅ | Exact real Silero/Kseniya cache/runtime |
-| `verify_slice9_host.py` | ✅ | 13 artifacts, one recovery, next blocked, production unit untouched |
+| `verify_slice9_host.py --config <sanitized-copy>` | ✅ | 13 artifacts, one recovery, next blocked; private `/var/tmp` state and temporary config removed; original private config hash unchanged; production unit untouched |
 | Real disposable A/B/no-op/rollback + Type=notify | ✅ | Exact release readiness, repeated tracer, byte-identical inventory, graceful zero-orphan stop |
-| Review focused regressions | ✅ | 47 operations/startup tests plus 51 pinned-runtime readiness/health/observability tests |
+| Review focused regressions | ✅ | 69 operations tests including NM-R145 executable and race regressions |
 | `git diff --check` | ✅ | No whitespace errors |
+
+## Validation-loop recovery record
+
+The full parked status and review transcript for run `01M05HK4AD6BX2QPYXDX0CASCQ` are preserved in [`slice-9-bounded-review-recovery.status.txt`](../../evidence/slice-9-bounded-review-recovery.status.txt) and [`slice-9-bounded-review-recovery.review.log`](../../evidence/slice-9-bounded-review-recovery.review.log). They record local `f50f064a2648e1d90e224564f8bb70eee6a23873`, pipeline `312c79a01fe6949999d2d9e3a54a407644a29e79`, and parked finding `NM-R145`. The parked run alone was cancelled; guarded recovery preserved its complete ancestry. Validation tooling was then upgraded without force from `v1.45.4` to healthy `v1.48.0` before the one consolidated NM-R145 correction.
 
 ## Recommendations
 

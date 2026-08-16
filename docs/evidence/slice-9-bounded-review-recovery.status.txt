@@ -1,0 +1,57 @@
+run:
+  id: "01M05HK4AD6BX2QPYXDX0CASCQ"
+  branch: fm/voice-agent-v2-slice9-reliability
+  status: running
+  awaiting_agent: parked 2m0s
+  head: 312c79a0
+  findings: 1 auto-fix
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,3
+    rebase,completed,0,14275
+    review,fix_review,1,9235761
+    test,pending,0,0
+    document,pending,0,0
+    lint,pending,0,0
+    push,pending,0,0
+    pr,pending,0,0
+    ci,pending,0,0
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: fm/voice-agent-v2-slice9-reliability
+    head: f50f064a2648e1d90e224564f8bb70eee6a23873
+    clean: true
+  pipeline:
+    run: "01M05HK4AD6BX2QPYXDX0CASCQ"
+    status: running
+    phase: pre_push
+    submitted_head: f50f064a2648e1d90e224564f8bb70eee6a23873
+    current_head: 312c79a01fe6949999d2d9e3a54a407644a29e79
+    pushed_head: ""
+    pushed_at: 0
+    push_generation: 0
+  target:
+    kind: ""
+    remote: origin
+    url: "https://github.com/prineycom/voice-agent-v2.git"
+    ref: ""
+  remote:
+    observed_head: ""
+    freshness: pipeline_push
+    observed_at: 0
+  relation: unknown
+  safety: blocked_pipeline_owned
+  pr_state: none
+  note: the pipeline head has moved but has not been successfully pushed; do not make local follow-up commits yet
+  next_action:
+    code: continue_active_run
+    command: no-mistakes axi status
+gate:
+  step: review
+  status: fix_review
+  risk: high
+  note: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."
+  findings[1]{id,severity,file,action,description}:
+    NM-R145,error,src/voice_agent_v2/operations.py,auto-fix,"Проверка custody выполняется только через `locked()`, но `execute_release`, `status` и `validate-deployment` вызывают `current()` без неё. `_linked_release()` разрешает `self.releases.resolve()`, поэтому канонический `releases`-symlink на внешний каталог с валидным release принимается и systemd исполняет release вне защищённого store. Проверяйте существующие `state_root`/`releases` без следования symlink на общей read-boundary `_linked_release()` или до любого чтения указателей."
+help[6]: Run `no-mistakes axi respond --action approve` to accept this step and continue,Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself),Run `no-mistakes axi respond --action skip` to skip this step,Run `no-mistakes axi logs --step review --full` to read the full step log,"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.","Commit post-pipeline follow-up work on top of the existing branch so every pipeline fix commit remains present. Never abort-and-restart, reset, or replace the branch in a way that drops prior gate-fix commits."

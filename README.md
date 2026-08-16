@@ -110,7 +110,9 @@ Run the CI-safe deterministic operational gate and, on the canonical host, the r
   ./scripts/verify_slice9_host.py
 ```
 
-The second command starts no product service, uses no `sudo`, prints no secret, and touches only a uniquely named disposable user service. It verifies exact selected artifacts/runtimes, ignored local configuration structure/mode, free-disk and active-cache bounds, then proves one completed restart and an actionable failed state. It does not inspect external exposure, reboot, or claim physical behavior.
+The second command starts no product service, uses no `sudo`, prints no secret, and touches only a uniquely named disposable user service. It creates a new private mode-`0700` deployment-state root under `/var/tmp`—not the smaller `XDG_RUNTIME_DIR` tmpfs to which the persistent 8-GiB bound does not apply—and deletes it on exit. It verifies exact selected artifacts/runtimes, ignored local configuration structure/mode, free-disk and active-cache bounds, then proves one completed restart and an actionable failed state. It does not inspect external exposure, reboot, or claim physical behavior. `--config <path>` may select a different mode-`0600` private file outside Git for a transitional read-only check.
+
+A private config retained from the retired Tailscale-coupled runtime needs a one-time explicit migration before normal validation or deployment: remove only `SLICE6_LIVEKIT_NODE_IP`, `SLICE6_APP_HTTPS_PORT`, `SLICE6_SIGNAL_HTTPS_PORT`, and `SLICE6_ENABLE_TAILSCALE_SERVE`; preserve all other names/values and mode `0600`, without logging secret values. If the product service is installed, run `./voice-agent-ops install-service --restart` afterward and confirm exact readiness with `status`. For transition-only host evidence, use a temporary mode-`0600` sanitized copy outside Git via `--config`, delete it afterward, and leave the original untouched.
 
 Operational activation is explicit. Keep the server configuration untracked and mode `0600`; no operation copies or prints its secret values:
 

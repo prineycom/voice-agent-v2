@@ -1234,6 +1234,226 @@ class ReleaseStore:
         _ensure_private_store_directory(self.state_root, parents=True)
         _ensure_private_store_directory(self.releases, parents=False)
 
+    @staticmethod
+    def _same_identity(first: os.stat_result, second: os.stat_result) -> bool:
+        return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+
+    def _open_store_directory(
+        self,
+        path: Path,
+        *,
+        label: str,
+        private: bool,
+        missing_ok: bool = False,
+        dir_fd: int | None = None,
+        name: str | None = None,
+    ) -> int | None:
+        entry: str | Path = name if name is not None else path
+        try:
+            if dir_fd is None:
+                lexical_metadata = path.lstat()
+            else:
+                lexical_metadata = os.stat(entry, dir_fd=dir_fd, follow_symlinks=False)
+            descriptor = os.open(
+                entry,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=dir_fd,
+            )
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise OperationalError(
+                "release_state_invalid", f"{label} is unavailable",
+            ) from None
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", f"{label} custody is unavailable",
+            ) from error
+        try:
+            descriptor_metadata = os.fstat(descriptor)
+            if not (
+                stat.S_ISDIR(lexical_metadata.st_mode)
+                and stat.S_ISDIR(descriptor_metadata.st_mode)
+                and self._same_identity(lexical_metadata, descriptor_metadata)
+                and descriptor_metadata.st_uid == os.geteuid()
+                and (
+                    not private
+                    or stat.S_IMODE(descriptor_metadata.st_mode) == 0o700
+                )
+            ):
+                raise OperationalError(
+                    "release_state_invalid", f"{label} custody changed",
+                )
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _confirm_store_directory(
+        self, path: Path, descriptor: int, *, label: str, private: bool,
+    ) -> None:
+        try:
+            lexical_metadata = path.lstat()
+            descriptor_metadata = os.fstat(descriptor)
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", f"{label} custody is unavailable",
+            ) from error
+        if not (
+            stat.S_ISDIR(lexical_metadata.st_mode)
+            and self._same_identity(lexical_metadata, descriptor_metadata)
+            and descriptor_metadata.st_uid == os.geteuid()
+            and (
+                not private
+                or stat.S_IMODE(descriptor_metadata.st_mode) == 0o700
+            )
+        ):
+            raise OperationalError(
+                "release_state_invalid", f"{label} custody changed",
+            )
+
+    def _validate_existing_lock(self, state_descriptor: int) -> None:
+        try:
+            lexical_metadata = os.stat(
+                self.lock_path.name,
+                dir_fd=state_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", "release store lock custody is unavailable",
+            ) from error
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                self.lock_path.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=state_descriptor,
+            )
+            descriptor_metadata = os.fstat(descriptor)
+            confirmed_metadata = os.stat(
+                self.lock_path.name,
+                dir_fd=state_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", "release store lock custody is unavailable",
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        if not (
+            stat.S_ISREG(lexical_metadata.st_mode)
+            and stat.S_ISREG(descriptor_metadata.st_mode)
+            and self._same_identity(lexical_metadata, descriptor_metadata)
+            and self._same_identity(lexical_metadata, confirmed_metadata)
+            and descriptor_metadata.st_uid == os.geteuid()
+            and descriptor_metadata.st_nlink == 1
+            and stat.S_IMODE(descriptor_metadata.st_mode) == 0o600
+        ):
+            raise OperationalError(
+                "release_state_invalid", "release store lock custody changed",
+            )
+
+    def _open_store_for_read(self) -> tuple[int, int] | None:
+        self.state_root = _require_canonical_state_root_custody(self.state_root)
+        canonical = _is_canonical_state_root(self.state_root)
+        state_descriptor = self._open_store_directory(
+            self.state_root,
+            label="release store directory",
+            private=canonical,
+            missing_ok=True,
+        )
+        if state_descriptor is None:
+            return None
+        releases_descriptor: int | None = None
+        try:
+            self._validate_existing_lock(state_descriptor)
+            releases_descriptor = self._open_store_directory(
+                self.releases,
+                label="release store releases directory",
+                private=canonical,
+                missing_ok=True,
+                dir_fd=state_descriptor,
+                name=self.releases.name,
+            )
+            if releases_descriptor is None:
+                for link_name in (self.current_link.name, self.previous_link.name):
+                    try:
+                        os.stat(
+                            link_name,
+                            dir_fd=state_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    except OSError as error:
+                        raise OperationalError(
+                            "release_state_invalid", "release link custody is unavailable",
+                        ) from error
+                    raise OperationalError(
+                        "release_state_invalid",
+                        "release link exists without a custodied releases directory",
+                    )
+                os.close(state_descriptor)
+                return None
+            return state_descriptor, releases_descriptor
+        except BaseException:
+            if releases_descriptor is not None:
+                os.close(releases_descriptor)
+            os.close(state_descriptor)
+            raise
+
+    def _require_release_directory(
+        self, release: Path, *, private: bool = True,
+    ) -> Path:
+        lexical_release = _absolute_lexical_path(release)
+        if (
+            lexical_release.parent != self.releases
+            or not RELEASE_ID.fullmatch(lexical_release.name)
+        ):
+            raise OperationalError(
+                "release_state_invalid", "release is outside the bounded store",
+            )
+        descriptors = self._open_store_for_read()
+        if descriptors is None:
+            raise OperationalError(
+                "release_state_invalid", "release store is unavailable",
+            )
+        state_descriptor, releases_descriptor = descriptors
+        release_descriptor: int | None = None
+        try:
+            release_descriptor = self._open_store_directory(
+                lexical_release,
+                label="release directory",
+                private=private,
+                dir_fd=releases_descriptor,
+                name=lexical_release.name,
+            )
+            self._confirm_store_directory(
+                self.state_root,
+                state_descriptor,
+                label="release store directory",
+                private=_is_canonical_state_root(self.state_root),
+            )
+            self._confirm_store_directory(
+                self.releases,
+                releases_descriptor,
+                label="release store releases directory",
+                private=_is_canonical_state_root(self.state_root),
+            )
+        finally:
+            if release_descriptor is not None:
+                os.close(release_descriptor)
+            os.close(releases_descriptor)
+            os.close(state_descriptor)
+        return lexical_release
+
     def locked(self) -> Iterator[None]:
         self._initialize()
         store = self
@@ -1357,16 +1577,23 @@ class ReleaseStore:
                     raise OperationalError(
                         "release_state_invalid", "release link transaction is invalid",
                     )
-                target_path = (self.state_root / target).resolve()
+                target_parts = Path(target).parts
+                target_name = target_parts[1] if len(target_parts) == 2 else ""
                 if (
-                    target != f"releases/{target_path.name}"
-                    or target_path.parent != self.releases.resolve()
-                    or not RELEASE_ID.fullmatch(target_path.name)
-                    or not target_path.is_dir()
+                    target_parts != ("releases", target_name)
+                    or not RELEASE_ID.fullmatch(target_name)
                 ):
                     raise OperationalError(
                         "release_state_invalid", "release link transaction target is invalid",
                     )
+                try:
+                    self._require_release_directory(
+                        self.releases / target_name, private=False,
+                    )
+                except OperationalError as error:
+                    raise OperationalError(
+                        "release_state_invalid", "release link transaction target is invalid",
+                    ) from error
             updates.append((link, target))
         for link, target in updates:
             if target is None:
@@ -1494,15 +1721,96 @@ class ReleaseStore:
         self._recover_link_transaction()
 
     def _linked_release(self, link: Path) -> Path | None:
-        if not link.is_symlink():
-            if link.exists():
-                raise OperationalError("release_state_invalid", f"{link.name} is not a release link")
+        if link.parent != self.state_root or link.name not in {"current", "previous"}:
+            raise OperationalError("release_state_invalid", "release link is outside the store")
+        descriptors = self._open_store_for_read()
+        if descriptors is None:
             return None
-        target = (link.parent / os.readlink(link)).resolve()
-        releases_root = self.releases.resolve()
-        if target.parent != releases_root or not RELEASE_ID.fullmatch(target.name):
-            raise OperationalError("release_state_invalid", f"{link.name} points outside releases")
-        return target
+        state_descriptor, releases_descriptor = descriptors
+        target_descriptor: int | None = None
+        try:
+            try:
+                link_metadata = os.stat(
+                    link.name,
+                    dir_fd=state_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as error:
+                raise OperationalError(
+                    "release_state_invalid", f"{link.name} release link is unavailable",
+                ) from error
+            if not (
+                stat.S_ISLNK(link_metadata.st_mode)
+                and link_metadata.st_uid == os.geteuid()
+            ):
+                raise OperationalError(
+                    "release_state_invalid", f"{link.name} is not a release link",
+                )
+            try:
+                target_text = os.readlink(link.name, dir_fd=state_descriptor)
+            except OSError as error:
+                raise OperationalError(
+                    "release_state_invalid", f"{link.name} release link is unavailable",
+                ) from error
+            target_parts = Path(target_text).parts
+            release_name = target_parts[1] if len(target_parts) == 2 else ""
+            if (
+                target_parts != ("releases", release_name)
+                or not RELEASE_ID.fullmatch(release_name)
+            ):
+                raise OperationalError(
+                    "release_state_invalid", f"{link.name} points outside releases",
+                )
+            target = self.releases / release_name
+            target_descriptor = self._open_store_directory(
+                target,
+                label=f"{link.name} release directory",
+                private=False,
+                dir_fd=releases_descriptor,
+                name=release_name,
+            )
+            confirmed_link_metadata = os.stat(
+                link.name,
+                dir_fd=state_descriptor,
+                follow_symlinks=False,
+            )
+            confirmed_target = os.readlink(link.name, dir_fd=state_descriptor)
+            if not (
+                self._same_identity(link_metadata, confirmed_link_metadata)
+                and confirmed_target == target_text
+            ):
+                raise OperationalError(
+                    "release_state_invalid", f"{link.name} release link changed while reading",
+                )
+            self._validate_existing_lock(state_descriptor)
+            self._confirm_store_directory(
+                self.state_root,
+                state_descriptor,
+                label="release store directory",
+                private=_is_canonical_state_root(self.state_root),
+            )
+            self._confirm_store_directory(
+                self.releases,
+                releases_descriptor,
+                label="release store releases directory",
+                private=_is_canonical_state_root(self.state_root),
+            )
+            return target
+        except FileNotFoundError as error:
+            raise OperationalError(
+                "release_state_invalid", f"{link.name} release link changed while reading",
+            ) from error
+        except OSError as error:
+            raise OperationalError(
+                "release_state_invalid", f"{link.name} release custody changed while reading",
+            ) from error
+        finally:
+            if target_descriptor is not None:
+                os.close(target_descriptor)
+            os.close(releases_descriptor)
+            os.close(state_descriptor)
 
     def current(self) -> Path | None:
         return self._linked_release(self.current_link)
@@ -1791,9 +2099,9 @@ class ReleaseStore:
 def _validate_release_snapshot(
     release_root: Path, *, state_root: Path, verify_host_state: bool,
 ) -> tuple[dict[str, object], dict[str, str]]:
-    release_root = release_root.resolve()
-    releases_root = (state_root.expanduser().resolve() / "releases").resolve()
-    if release_root.parent != releases_root or not RELEASE_ID.fullmatch(release_root.name):
+    store = ReleaseStore(state_root)
+    release_root = store._require_release_directory(release_root)
+    if not RELEASE_ID.fullmatch(release_root.name):
         raise OperationalError("release_incompatible", "release is outside the bounded store")
     manifest_path = release_root / "release.json"
     try:
@@ -1933,6 +2241,10 @@ def execute_release(state_root: Path = DEFAULT_STATE_ROOT) -> None:
     environment["PYTHONPATH"] = str(release_root / "src")
     python = Path.home() / ".cache/voice-agent-v2/slice-6/runtime/venv/bin/python"
     script = release_root / "scripts/run_slice6.py"
+    if store.current() != release_root:
+        raise OperationalError(
+            "release_state_invalid", "active release changed during execution validation",
+        )
     os.chdir(release_root)
     os.execve(str(python), [str(python), "-B", str(script)], environment)
 

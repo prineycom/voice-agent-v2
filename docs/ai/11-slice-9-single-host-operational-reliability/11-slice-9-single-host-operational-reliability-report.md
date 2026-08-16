@@ -19,6 +19,7 @@
 | `tests/test_operations.py`, `test_slice9_runtime.py`, related Slice 6/8 tests | Release, compatibility, runtime, shutdown, schema, recovered-tracer/inventory regressions | executable acceptance |
 | `docs/adr/0013-systemd-bounded-single-host-operations.md`, `docs/architecture.md`, `docs/roadmap.md`, `CONTEXT.md`, `README.md`, `AGENTS.md` | Accepted ownership, operator procedure, scope, nonclaims | documentation |
 | `docs/evidence/slice-9-single-host-reliability.md` | Content-free host/systemd/failure/rollback/writer-diagnosis evidence and exact gaps | evidence |
+| `docs/evidence/slice-9-bounded-review-recovery.*` | Full parked-run status/review log for the bounded validation-tool recovery | review custody evidence |
 
 ## Acceptance coverage
 
@@ -29,11 +30,11 @@
 | Graceful ordered drain and no orphan inference | ✅ | Real full stack reached ready, stopped in declared application order, and left no project process; external exposure is outside application custody |
 | One-at-a-time local LLM/LiveKit/gateway/STT/TTS loss | ✅ | Each reached bounded failed state and complete cleanup; no invented provider process or inference retry |
 | Cache/disk/release bounds | ✅ | Fixed limits, non-destructive pressure refusal, retained fixture unchanged, no automatic cleanup |
-| Exact public build/readiness reporting | ✅ | Versioned `/api/status` reports five components, exact build/release, local/no-fallback, and avatar identities; final READY repolls every owned child and public health uses fresh LiveKit/LFM PID-generation custody |
+| Exact public build/readiness reporting | ✅ | Versioned `/api/status` reports five components, exact build/release, local/no-fallback, and avatar identities; final READY repolls every owned child and public health uses bounded fresh LiveKit/LFM endpoint plus PID-generation custody |
 | Idempotent deploy and incompatible refusal | ✅ | Identical release returned no-op; forbidden `LITELLM_*` exited 2 without pointer movement |
 | Verified rollback and deterministic tracer | ✅ | Payload-bound A/B rollback revalidated restored A; direct and two recovered tracer outputs matched; full path/hash/mode/mtime inventory stayed byte-identical |
 | Immutable runtime boundary | ✅ | Before/after inventory plus kernel inotify identified minimal-env Python writers; all controls moved outside release; post-fix inotify saw zero release events and real deployed runtime preserved inventory |
-| Sustained acceptance evaluator | ✅ | 20/20 controlled metadata-only turns met all configured scalar thresholds |
+| Sustained acceptance evaluator | ✅ | 24 controlled metadata-only outcomes (20 completed plus 4 interrupted cancellation samples) met all configured scalar thresholds |
 | Physical reboot and boot recovery | ⚠️ open | Deliberately not performed: clean committed durable continuation and no-other-worker safety gate were not provable |
 | Real post-rollback microphone/voice, physical 20-turn soak, second device, Raspberry Pi | ⚠️ open | Explicitly unclaimed; synthetic/startup evidence is not substituted |
 
@@ -41,18 +42,24 @@
 
 | Command/check | Result | Notes |
 | --- | --- | --- |
-| `./verify` | ✅ | 332 Python behavioral tests; deterministic trace/PCM hashes pass |
+| `./verify` | ✅ | 380 Python behavioral tests; deterministic trace/PCM hashes pass |
 | `./verify-slice6` | ✅ | Installed runtime, 88 web tests, production/review build, Firefox/LiveKit synthetic media regression |
 | `./verify-slice7` | ✅ | 87 focused web tests and production/review builds |
 | `./verify-slice8` | ✅ | 90 Python and 69 focused web tests; loopback privacy/failure/resource gate |
-| `./verify-slice9` | ✅ | 52 Python and 50 focused web tests; deterministic loopback operations gate |
+| `./verify-slice9` | ✅ | 98 Python and 50 focused web tests; deterministic loopback operations gate |
 | `./verify-local-lfm` | ✅ | Exact model/runtime, parallel slots, context, streaming, cancellation recovery |
 | `./verify-silero-kseniya` | ✅ | Exact real cache/model/runtime focused verification |
-| `scripts/verify_slice9_host.py` | ✅ | 13 artifacts; exact runtime/local-config/cache; one restart, next blocked; production unit untouched |
+| `scripts/verify_slice9_host.py --config <sanitized-copy>` | ✅ | 13 artifacts; exact runtime/config/cache; one restart, next blocked; new private `/var/tmp` state auto-cleaned; original private config byte-identical; production unit untouched |
 | Disposable real release A/B/no-op/rollback | ✅ | Final evidence IDs and complete procedure recorded in Slice 9 evidence |
 | Deployed-release full runtime | ✅ | Ready five-component status, graceful stop, zero orphan, complete inventory unchanged |
-| Review focused regressions | ✅ | 47 operations/startup tests plus 51 pinned-runtime readiness/health/observability tests |
+| Review focused regressions | ✅ | 69 operations tests, including executable run/status/validate-deployment no-follow custody and pointer-race regressions |
 | `git diff --check` | ✅ | No whitespace errors |
+
+## Bounded review-loop recovery
+
+Run `01M05HK4AD6BX2QPYXDX0CASCQ` was captured while parked at `NM-R145` after 16 review passes and 15 fix rounds. The pre-recovery local head was `f50f064a2648e1d90e224564f8bb70eee6a23873`; the preserved pipeline head was `312c79a01fe6949999d2d9e3a54a407644a29e79`. The complete captured outputs are [`slice-9-bounded-review-recovery.status.txt`](../../evidence/slice-9-bounded-review-recovery.status.txt) (SHA-256 `d9174c4e3c8b16d799475b80d97ec68ef2c2b8f86702336d16ee13ba8640564a`) and [`slice-9-bounded-review-recovery.review.log`](../../evidence/slice-9-bounded-review-recovery.review.log) (SHA-256 `3cbfe464a335eb2fb91f1e1a30a68fe86ec317d4d89fc8f03e55f06f29669b8e`).
+
+Only that parked run was cancelled. Guarded `no-mistakes axi sync --recover` moved the clean local branch to exact `312c79a0` and ancestry verification retained every commit from `f50f064` through `312c79a0`. Ordinary `no-mistakes update` upgraded `v1.45.4` to `v1.48.0`; `no-mistakes doctor` reported the daemon and `pi` gate healthy. NM-R145 was then corrected once on top: every current/previous/release validation read uses lstat/no-follow state, releases, lock, pointer, and target custody; external/symlinked stores and pointer races fail closed while private disposable stores remain usable.
 
 ## Unresolved uncertainty
 

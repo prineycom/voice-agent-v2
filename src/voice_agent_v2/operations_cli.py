@@ -315,6 +315,10 @@ def command_validate_deployment(arguments: argparse.Namespace) -> None:
     document = validate_release(
         current, state_root=store.state_root, verify_host_state=True,
     )
+    if store.current() != current:
+        raise OperationalError(
+            "release_state_invalid", "active release changed during deployment validation",
+        )
     _print({
         "schema_version": "voice-agent.deployment-validation.v1",
         "status": "compatible",
@@ -345,6 +349,10 @@ def command_status(arguments: argparse.Namespace) -> None:
                 "build_id": document["build_id"],
                 "provider_mode": document["provider_mode"],
             }
+    if store.current() != current:
+        raise OperationalError(
+            "release_state_invalid", "active release changed during status validation",
+        )
     canonical = _is_canonical_state_root(arguments.state_root)
     if canonical:
         service = {"applicable": True, **_systemctl_show()}

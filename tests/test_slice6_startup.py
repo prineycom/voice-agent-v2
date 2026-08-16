@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -116,28 +114,36 @@ class SystemdReadinessTests(unittest.TestCase):
             "automatic_fallback": False,
             "health": {"overall_readiness": "ready"},
         }).encode("utf-8")
+        observed: dict[str, object] = {}
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                time.sleep(0.3)
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(document)))
-                self.end_headers()
-                self.wfile.write(document)
+        class Response:
+            status = 200
 
-            def log_message(self, _format: str, *_arguments: object) -> None:
-                pass
+            def read(self, limit: int) -> bytes:
+                observed["limit"] = limit
+                return document
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            with patch.object(run_slice6, "GATEWAY_PORT", server.server_port):
-                self.assertTrue(run_slice6.gateway_operational_ready())
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
+        class Connection:
+            def __init__(self, host: str, port: int, *, timeout: float) -> None:
+                observed.update(host=host, port=port, timeout=timeout)
+
+            def request(
+                self, method: str, path: str, *, headers: dict[str, str],
+            ) -> None:
+                observed.update(method=method, path=path, headers=headers)
+
+            def getresponse(self) -> Response:
+                return Response()
+
+            def close(self) -> None:
+                observed["closed"] = True
+
+        with patch.object(run_slice6.http.client, "HTTPConnection", Connection):
+            self.assertTrue(run_slice6.gateway_operational_ready())
+
+        self.assertEqual(observed["timeout"], 1.0)
+        self.assertEqual(observed["host"], "127.0.0.1")
+        self.assertTrue(observed["closed"])
 
     def test_shutdown_request_prevents_systemd_ready_publication(self) -> None:
         supervisor = run_slice6.ProcessSupervisor()

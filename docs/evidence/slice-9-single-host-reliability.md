@@ -19,14 +19,17 @@
 
 The one-unit choice is intentional: STT/TTS are already controller-owned resident workers, the provider adapter is not a daemon, and splitting them would duplicate turn drain/readiness/cancellation. Any owned direct-child exit fails the complete service. A gateway-owned STT/TTS/provider capability that remains unready for two seconds does the same. This releases the complete old room/inference generation before an outer restart rather than preserving a partially stale stack.
 
+## Bounded validation-tool recovery and NM-R145
+
+The v1.45.4 validation run `01M05HK4AD6BX2QPYXDX0CASCQ` was deliberately stopped after 16 review passes and 15 fix rounds, before a prohibited round 17. Its full parked [status](slice-9-bounded-review-recovery.status.txt) and [review log](slice-9-bounded-review-recovery.review.log) record local head `f50f064a2648e1d90e224564f8bb70eee6a23873`, preserved pipeline head `312c79a01fe6949999d2d9e3a54a407644a29e79`, and `NM-R145`. Their respective SHA-256 values are `d9174c4e3c8b16d799475b80d97ec68ef2c2b8f86702336d16ee13ba8640564a` and `3cbfe464a335eb2fb91f1e1a30a68fe86ec317d4d89fc8f03e55f06f29669b8e`.
+
+Only that parked run was cancelled. Guarded recovery returned a clean branch at exact `312c79a0`; an ancestry check retained all 16 commits from `f50f064` through that head. Ordinary, non-force update installed `no-mistakes v1.48.0`, and `no-mistakes doctor` reported its daemon/database plus the `pi` gate healthy. The subsequent one-time NM-R145 correction makes every current/previous release read validate the existing state root, releases directory, lock, pointer, and target with lstat/no-follow plus descriptor identity checks. The same boundary is exercised by actual `voice-agent-ops run`, `status`, and `validate-deployment` commands; an external/symlinked store, symlinked lock/target, or pointer replacement race fails with `release_state_invalid`, while a private noncanonical disposable store remains readable.
+
 ## Compatibility, build, cache, and secret preflight
 
-The canonical-host command below completed successfully against ignored mode-`0600` `.env.slice6`:
+The canonical-host validation completed successfully with a mode-`0600` private configuration outside Git. For the final host rerun, an existing pre-decision `.env.slice6` was not modified or printed: a temporary mode-`0600` copy outside Git removed only the four obsolete names listed below, verification used that copy, and the copy was deleted. The original file's SHA-256 and mode were checked before and after and remained byte-identical/`0600`.
 
-```sh
-./voice-agent-ops validate --config .env.slice6 \
-  --state-root "$PWD/tmp/slice9-validation-state"
-```
+Existing private configurations from the retired Tailscale-coupled runtime require one explicit migration before normal validate/deploy: remove only `SLICE6_LIVEKIT_NODE_IP`, `SLICE6_APP_HTTPS_PORT`, `SLICE6_SIGNAL_HTTPS_PORT`, and `SLICE6_ENABLE_TAILSCALE_SERVE`; preserve every other name/value and mode `0600`; never print or copy secret values into Git. If the product service is installed, finish the configuration change with `voice-agent-ops install-service --restart` and exact status readiness. The application does not migrate or monitor these obsolete settings automatically.
 
 Observed content-free result:
 
@@ -126,7 +129,7 @@ The canonical host's real user systemd manager also ran one unique disposable tr
 
 | Metric | Controlled result |
 | --- | --- |
-| Evaluated turns / completed | 20 / 20 |
+| Evaluated outcomes / completed turns | 24 / 20 (plus 4 interrupted cancellation samples) |
 | Interrupted cancellation samples | 4 / 4 |
 | Total-turn p95 | 1,180 ms |
 | Cancellation p95 | 100 ms (4 samples) |
@@ -141,7 +144,7 @@ This proves threshold evaluation, sample-count enforcement, and bounded scalar/r
 
 ```sh
 ./verify-slice9
-./scripts/verify_slice9_host.py
+./scripts/verify_slice9_host.py --config <mode-0600-sanitized-copy-outside-git>
 ./verify
 ./verify --tracer-only
 ./verify-slice8
@@ -151,7 +154,7 @@ This proves threshold evaluation, sample-count enforcement, and bounded scalar/r
 ./verify-silero-kseniya
 ```
 
-The host script performs read-only selected-artifact/local-config/cache checks plus one disposable user-systemd service; it does not inspect external exposure. It does not install the product unit. Exact cumulative results are also recorded in the Slice 9 do report.
+The host script performs read-only selected-artifact/local-config/cache checks plus one disposable user-systemd service; it does not inspect external exposure or install the product unit. Its deployment-state preflight uses a newly created private mode-`0700` directory under `/var/tmp`, the filesystem that would hold persistent deployment state, rather than `XDG_RUNTIME_DIR` tmpfs; the directory is removed on exit. This preserves the fixed 8-GiB free-space bound instead of weakening it to fit a smaller runtime tmpfs. Exact cumulative results are also recorded in the Slice 9 do report.
 
 ## Reboot safety decision and exact physical gaps
 

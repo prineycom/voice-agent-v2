@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+from typing import Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -17,14 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from voice_agent_v2.operations import validate_host  # noqa: E402
 
 
-def mutable_root() -> Path:
-    configured = os.environ.get("VOICE_AGENT_MUTABLE_STATE_ROOT")
-    if configured:
-        root = Path(configured).expanduser()
-    elif runtime := os.environ.get("XDG_RUNTIME_DIR"):
-        root = Path(runtime) / "voice-agent-v2" / "verify-slice9-host"
-    else:
-        root = Path("/var/tmp") / f"voice-agent-v2-{os.getuid()}" / "verify-slice9-host"
+def _validate_mutable_root(root: Path) -> Path:
     if not root.is_absolute():
         raise RuntimeError("Slice 9 mutable state root must be absolute")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -35,6 +32,21 @@ def mutable_root() -> Path:
     ):
         raise RuntimeError("Slice 9 mutable state root is not private")
     return root
+
+
+@contextmanager
+def mutable_root() -> Iterator[Path]:
+    configured = os.environ.get("VOICE_AGENT_MUTABLE_STATE_ROOT")
+    if configured:
+        yield _validate_mutable_root(Path(configured).expanduser())
+        return
+    with tempfile.TemporaryDirectory(
+        prefix=f"voice-agent-v2-{os.getuid()}-verify-slice9-host-",
+        dir="/var/tmp",
+    ) as temporary:
+        root = Path(temporary)
+        root.chmod(0o700)
+        yield _validate_mutable_root(root)
 
 
 def command(arguments: list[str], *, allowed: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess[str]:
@@ -104,25 +116,38 @@ def systemd_recovery_bound(state_root: Path) -> dict[str, object]:
         counter.unlink(missing_ok=True)
 
 
-def main() -> int:
-    config = ROOT / ".env.slice6"
-    state = mutable_root()
-    report = validate_host(
-        source_root=ROOT,
-        config_path=config,
-        state_root=state / "deployment-state",
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate Slice 9 host compatibility without installing the product unit",
     )
-    evidence = {
-        "schema_version": "voice-agent.slice9-host-preflight.v1",
-        "validation": report.as_dict(),
-        "systemd_recovery": systemd_recovery_bound(state),
-        "sudo_used": False,
-        "shared_service_touched": False,
-        "production_unit_installed": False,
-        "reboot_performed": False,
-        "physical_voice_turn_performed": False,
-    }
-    print(json.dumps(evidence, ensure_ascii=True, sort_keys=True, indent=2))
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=ROOT / ".env.slice6",
+        help="mode-0600 private configuration to validate (default: .env.slice6)",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    config = parse_args().config.expanduser()
+    with mutable_root() as state:
+        report = validate_host(
+            source_root=ROOT,
+            config_path=config,
+            state_root=state / "deployment-state",
+        )
+        evidence = {
+            "schema_version": "voice-agent.slice9-host-preflight.v1",
+            "validation": report.as_dict(),
+            "systemd_recovery": systemd_recovery_bound(state),
+            "sudo_used": False,
+            "shared_service_touched": False,
+            "production_unit_installed": False,
+            "reboot_performed": False,
+            "physical_voice_turn_performed": False,
+        }
+        print(json.dumps(evidence, ensure_ascii=True, sort_keys=True, indent=2))
     return 0
 
 

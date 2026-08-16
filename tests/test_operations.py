@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr
 import hashlib
-import http.client
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 import json
 import os
@@ -13,12 +11,11 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from scripts import verify_slice9_host
 from voice_agent_v2 import operations, operations_cli
 from voice_agent_v2.operations import (
     DEFAULT_MANIFEST_RELATIVE,
@@ -361,45 +358,51 @@ class OperationsManifestTests(unittest.TestCase):
 
 
 class ServiceApplicationTests(unittest.TestCase):
+    def test_host_verifier_uses_private_persistent_state_and_cleans_it(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VOICE_AGENT_MUTABLE_STATE_ROOT", None)
+            with verify_slice9_host.mutable_root() as root:
+                retained = root
+                self.assertEqual(root.parent, Path("/var/tmp"))
+                self.assertEqual(stat.S_IMODE(root.lstat().st_mode), 0o700)
+                self.assertTrue(root.is_dir())
+            self.assertFalse(retained.exists())
+
     def test_runtime_status_accepts_a_valid_response_within_the_public_budget(self) -> None:
         payload = json.dumps({"release_id": "a" * 24}).encode("utf-8")
+        observed: dict[str, object] = {}
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                time.sleep(0.6)
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+        class Response:
+            status = 200
 
-            def log_message(self, _format: str, *_arguments: object) -> None:
-                return
+            def read(self, limit: int) -> bytes:
+                self.limit = limit
+                return payload
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        server_thread = threading.Thread(target=server.serve_forever)
-        server_thread.start()
-        actual_connection = http.client.HTTPConnection
+        class Connection:
+            def __init__(self, host: str, port: int, *, timeout: float) -> None:
+                observed.update(host=host, port=port, timeout=timeout)
 
-        def redirected_connection(
-            _host: str, _port: int, *, timeout: float,
-        ) -> http.client.HTTPConnection:
-            return actual_connection(
-                "127.0.0.1", server.server_port, timeout=timeout,
-            )
+            def request(
+                self, method: str, path: str, *, headers: dict[str, str],
+            ) -> None:
+                observed.update(method=method, path=path, headers=headers)
 
-        try:
-            with patch.object(
-                operations_cli.http.client,
-                "HTTPConnection",
-                side_effect=redirected_connection,
-            ):
-                document = operations_cli._runtime_status()
-        finally:
-            server.shutdown()
-            server.server_close()
-            server_thread.join()
+            def getresponse(self) -> Response:
+                return Response()
+
+            def close(self) -> None:
+                observed["closed"] = True
+
+        with patch.object(
+            operations_cli.http.client, "HTTPConnection", Connection,
+        ):
+            document = operations_cli._runtime_status()
 
         self.assertEqual(document, {"release_id": "a" * 24})
+        self.assertEqual(observed["timeout"], operations_cli.RUNTIME_STATUS_TIMEOUT_SECONDS)
+        self.assertEqual(observed["host"], "127.0.0.1")
+        self.assertTrue(observed["closed"])
 
     def test_systemd_start_and_restart_allow_the_full_bounded_job(self) -> None:
         calls: list[dict[str, object]] = []
@@ -1236,6 +1239,173 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                     pass
             self.assertEqual(list(outside.iterdir()), [])
             self.assertFalse((state / "operations.lock").exists())
+
+    def test_every_release_link_read_rejects_an_external_releases_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            outside = root / "outside"
+            state.mkdir(mode=0o700)
+            outside.mkdir(mode=0o700)
+            release_ids = ("1" * 24, "2" * 24)
+            for release_id in release_ids:
+                (outside / release_id).mkdir(mode=0o700)
+            (state / "releases").symlink_to(outside, target_is_directory=True)
+            (state / "current").symlink_to(f"releases/{release_ids[0]}")
+            (state / "previous").symlink_to(f"releases/{release_ids[1]}")
+            store = ReleaseStore(state)
+
+            for read in (store.current, store.previous):
+                with (
+                    self.subTest(read=read.__name__),
+                    self.assertRaisesRegex(OperationalError, "releases directory custody"),
+                ):
+                    read()
+
+    def test_execute_status_and_deployment_validation_reject_external_release_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            outside = root / "outside"
+            release_id = "3" * 24
+            state.mkdir(mode=0o700)
+            outside.mkdir(mode=0o700)
+            (outside / release_id).mkdir(mode=0o700)
+            (state / "releases").symlink_to(outside, target_is_directory=True)
+            (state / "current").symlink_to(f"releases/{release_id}")
+
+            for command in ("run", "status", "validate-deployment"):
+                result = subprocess.run(
+                    [
+                        str(ROOT / "voice-agent-ops"), command,
+                        "--state-root", str(state),
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                with self.subTest(command=command):
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("release_state_invalid", result.stderr)
+
+    def test_public_read_boundaries_reject_pointer_change_after_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            first = state / "releases" / ("a" * 24)
+            second = state / "releases" / ("b" * 24)
+            document = {
+                "release_id": first.name,
+                "build_id": "c" * 40,
+                "provider_mode": "local",
+            }
+            for command in (
+                operations_cli.command_status,
+                operations_cli.command_validate_deployment,
+            ):
+                store = SimpleNamespace(
+                    state_root=state,
+                    current=Mock(side_effect=(first, second)),
+                )
+                with (
+                    self.subTest(command=command.__name__),
+                    patch.object(operations_cli, "ReleaseStore", return_value=store),
+                    patch.object(
+                        operations_cli, "validate_release", return_value=document,
+                    ),
+                    patch.object(operations_cli, "_print") as output,
+                    self.assertRaisesRegex(OperationalError, "changed during"),
+                ):
+                    command(SimpleNamespace(state_root=state))
+                output.assert_not_called()
+
+            store = SimpleNamespace(
+                state_root=state,
+                current=Mock(side_effect=(first, second)),
+            )
+            with (
+                patch.object(operations, "ReleaseStore", return_value=store),
+                patch.object(
+                    operations, "_validate_release_snapshot",
+                    return_value=(document, configuration_values()),
+                ),
+                patch.object(
+                    operations, "_prepare_mutable_runtime_directory",
+                    side_effect=lambda path: path,
+                ),
+                patch.object(operations.os, "chdir") as change_directory,
+                patch.object(operations.os, "execve") as execute,
+                self.assertRaisesRegex(OperationalError, "changed during"),
+            ):
+                execute_release(state)
+            change_directory.assert_not_called()
+            execute.assert_not_called()
+
+    def test_release_link_read_rejects_a_symlinked_existing_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            releases = state / "releases"
+            release = releases / ("4" * 24)
+            release.mkdir(parents=True, mode=0o700)
+            state.chmod(0o700)
+            releases.chmod(0o700)
+            (state / "current").symlink_to(f"releases/{release.name}")
+            target = root / "lock-target"
+            target.write_text("retained", encoding="utf-8")
+            (state / "operations.lock").symlink_to(target)
+
+            with self.assertRaisesRegex(OperationalError, "lock custody"):
+                ReleaseStore(state).current()
+            self.assertEqual(target.read_text(encoding="utf-8"), "retained")
+
+    def test_release_link_read_fails_if_pointer_changes_during_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            releases = state / "releases"
+            first = releases / ("5" * 24)
+            second = releases / ("6" * 24)
+            first.mkdir(parents=True, mode=0o700)
+            second.mkdir(mode=0o700)
+            state.chmod(0o700)
+            releases.chmod(0o700)
+            current = state / "current"
+            current.symlink_to(f"releases/{first.name}")
+            actual_readlink = os.readlink
+            raced = False
+
+            def replace_pointer(path: object, *args: object, **kwargs: object) -> str:
+                nonlocal raced
+                target = actual_readlink(path, *args, **kwargs)
+                if not raced and Path(str(path)).name == "current":
+                    raced = True
+                    current.unlink()
+                    current.symlink_to(f"releases/{second.name}")
+                return target
+
+            with (
+                patch.object(operations.os, "readlink", side_effect=replace_pointer),
+                self.assertRaisesRegex(OperationalError, "changed while reading"),
+            ):
+                ReleaseStore(state).current()
+            self.assertTrue(raced)
+
+    def test_safe_disposable_release_store_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            store = ReleaseStore(state)
+            with store.locked():
+                current = store.releases / ("7" * 24)
+                previous = store.releases / ("8" * 24)
+                current.mkdir(mode=0o700)
+                previous.mkdir(mode=0o700)
+                store.current_link.symlink_to(f"releases/{current.name}")
+                store.previous_link.symlink_to(f"releases/{previous.name}")
+
+            self.assertEqual(store.current(), current)
+            self.assertEqual(store.previous(), previous)
 
     def test_release_store_rejects_a_symlinked_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
