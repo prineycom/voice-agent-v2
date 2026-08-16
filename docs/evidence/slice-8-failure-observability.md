@@ -67,6 +67,11 @@ The bounded verifier emits one synthetic metadata-only turn and reconstructs, wi
   "session_id": "session-slice8",
   "turn_id": "turn-slice8",
   "terminal_outcome": "completed",
+  "dependency_class": null,
+  "failure_matrix_id": null,
+  "failure_stage": null,
+  "failure_code": null,
+  "user_state": null,
   "endpoint_to_stt_final_ms": 80.0,
   "provider_time_to_first_token_ms": 45.0,
   "provider_completion_ms": 110.0,
@@ -76,7 +81,7 @@ The bounded verifier emits one synthetic metadata-only turn and reconstructs, wi
 }
 ```
 
-The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance-percentile claim. The same correlated metadata stream also carries provider mode/identity, `external_transfer=false`, usage-unit counts when the local runtime supplies them, terminal outcome, PCM/segment queue high-water marks, cancellation/stale/control-drop counts, and independently emitted endpoint/terminal resource samples. The public terminal control exposes the latest resource sample only when one has already completed; a missing or late sample remains optional metadata. The percentile report consumes the correlated observation stream for its reconstructed timing timeline and timing/resource percentiles. Runtime-level content-free model `loaded`/`unloaded` events are recorded separately.
+The one-sample p50/p95/p99 are therefore identical and are **not** an acceptance-percentile claim. A failed-turn regression reconstructs terminal outcome, `hard|soft` dependency class, failure-matrix ID, failure stage/code, and allowed user state from the emitted metadata. The same correlated stream also carries provider mode/identity, `external_transfer=false`, usage-unit counts when the local runtime supplies them, PCM/segment queue high-water marks, cancellation/stale/control-drop counts, and independently emitted endpoint/terminal resource samples. The public terminal control exposes the latest resource sample only when one has already completed; a missing or late sample remains optional metadata. The percentile report consumes the correlated observation stream for its reconstructed timing timeline and timing/resource percentiles. Runtime-level content-free model `loaded`/`unloaded` events are recorded separately.
 
 ## Default-log privacy review and capture deletion
 
@@ -90,7 +95,7 @@ VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT=<absolute path beneath XDG_RUNTIME_DIR>
 # Optional: VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS=<60..3600>
 ```
 
-One capture is capped at 16 content files / 1 MiB of content, plus its owned manifest/expiry; the directory mode is `0700` and every file mode is `0600`. Creation fails closed unless it can launch a detached expiry worker carrying the manifest's random owner nonce, wall-clock manifest expiry, and boot-time monotonic deadline. That worker survives backend exit/crash, receives only a minimal non-secret environment, remains bounded across wall-clock rollback, and deletes only the same manifest owner; an in-process timer is defense in depth, and private runtime tmpfs erases the root across logout/reboot. The verifier captured only labelled synthetic raw bytes/transcript/prompt/response, invoked the public `./manage-diagnostics delete <capture-directory>` path, and proved the directory no longer existed. It also executes the independent expiry worker and monotonic-deadline boundaries and rejects repository-local or outside-runtime roots. No capture or content was written to Git.
+Each capture is capped at 16 content files / 1 MiB plus its owned manifest/expiry; one file-locked root admits at most four owned captures / 4 MiB of content, the directories are `0700`, and every content/manifest/lock file is `0600`. Creation fails closed at the aggregate bound or unless it can launch a detached expiry worker carrying the manifest's random owner nonce, wall-clock manifest expiry, and boot-time monotonic deadline. That worker survives backend exit/crash, receives only a minimal non-secret environment, remains bounded across wall-clock rollback, exits promptly after early deletion, and deletes only the same manifest owner. Thus retained directories, guardians, and reaper threads have the same hard aggregate bound; manifest purge is defense in depth and private runtime tmpfs erases the root across logout/reboot. The verifier captured only labelled synthetic raw bytes/transcript/prompt/response, invoked the public `./manage-diagnostics delete <capture-directory>` path, and proved the directory no longer existed. It also executes the independent expiry worker and monotonic-deadline boundaries and rejects repository-local or outside-runtime roots. No capture or content was written to Git.
 
 ## Safe resource case
 

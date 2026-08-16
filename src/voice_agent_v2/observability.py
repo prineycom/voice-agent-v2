@@ -484,6 +484,11 @@ class TurnTimeline:
     session_id: str
     turn_id: str
     terminal_outcome: str
+    dependency_class: str | None
+    failure_matrix_id: str | None
+    failure_stage: str | None
+    failure_code: str | None
+    user_state: str | None
     endpoint_to_stt_final_ms: float | None
     provider_time_to_first_token_ms: float | None
     provider_completion_ms: float | None
@@ -497,6 +502,11 @@ class TurnTimeline:
             "session_id": self.session_id,
             "turn_id": self.turn_id,
             "terminal_outcome": self.terminal_outcome,
+            "dependency_class": self.dependency_class,
+            "failure_matrix_id": self.failure_matrix_id,
+            "failure_stage": self.failure_stage,
+            "failure_code": self.failure_code,
+            "user_state": self.user_state,
             "endpoint_to_stt_final_ms": self.endpoint_to_stt_final_ms,
             "provider_time_to_first_token_ms": self.provider_time_to_first_token_ms,
             "provider_completion_ms": self.provider_completion_ms,
@@ -551,6 +561,16 @@ def reconstruct_timelines(records: Iterable[Mapping[str, object]]) -> tuple[Turn
         merged = state["fields"]
         assert isinstance(merged, dict)
         for name in (
+            "dependency_class",
+            "failure_matrix_id",
+            "failure_stage",
+            "failure_code",
+            "user_state",
+        ):
+            value = fields.get(name)
+            if isinstance(value, str):
+                merged[name] = value
+        for name in (
             "endpoint_to_stt_final_ms",
             "provider_time_to_first_token_ms",
             "provider_completion_ms",
@@ -587,6 +607,11 @@ def reconstruct_timelines(records: Iterable[Mapping[str, object]]) -> tuple[Turn
             session_id,
             turn_id,
             str(state["terminal"]),
+            fields.get("dependency_class"),
+            fields.get("failure_matrix_id"),
+            fields.get("failure_stage"),
+            fields.get("failure_code"),
+            fields.get("user_state"),
             fields.get("endpoint_to_stt_final_ms"),
             fields.get("provider_time_to_first_token_ms"),
             fields.get("provider_completion_ms"),

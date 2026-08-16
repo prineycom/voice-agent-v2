@@ -200,6 +200,45 @@ class LocalLFMProviderTests(unittest.TestCase):
             "reason_code": "selected_provider_protocol_error",
         })
 
+    def test_health_body_transport_loss_is_dead_not_a_contract_mismatch(self) -> None:
+        health = StubResponse([])
+
+        def fail_read(_limit=None):
+            raise OSError("truncated health transfer")
+
+        health.read = fail_read
+        factory, _created = self.factory([health])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.readiness()
+
+        self.assertEqual(raised.exception.code, "local_lfm_unavailable")
+        self.assertEqual(provider.runtime_health, {
+            "live": False,
+            "ready": False,
+            "compatible": True,
+            "reason_code": "local_lfm_unavailable",
+        })
+
+    def test_invalid_health_document_is_alive_but_incompatible(self) -> None:
+        health = StubResponse([])
+        health._body = b'{invalid'
+        health.read = lambda limit=None: health._body
+        factory, _created = self.factory([health])
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.readiness()
+
+        self.assertEqual(raised.exception.code, "local_lfm_health_failed")
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": False,
+            "compatible": False,
+            "reason_code": "local_lfm_health_failed",
+        })
+
     def test_payload_freezes_voice_sampling_reasoning_and_visible_bounds(self) -> None:
         provider = LocalLFMProvider(connection_factory=lambda *_a, **_k: None)
         payload = provider._payload("session-a", "Почему летом день длиннее?")

@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from voice_agent_v2.diagnostic_expiry import expire_capture
 from voice_agent_v2.diagnostics import (
+    MAX_CAPTURE_DIRECTORIES,
     DiagnosticContentCapture,
     PrivacySafeTrace,
     TraceIdentity,
@@ -150,13 +151,20 @@ class ObservationContractTests(unittest.TestCase):
                     "terminal": True,
                     "outcome": "failed",
                     "dependency_class": "hard",
+                    "failure_matrix_id": "selected_llm_failure",
                     "failure_stage": "llm_provider",
                     "failure_code": "local_lfm_transport_error",
+                    "user_state": "unavailable",
                 },
             ))
             records = [json.loads(line) for line in path.read_text().splitlines()]
             timelines = reconstruct_timelines(records)
             self.assertEqual(timelines[0].terminal_outcome, "failed")
+            self.assertEqual(timelines[0].dependency_class, "hard")
+            self.assertEqual(timelines[0].failure_matrix_id, "selected_llm_failure")
+            self.assertEqual(timelines[0].failure_stage, "llm_provider")
+            self.assertEqual(timelines[0].failure_code, "local_lfm_transport_error")
+            self.assertEqual(timelines[0].user_state, "unavailable")
             self.assertEqual(records[0]["fields"]["dependency_class"], "hard")
 
     def test_one_turn_and_percentiles_reconstruct_only_from_metadata(self) -> None:
@@ -343,6 +351,42 @@ class CaptureAndResourceTests(unittest.TestCase):
             self.assertTrue(DiagnosticContentCapture.delete_path(capture.path))
             self.assertFalse(capture.path.exists())
 
+    def test_capture_root_has_a_hard_aggregate_custody_bound(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            root = Path(directory) / "captures"
+            guardians: list[tuple[Path, str, float, float]] = []
+            captures = [
+                DiagnosticContentCapture(
+                    root,
+                    f"session-bounded-{index}",
+                    opt_in=True,
+                    ttl_seconds=60,
+                    guardian_factory=lambda *arguments: guardians.append(arguments),
+                    runtime_root=Path(directory),
+                )
+                for index in range(MAX_CAPTURE_DIRECTORIES)
+            ]
+            self.assertEqual(len(guardians), MAX_CAPTURE_DIRECTORIES)
+            with self.assertRaisesRegex(RuntimeError, "root limit"):
+                DiagnosticContentCapture(
+                    root,
+                    "session-bounded-overflow",
+                    opt_in=True,
+                    ttl_seconds=60,
+                    guardian_factory=lambda *arguments: guardians.append(arguments),
+                    runtime_root=Path(directory),
+                )
+            self.assertTrue(captures[0].delete())
+            replacement = DiagnosticContentCapture(
+                root,
+                "session-bounded-replacement",
+                opt_in=True,
+                ttl_seconds=60,
+                guardian_factory=lambda *arguments: guardians.append(arguments),
+                runtime_root=Path(directory),
+            )
+            self.assertTrue(replacement.path.exists())
+
     def test_capture_rejects_project_path_and_exercises_expiry(self) -> None:
         with self.assertRaisesRegex(ValueError, "outside Git"):
             DiagnosticContentCapture(
@@ -351,30 +395,10 @@ class CaptureAndResourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             clock = [1000.0]
             uptime = [500.0]
-            scheduled: list[object] = []
-
-            class ManualTimer:
-                daemon = False
-
-                def __init__(self, _delay: float, callback) -> None:
-                    self.callback = callback
-                    self.cancelled = False
-                    scheduled.append(self)
-
-                def start(self) -> None:
-                    pass
-
-                def cancel(self) -> None:
-                    self.cancelled = True
-
-                def fire(self) -> None:
-                    if not self.cancelled:
-                        self.callback()
-
             guardians: list[tuple[Path, str, float, float]] = []
             capture = DiagnosticContentCapture(
                 Path(directory), "session-expiry", opt_in=True,
-                ttl_seconds=60, now=lambda: clock[0], timer_factory=ManualTimer,
+                ttl_seconds=60, now=lambda: clock[0],
                 guardian_factory=lambda *arguments: guardians.append(arguments),
                 runtime_root=Path(directory), uptime_now=lambda: uptime[0],
             )
@@ -394,7 +418,11 @@ class CaptureAndResourceTests(unittest.TestCase):
             ))
             self.assertGreaterEqual(len(delays), 2)
             self.assertFalse(capture.path.exists())
-            scheduled[0].fire()
+            self.assertFalse(expire_capture(
+                *guardians[0],
+                uptime_now=lambda: 500.0,
+                sleep=lambda _delay: self.fail("deleted capture guardian must exit"),
+            ))
 
     def test_expiry_guardian_receives_only_minimal_environment(self) -> None:
         class FinishedProcess:
@@ -433,6 +461,8 @@ class CaptureAndResourceTests(unittest.TestCase):
                 "owner_nonce": nonce,
                 "max_files": 16,
                 "max_bytes": 1_048_576,
+                "root_max_captures": 4,
+                "root_max_content_bytes": 4_194_304,
                 "explicit_opt_in": True,
             }))
             process = subprocess.Popen(

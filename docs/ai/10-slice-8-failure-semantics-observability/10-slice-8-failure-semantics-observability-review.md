@@ -36,7 +36,7 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | PASS | 244 network-denied Python behavioral tests after follow-up regressions. |
+| `./verify` | PASS | 250 network-denied Python behavioral tests after all follow-up regressions. |
 | `./verify-slice8` | PASS | Full matrix/privacy/readiness/capture/process/resource and focused browser gate. |
 | `./verify-slice7` | PASS | Avatar/UI tests/builds. |
 | `./verify-local-lfm` | PASS | Exact real local provider and cancellation/recovery. |
@@ -52,9 +52,9 @@ The follow-up commit on top of the exact pipeline head closes every remaining re
 
 | Finding | Final correction |
 | --- | --- |
-| `READY-002` | Local LFM now owns separate live/ready/compatible/reason state. Transport loss is dead/unready; identity/contract failure is alive/unready/incompatible; both block admission and success is the only compatibility recovery. |
-| `OBS-002` | `dependency_class` is a closed `hard|soft` observation scalar and a real failed-turn record reconstructs from emitted metadata. |
-| `PRIV-001` | Capture is restricted to the private user-owned `XDG_RUNTIME_DIR`; creation fails closed unless it launches a detached manifest-owner expiry process with wall-clock manifest metadata and a boot-time monotonic deadline. The guardian receives only a minimal non-secret environment, the independent executable/clock-rollback paths are tested, the in-process timer/purge remain defense in depth, and runtime tmpfs removes data over logout/reboot. |
+| `READY-002` / `READY-003` / `READY-004` | Local LFM owns separate live/ready/compatible/reason state. Header/body I/O loss is dead/unready but remains independently compatible; a responding identity/protocol/health-contract failure is alive/unready/incompatible. Both block admission and success is the only compatibility recovery. |
+| `OBS-002` / `OBS-003` | `dependency_class` is a closed `hard|soft` observation scalar; failed-turn reconstruction/report retains dependency class, matrix ID, failure stage/code, and user state from emitted metadata. |
+| `PRIV-001` / `PRIV-002` / `PRIV-003` / `PRIV-004` | Capture is restricted to private user-owned `XDG_RUNTIME_DIR`; creation fails closed unless it launches a detached manifest-owner expiry process with a boot-time monotonic deadline and minimal non-secret environment. A file-locked root admits at most four captures / 4 MiB, bounding retained data, guardians, and reapers; workers exit promptly after early deletion. Independent executable/clock-rollback/aggregate paths are tested, manifest purge is defense in depth, and runtime tmpfs removes data over logout/reboot. |
 | `PERF-001` | `/proc`/`nvidia-smi` sampling is serialized off the asyncio event loop via background `to_thread` tasks; endpoint admission has a timing regression proving it does not wait for a slow sampler. |
 | `DOC-001` | Late/duplicate control now has the allowed `degraded` consequence: strict drop, visible/diagnostic count, no phase/media action, with new-session recovery. Executable mapper, reducer, System mapping, tests, architecture, and evidence agree. |
 

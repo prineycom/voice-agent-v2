@@ -248,11 +248,9 @@ class LocalLFMProvider:
     def readiness(self, cancellation: CancellationToken | None = None) -> dict[str, object]:
         generation = self._begin_operation(cancellation)
         connection = self._register_connection(generation, READINESS_TIMEOUT_SECONDS)
-        response_received = False
         try:
             connection.request("GET", "/health", headers={"Connection": "close"})
             response = connection.getresponse()
-            response_received = True
             self._set_runtime_health(live=True)
             body = response.read(4_097)
             if self._cancelled(generation):
@@ -265,13 +263,20 @@ class LocalLFMProvider:
         except StageFailure as error:
             self._record_runtime_failure(error.code)
             raise
-        except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError) as error:
-            if self._cancelled(generation):
-                code = "selected_provider_cancelled"
-            elif response_received:
-                code = "local_lfm_health_failed"
-            else:
-                code = "local_lfm_unavailable"
+        except (UnicodeError, json.JSONDecodeError) as error:
+            code = (
+                "selected_provider_cancelled"
+                if self._cancelled(generation)
+                else "local_lfm_health_failed"
+            )
+            self._record_runtime_failure(code)
+            raise StageFailure("llm_provider", code) from error
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
+            code = (
+                "selected_provider_cancelled"
+                if self._cancelled(generation)
+                else "local_lfm_unavailable"
+            )
             self._record_runtime_failure(code)
             raise StageFailure("llm_provider", code) from error
         finally:

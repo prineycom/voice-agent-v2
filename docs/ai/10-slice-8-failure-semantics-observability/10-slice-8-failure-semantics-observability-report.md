@@ -25,24 +25,24 @@
 | No silent provider/model/cloud STT/TTS/auth/wake/avatar change | ✅ | Every disposition closes six change flags false; health contract fixes local mode/transfer/fallback/STT/TTS/auth/wake/avatar facts; existing active composition unchanged. |
 | Bounded retry/recovery; no admission/restart loop | ✅ | Browser reconnect publications bounded by 5-second/10-attempt window; inference request retry and product automatic service restart are zero. Disposable real process permits one test-only recovery and blocks a second restart. |
 | Preregistered latency/resource percentiles and slow stage computable | ✅ diagnostic | `config/observability-v1.json`; nearest-rank p50/p95/p99 report with sample count. A one-turn example is diagnostic only; 20-turn acceptance claim remains open. |
-| Content capture off by default, bounded/outside Git, deletion exercised | ✅ | Exact enable flag plus private user-owned `XDG_RUNTIME_DIR` root, 900-second TTL default with a 60–3,600-second override bound, 16 content files/1 MiB plus manifest, `0700`/`0600`, owner-nonce detached expiry across backend exit/crash, runtime-tmpfs logout/reboot erasure, and public early deletion. |
+| Content capture off by default, bounded/outside Git, deletion exercised | ✅ | Exact enable flag plus private user-owned `XDG_RUNTIME_DIR`, 60–3,600-second TTL, 16 files/1 MiB per capture and four captures/4 MiB per file-locked root, `0700`/`0600`, minimal-env owner-nonce detached expiry across backend exit/crash/clock rollback, prompt exit after early deletion, runtime-tmpfs logout/reboot erasure, and public early deletion. |
 | Safe real process/resource validation | ✅ bounded | Two disposable process losses, one bounded recovery, second blocked; exact 16-MiB/100-ms safe pressure with serialized background `/proc`/read-only GPU sampling. A slow-sampler regression proves endpoint admission does not wait. |
 
 ## No-mistakes follow-up
 
-The first pipeline head `556d57eb` fixed `OBS-001`, `READY-001`, `FAIL-001`, and `DATA-001`, but its fix review still reported `READY-002`, `OBS-002`, `PRIV-001`, `PERF-001`, and document finding `DOC-001`. Pasha explicitly accepted all five. The final follow-up separates live/ready/compatible local-LFM state, closes `dependency_class`, adds private-runtime detached hard expiry, removes resource subprocess work from the asyncio path, and gives late/duplicate events the executable `degraded` consequence. The review artifact records the exact mapping.
+The first pipeline head `556d57eb` fixed `OBS-001`, `READY-001`, `FAIL-001`, and `DATA-001`; its fix review then reported the accepted `READY-002`, `OBS-002`, `PRIV-001`, `PERF-001`, and `DOC-001`. The follow-up pipelines refined those into `READY-003/004`, `OBS-003`, and `PRIV-002/003/004`. The final boundary classifies transport versus responding contract health independently, reconstructs all failure metadata, enforces independent minimal-env monotonic expiry plus aggregate custody bounds, removes resource subprocess work from the asyncio path, and gives late/duplicate events the executable `degraded` consequence. The review artifact records each correction.
 
 ## Validation
 
 | Command | Result | Notes |
 | --- | --- | --- |
 | `no-mistakes doctor` | PASS | Shared daemon healthy; not restarted/updated. |
-| `./verify-slice8` | PASS | 51 Python focused tests, safe process/resource/privacy verifier, 66 focused browser tests; 12-row matrix complete. |
-| `./verify` | PASS | 244 Python behavioral tests; network-denied deterministic root trace. |
+| `./verify-slice8` | PASS | 53 Python focused tests, safe process/resource/privacy verifier, 66 focused browser tests; 12-row matrix complete. |
+| `./verify` | PASS | 250 Python behavioral tests; network-denied deterministic root trace. |
 | `./verify-slice7` | PASS | 84 focused avatar/UI/browser tests plus production/review builds; replay hash unchanged. |
 | `./verify-local-lfm` | PASS | Exact local identity/hashes/2×32K slots, parallel/cancellation/recovery; no cloud/fallback. |
 | `./verify-silero-kseniya` | PASS | Exact-cache two-worker/native-48 focused real check; physical claims explicitly absent. |
-| `./verify-slice6` | PASS | 244 Python + installed runtime + 85 web tests/builds + deterministic Firefox/official LiveKit regression. Physical audibility not claimed. |
+| `./verify-slice6` | PASS | 250 Python + installed runtime + 85 web tests/builds + deterministic Firefox/official LiveKit regression. Physical audibility not claimed. |
 | `git diff --check` / Python compile / TypeScript typecheck | PASS | Clean whitespace/syntax/type boundaries at implementation checkpoint. |
 
 ## Unresolved uncertainty

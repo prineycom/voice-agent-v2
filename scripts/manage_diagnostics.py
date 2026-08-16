@@ -11,7 +11,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from voice_agent_v2.diagnostics import DiagnosticContentCapture  # noqa: E402
+from voice_agent_v2.diagnostics import (  # noqa: E402
+    MAX_CAPTURE_BYTES,
+    MAX_CAPTURE_DIRECTORIES,
+    MAX_CAPTURE_FILES,
+    MAX_CAPTURE_ROOT_BYTES,
+    DiagnosticContentCapture,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +44,10 @@ def safe_manifest(path: Path) -> dict[str, object]:
         or resolved.name != f"capture-{document.get('session_id')}"
         or not isinstance(document.get("owner_nonce"), str)
         or len(document["owner_nonce"]) != 32
+        or document.get("max_files") != MAX_CAPTURE_FILES
+        or document.get("max_bytes") != MAX_CAPTURE_BYTES
+        or document.get("root_max_captures") != MAX_CAPTURE_DIRECTORIES
+        or document.get("root_max_content_bytes") != MAX_CAPTURE_ROOT_BYTES
     ):
         raise ValueError("capture manifest is invalid")
     # Never enumerate or print captured content names.
@@ -48,6 +58,8 @@ def safe_manifest(path: Path) -> dict[str, object]:
         "expires_unix_seconds": document["expires_unix_seconds"],
         "max_files": document["max_files"],
         "max_bytes": document["max_bytes"],
+        "root_max_captures": document["root_max_captures"],
+        "root_max_content_bytes": document["root_max_content_bytes"],
         "explicit_opt_in": True,
         "path": str(resolved),
     }

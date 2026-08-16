@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -32,10 +35,33 @@ MAX_TRACE_AGE_SECONDS = 7 * 24 * 60 * 60
 MAX_TRACE_FAILURES = 20_000
 MAX_CAPTURE_BYTES = 1 * 1024 * 1024
 MAX_CAPTURE_FILES = 16
+MAX_CAPTURE_DIRECTORIES = 4
+MAX_CAPTURE_ROOT_BYTES = MAX_CAPTURE_BYTES * MAX_CAPTURE_DIRECTORIES
 MIN_CAPTURE_TTL_SECONDS = 60
 MAX_CAPTURE_TTL_SECONDS = 60 * 60
 _DIRECTORY_LOCK = threading.Lock()
 _CAPTURE_KINDS = frozenset({"raw-audio", "transcript", "prompt", "response"})
+
+
+@contextmanager
+def _capture_root_lock(root: Path):
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(root, 0o700)
+    descriptor = os.open(
+        root / ".capture.lock",
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        lock_status = os.fstat(descriptor)
+        if not stat.S_ISREG(lock_status.st_mode) or lock_status.st_uid != os.getuid():
+            raise ValueError("diagnostic capture root lock is not owned")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _uptime_seconds() -> float:
@@ -308,9 +334,6 @@ class DiagnosticContentCapture:
         opt_in: bool,
         ttl_seconds: int = 15 * 60,
         now: Callable[[], float] = time.time,
-        timer_factory: Callable[
-            [float, Callable[[], None]], threading.Timer
-        ] = threading.Timer,
         guardian_factory: Callable[[Path, str, float, float], None] = _spawn_expiry_guardian,
         runtime_root: Path | None = None,
         uptime_now: Callable[[], float] = _uptime_seconds,
@@ -358,38 +381,45 @@ class DiagnosticContentCapture:
         self._files = 0
         self._bytes = 0
         self._lock = threading.RLock()
-        self._expiry_timer: threading.Timer | None = None
         self.purge_expired(resolved, now=now)
-        self.path.mkdir(parents=True, exist_ok=False, mode=0o700)
-        try:
-            os.chmod(self.path, 0o700)
-            manifest = {
-                "schema_version": "voice-agent.diagnostic-content-capture.v1",
-                "session_id": session_id,
-                "created_unix_seconds": self._created,
-                "expires_unix_seconds": self._expires,
-                "owner_nonce": self._owner_nonce,
-                "max_files": MAX_CAPTURE_FILES,
-                "max_bytes": MAX_CAPTURE_BYTES,
-                "explicit_opt_in": True,
-            }
-            self._write_file(
-                "manifest.json",
-                json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
-            )
-            guardian_factory(
-                self.path,
-                self._owner_nonce,
-                self._expires,
-                self._expires_uptime,
-            )
-            expiry_timer = timer_factory(ttl_seconds, self._expire_now)
-            expiry_timer.daemon = True
-            self._expiry_timer = expiry_timer
-            expiry_timer.start()
-        except BaseException:
-            shutil.rmtree(self.path, ignore_errors=True)
-            raise
+        with _capture_root_lock(resolved):
+            owned = 0
+            for directory in resolved.glob("capture-*"):
+                try:
+                    self._owned_manifest(directory)
+                except ValueError:
+                    continue
+                owned += 1
+            if owned >= MAX_CAPTURE_DIRECTORIES:
+                raise RuntimeError("diagnostic capture root limit reached")
+            self.path.mkdir(exist_ok=False, mode=0o700)
+            try:
+                os.chmod(self.path, 0o700)
+                manifest = {
+                    "schema_version": "voice-agent.diagnostic-content-capture.v1",
+                    "session_id": session_id,
+                    "created_unix_seconds": self._created,
+                    "expires_unix_seconds": self._expires,
+                    "owner_nonce": self._owner_nonce,
+                    "max_files": MAX_CAPTURE_FILES,
+                    "max_bytes": MAX_CAPTURE_BYTES,
+                    "root_max_captures": MAX_CAPTURE_DIRECTORIES,
+                    "root_max_content_bytes": MAX_CAPTURE_ROOT_BYTES,
+                    "explicit_opt_in": True,
+                }
+                self._write_file(
+                    "manifest.json",
+                    json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
+                )
+                guardian_factory(
+                    self.path,
+                    self._owner_nonce,
+                    self._expires,
+                    self._expires_uptime,
+                )
+            except BaseException:
+                shutil.rmtree(self.path, ignore_errors=True)
+                raise
         self._files = 0
         self._bytes = 0
 
@@ -427,18 +457,8 @@ class DiagnosticContentCapture:
             self._bytes += len(encoded)
             return self.path / name
 
-    def _expire_now(self) -> None:
-        try:
-            self.delete()
-        except RuntimeError:
-            pass
-
     def delete(self) -> bool:
         with self._lock:
-            timer = self._expiry_timer
-            self._expiry_timer = None
-            if timer is not None:
-                timer.cancel()
             if not self.path.exists():
                 return False
             try:
@@ -451,12 +471,7 @@ class DiagnosticContentCapture:
                 raise RuntimeError("diagnostic capture deletion guard failed") from error
 
     @staticmethod
-    def delete_path(
-        path: Path,
-        *,
-        expected_owner_nonce: str | None = None,
-        expected_expires_unix_seconds: float | None = None,
-    ) -> bool:
+    def _owned_manifest(path: Path) -> tuple[Path, dict[str, object]]:
         expanded = path.expanduser()
         if expanded.is_symlink():
             raise ValueError("path is not an owned outside-Git diagnostic capture")
@@ -478,14 +493,28 @@ class DiagnosticContentCapture:
             or resolved.name != f"capture-{document.get('session_id')}"
             or not isinstance(document.get("owner_nonce"), str)
             or len(document["owner_nonce"]) != 32
-            or (
-                expected_owner_nonce is not None
-                and document["owner_nonce"] != expected_owner_nonce
-            )
-            or (
-                expected_expires_unix_seconds is not None
-                and document.get("expires_unix_seconds") != expected_expires_unix_seconds
-            )
+            or document.get("max_files") != MAX_CAPTURE_FILES
+            or document.get("max_bytes") != MAX_CAPTURE_BYTES
+            or document.get("root_max_captures") != MAX_CAPTURE_DIRECTORIES
+            or document.get("root_max_content_bytes") != MAX_CAPTURE_ROOT_BYTES
+        ):
+            raise ValueError("diagnostic capture manifest does not own this path")
+        return resolved, document
+
+    @staticmethod
+    def delete_path(
+        path: Path,
+        *,
+        expected_owner_nonce: str | None = None,
+        expected_expires_unix_seconds: float | None = None,
+    ) -> bool:
+        resolved, document = DiagnosticContentCapture._owned_manifest(path)
+        if (
+            expected_owner_nonce is not None
+            and document["owner_nonce"] != expected_owner_nonce
+        ) or (
+            expected_expires_unix_seconds is not None
+            and document.get("expires_unix_seconds") != expected_expires_unix_seconds
         ):
             raise ValueError("diagnostic capture manifest does not own this path")
         shutil.rmtree(resolved)
