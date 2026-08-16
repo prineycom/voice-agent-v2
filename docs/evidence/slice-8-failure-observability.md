@@ -16,7 +16,7 @@
 
 Existing boundaries remain in place: `PrivacySafeTrace` stores bounded outside-Git JSONL, `realtime-control.v2` carries public health/failure/timing/provider/count/resource payloads, `voiceReducer` owns client state, and the existing System/Timeline tabs render it. No telemetry server, generalized event bus, control plane, hosted vendor, alternate provider, or TTS/avatar selector was added.
 
-The active composition is unchanged: local LiveKit, Whisper large-v3-turbo, fixed local LFM2.5 Q4_K_M/llama.cpp, exact Silero `v5_5_ru` / `kseniya`, renderer-agnostic avatar host with the selected MVP eye/static safety representation, tailnet authorization, no wake, and no fallback. Health reports close these facts as `provider_mode=local`, `external_transfer=false`, `automatic_fallback=false`, local STT/TTS, `auth_boundary=tailnet`, `wake_enabled=false`, and `selected_avatar_module=mvp-eye-svg-v1`.
+At the Slice 8 checkpoint, the composition remained local LiveKit, Whisper large-v3-turbo, fixed local LFM2.5 Q4_K_M/llama.cpp, exact Silero `v5_5_ru` / `kseniya`, and the renderer-agnostic avatar host with the selected MVP eye and then-configured static safety renderer. Health reports closed the server facts as `provider_mode=local`, `external_transfer=false`, `automatic_fallback=false`, local STT/TTS, `auth_boundary=tailnet`, `wake_enabled=false`, and `selected_avatar_module=mvp-eye-svg-v1`. Current avatar composition is owned by [`architecture.md`](../architecture.md#61-host-and-service-lifecycle).
 
 ## Readiness compatibility report
 
