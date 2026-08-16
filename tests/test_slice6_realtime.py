@@ -300,6 +300,48 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(degraded["payload"]["code"], "microphone_stream_failed")
         self.assertTrue(session.closed)
 
+    async def test_repeated_cancellation_waits_for_requested_degradation_publish(self) -> None:
+        class BlockingDegradedEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.degraded_started = asyncio.Event()
+                self.release_degraded = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "session.degraded":
+                    self.degraded_started.set()
+                    await self.release_degraded.wait()
+                await super().send(event)
+
+        events = BlockingDegradedEvents()
+        session = RealtimeSession(
+            session_id="session-repeated-cancel-degrade",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(
+            session.fail("microphone_capture", "microphone_stream_failed")
+        )
+        await asyncio.wait_for(events.degraded_started.wait(), 0.5)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(caller.done())
+        events.release_degraded.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        degraded = next(
+            event for event in events.events if event["type"] == "session.degraded"
+        )
+        self.assertEqual(degraded["payload"]["stage"], "microphone_capture")
+        self.assertEqual(degraded["payload"]["code"], "microphone_stream_failed")
+        self.assertTrue(session.closed)
+
     async def test_cancelled_initial_failure_terminal_closes_admission(self) -> None:
         class BlockingFailureEvents(MemoryEvents):
             def __init__(self) -> None:

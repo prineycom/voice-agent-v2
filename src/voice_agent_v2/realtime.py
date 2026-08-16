@@ -919,22 +919,42 @@ class RealtimeSession:
             self.failure_handler(stage, code)
 
     async def _publish_degraded_locked(self, stage: str, code: str) -> None:
-        try:
-            await self._emit(
-                SESSION_TURN_ID,
-                "session.degraded",
-                {
-                    "state": "degraded",
-                    "stage": stage,
-                    "code": code,
-                    **failure_payload(stage, code),
-                    "health": self._health_report(
-                        failed_stage=stage, failure_code=code
-                    ),
-                },
-            )
-        finally:
-            self._report_failure(stage, code)
+        async def publish() -> None:
+            try:
+                await self._emit(
+                    SESSION_TURN_ID,
+                    "session.degraded",
+                    {
+                        "state": "degraded",
+                        "stage": stage,
+                        "code": code,
+                        **failure_payload(stage, code),
+                        "health": self._health_report(
+                            failed_stage=stage, failure_code=code
+                        ),
+                    },
+                )
+            finally:
+                self._report_failure(stage, code)
+
+        operation = asyncio.create_task(
+            publish(), name=f"publish-session-degraded-{self.session_id}"
+        )
+        cancellation_requested = False
+        while True:
+            try:
+                await asyncio.shield(operation)
+                break
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                if operation.done():
+                    await operation
+                    break
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        if cancellation_requested:
+            raise asyncio.CancelledError
 
     async def _degrade_locked(self, stage: str, code: str) -> None:
         if self._closed:
@@ -2429,7 +2449,15 @@ class RealtimeSession:
                     and correlated_turn
                     and context.public_event_published
                 )
-                if cancelled_terminal or cancelled_post_announcement:
+                cancelled_session_degradation = (
+                    turn_id == SESSION_TURN_ID
+                    and event_type == "session.degraded"
+                )
+                if (
+                    cancelled_terminal
+                    or cancelled_post_announcement
+                    or cancelled_session_degradation
+                ):
                     self._record_control_publish_failure(
                         event, turn_id, event_type, error
                     )
