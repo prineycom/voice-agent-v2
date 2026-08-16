@@ -582,15 +582,14 @@ def reconcile_serve_routes(
         )
         for https_port, target in routes
     }
-    conflicts = [str(port) for port, state in states.items() if state == "conflict"]
-    if conflicts:
+    collisions = [str(port) for port, state in states.items() if state != "absent"]
+    if collisions:
         raise Slice6ConfigurationError(
-            "conflicting Tailscale Serve mapping on HTTPS/" + ", HTTPS/".join(conflicts)
+            "required Tailscale Serve route is already externally owned or conflicting on HTTPS/"
+            + ", HTTPS/".join(collisions)
         )
 
     for https_port, target in routes:
-        if states[https_port] == "preexisting":
-            continue
         role = (
             "tailnet-app-route" if target.endswith(f":{GATEWAY_PORT}")
             else "tailnet-signal-route"
@@ -781,11 +780,7 @@ def main() -> int:
 
         operational_unready_since: float | None = None
         while not stopping:
-            for process in supervisor.processes:
-                if process.poll() is not None:
-                    raise ServiceProcessFailure(
-                        f"supervised component exited unexpectedly: {supervisor.role(process)}"
-                    )
+            require_supervised_children_alive(supervisor, phase="during runtime")
             if gateway_operational_ready(
                 expected_build_id=settings.build_id,
                 expected_release_id=settings.release_id,

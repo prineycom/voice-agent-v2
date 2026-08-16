@@ -357,7 +357,7 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             "http://127.0.0.1:3000",
         )
 
-    def test_exact_preexisting_routes_start_no_children_and_survive_cleanup(self) -> None:
+    def test_exact_preexisting_routes_fail_closed_without_touching_external_routes(self) -> None:
         for document in (serve_document(*ROUTES), foreground_serve_document(*ROUTES)):
             with self.subTest(foreground="Foreground" in document):
                 original = copy.deepcopy(document)
@@ -365,21 +365,27 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
                 with (
                     patch.object(run_slice6, "read_tailscale_serve_status", return_value=document),
                     patch.object(run_slice6.subprocess, "Popen") as popen,
+                    self.assertRaisesRegex(
+                        Slice6ConfigurationError, "externally owned or conflicting",
+                    ),
                 ):
-                    states = run_slice6.reconcile_serve_routes(
+                    run_slice6.reconcile_serve_routes(
                         supervisor=supervisor,
                         environment={},
                         hostname=HOSTNAME,
                         routes=ROUTES,
                     )
-                    supervisor.close()
-                self.assertEqual(states, {8443: "preexisting", 7443: "preexisting"})
                 self.assertEqual(supervisor.processes, [])
                 popen.assert_not_called()
                 self.assertEqual(document, original)
+                self.assertEqual(
+                    document["Web"][f"{HOSTNAME}:443"]["Handlers"]["/"]["Proxy"],
+                    "http://127.0.0.1:3000",
+                )
 
     def test_absent_routes_are_created_serially_and_both_children_are_supervised(self) -> None:
         events: list[str] = []
+        commands: list[list[str]] = []
         app_process = FakeProcess()
         signal_process = FakeProcess()
         statuses = iter([
@@ -393,6 +399,7 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             return next(statuses)
 
         def popen(command: list[str], **_kwargs: object) -> FakeProcess:
+            commands.append(command)
             port = "8443" if "--https=8443" in command else "7443"
             events.append(f"start-{port}")
             return app_process if port == "8443" else signal_process
@@ -413,6 +420,10 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
             ["status", "start-8443", "status", "start-7443", "status"],
         )
         self.assertEqual(states, {8443: "owned", 7443: "owned"})
+        self.assertEqual(commands, [
+            ["tailscale", "serve", "--yes", "--https=8443", APP_TARGET],
+            ["tailscale", "serve", "--yes", "--https=7443", SIGNAL_TARGET],
+        ])
         self.assertEqual(supervisor.processes, [app_process, signal_process])
         supervisor.close()
         self.assertTrue(app_process.terminated)
@@ -530,6 +541,23 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
                     supervisor.close()
         self.assertEqual(supervisor.processes, [first])
         self.assertTrue(first.terminated)
+
+    def test_owned_route_disappearance_is_a_runtime_failure(self) -> None:
+        route = FakeProcess()
+        supervisor = run_slice6.ProcessSupervisor()
+        with patch.object(run_slice6.subprocess, "Popen", return_value=route):
+            supervisor.start(
+                ["tailscale", "serve", "--yes", "--https=8443", APP_TARGET],
+                role="tailnet-app-route",
+            )
+        route.returncode = 1
+        with self.assertRaisesRegex(
+            run_slice6.ServiceProcessFailure,
+            "tailnet-app-route",
+        ):
+            run_slice6.require_supervised_children_alive(
+                supervisor, phase="during runtime",
+            )
 
     def test_ctrl_c_path_stops_owned_children_in_reverse_without_touching_external_routes(self) -> None:
         first = FakeProcess()

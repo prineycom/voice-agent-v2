@@ -145,7 +145,7 @@ class ValidationReport:
 def _json_object(path: Path, *, code: str) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, ValueError) as error:
         raise OperationalError(code, f"{path.name} is unavailable or invalid") from error
     if not isinstance(value, dict):
         raise OperationalError(code, f"{path.name} is not a JSON object")

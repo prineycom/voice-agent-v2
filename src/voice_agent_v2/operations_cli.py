@@ -260,7 +260,7 @@ def _install_service_locked(
     changed = not identical
     if changed:
         _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(unit), str(SYSTEM_UNIT_PATH))
-        _sudo("systemctl", "daemon-reload")
+    _sudo("systemctl", "daemon-reload")
     unit_changed = changed
     enabled = _sudo(
         "systemctl", "is-enabled", SERVICE_NAME, allowed=(0, 1, 3, 4),

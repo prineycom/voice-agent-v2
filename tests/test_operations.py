@@ -31,6 +31,7 @@ from voice_agent_v2.operations import (
     parse_server_configuration,
     release_tree_digest,
     sha256_file,
+    validate_release,
     validate_server_configuration,
     verify_artifacts,
     verify_disk_policy,
@@ -182,6 +183,41 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertFalse(any(command[0] in {"install", "systemctl"} and (
                 command[0] == "install" or command[1] in {"enable", "start", "restart"}
             ) for command in calls))
+            wait.assert_called_once_with(release.name)
+            self.assertIn(("systemctl", "daemon-reload"), calls)
+            self.assertFalse(output.call_args.args[0]["changed"])
+
+    def test_identical_unit_retries_daemon_reload_after_a_prior_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state, release, arguments = self._fixture(Path(temporary))
+            reload_attempts = 0
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                nonlocal reload_attempts
+                if command == ("systemctl", "daemon-reload"):
+                    reload_attempts += 1
+                    if reload_attempts == 1:
+                        raise OperationalError(
+                            "systemd_install_failed", "fixture reload failure",
+                        )
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "validate_release", return_value={}),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(
+                    operations_cli, "_runtime_status",
+                    return_value={"release_id": release.name},
+                ),
+                patch.object(operations_cli, "_wait_for_runtime_release") as wait,
+                patch.object(operations_cli, "_print") as output,
+            ):
+                with self.assertRaisesRegex(OperationalError, "reload failure"):
+                    operations_cli.command_install_service(arguments)
+                operations_cli.command_install_service(arguments)
+
+            self.assertEqual(reload_attempts, 2)
             wait.assert_called_once_with(release.name)
             self.assertFalse(output.call_args.args[0]["changed"])
 
@@ -950,6 +986,38 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             self.assertEqual(result["replaced_release_id"], current.name)
             self.assertIsNone(result["replaced_build_id"])
             self.assertFalse(result["replaced_release_compatible"])
+
+    def test_rollback_recovers_when_current_manifest_has_an_oversized_integer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            releases = state / "releases"
+            current = releases / ("7" * 24)
+            previous = releases / ("8" * 24)
+            current.mkdir(parents=True, mode=0o700)
+            previous.mkdir(mode=0o700)
+            current.chmod(0o700)
+            manifest = current / "release.json"
+            manifest.write_text(
+                '{"invalid":' + "9" * 5000 + "}", encoding="utf-8",
+            )
+            manifest.chmod(0o600)
+            (state / "current").symlink_to(f"releases/{current.name}")
+            (state / "previous").symlink_to(f"releases/{previous.name}")
+
+            def validation(path: Path, **kwargs: object) -> dict[str, object]:
+                if path.resolve() == previous.resolve():
+                    return {"build_id": "8" * 40}
+                return validate_release(path, **kwargs)
+
+            with patch(
+                "voice_agent_v2.operations.validate_release", side_effect=validation,
+            ):
+                result = ReleaseStore(state).rollback()
+
+            self.assertEqual((state / "current").resolve(), previous.resolve())
+            self.assertEqual((state / "previous").resolve(), current.resolve())
+            self.assertFalse(result["replaced_release_compatible"])
+            self.assertIsNone(result["replaced_build_id"])
 
     def test_verified_rollback_swaps_only_current_and_previous(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
