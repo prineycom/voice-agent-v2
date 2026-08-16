@@ -1,14 +1,31 @@
 #!/bin/sh
 set -eu
-
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-mkdir -p "$ROOT/tmp"
-RUN_ROOT=$(mktemp -d "$ROOT/tmp/verify.XXXXXX")
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+umask 077
+if [ -n "${VOICE_AGENT_MUTABLE_STATE_ROOT:-}" ]; then
+  MUTABLE_ROOT=$VOICE_AGENT_MUTABLE_STATE_ROOT
+elif [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  MUTABLE_ROOT=$XDG_RUNTIME_DIR/voice-agent-v2
+else
+  MUTABLE_ROOT=/var/tmp/voice-agent-v2-$(id -u)
+fi
+case "$MUTABLE_ROOT" in
+  /*) ;;
+  *) echo "voice-agent mutable state root must be absolute" >&2; exit 2 ;;
+esac
+[ ! -L "$MUTABLE_ROOT" ] || { echo "voice-agent mutable state root must not be a symlink" >&2; exit 2; }
+mkdir -p "$MUTABLE_ROOT"
+[ "$(stat -c %u "$MUTABLE_ROOT")" = "$(id -u)" ] && [ "$(stat -c %a "$MUTABLE_ROOT")" = 700 ] || {
+  echo "voice-agent mutable state root must be private and user-owned" >&2
+  exit 2
+}
+mkdir -p "$MUTABLE_ROOT/verify"
+RUN_ROOT=$(mktemp -d "$MUTABLE_ROOT/verify/run.XXXXXX")
 trap 'rm -rf "$RUN_ROOT"' EXIT HUP INT TERM
-mkdir -p "$RUN_ROOT/home" "$RUN_ROOT/temp"
-
+mkdir -p "$RUN_ROOT/home" "$RUN_ROOT/cache" "$RUN_ROOT/temp" "$RUN_ROOT/pycache"
 HOME="$RUN_ROOT/home" \
 XDG_CACHE_HOME="$RUN_ROOT/cache" \
 TMPDIR="$RUN_ROOT/temp" \
+PYTHONPYCACHEPREFIX="$RUN_ROOT/pycache" \
 LC_ALL=C.UTF-8 \
 python3 -I -B "$ROOT/scripts/verify.py" "$@"

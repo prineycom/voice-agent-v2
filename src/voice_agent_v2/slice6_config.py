@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 
 from .runtime_directory import require_lifetime_runtime_root
@@ -14,6 +15,8 @@ from .runtime_directory import require_lifetime_runtime_root
 
 TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 LOOPBACK_APP_ORIGIN = "http://127.0.0.1:8000"
+BUILD_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{40})$")
+RELEASE_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{24})$")
 
 
 class Slice6ConfigurationError(ValueError):
@@ -96,6 +99,8 @@ class Slice6Settings:
     max_sessions: int = 1
     diagnostic_capture_root: Path | None = None
     diagnostic_capture_ttl_seconds: int = 15 * 60
+    build_id: str = "development"
+    release_id: str = "development"
 
     @classmethod
     def from_environment(
@@ -179,6 +184,10 @@ class Slice6Settings:
                 raise Slice6ConfigurationError("invalid diagnostic capture TTL") from error
             if not 60 <= diagnostic_capture_ttl_seconds <= 3_600:
                 raise Slice6ConfigurationError("diagnostic capture TTL is outside 60..3600 seconds")
+        build_id = values.get("VOICE_AGENT_BUILD_ID", "development")
+        release_id = values.get("VOICE_AGENT_RELEASE_ID", "development")
+        if not BUILD_ID_PATTERN.fullmatch(build_id) or not RELEASE_ID_PATTERN.fullmatch(release_id):
+            raise Slice6ConfigurationError("operational build/release identity is invalid")
         return cls(
             livekit_api_key=api_key,
             livekit_api_secret=api_secret,
@@ -188,4 +197,6 @@ class Slice6Settings:
             web_dist=web_dist,
             diagnostic_capture_root=diagnostic_capture_root,
             diagnostic_capture_ttl_seconds=diagnostic_capture_ttl_seconds,
+            build_id=build_id,
+            release_id=release_id,
         )

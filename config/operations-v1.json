@@ -1,0 +1,271 @@
+{
+  "schema_version": "voice-agent.operations.v1",
+  "deployment": {
+    "service_name": "voice-agent-v2.service",
+    "state_root": "~/.local/share/voice-agent-v2",
+    "provider_mode": "local",
+    "provider_identity": "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M",
+    "automatic_fallback": false,
+    "wake_enabled": false,
+    "auth_boundary": "tailnet"
+  },
+  "lifecycle": {
+    "start_order": [
+      "configuration",
+      "artifacts",
+      "local-llm",
+      "livekit",
+      "gateway-controller-stt-tts-provider",
+      "tailnet-app-route",
+      "tailnet-signal-route"
+    ],
+    "stop_order": [
+      "tailnet-app-route",
+      "gateway-controller-stt-tts-provider",
+      "tailnet-signal-route",
+      "livekit",
+      "local-llm"
+    ],
+    "graceful_drain_seconds": 60,
+    "hard_stop_seconds": 75,
+    "restart_policy": {
+      "mode": "on-failure",
+      "restart_seconds": 5,
+      "start_limit_interval_seconds": 600,
+      "start_limit_burst": 2,
+      "automatic_recoveries_per_failure_window": 1,
+      "configuration_exit_status": 2
+    }
+  },
+  "components": [
+    {
+      "name": "livekit",
+      "location": "host",
+      "supervision": "owned-child-process",
+      "admission_required": true
+    },
+    {
+      "name": "web-gateway",
+      "location": "host",
+      "supervision": "gateway-process",
+      "admission_required": true
+    },
+    {
+      "name": "controller",
+      "location": "host",
+      "supervision": "gateway-process",
+      "admission_required": true
+    },
+    {
+      "name": "local-stt",
+      "location": "host",
+      "supervision": "controller-owned-process",
+      "admission_required": true
+    },
+    {
+      "name": "local-tts",
+      "location": "host",
+      "supervision": "controller-owned-process-pool",
+      "admission_required": true
+    },
+    {
+      "name": "selected-local-llm",
+      "location": "host",
+      "supervision": "owned-child-process",
+      "admission_required": true
+    },
+    {
+      "name": "provider-adapter",
+      "location": "host",
+      "supervision": "gateway-process",
+      "admission_required": true
+    },
+    {
+      "name": "avatar-host",
+      "location": "browser",
+      "supervision": "versioned-client-build-and-readiness",
+      "admission_required": false
+    },
+    {
+      "name": "mvp-eye",
+      "location": "browser",
+      "supervision": "versioned-client-build-and-readiness",
+      "admission_required": false
+    },
+    {
+      "name": "cloud-llm",
+      "location": "external",
+      "supervision": "external-readiness-only",
+      "admission_required": false,
+      "active": false
+    }
+  ],
+  "contracts": {
+    "stt": "voice-agent.stt.v1",
+    "llm_provider": "voice-agent.llm-provider.v1",
+    "tts": "voice-agent.tts.v2",
+    "realtime_control": "voice-agent.realtime-control.v2",
+    "health_readiness": "voice-agent.health-readiness.v1",
+    "observation": "voice-agent.observation.v1",
+    "avatar_host": "voice-agent.avatar-host.v1",
+    "avatar_control": "voice-agent.avatar-control.v1",
+    "selected_avatar_module": "mvp-eye-svg-v1"
+  },
+  "artifacts": [
+    {
+      "name": "livekit-server",
+      "path": "{home}/.cache/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5",
+      "size_bytes": 53420194,
+      "sha256": "51a1bbe04439b33d6d7a6d6d83fdefad9b938162c341f0f07f75af03e456b49a",
+      "executable": true
+    },
+    {
+      "name": "silero-vad-v6",
+      "path": "{home}/.cache/voice-agent-v2/slice-6/models/silero-vad-v6.onnx",
+      "size_bytes": 1245151,
+      "sha256": "4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2"
+    },
+    {
+      "name": "whisper-large-v3-turbo-model",
+      "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/model.bin",
+      "size_bytes": 1617884929,
+      "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
+    },
+    {
+      "name": "whisper-large-v3-turbo-config",
+      "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/config.json",
+      "size_bytes": 2263,
+      "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"
+    },
+    {
+      "name": "whisper-large-v3-turbo-tokenizer",
+      "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/tokenizer.json",
+      "size_bytes": 2710337,
+      "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"
+    },
+    {
+      "name": "whisper-large-v3-turbo-vocabulary",
+      "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/vocabulary.json",
+      "size_bytes": 1068114,
+      "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+    },
+    {
+      "name": "whisper-large-v3-turbo-preprocessor",
+      "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo/preprocessor_config.json",
+      "size_bytes": 340,
+      "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+    },
+    {
+      "name": "llama-server-b10357",
+      "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4/runtime/llama-b10357-cuda13-build/bin/llama-server",
+      "sha256": "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11",
+      "executable": true
+    },
+    {
+      "name": "lfm2.5-q4-k-m",
+      "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4/model/LFM2.5-2.6B-Q4_K_M.gguf",
+      "size_bytes": 1674454848,
+      "sha256": "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14"
+    },
+    {
+      "name": "silero-v5-5-ru",
+      "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/downloads/v5_5_ru.pt",
+      "size_bytes": 145420684,
+      "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437"
+    },
+    {
+      "name": "silero-python",
+      "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/venv/bin/python",
+      "sha256": "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0acec7",
+      "executable": true,
+      "resolve_symlink": true
+    },
+    {
+      "name": "silero-torch-extension",
+      "path_glob": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/venv/lib/python3.12/site-packages/torch/_C.cpython-312-*-linux-gnu.so",
+      "matches": 1,
+      "sha256": "5dc8a93ddc69041dbd3f796794e0c2b3f72b47e0dc24ae2b46d9e7d0dc78953b"
+    },
+    {
+      "name": "silero-libtorch-cpu",
+      "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts/venv/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so",
+      "sha256": "629d28a5fb24e2c33df077e2d98d5da0c73d0b53e628bb826fd4ba36616b482b"
+    }
+  ],
+  "python_runtimes": [
+    {
+      "name": "slice6",
+      "python": "{home}/.cache/voice-agent-v2/slice-6/runtime/venv/bin/python",
+      "packages": {
+        "fastapi": "0.141.1",
+        "uvicorn": "0.52.1",
+        "livekit": "1.1.14",
+        "livekit-api": "1.2.0",
+        "onnxruntime": "1.28.0",
+        "numpy": "2.5.2"
+      }
+    },
+    {
+      "name": "stt",
+      "python": "{home}/.cache/voice-agent-v2/slice-2/runtime/stt-tts-venv/bin/python",
+      "packages": {
+        "faster-whisper": "1.2.1",
+        "ctranslate2": "4.8.1",
+        "numpy": "2.5.2"
+      }
+    }
+  ],
+  "disk": {
+    "minimum_free_bytes": 8589934592,
+    "cache_roots": [
+      {
+        "name": "slice6-runtime",
+        "path": "{home}/.cache/voice-agent-v2/slice-6",
+        "maximum_bytes": 2147483648
+      },
+      {
+        "name": "stt-model",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo",
+        "maximum_bytes": 2147483648
+      },
+      {
+        "name": "stt-runtime",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/runtime/stt-tts-venv",
+        "maximum_bytes": 4294967296
+      },
+      {
+        "name": "stt-service-state",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/raw",
+        "maximum_bytes": 1073741824
+      },
+      {
+        "name": "local-lfm-runtime",
+        "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4",
+        "maximum_bytes": 5368709120
+      },
+      {
+        "name": "silero-runtime",
+        "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts",
+        "maximum_bytes": 2147483648
+      },
+      {
+        "name": "silero-state",
+        "path": "{home}/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship",
+        "maximum_bytes": 1073741824
+      }
+    ],
+    "release_maximum_count": 3,
+    "release_maximum_bytes": 1073741824,
+    "cleanup_policy": "refuse-without-deleting"
+  },
+  "sustained_acceptance": {
+    "minimum_turns": 20,
+    "minimum_turn_success_ratio": 1.0,
+    "maximum_p95_total_turn_ms": 20000,
+    "maximum_p95_cancellation_latency_ms": 250,
+    "maximum_process_rss_growth_mib": 512,
+    "maximum_gpu_vram_growth_mib": 512,
+    "minimum_avatar_healthy_frame_ratio": 0.98,
+    "minimum_avatar_fps": 55
+  }
+}

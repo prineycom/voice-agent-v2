@@ -214,6 +214,7 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     startup_controller.arm_browser_join_timeout = refuse_join_timer
 
     cancelled_registry = SessionRegistry(settings)
+    cancelled_registry._accepting = True
     with patch(
         "voice_agent_v2.livekit_runtime.LiveKitRoomController",
         return_value=startup_controller,
@@ -246,6 +247,7 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     )
     failed_controller._browser_ready = True
     failed_registry = SessionRegistry(settings)
+    failed_registry._accepting = True
     failed_controller.on_closed = failed_registry.remove
     failed_registry._controllers[failed_controller.session_id] = failed_controller
     try:

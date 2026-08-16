@@ -129,6 +129,7 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         registry.runner = runner
         registry._controllers = {}
         registry._lock = asyncio.Lock()
+        registry._accepting = True
         controller = types.SimpleNamespace(
             start=lambda: asyncio.sleep(0),
             arm_browser_join_timeout=lambda: None,

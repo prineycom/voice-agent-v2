@@ -1,0 +1,366 @@
+"""Command-line interface for the bounded single-host operations contract."""
+
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from .operations import (
+    DEFAULT_MANIFEST_RELATIVE,
+    DEFAULT_STATE_ROOT,
+    OperationalError,
+    ReleaseStore,
+    evaluate_sustained_run,
+    execute_release,
+    load_operations_manifest,
+    validate_host,
+    validate_release,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SERVICE_NAME = "voice-agent-v2.service"
+SYSTEM_UNIT_PATH = Path("/etc/systemd/system") / SERVICE_NAME
+
+
+def _state_root(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("state root must be absolute")
+    return path
+
+
+def _configuration(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    return path
+
+
+def _print(value: object) -> None:
+    print(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2))
+
+
+def _sudo(*arguments: str, allowed: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", *arguments], capture_output=True, text=True,
+            timeout=210, check=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OperationalError("systemd_install_failed", "sudo -n system operation failed") from error
+    if result.returncode not in allowed:
+        raise OperationalError("systemd_install_failed", "sudo -n system operation failed")
+    return result
+
+
+def _systemctl_show() -> dict[str, object]:
+    result = subprocess.run(
+        [
+            "systemctl", "show", SERVICE_NAME,
+            "--property=LoadState,ActiveState,SubState,Result,NRestarts,ExecMainStatus",
+        ],
+        capture_output=True, text=True, timeout=10, check=False,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+    )
+    values: dict[str, str] = {}
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                name, value = line.split("=", 1)
+                values[name] = value
+    return {
+        "load": values.get("LoadState", "not-found"),
+        "active": values.get("ActiveState", "inactive"),
+        "substate": values.get("SubState", "dead"),
+        "result": values.get("Result", "unknown"),
+        "restart_count": int(values.get("NRestarts", "0") or "0"),
+        "main_exit_status": int(values.get("ExecMainStatus", "0") or "0"),
+    }
+
+
+def command_validate(arguments: argparse.Namespace) -> None:
+    report = validate_host(
+        source_root=ROOT,
+        config_path=arguments.config,
+        state_root=arguments.state_root,
+    )
+    _print(report.as_dict())
+
+
+def command_deploy(arguments: argparse.Namespace) -> None:
+    result = ReleaseStore(arguments.state_root).deploy(
+        source_root=ROOT, config_path=arguments.config,
+    )
+    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+    service = _systemctl_show() if canonical else {"load": "not-applicable"}
+    result["service_apply_required"] = bool(
+        result.get("changed") is True and service.get("load") == "loaded"
+    )
+    _print(result)
+
+
+def command_validate_deployment(arguments: argparse.Namespace) -> None:
+    store = ReleaseStore(arguments.state_root)
+    current = store.current()
+    if current is None:
+        raise OperationalError("deployment_unavailable", "no active operational release exists")
+    document = validate_release(
+        current, state_root=store.state_root, verify_host_state=True,
+    )
+    _print({
+        "schema_version": "voice-agent.deployment-validation.v1",
+        "status": "compatible",
+        "release_id": document["release_id"],
+        "build_id": document["build_id"],
+        "provider_mode": document["provider_mode"],
+        "external_provider_supervised": False,
+        "automatic_fallback": False,
+    })
+
+
+def command_status(arguments: argparse.Namespace) -> None:
+    store = ReleaseStore(arguments.state_root)
+    current = store.current()
+    release: dict[str, object] | None = None
+    compatibility = "unconfigured"
+    if current is not None:
+        try:
+            document = validate_release(
+                current, state_root=store.state_root, verify_host_state=True,
+            )
+        except OperationalError:
+            compatibility = "incompatible"
+        else:
+            compatibility = "compatible"
+            release = {
+                "release_id": document["release_id"],
+                "build_id": document["build_id"],
+                "provider_mode": document["provider_mode"],
+            }
+    service = _systemctl_show()
+    public_status = _runtime_status() if service["active"] == "active" else None
+    health = public_status.get("health") if isinstance(public_status, dict) else None
+    runtime = {
+        "reachable": public_status is not None,
+        "release_id": public_status.get("release_id") if public_status else None,
+        "build_id": public_status.get("build_id") if public_status else None,
+        "overall_readiness": health.get("overall_readiness") if isinstance(health, dict) else None,
+        "accepting": public_status.get("accepting") if public_status else False,
+    }
+    _print({
+        "schema_version": "voice-agent.operational-status.v1",
+        "compatibility": compatibility,
+        "release": release,
+        "service": service,
+        "runtime": runtime,
+        "supervision": {
+            "host_stack": "systemd-bounded-process-group",
+            "avatar_host": "versioned-client-build-and-readiness",
+            "selected_avatar_module": "mvp-eye-svg-v1",
+            "cloud_provider": "external-readiness-only-inactive",
+            "external_provider_supervised": False,
+            "automatic_fallback": False,
+        },
+    })
+
+
+def _runtime_status() -> dict[str, object] | None:
+    connection = http.client.HTTPConnection("127.0.0.1", 8000, timeout=0.5)
+    try:
+        connection.request("GET", "/api/status", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(64 * 1024 + 1)
+        if response.status != 200 or len(body) > 64 * 1024:
+            return None
+        document = json.loads(body)
+    except (
+        OSError, TimeoutError, http.client.HTTPException, UnicodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    finally:
+        connection.close()
+    return document if isinstance(document, dict) else None
+
+
+def _wait_for_runtime_release(release_id: str, *, timeout: float = 90.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        document = _runtime_status()
+        health = document.get("health") if isinstance(document, dict) else None
+        if (
+            document is not None
+            and document.get("release_id") == release_id
+            and isinstance(health, dict)
+            and health.get("overall_readiness") == "ready"
+        ):
+            return
+        service = _systemctl_show()
+        if service["load"] == "loaded" and service["active"] == "failed":
+            break
+        time.sleep(0.5)
+    raise OperationalError(
+        "systemd_install_failed", "system service did not reach exact-release readiness",
+    )
+
+
+def command_install_service(arguments: argparse.Namespace) -> None:
+    if arguments.state_root.resolve() != DEFAULT_STATE_ROOT.resolve():
+        raise OperationalError("systemd_install_failed", "system service supports only the canonical state root")
+    store = ReleaseStore(arguments.state_root)
+    current = store.current()
+    if current is None:
+        raise OperationalError("deployment_unavailable", "deploy a compatible release before installing systemd")
+    validate_release(current, state_root=store.state_root, verify_host_state=True)
+    unit = current / "ops/systemd/voice-agent-v2.service"
+    if not unit.is_file():
+        raise OperationalError("systemd_unit_incompatible", "release systemd unit is missing")
+    exists = _sudo("test", "-e", str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
+    identical = exists and _sudo("cmp", "-s", str(unit), str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
+    changed = not identical
+    if changed:
+        _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(unit), str(SYSTEM_UNIT_PATH))
+        _sudo("systemctl", "daemon-reload")
+    unit_changed = changed
+    enabled = _sudo(
+        "systemctl", "is-enabled", SERVICE_NAME, allowed=(0, 1, 3, 4),
+    ).returncode == 0
+    active = _sudo(
+        "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
+    ).returncode == 0
+    running = _runtime_status() if active else None
+    release_changed = running is None or running.get("release_id") != current.name
+    if not enabled:
+        _sudo("systemctl", "enable", SERVICE_NAME)
+        changed = True
+    if active and (unit_changed or release_changed):
+        _sudo("systemctl", "restart", SERVICE_NAME)
+        changed = True
+    elif not active:
+        _sudo("systemctl", "start", SERVICE_NAME)
+        changed = True
+    active = _sudo(
+        "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
+    ).returncode == 0
+    if not active:
+        raise OperationalError(
+            "systemd_install_failed", "system service did not reach active state",
+        )
+    _wait_for_runtime_release(current.name)
+    _print({
+        "schema_version": "voice-agent.systemd-install-result.v1",
+        "status": "installed",
+        "changed": changed,
+        "unit": SERVICE_NAME,
+        "enabled": True,
+        "active": True,
+        "ready": True,
+        "release_id": current.name,
+    })
+
+
+def command_rollback(arguments: argparse.Namespace) -> None:
+    result = ReleaseStore(arguments.state_root).rollback()
+    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+    if canonical and _systemctl_show()["load"] == "loaded":
+        _sudo("systemctl", "restart", SERVICE_NAME)
+        active = _sudo("systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4)).returncode == 0
+        if not active:
+            raise OperationalError(
+                "rollback_restart_failed",
+                "rollback pointer changed but service did not become active",
+            )
+        try:
+            _wait_for_runtime_release(str(result["release_id"]))
+        except OperationalError as error:
+            raise OperationalError(
+                "rollback_restart_failed",
+                "rollback pointer changed but prior release did not become ready",
+            ) from error
+        result["service_restarted"] = True
+        result["service_ready"] = True
+    else:
+        result["service_restarted"] = False
+    _print(result)
+
+
+def command_sustained_report(arguments: argparse.Namespace) -> None:
+    try:
+        evidence = json.loads(arguments.evidence.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise OperationalError("sustained_report_invalid", "sustained evidence is unavailable or invalid") from error
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("turns"), list) or not isinstance(evidence.get("avatar"), dict):
+        raise OperationalError("sustained_report_invalid", "sustained evidence shape is invalid")
+    manifest = load_operations_manifest(ROOT / DEFAULT_MANIFEST_RELATIVE)
+    report = evaluate_sustained_run(
+        manifest, turns=evidence["turns"], avatar=evidence["avatar"],
+    )
+    _print(report)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        prog="voice-agent-ops",
+        description="Bounded single-host deployment, validation, status, and rollback",
+    )
+    subcommands = result.add_subparsers(dest="command", required=True)
+
+    validate = subcommands.add_parser("validate", help="validate config, artifacts, caches, disk, and tailnet")
+    validate.add_argument("--config", type=_configuration, required=True)
+    validate.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    validate.set_defaults(function=command_validate)
+
+    deploy = subcommands.add_parser("deploy", help="stage and atomically activate one clean committed release")
+    deploy.add_argument("--config", type=_configuration, required=True)
+    deploy.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    deploy.set_defaults(function=command_deploy)
+
+    deployment = subcommands.add_parser("validate-deployment", help="revalidate the active immutable release")
+    deployment.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    deployment.set_defaults(function=command_validate_deployment)
+
+    status = subcommands.add_parser("status", help="report release, service, provider, and client supervision state")
+    status.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    status.set_defaults(function=command_status)
+
+    install = subcommands.add_parser("install-service", help="idempotently install/enable the canonical systemd unit")
+    install.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    install.set_defaults(function=command_install_service)
+
+    rollback = subcommands.add_parser("rollback", help="activate only the verified previous compatible release")
+    rollback.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    rollback.set_defaults(function=command_rollback)
+
+    sustained = subcommands.add_parser("sustained-report", help="evaluate content-free sustained-run evidence")
+    sustained.add_argument("--evidence", type=_configuration, required=True)
+    sustained.set_defaults(function=command_sustained_report)
+
+    run = subcommands.add_parser("run", help=argparse.SUPPRESS)
+    run.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
+    run.set_defaults(function=lambda arguments: execute_release(arguments.state_root))
+    return result
+
+
+def main() -> int:
+    arguments = parser().parse_args()
+    try:
+        arguments.function(arguments)
+    except OperationalError as error:
+        print(f"voice-agent-ops failed: {error.code}: {error}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("voice-agent-ops failed: interrupted", file=sys.stderr)
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

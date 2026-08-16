@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Slice 8 controlled failure semantics, compatible readiness, privacy-safe timeline/percentile reconstruction, bounded diagnostic retention/deletion, disposable process loss, and safe resource pressure pass. Physical/shared/destructive acceptance remains explicitly open.** The private Silero/Kseniya native-48 path passes deterministic and focused exact-cache checks; Pasha's physical Firefox acceptance is still required. Slice 7 provides the bounded renderer-agnostic avatar host, original deterministic eye, and portrait-first UI shell, while physical Raspberry Pi/full-stack visual acceptance remains open. Active composition is fixed directly to cache-local Silero `v5_5_ru`, speaker `kseniya`, behind TTS v2. There is no TTS selector, Qwen adapter, co-start, hot switch, fallback, or cross-adapter retry. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`. The local LFM2.5 Q4_K_M path remains fixed and cloud-free.
+**Slice 9's deterministic and canonical-host operational boundaries pass: exact config/artifact/cache preflight, versioned immutable release, idempotent deploy, compatible rollback, declared drain, one systemd recovery, controlled full-stack/core-process loss, and no surviving inference process. Physical reboot and physical voice/avatar acceptance remain explicitly open, so core MVP physical sign-off is still pending.** The private Silero/Kseniya native-48 path remains fixed to exact cache-local `v5_5_ru` / `kseniya` behind TTS v2; the active LLM remains only local LFM2.5 Q4_K_M. There is no provider/model/TTS/avatar fallback, Qwen co-start, cloud supervision, wake, kiosk, or public exposure. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`.
 
 Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
@@ -99,6 +99,45 @@ Default metadata diagnostics contain no conversation/media content, secrets, exc
 ```
 
 [`docs/architecture.md` §8.2](docs/architecture.md#82-data-handling) owns the capture limits, expiry, and privacy contract. The complete exercised matrix, example redacted report, privacy evidence, and exact nonclaims are in [`docs/evidence/slice-8-failure-observability.md`](docs/evidence/slice-8-failure-observability.md).
+
+### Slice 9 single-host operations
+
+Run the CI-safe deterministic operational gate and, on the canonical host, the read-only exact-cache plus disposable transient-systemd preflight:
+
+```sh
+./verify-slice9
+"${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/runtime/venv/bin/python" \
+  ./scripts/verify_slice9_host.py
+```
+
+The second command starts no product service, uses no `sudo`, prints no secret, and touches only a uniquely named disposable user service. It verifies exact selected artifacts/runtimes, ignored configuration structure/mode, tailnet identity, free-disk and active-cache bounds, then proves one completed restart and an actionable failed state. It does not reboot or claim physical behavior.
+
+Operational activation is explicit. Keep the server configuration untracked and mode `0600`; no operation copies or prints its secret values:
+
+```sh
+./voice-agent-ops validate --config .env.slice6
+./voice-agent-ops deploy --config .env.slice6
+./voice-agent-ops install-service
+./voice-agent-ops status
+```
+
+`deploy` requires a clean committed source, builds the ordinary client with that exact commit, and atomically activates an immutable release under `~/.local/share/voice-agent-v2`. The complete payload inventory includes empty directories and modes as well as file/symlink hashes and targets. Runtime bytecode/temp/output goes only to explicit private mutable runtime/cache roots; the systemd unit does not make the release store writable. Reapplying the same source/config reports `changed: false`. Reaching a cache, free-disk, release-count, or release-byte bound fails without deletion. `install-service` is the only privileged step and uses only `sudo -n`; after a changed deploy it reconciles/restarts an already installed unit and returns success only after systemd `Type=notify` plus the exact-release five-component readiness report. Reapplying it to the already ready release is a no-op. It does not change firewalld, Tailscale identity, or unrelated units.
+
+The unit starts local LFM → LiveKit → gateway/controller-owned STT/TTS/provider adapter → exact foreground tailnet routes. Shutdown removes application admission first, drains the controller/workers, then closes signaling, LiveKit, and LFM. A runtime loss gets at most one completed systemd restart in 600 seconds; configuration/artifact incompatibility never restarts. `status` reports the exact build/release, local provider, browser avatar contract/MVP eye, and external-cloud-not-supervised facts without secrets.
+
+Rollback accepts only the recorded previous release and revalidates its complete inventory, referenced configuration, exact external artifacts/runtimes, tailnet identity, and disk/cache preflight before restarting:
+
+```sh
+./voice-agent-ops rollback
+```
+
+It is not an arbitrary Git reset and never deletes a cache/release to force success. The narrow post-rollback deterministic check uses the same public Slice 1 tracer without recursively running the full test suite:
+
+```sh
+"$HOME/.local/share/voice-agent-v2/current/verify" --tracer-only
+```
+
+This focused recovery check is not a substitute for the ordinary full `./verify` gate. [`docs/evidence/slice-9-single-host-reliability.md`](docs/evidence/slice-9-single-host-reliability.md) records the exercised cases and exact remaining physical reboot/voice gaps.
 
 ### Pasha physical acceptance and rollback
 

@@ -619,7 +619,12 @@ class CaptureAndResourceTests(unittest.TestCase):
             self.assertFalse(lease.exists())
 
         environment = spawn.call_args.kwargs["env"]
-        self.assertEqual(environment, {"PYTHONUTF8": "1"})
+        self.assertEqual(environment, {
+            "PYTHONUTF8": "1",
+            "PYTHONPYCACHEPREFIX": str(
+                Path(directory).resolve() / "voice-agent-v2" / "pycache"
+            ),
+        })
         self.assertNotIn("LIVEKIT_API_SECRET", environment)
 
     def test_detached_expiry_executable_refuses_persistent_capture(self) -> None:
@@ -642,6 +647,8 @@ class CaptureAndResourceTests(unittest.TestCase):
                 "explicit_opt_in": True,
             }))
             manifest.chmod(0o600)
+            pycache = Path(directory) / "python-pycache"
+            pycache.mkdir(mode=0o700)
             process = subprocess.run(
                 [
                     sys.executable,
@@ -659,6 +666,10 @@ class CaptureAndResourceTests(unittest.TestCase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                env={
+                    "PYTHONUTF8": "1",
+                    "PYTHONPYCACHEPREFIX": str(pycache),
+                },
             )
             self.assertEqual(process.returncode, 0)
             self.assertTrue(capture.exists())
@@ -694,6 +705,8 @@ class CaptureAndResourceTests(unittest.TestCase):
                 "explicit_opt_in": True,
             }))
             manifest.chmod(0o600)
+            pycache = root / "python-pycache"
+            pycache.mkdir(mode=0o700)
             process = subprocess.run(
                 [
                     sys.executable,
@@ -708,7 +721,10 @@ class CaptureAndResourceTests(unittest.TestCase):
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=2,
-                env={"PYTHONUTF8": "1"},
+                env={
+                    "PYTHONUTF8": "1",
+                    "PYTHONPYCACHEPREFIX": str(pycache),
+                },
             )
             self.assertEqual(process.returncode, 0)
             self.assertFalse(capture.exists())
@@ -751,6 +767,8 @@ class CaptureAndResourceTests(unittest.TestCase):
                 "_spawn_expiry_guardian(Path(sys.argv[1]), sys.argv[2], "
                 "float(sys.argv[3]), float(sys.argv[4]), Path(sys.argv[5]))"
             )
+            parent_pycache = root / "parent-python-pycache"
+            parent_pycache.mkdir(mode=0o700)
             parent = subprocess.run(
                 [
                     sys.executable, "-c", helper, str(capture), nonce,
@@ -764,6 +782,7 @@ class CaptureAndResourceTests(unittest.TestCase):
                 env={
                     "PYTHONPATH": str(ROOT / "src"),
                     "PYTHONUTF8": "1",
+                    "PYTHONPYCACHEPREFIX": str(parent_pycache),
                 },
             )
             self.assertEqual(parent.returncode, 0)

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/public-operational-status.v1.schema.json",
+  "title": "Voice Agent public operational status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "available",
+    "accepting",
+    "session_limit",
+    "build_id",
+    "release_id",
+    "provider_mode",
+    "external_provider_supervised",
+    "automatic_fallback",
+    "avatar_host_contract",
+    "selected_avatar_module",
+    "health"
+  ],
+  "properties": {
+    "schema_version": {"const": "voice-agent.public-operational-status.v1"},
+    "available": {"type": "boolean"},
+    "accepting": {"type": "boolean"},
+    "session_limit": {"const": 1},
+    "build_id": {"type": "string", "pattern": "^(development|[0-9a-f]{40})$"},
+    "release_id": {"type": "string", "pattern": "^(development|[0-9a-f]{24})$"},
+    "provider_mode": {"const": "local"},
+    "external_provider_supervised": {"const": false},
+    "automatic_fallback": {"const": false},
+    "avatar_host_contract": {"const": "voice-agent.avatar-host.v1"},
+    "selected_avatar_module": {"const": "mvp-eye-svg-v1"},
+    "health": {"type": "object", "minProperties": 11, "maxProperties": 11}
+  }
+}

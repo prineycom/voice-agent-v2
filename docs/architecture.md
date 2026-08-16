@@ -37,6 +37,7 @@ Untested behavior is not implied by a target diagram.
 | D13 | Decision | The private unmerged TTS evaluation branch adds backend-neutral TTS/event/control v2 contracts but fixes active composition directly to exact cache-local Silero `v5_5_ru` / `kseniya`. Input stays mono 16 kHz; output is native mono 48 kHz through two isolated resident workers and generation-gated playback. Historical Qwen/TTS v1 stays inactive and immutable. There is no TTS selector, second adapter, co-start, retry, fallback, production authority, or commercial authority. See [ADR-0009](adr/0009-silero-kseniya-tts-v2-native-48-private-evaluation.md). |
 | D14 | Decision | The browser is a portrait-first full-viewport avatar shell. UI chrome knows only the avatar-host v1 API; the selected module knows no panels or controls. Four steady overlays, right-edge panels, neon-minimal tokens, and system/user reduced-motion behavior are fixed by ADR-0011 and ADR-0012. |
 | D15 | Decision | Slice 8 observation shapes and failure-to-user-state mapping have one direct owner in `voice_agent_v2.observability`. The existing metadata trace, realtime-control payload, reducer, and System/Timeline panels compose that boundary; there is no telemetry service, generalized event bus, fallback controller, or hosted vendor. |
+| D16 | Decision | Slice 9 uses one non-root system-level systemd service around the existing owned foreground process tree, immutable compatible releases, a one-recovery restart window, non-destructive cache/disk refusal, and verified prior-release rollback. Browser avatar recovery stays a client-build/readiness boundary; inactive cloud mode is external-readiness-only. See [ADR-0013](adr/0013-systemd-bounded-single-host-operations.md). |
 
 ## 3. System boundary
 
@@ -149,6 +150,7 @@ Media and control remain distinct even when LiveKit transports both.
 | External tracking target | Approved trigger producer → avatar host | Avatar host | Optional, bounded coordinates/age/confidence, stale-input rejection; producer implementation is separate. |
 | Render state | Avatar module internal | Avatar module | Deterministic mapping from validated inputs; never accepted from an LLM or network as frame data. |
 | Health/readiness report | Server capability owners → controller/browser System panel | Session-controller observability boundary | `voice-agent.health-readiness.v1`: liveness distinct from readiness for LiveKit, controller, STT, selected LLM, and TTS; failure enrichment preserves each component owner's liveness while changing readiness/reason. Silero pool liveness and admission readiness come from one locked worker snapshot: one live worker is alive/unready, while zero live workers is dead/unready. The report also carries contract/artifact compatibility, identity, reason code, and bounded recovery attempts; no secrets. The browser maps the existing avatar-host health contract into separate avatar-host and active-module System rows rather than relabelling client health as a server report. |
+| Public operational status | Web gateway → private browser/operator readiness probe | Web gateway | `voice-agent.public-operational-status.v1`: composes one fresh unchanged five-component health report with admission/capacity, exact build/release IDs, fixed local/no-fallback/no-external-supervision facts, and avatar-host/MVP-eye build identity. No secret, token, conversation content, model-management control, or cloud-supervision claim. |
 | Privacy-safe observation | Services/controller/browser adapters → operator report | Session-controller observability boundary | `voice-agent.observation.v1`: one session/turn correlation, monotonic sequence/time, scalar content-free fields, bounded storage/failures, and executable reconstruction/percentile rules. |
 
 Contract versions change for semantic compatibility, not every implementation release. During implementation, machine-readable schemas and executable producer/consumer contract tests become authoritative; this document continues to own the boundary and invariants.
@@ -193,13 +195,16 @@ The avatar host owns validation, module lifecycle, and capability/fallback repor
 
 ### 6.1 Host and service lifecycle
 
-1. Tracked, non-secret configuration is validated before service startup.
-2. LiveKit, the web gateway, controller, and inference services expose liveness separately from capability readiness.
-3. The product is ready for a new voice turn only when LiveKit, controller, STT, the explicitly selected LLM provider, and TTS report compatible contracts and loaded capabilities.
-4. The browser may connect while inference is unavailable, but it must show the degraded state and must not pretend a turn succeeded.
-5. Graceful shutdown stops admission, cancels in-flight turns with terminal events where possible, then releases model and media resources.
+1. `voice-agent-ops` validates the tracked operations schema, ignored mode-`0600` server configuration, exact artifact/runtime identities, tailnet identity, immutable release inventory, and non-destructive disk/cache bounds before service startup. Inventory covers every payload path/type/mode, symlink target, size, and file hash; exact release metadata is bound to the release ID.
+2. The one `voice-agent-v2.service` systemd unit runs as non-root `priney`. Its release tree is read-only, while Python bytecode and other runtime scratch state are explicitly rooted in private mutable runtime/cache paths outside the release. The existing foreground runner remains the child-process owner; no logical role is turned into a second orchestration framework or network service.
+3. Start order is configuration/artifacts, local LLM, LiveKit, gateway/controller-owned STT/TTS/provider adapter, application Serve route, then signaling Serve route. A partial start is closed in the declared stop order and cannot publish success.
+4. LiveKit, the web gateway/controller, and inference owners expose liveness separately from capability readiness. `/api/status` includes a fresh five-component health report, exact build/release identities, fixed local-provider/no-fallback facts, and selected avatar build identity without secrets. The `Type=notify` main process emits systemd readiness only after that report is ready and both foreground tailnet routes passed startup; install/reconciliation and rollback additionally match the reported release ID.
+5. The product is ready for a new voice turn only when LiveKit, controller, STT, the explicitly selected LLM provider, and TTS report compatible loaded capabilities. An idle controller-owned worker/provider loss that stays unready for two seconds fails the outer service rather than leaving an unobserved dead inference child.
+6. Graceful shutdown first stops the application route/admission, gives the gateway/controller up to 60 seconds to terminalize/cancel turns and close resident workers, then stops signaling, LiveKit, and local LLM. systemd's 75-second `KillMode=mixed` boundary kills any remainder, so a lost runner cannot leave an unbounded process group.
+7. Runtime exit `1` permits one completed restart after five seconds; `StartLimitBurst=2` in 600 seconds makes the next failure actionable and stopped. Compatibility exit `2` is never restarted. Inference requests themselves retain zero retry/fallback.
+8. The browser may connect while inference is unavailable only to show the explicit degraded state; it must not pretend a turn succeeded. Avatar host/MVP eye recovery is versioned client readiness/reconnect/static-safety behavior, not kiosk/browser process supervision.
 
-The exact supervisor, packaging, and start order are **hypotheses** until the operational-reliability slice proves restart and recovery behavior.
+ADR-0013 owns this systemd/release decision. `config/operations-v1.json` owns its executable component/order/restart/cache/sustained thresholds, while each runtime component still owns its readiness and cancellation contract.
 
 ### 6.2 Realtime-session lifecycle
 
@@ -233,7 +238,17 @@ The agent reuses `RealTurnController`, Whisper, and local LFM rather than creati
 
 Initial and reconnect `session.ready` publications each require one freshly assembled valid [`health-readiness.v1`](../contracts/README.md#contract-ownership) report with exactly five unique server components and overall readiness `ready`; no separate admission read may race that report. Reconnect processing resets turn and context first; both a new acknowledgement and replay of the last bounded acknowledgement obtain a new report. Any unready component emits `session.degraded`, closes admission, and prevents the `session.reconnected`/`session.ready` pair.
 
-`./run-slice6` is a foreground development orchestrator only. Deployment supervision, reboot behavior, durable readiness and restart policy remain Slice 9.
+`./run-slice6` remains a foreground development orchestrator only. Slice 9 composes it beneath the separate validated immutable-release/systemd boundary; it does not turn development startup into an updater or deployment control plane.
+
+### 6.6 Slice 9 operational runtime
+
+A clean committed source plus one ignored server configuration becomes an immutable release under `~/.local/share/voice-agent-v2/releases/`. The release records the Git build/tree, operations-manifest digest, public configuration fingerprint, configuration locator digest, provider/no-fallback facts, exact ordinary client build, and a full non-secret payload inventory covering files, symlinks, empty directories, types, modes, targets, sizes, and content hashes. Exact-key release metadata is recomputed into the release ID rather than excluded from compatibility. It never contains or fingerprints secret values. `current` changes atomically only after compatibility passes. An identical deploy reports `changed=false`; a new compatible activation retains the old verified target as `previous`.
+
+Runtime writes are disjoint from that tree. systemd exposes the release read-only and owns `/run/user/1000/voice-agent-v2`; the execution boundary sends Python bytecode to its private `pycache` subtree. STT and any historical isolated Python adapter name bounded cache-local bytecode roots, Silero/gateway/entry processes use `-B`, and detached diagnostic expiry processes receive an explicit private runtime-tmpfs prefix even though their environment otherwise remains minimal. The deterministic tracer allocates HOME/XDG cache/temp/bytecode under `VOICE_AGENT_MUTABLE_STATE_ROOT`, the user's runtime directory, or an owner-specific `/var/tmp` fallback. Compatibility never ignores a generated path: repeated recovered-release tracer and full-runtime runs must preserve the complete inventory.
+
+Rollback accepts only that `previous` target and revalidates its inventory, operations schema, referenced current-user mode-`0600` configuration/public fingerprint, external artifacts/runtimes, tailnet identity, and disk/cache preflight before swapping links and restarting the canonical unit. Reaching the three-release/1-GiB release-store bound or an active-cache bound refuses without deleting any existing release/model/cache. Artifact acquisition and automatic upgrades remain outside runtime.
+
+The systemd unit changes no firewall or Tailscale identity/global exposure. Foreground Tailscale Serve ownership remains exact: pre-existing matching routes survive, conflicts fail closed, and only run-owned routes are removed. The active local deployment declares cloud LLM inactive; any separately authorized future cloud mode reports external readiness only and can never be listed as a supervised host process or automatic fallback. Avatar host/MVP-eye compatibility is delivered and reported as part of the exact browser build because kiosk/autostart remains excluded.
 
 ## 7. Failure semantics
 
@@ -250,7 +265,7 @@ No failure silently switches LLM provider, moves another inference capability to
 | Avatar input invalid, missing, late, or stale | Soft | Avatar host rejects it and chooses the designed safe deterministic state; voice continues and validation failure is counted without private content. |
 | Avatar module/runtime failure | Soft for voice | Voice and text continue; client exposes visual degradation, prevents runaway motion, and does not select another module silently. |
 | Client disconnect | Hard for that delivery | Controller cancels or expires in-flight work for that participant/session; no unbounded orphan inference. |
-| GPU out of memory or local model process crash | Hard for affected local inference capability | Readiness drops, current turn terminates explicitly, supervised recovery is bounded, and no request retry or provider switch can amplify/change load or alter privacy. |
+| GPU out of memory or local model process crash | Hard for affected local inference capability | Readiness drops and the current turn terminates explicitly. Slice 9 lets the outer service complete at most one restart in its 600-second window; the next failure remains an actionable failed unit. No inference-request retry or provider switch can amplify/change load or alter privacy. |
 | Tailscale unavailable | Soft for loopback, hard for remote access | Local use may continue; remote clients receive no alternate public exposure. |
 | Late or duplicate event | Soft | Client discards it using session/turn identity and sequence rules. |
 
@@ -302,7 +317,7 @@ Content capture is off unless ignored server configuration sets exact `VOICE_AGE
 
 ### 9.1 Tracked configuration
 
-Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, and the exact local LFM and Silero artifact/runtime manifests. The active Slice 6 provider has no endpoint or credential configuration: llama.cpp is fixed at host loopback, and startup rejects every `LITELLM_*` value. Startup verifies both cache-local model identities and their pinned runtimes before admission.
+Tracked files may contain schemas, safe defaults, loopback addresses, non-secret feature flags, resource limits, and the exact local LFM and Silero artifact/runtime manifests. `config/operations-v1.json` additionally owns the Slice 9 component coverage, exact start/stop and restart bounds, selected STT/LiveKit/LFM/Silero/runtime artifact checks, active-cache/free-disk/release-store bounds, client contract/module identity, inactive-cloud external-readiness-only fact, and preregistered sustained thresholds. The active Slice 6 provider has no endpoint or credential configuration: llama.cpp is fixed at host loopback, and startup rejects every `LITELLM_*` value. Operational startup verifies the complete selected artifact/runtime set and immutable client/release compatibility before admission.
 
 ### 9.2 Untracked local state
 

@@ -455,6 +455,8 @@ Run the deterministic fault matrix, real-process kill/recovery cases, resource-p
 
 ## Slice 9 — Single-host operational reliability
 
+> **Implementation checkpoint (2026-08-16):** the tracked systemd/release boundary, exact host artifact/config/cache preflight, public build/readiness report, declared graceful drain, one-recovery restart window, owned and controller-child process-loss handling, deterministic 20-turn resource/avatar threshold evaluation, identical-deploy no-op, incompatible-config refusal, and verified prior-release rollback pass. Canonical-host exact-cache validation, disposable real-systemd start limiting, real full-stack ready/graceful stop, and one-at-a-time local LLM/LiveKit/gateway/STT/TTS loss with no surviving project process were exercised. A physical reboot, installed production unit across reboot, physical 20-turn microphone/audibility/avatar soak, real voice turn after rollback, second-device tailnet voice turn, and Raspberry Pi frame acceptance remain unclaimed, so core MVP physical sign-off is still pending. See [`slice-9-single-host-reliability.md`](evidence/slice-9-single-host-reliability.md).
+
 ### User-visible outcome
 
 After a normal host boot or a bounded service failure, the private app reaches an honest ready/degraded state without manual process archaeology and sustains normal conversation reliably. This is the core MVP exit gate.

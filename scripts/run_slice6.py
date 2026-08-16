@@ -47,24 +47,66 @@ SERVER_SECRET_NAMES = frozenset({
 FORBIDDEN_CLOUD_NAMES = frozenset({"LITELLM_BASE_URL", "LITELLM_TOKEN_FILE"})
 SERVE_READINESS_TIMEOUT_SECONDS = 5.0
 SERVE_STATUS_LIMIT_BYTES = 64 * 1024
+OPERATIONAL_STATUS_LIMIT_BYTES = 64 * 1024
+OPERATIONAL_UNREADY_GRACE_SECONDS = 2.0
+
+
+SHUTDOWN_ORDER = (
+    "tailnet-app-route",
+    "gateway-controller-stt-tts-provider",
+    "tailnet-signal-route",
+    "livekit",
+    "local-llm",
+)
+STOP_TIMEOUTS = {
+    "tailnet-app-route": 5.0,
+    "gateway-controller-stt-tts-provider": 60.0,
+    "tailnet-signal-route": 5.0,
+    "livekit": 10.0,
+    "local-llm": 10.0,
+}
+
+
+class ServiceProcessFailure(RuntimeError):
+    pass
 
 
 class ProcessSupervisor:
-    """Own and stop only child processes started by this runner."""
+    """Own child processes and stop them in the declared safe drain order."""
 
     def __init__(self) -> None:
         self.processes: list[subprocess.Popen] = []
+        self._roles: dict[int, str] = {}
 
-    def start(self, command: list[str], **kwargs: object) -> subprocess.Popen:
+    def start(
+        self, command: list[str], *, role: str | None = None, **kwargs: object,
+    ) -> subprocess.Popen:
         process = subprocess.Popen(command, **kwargs)
         self.processes.append(process)
+        if role is not None:
+            if role in self._roles.values():
+                stop(process)
+                raise RuntimeError(f"duplicate supervised role: {role}")
+            self._roles[id(process)] = role
         return process
 
-    def close(self) -> None:
+    def role(self, process: subprocess.Popen) -> str:
+        return self._roles.get(id(process), "unclassified-child")
+
+    def close(self, order: tuple[str, ...] | None = None) -> None:
         first_error: BaseException | None = None
-        for process in reversed(self.processes):
+        ordered: list[subprocess.Popen] = []
+        if order is not None:
+            for role in order:
+                ordered.extend(
+                    process for process in self.processes
+                    if self._roles.get(id(process)) == role and process not in ordered
+                )
+        ordered.extend(process for process in reversed(self.processes) if process not in ordered)
+        for process in ordered:
             try:
-                stop(process)
+                timeout = STOP_TIMEOUTS.get(self.role(process), 5.0)
+                stop(process, timeout=timeout)
             except BaseException as error:
                 if first_error is None:
                     first_error = error
@@ -166,6 +208,46 @@ def local_lfm_health_ready(port: int, timeout: float) -> bool:
         connection.close()
 
 
+def systemd_notify_ready() -> None:
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    notifier = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        notifier.settimeout(1.0)
+        notifier.connect(address)
+        notifier.sendall(b"READY=1\nSTATUS=Voice Agent exact release ready\n")
+    except OSError as error:
+        raise ServiceProcessFailure("systemd readiness notification failed") from error
+    finally:
+        notifier.close()
+
+
+def gateway_operational_ready(timeout: float = 0.2) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", GATEWAY_PORT, timeout=timeout)
+    try:
+        connection.request("GET", "/api/status", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(OPERATIONAL_STATUS_LIMIT_BYTES + 1)
+        if response.status != 200 or len(body) > OPERATIONAL_STATUS_LIMIT_BYTES:
+            return False
+        document = json.loads(body)
+        health = document.get("health") if isinstance(document, dict) else None
+        return bool(
+            isinstance(health, dict)
+            and health.get("overall_readiness") == "ready"
+            and document.get("provider_mode") == "local"
+            and document.get("external_provider_supervised") is False
+            and document.get("automatic_fallback") is False
+        )
+    except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError):
+        return False
+    finally:
+        connection.close()
+
+
 def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: float = 30) -> None:
     deadline = time.monotonic() + timeout
     require_lfm_health = port == LLAMA_PORT and name == "local LFM"
@@ -187,12 +269,12 @@ def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: floa
     raise RuntimeError(f"{name} did not {readiness} within {timeout:.0f}s")
 
 
-def stop(process: subprocess.Popen) -> None:
+def stop(process: subprocess.Popen, *, timeout: float = 5.0) -> None:
     if process.poll() is not None:
         return
     process.terminate()
     try:
-        process.wait(timeout=5)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
@@ -327,9 +409,13 @@ def reconcile_serve_routes(
     for https_port, target in routes:
         if states[https_port] == "preexisting":
             continue
+        role = (
+            "tailnet-app-route" if target.endswith(f":{GATEWAY_PORT}")
+            else "tailnet-signal-route"
+        )
         process = supervisor.start([
             "tailscale", "serve", "--yes", f"--https={https_port}", target,
-        ], env=environment)
+        ], role=role, env=environment)
         wait_for_serve_route(
             process,
             environment=environment,
@@ -431,20 +517,23 @@ def main() -> int:
         llama_log.parent.mkdir(parents=True, exist_ok=True)
         llama_output = llama_log.open("ab", buffering=0)
         local_lfm = supervisor.start(
-            llama_command(), cwd=LFM_CACHE, env=llama_environment,
+            llama_command(), role="local-llm", cwd=LFM_CACHE, env=llama_environment,
             stdout=llama_output, stderr=subprocess.STDOUT,
         )
         wait_for_port(local_lfm, LLAMA_PORT, "local LFM", timeout=30)
 
-        livekit = supervisor.start([str(binary)], cwd=ROOT, env=livekit_environment)
+        livekit = supervisor.start(
+            [str(binary)], role="livekit", cwd=ROOT, env=livekit_environment,
+        )
         wait_for_port(livekit, SIGNAL_PORT, "LiveKit")
 
         gateway = supervisor.start(
             [
-                str(python), "-m", "uvicorn", "voice_agent_v2.slice6_gateway:app",
+                str(python), "-B", "-m", "uvicorn", "voice_agent_v2.slice6_gateway:app",
                 "--host", "127.0.0.1", "--port", str(GATEWAY_PORT),
                 "--no-access-log", "--log-level", "info",
             ],
+            role="gateway-controller-stt-tts-provider",
             cwd=ROOT,
             env=gateway_environment,
         )
@@ -459,6 +548,11 @@ def main() -> int:
                 (signal_https_port, f"http://127.0.0.1:{SIGNAL_PORT}"),
             ),
         )
+        if not gateway_operational_ready(timeout=1.0):
+            raise ServiceProcessFailure(
+                "gateway did not expose exact operational readiness after route startup"
+            )
+        systemd_notify_ready()
         print("Voice Agent v2 Slice 6 local-LFM development app started")
         print(f"loopback: http://127.0.0.1:{GATEWAY_PORT}")
         print(f"tailnet: {app_public_url}")
@@ -483,24 +577,47 @@ def main() -> int:
         )
         print("Press Ctrl+C to stop this development run.")
 
+        operational_unready_since: float | None = None
         while not stopping:
             for process in supervisor.processes:
                 if process.poll() is not None:
-                    raise RuntimeError("a Slice 6 development process exited unexpectedly")
+                    raise ServiceProcessFailure(
+                        f"supervised component exited unexpectedly: {supervisor.role(process)}"
+                    )
+            if gateway_operational_ready():
+                operational_unready_since = None
+            elif operational_unready_since is None:
+                operational_unready_since = time.monotonic()
+            elif time.monotonic() - operational_unready_since >= OPERATIONAL_UNREADY_GRACE_SECONDS:
+                raise ServiceProcessFailure(
+                    "gateway-owned capability remained unready beyond the recovery grace"
+                )
             time.sleep(0.25)
     finally:
+        active_failure = sys.exc_info()[0] is not None
         try:
-            supervisor.close()
+            supervisor.close(SHUTDOWN_ORDER)
+        except BaseException as cleanup_error:
+            if not active_failure:
+                raise ServiceProcessFailure("supervised component cleanup failed") from cleanup_error
+            print("Voice Agent cleanup also failed within the systemd hard-stop bound", file=sys.stderr)
         finally:
             llama_output_object = locals().get("llama_output")
             if llama_output_object is not None:
-                llama_output_object.close()
+                try:
+                    llama_output_object.close()
+                except OSError as cleanup_error:
+                    if not active_failure:
+                        raise ServiceProcessFailure("local LFM log cleanup failed") from cleanup_error
     return 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except ServiceProcessFailure as error:
+        print(f"Voice Agent service failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
     except (Slice6ConfigurationError, RuntimeError, OSError, ValueError) as error:
         print(f"Slice 6 startup failed: {error}", file=sys.stderr)
         raise SystemExit(2)

@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="preserve the verified trace and playable PCM artifacts in a new directory",
     )
+    parser.add_argument(
+        "--tracer-only",
+        action="store_true",
+        help="run only the same deterministic tracer for immutable-release recovery checks",
+    )
     return parser.parse_args()
 
 
@@ -79,12 +84,15 @@ def main() -> int:
         write_trace_artifacts,
     )
 
-    suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
-    test_output = io.StringIO()
-    result = unittest.TextTestRunner(stream=test_output, verbosity=2).run(suite)
-    if not result.wasSuccessful():
-        sys.stderr.write(test_output.getvalue())
-        return 1
+    tests_run: int | None = None
+    if not args.tracer_only:
+        suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
+        test_output = io.StringIO()
+        result = unittest.TextTestRunner(stream=test_output, verbosity=2).run(suite)
+        if not result.wasSuccessful():
+            sys.stderr.write(test_output.getvalue())
+            return 1
+        tests_run = result.testsRun
 
     clean_runs: list[tuple[bytes, bytes, bytes]] = []
     for _run_number in (1, 2):
@@ -149,7 +157,10 @@ def main() -> int:
     for scenario, terminal_type, detail in scenario_summaries:
         print(f"case {scenario}: terminal={terminal_type} detail={detail} terminal_count=1")
 
-    print(f"behavioral_tests: pass count={result.testsRun}")
+    if tests_run is None:
+        print("behavioral_tests: omitted only for explicit immutable-release tracer check")
+    else:
+        print(f"behavioral_tests: pass count={tests_run}")
     print(
         "slice6_headless_media: success disconnect duplicate/late/malformed "
         "interruption/reconnect=PASS fake_inference=true IP_network=denied"

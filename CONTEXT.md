@@ -18,11 +18,14 @@
 - **LLM gateway** — An allowlisted server-side relay to one explicitly selected cloud model alias; it is not itself proof of the underlying provider/model and may not choose an implicit default or fallback.
 - **LLM provider** — The single explicitly selected response-generation backend for a deployment, either host-local or an approved cloud service.
 - **MVP eye** — The initial custom animated-eye avatar module with deterministic pupil, blink, speech-pulse, palette, and state behavior.
+- **Operational release** — An immutable clean-commit source/client build plus a content-free compatibility manifest; its complete payload path/type/mode/hash inventory is disjoint from explicit mutable runtime/cache/temp state, and it references but never contains the ignored server secret configuration or external model caches.
 - **Privacy-safe observation** — A bounded correlated metadata record that can describe health, timing, counts, resources, provider facts, and terminal outcomes without conversation or media content.
 - **Provider selection** — The deliberate configured choice of one LLM provider after measurement and privacy review, never a per-request or failure-triggered fallback.
+- **Recovery window** — The systemd start-limit interval in which the host stack may complete at most one automatic service restart before remaining in an actionable failed state; it is not an inference-request retry.
 - **Realtime session** — The bounded period in which a client and the agent share media, control events, and conversation state.
 - **Render state** — Renderer-internal values and frames owned exclusively by an avatar module, never supplied by an LLM.
 - **Soft dependency** — A capability whose loss permits an explicitly degraded but still correct experience.
+- **Compatible rollback** — Atomic activation of only the recorded prior operational release after its file inventory, referenced configuration, artifact/runtime, tailnet, and disk/cache compatibility are freshly revalidated.
 - **Speech envelope** — A bounded 30-Hz timing/amplitude observation derived from the browser's current decoded audio playout path for deterministic speech-synchronous visual behavior; it is not proof of physical audibility.
 - **Tailnet** — The private network formed by devices that are members of the project's Tailscale network.
 - **Tracer** — The smallest end-to-end path that crosses the intended boundaries with deterministic substitutes and produces inspectable evidence.

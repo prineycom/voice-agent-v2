@@ -72,6 +72,26 @@ def _uptime_seconds() -> float:
     return time.monotonic()
 
 
+def _private_runtime_pycache(runtime_root: Path) -> Path:
+    """Return an owned mutable bytecode root outside the immutable release tree."""
+    parent = runtime_root / "voice-agent-v2"
+    pycache = parent / "pycache"
+    for path in (parent, pycache):
+        try:
+            path.mkdir(mode=0o700, exist_ok=True)
+            status = path.lstat()
+        except OSError as error:
+            raise ValueError("private runtime bytecode root is unavailable") from error
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.getuid()
+            or status.st_mode & 0o077
+        ):
+            raise ValueError("private runtime bytecode root is not owned")
+    return pycache
+
+
 def _spawn_expiry_guardian(
     path: Path,
     owner_nonce: str,
@@ -124,7 +144,12 @@ def _spawn_expiry_guardian(
             start_new_session=True,
             close_fds=True,
             pass_fds=(lease_descriptor,),
-            env={"PYTHONUTF8": "1"},
+            env={
+                "PYTHONUTF8": "1",
+                "PYTHONPYCACHEPREFIX": str(
+                    _private_runtime_pycache(verified_runtime_root)
+                ),
+            },
         )
     finally:
         os.close(lease_descriptor)

@@ -30,7 +30,7 @@ from .local_stt import WhisperSTT
 from .real_turn import RealTurnController
 from .silero_tts import SileroKseniyaTTS, SileroVoiceProfile
 from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
-from .observability import ComponentHealth, ResourceSampler
+from .observability import ComponentHealth, HealthReport, ResourceSampler
 from .realtime import (
     CLIENT_CONTROL_TOPIC,
     CONTROL_TOPIC,
@@ -1394,9 +1394,11 @@ class SessionRegistry:
         )
         self._controllers: dict[str, LiveKitRoomController] = {}
         self._lock = asyncio.Lock()
+        self._accepting = False
 
     async def start(self) -> None:
         await asyncio.to_thread(self.runner.start)
+        self._accepting = True
         for component in self.runner.readiness_components():
             self.trace.emit(
                 "model",
@@ -1414,8 +1416,31 @@ class SessionRegistry:
     def active_count(self) -> int:
         return len(self._controllers)
 
+    @property
+    def accepting(self) -> bool:
+        return self._accepting
+
+    def operational_health(self) -> dict[str, object]:
+        ready = self._accepting
+        components = (
+            ComponentHealth(
+                "livekit", "alive", "ready" if ready else "unready", True,
+                "livekit-server-v1.13.5", "voice-agent.realtime-control.v2",
+                None if ready else "service_draining",
+            ),
+            ComponentHealth(
+                "controller", "alive", "ready" if ready else "unready", True,
+                "voice-agent-v2-controller", "voice-agent.realtime-control.v2",
+                None if ready else "service_draining",
+            ),
+            *self.runner.readiness_components(),
+        )
+        return HealthReport(tuple(components)).as_dict()
+
     async def create(self) -> dict[str, object]:
         async with self._lock:
+            if not self._accepting:
+                raise RuntimeError("the voice stack is draining")
             if len(self._controllers) >= self.settings.max_sessions:
                 raise SessionCapacityError("the single measured Slice 6 session is in use")
             session_id = f"session-{secrets.token_hex(12)}"
@@ -1460,6 +1485,7 @@ class SessionRegistry:
 
     async def close(self) -> None:
         async with self._lock:
+            self._accepting = False
             controllers = list(self._controllers.values())
         results = await asyncio.gather(
             *(controller.close() for controller in controllers),

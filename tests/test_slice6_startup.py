@@ -68,6 +68,39 @@ class FakeProcess:
         self.returncode = -9
 
 
+class SystemdReadinessTests(unittest.TestCase):
+    def test_exact_ready_notification_reaches_systemd_socket(self) -> None:
+        class Notifier:
+            address: str | None = None
+            message: bytes | None = None
+            closed = False
+
+            def settimeout(self, _timeout: float) -> None:
+                pass
+
+            def connect(self, address: str) -> None:
+                self.address = address
+
+            def sendall(self, message: bytes) -> None:
+                self.message = message
+
+            def close(self) -> None:
+                self.closed = True
+
+        notifier = Notifier()
+        with (
+            patch.dict(os.environ, {"NOTIFY_SOCKET": "@voice-agent-notify"}),
+            patch.object(run_slice6.socket, "socket", return_value=notifier),
+        ):
+            run_slice6.systemd_notify_ready()
+        self.assertEqual(notifier.address, "\0voice-agent-notify")
+        self.assertEqual(
+            notifier.message,
+            b"READY=1\nSTATUS=Voice Agent exact release ready\n",
+        )
+        self.assertTrue(notifier.closed)
+
+
 class Slice6WrapperEnvironmentTests(unittest.TestCase):
     def run_wrapper(
         self, *, inherited: dict[str, str], configured: dict[str, str],
@@ -344,6 +377,34 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
         self.assertTrue(second.terminated)
         self.assertFalse(first.killed)
         self.assertFalse(second.killed)
+
+    def test_operational_shutdown_closes_admission_then_drains_before_media_and_inference(self) -> None:
+        roles = (
+            "local-llm",
+            "livekit",
+            "gateway-controller-stt-tts-provider",
+            "tailnet-app-route",
+            "tailnet-signal-route",
+        )
+        processes = [FakeProcess() for _role in roles]
+        supervisor = run_slice6.ProcessSupervisor()
+        with patch.object(run_slice6.subprocess, "Popen", side_effect=processes):
+            for role in roles:
+                supervisor.start(["fixture"], role=role)
+        stopped: list[tuple[str, float]] = []
+
+        def record_stop(process: FakeProcess, *, timeout: float = 5.0) -> None:
+            stopped.append((supervisor.role(process), timeout))
+            process.terminate()
+
+        with patch.object(run_slice6, "stop", side_effect=record_stop):
+            supervisor.close(run_slice6.SHUTDOWN_ORDER)
+        self.assertEqual([role for role, _timeout in stopped], list(run_slice6.SHUTDOWN_ORDER))
+        self.assertEqual(dict(stopped)["gateway-controller-stt-tts-provider"], 60.0)
+        self.assertLess(
+            [role for role, _timeout in stopped].index("gateway-controller-stt-tts-provider"),
+            [role for role, _timeout in stopped].index("livekit"),
+        )
 
 
 if __name__ == "__main__":
