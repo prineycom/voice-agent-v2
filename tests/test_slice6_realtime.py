@@ -29,6 +29,23 @@ from voice_agent_v2.realtime import (
 from voice_agent_v2.tracer import TraceResult
 
 
+class BlockingCancellationRunner(StreamingRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_started = threading.Event()
+        self.cancel_release = threading.Event()
+        self.rollback_finished = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_started.set()
+        self.cancel_release.wait(2)
+        super().cancel()
+
+    def discard_turn(self, session_id: str, turn_id: str) -> None:
+        super().discard_turn(session_id, turn_id)
+        self.rollback_finished.set()
+
+
 class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
     async def test_trace_observer_refusal_is_counted(self) -> None:
         session = RealtimeSession(
@@ -187,9 +204,10 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
                 return "persistent-publication"
 
         events = MemoryEvents()
+        runner = BlockingCancellationRunner()
         session = RealtimeSession(
             session_id="session-clear-cancel",
-            runner=StreamingRunner(),
+            runner=runner,
             event_sink=events,
             audio_sink=CancelClearAudio(),
         )
@@ -197,9 +215,15 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         caller = asyncio.create_task(session.interrupt())
         holder["caller"] = caller
 
+        cleanup_started = await asyncio.to_thread(runner.cancel_started.wait, 0.5)
+        propagated_before_cleanup = caller.done()
+        runner.cancel_release.set()
         with self.assertRaises(asyncio.CancelledError):
             await caller
 
+        self.assertTrue(cleanup_started)
+        self.assertFalse(propagated_before_cleanup)
+        self.assertTrue(runner.rollback_finished.is_set())
         self.assertIn("turn.interrupted", [event["type"] for event in events.events])
         self.assertIn("session.degraded", [event["type"] for event in events.events])
         self.assertTrue(session.closed)
@@ -247,9 +271,10 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
                     holder["caller"].cancel()
 
         events = CancelAfterInterrupt()
+        runner = BlockingCancellationRunner()
         session = RealtimeSession(
             session_id="session-fail-interrupt-race",
-            runner=StreamingRunner(),
+            runner=runner,
             event_sink=events,
             audio_sink=MemoryAudio(),
         )
@@ -259,9 +284,15 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         )
         holder["caller"] = caller
 
+        cleanup_started = await asyncio.to_thread(runner.cancel_started.wait, 0.5)
+        propagated_before_cleanup = caller.done()
+        runner.cancel_release.set()
         with self.assertRaises(asyncio.CancelledError):
             await caller
 
+        self.assertTrue(cleanup_started)
+        self.assertFalse(propagated_before_cleanup)
+        self.assertTrue(runner.rollback_finished.is_set())
         degraded = next(
             event for event in events.events if event["type"] == "session.degraded"
         )

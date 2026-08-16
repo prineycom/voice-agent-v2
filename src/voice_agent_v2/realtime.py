@@ -1174,15 +1174,37 @@ class RealtimeSession:
                 if current is not None:
                     current.uncancel()
         if cancellation_requested:
+            cleanup_error: str | None = None
             if cleanup is not None:
-                self._watch_cleanup(cleanup)
+                deadline = (
+                    asyncio.get_running_loop().time()
+                    + CANCELLATION_CLEANUP_BOUND_MS / 1000
+                )
+                while not cleanup.done():
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        cleanup_error = "cancellation_cleanup_timeout"
+                        break
+                    try:
+                        await asyncio.wait((cleanup,), timeout=remaining)
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if current is not None:
+                            current.uncancel()
+                if cleanup.done():
+                    try:
+                        cleanup_error = cleanup.result()
+                    except BaseException:
+                        cleanup_error = "cancellation_cleanup_failed"
             if cancellation_failure is not None:
                 failure_stage, failure_code = cancellation_failure
                 await self._degrade_locked(
-                    failure_stage, drain_error or failure_code
+                    failure_stage, drain_error or cleanup_error or failure_code
                 )
             elif drain_error is not None:
                 await self._degrade_locked("publication", drain_error)
+            elif cleanup_error is not None:
+                await self._degrade_locked("controller", cleanup_error)
             raise asyncio.CancelledError
         return cleanup, drain_error, publication_id
 

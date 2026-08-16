@@ -77,6 +77,21 @@ class ObservationContractTests(unittest.TestCase):
             if name == "observation":
                 self.assertEqual(validate_observation(fixture), fixture)
 
+    def test_health_schema_rejects_duplicate_component_names(self) -> None:
+        fixture = json.loads(
+            (ROOT / "contracts" / "fixtures" / "health-readiness.v1.json").read_text()
+        )
+        schema = json.loads(
+            (ROOT / "contracts" / "health-readiness.v1.schema.json").read_text()
+        )
+        duplicate = {**fixture, "components": [dict(item) for item in fixture["components"]]}
+        duplicate["components"][-1] = {
+            **duplicate["components"][0],
+            "identity": "second-livekit-identity",
+        }
+        with self.assertRaises(SchemaViolation):
+            validate_schema(duplicate, schema)
+
     def test_observation_schema_rejects_content_keys_and_non_scalar_fields(self) -> None:
         fixture = json.loads(
             (ROOT / "contracts" / "fixtures" / "observation.v1.json").read_text()

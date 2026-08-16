@@ -42,6 +42,10 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
+    if "allOf" in schema:
+        for branch in schema["allOf"]:
+            validate(instance, branch, path)
+
     if "oneOf" in schema:
         matches: list[int] = []
         failures: list[str] = []
@@ -141,6 +145,21 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
             raise SchemaViolation(f"{path}: array is too short")
         if "maxItems" in schema and len(instance) > schema["maxItems"]:
             raise SchemaViolation(f"{path}: array is too long")
+        if "contains" in schema:
+            matches = 0
+            for index, item in enumerate(instance):
+                try:
+                    validate(item, schema["contains"], f"{path}[{index}]")
+                except SchemaViolation:
+                    pass
+                else:
+                    matches += 1
+            minimum = schema.get("minContains", 1)
+            maximum = schema.get("maxContains")
+            if matches < minimum:
+                raise SchemaViolation(f"{path}: array has too few matching items")
+            if maximum is not None and matches > maximum:
+                raise SchemaViolation(f"{path}: array has too many matching items")
         if "items" in schema:
             for index, item in enumerate(instance):
                 validate(item, schema["items"], f"{path}[{index}]")
