@@ -410,7 +410,7 @@ Run module-contract bounds/property tests, seeded deterministic fixture replay, 
 
 ## Slice 8 — Failure semantics and privacy-safe observability
 
-> **Implementation checkpoint (2026-08-15):** `./verify-slice8` passes the complete controlled architecture failure map, typed liveness/readiness compatibility, metadata-only timeline/percentile reconstruction, default-log privacy review, public capture-deletion path, disposable real-process bounded recovery, safe 16-MiB/100-ms resource pressure, and focused browser state/render boundaries. Evidence and exact physical/shared/destructive gaps are recorded in [`slice-8-failure-observability.md`](evidence/slice-8-failure-observability.md). Physical microphone/audibility/Raspberry Pi, actual tailnet-interface loss, destructive OOM, shared-service kill, and 20-turn full-stack acceptance percentiles remain unclaimed; none is replaced by synthetic evidence.
+> **Implementation checkpoint (2026-08-16):** `./verify-slice8` passes the complete controlled architecture failure map, typed liveness/readiness compatibility, metadata-only timeline/percentile reconstruction, default-log privacy review, public capture-deletion path, disposable real-process bounded recovery, safe 16-MiB/100-ms resource pressure, and focused browser state/render boundaries. Evidence and exact physical/shared/destructive gaps are recorded in [`slice-8-failure-observability.md`](evidence/slice-8-failure-observability.md). Physical microphone/audibility/Raspberry Pi, actual tailnet-interface loss, destructive OOM, shared-service kill, and 20-turn full-stack acceptance percentiles remain unclaimed; none is replaced by synthetic evidence.
 
 ### User-visible outcome
 
