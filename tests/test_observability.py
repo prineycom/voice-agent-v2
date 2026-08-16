@@ -283,6 +283,17 @@ class ReadinessAndFailurePolicyTests(unittest.TestCase):
         self.assertEqual(llm["readiness"], "unready")
         self.assertFalse(llm["compatible"])
 
+    def test_health_report_rejects_browser_only_component_extension(self) -> None:
+        components = tuple(
+            ComponentHealth(
+                component, "alive", "ready", True,
+                f"{component}-identity", "voice-agent.test.v1",
+            )
+            for component in COMPONENT_NAMES[:6]
+        )
+        with self.assertRaisesRegex(ValueError, "five server components"):
+            HealthReport(components).as_dict()
+
     def test_every_architecture_failure_row_has_bounded_safe_behavior(self) -> None:
         expected_rows = {
             "LiveKit unavailable",
@@ -686,6 +697,71 @@ class CaptureAndResourceTests(unittest.TestCase):
             )
             self.assertEqual(process.returncode, 0)
             self.assertFalse(capture.exists())
+
+    def test_real_detached_guardian_survives_short_lived_parent(self) -> None:
+        runtime_value = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime_value is None:
+            self.skipTest("no XDG runtime directory")
+        try:
+            runtime_root = require_lifetime_runtime_root(Path(runtime_value))
+        except ValueError:
+            self.skipTest("host has no supported non-lingering runtime tmpfs")
+        with tempfile.TemporaryDirectory(dir=runtime_root) as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            capture = root / "capture-detached-parent"
+            capture.mkdir(mode=0o700)
+            nonce = "c" * 32
+            expires = time.time() + 0.2
+            uptime_clock = getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC)
+            expires_uptime = time.clock_gettime(uptime_clock) + 0.2
+            manifest = capture / "manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": "voice-agent.diagnostic-content-capture.v1",
+                "session_id": "detached-parent",
+                "created_unix_seconds": expires - 1,
+                "expires_unix_seconds": expires,
+                "owner_nonce": nonce,
+                "max_files": 16,
+                "max_bytes": 1_048_576,
+                "root_max_captures": 4,
+                "root_max_content_bytes": 4_194_304,
+                "explicit_opt_in": True,
+            }))
+            manifest.chmod(0o600)
+            DiagnosticContentCapture._create_guardian_lease_locked(root, nonce)
+            helper = (
+                "from pathlib import Path; import sys; "
+                "from voice_agent_v2.diagnostics import _spawn_expiry_guardian; "
+                "_spawn_expiry_guardian(Path(sys.argv[1]), sys.argv[2], "
+                "float(sys.argv[3]), float(sys.argv[4]), Path(sys.argv[5]))"
+            )
+            parent = subprocess.run(
+                [
+                    sys.executable, "-c", helper, str(capture), nonce,
+                    str(expires), str(expires_uptime), str(runtime_root),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=2,
+                env={
+                    "PYTHONPATH": str(ROOT / "src"),
+                    "PYTHONUTF8": "1",
+                },
+            )
+            self.assertEqual(parent.returncode, 0)
+            deadline = time.monotonic() + 2
+            while capture.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(capture.exists())
+            DiagnosticContentCapture._release_guardian_lease(
+                root, nonce, runtime_root=runtime_root
+            )
+            self.assertFalse(
+                DiagnosticContentCapture._guardian_lease_path(root, nonce).exists()
+            )
 
     def test_expiry_purge_refuses_unowned_capture_directories(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:

@@ -205,6 +205,38 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.closed)
         self.assertEqual(session.turn_counts["interrupted"], 1)
 
+    async def test_cancel_during_fail_audio_clear_preserves_requested_stage(self) -> None:
+        holder: dict[str, asyncio.Task[None]] = {}
+
+        class CancelFailClearAudio(MemoryAudio):
+            async def clear(self, _turn_id: str) -> str:
+                holder["caller"].cancel()
+                await asyncio.sleep(0)
+                return "persistent-publication"
+
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-fail-clear-cancel",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=CancelFailClearAudio(),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(
+            session.fail("microphone_capture", "microphone_stream_failed")
+        )
+        holder["caller"] = caller
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        degraded = next(
+            event for event in events.events if event["type"] == "session.degraded"
+        )
+        self.assertEqual(degraded["payload"]["stage"], "microphone_capture")
+        self.assertEqual(degraded["payload"]["code"], "audio_drain_cancelled")
+        self.assertTrue(session.closed)
+
     async def test_completed_interruption_before_fail_cancellation_closes_requested_stage(self) -> None:
         holder: dict[str, asyncio.Task[None]] = {}
 

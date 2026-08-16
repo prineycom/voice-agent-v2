@@ -213,8 +213,9 @@ class HealthReport:
     def as_dict(self) -> dict[str, object]:
         component_documents = [component.as_dict() for component in self.components]
         names = [document["component"] for document in component_documents]
-        if len(names) != len(set(names)) or any(name not in COMPONENT_NAMES for name in names):
-            raise ValueError("health report components are not unique")
+        hard = {"livekit", "controller", "stt", "selected_llm", "tts"}
+        if len(names) != len(set(names)) or set(names) != hard:
+            raise ValueError("health report must contain the five server components")
         if (
             self.provider_mode != "local"
             or self.external_transfer
@@ -226,7 +227,6 @@ class HealthReport:
             or self.selected_avatar_module != "mvp-eye-svg-v1"
         ):
             raise ValueError("health report changed a fixed product boundary")
-        hard = {"livekit", "controller", "stt", "selected_llm", "tts"}
         ready = all(
             component["liveness"] == "alive"
             and component["readiness"] == "ready"

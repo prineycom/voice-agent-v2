@@ -864,7 +864,9 @@ class RealtimeSession:
     async def fail(self, stage: str, code: str) -> None:
         async with self._lock:
             try:
-                cleanup, drain_error, _publication_id = await self._interrupt_locked(code)
+                cleanup, drain_error, _publication_id = await self._interrupt_locked(
+                    code, cancellation_failure=(stage, code)
+                )
             except asyncio.CancelledError:
                 await self._degrade_locked(stage, code)
                 raise
@@ -1120,7 +1122,11 @@ class RealtimeSession:
         return cleanup
 
     async def _interrupt_locked(
-        self, reason: str, *, notify_client: bool = True
+        self,
+        reason: str,
+        *,
+        notify_client: bool = True,
+        cancellation_failure: tuple[str, str] | None = None,
     ) -> tuple[asyncio.Task[str | None] | None, str | None, str | None]:
         context = self._active
         if context is None or context.terminal:
@@ -1168,10 +1174,15 @@ class RealtimeSession:
                 if current is not None:
                     current.uncancel()
         if cancellation_requested:
-            if drain_error is not None:
-                await self._degrade_locked("publication", drain_error)
-            elif cleanup is not None:
+            if cleanup is not None:
                 self._watch_cleanup(cleanup)
+            if cancellation_failure is not None:
+                failure_stage, failure_code = cancellation_failure
+                await self._degrade_locked(
+                    failure_stage, drain_error or failure_code
+                )
+            elif drain_error is not None:
+                await self._degrade_locked("publication", drain_error)
             raise asyncio.CancelledError
         return cleanup, drain_error, publication_id
 

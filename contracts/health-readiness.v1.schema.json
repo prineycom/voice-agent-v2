@@ -11,13 +11,13 @@
     "components": {
       "type": "array",
       "minItems": 5,
-      "maxItems": 7,
+      "maxItems": 5,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["component", "liveness", "readiness", "compatible", "identity", "contract_version", "reason_code", "retry_count", "retry_limit"],
         "properties": {
-          "component": {"enum": ["livekit", "controller", "stt", "selected_llm", "tts", "avatar_host", "active_module"]},
+          "component": {"enum": ["livekit", "controller", "stt", "selected_llm", "tts"]},
           "liveness": {"enum": ["alive", "dead", "unknown"]},
           "readiness": {"enum": ["ready", "unready", "degraded", "unknown"]},
           "compatible": {"type": "boolean"},
