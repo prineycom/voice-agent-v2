@@ -564,6 +564,43 @@ class CaptureAndResourceTests(unittest.TestCase):
                 runtime_root=guardians[0][4],
             ))
 
+    @patch(
+        "voice_agent_v2.diagnostics.require_lifetime_runtime_root",
+        side_effect=lambda path: path.expanduser().resolve(),
+    )
+    def test_systemd_guardian_deletes_before_ttl_when_main_generation_exits(
+        self, _runtime_root
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            runtime_root = Path(directory)
+            root = runtime_root / "captures"
+            guardians: list[tuple[Path, str, float, float, Path]] = []
+            capture = DiagnosticContentCapture(
+                root,
+                "session-service-stop",
+                opt_in=True,
+                ttl_seconds=60,
+                now=lambda: 1000.0,
+                guardian_factory=lambda *arguments: guardians.append(arguments),
+                runtime_root=runtime_root,
+                uptime_now=lambda: 500.0,
+            )
+            capture.capture("prompt", "synthetic")
+            liveness = iter((True, False))
+            delays: list[float] = []
+            self.assertTrue(expire_capture(
+                *guardians[0][:4],
+                uptime_now=lambda: 500.0,
+                sleep=delays.append,
+                runtime_root=guardians[0][4],
+                service_main_process="123:456",
+                process_alive=lambda identity: (
+                    identity == "123:456" and next(liveness)
+                ),
+            ))
+            self.assertEqual(delays, [1.0])
+            self.assertFalse(capture.path.exists())
+
     def test_guardian_boundaries_reject_persistent_roots(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, patch(
             "voice_agent_v2.diagnostics.subprocess.Popen"
@@ -586,6 +623,44 @@ class CaptureAndResourceTests(unittest.TestCase):
                 absent_root, nonce, runtime_root=root
             )
             self.assertFalse(absent_root.exists())
+
+    def test_systemd_guardian_receives_main_process_generation(self) -> None:
+        class FinishedProcess:
+            pid = 1234
+
+            @staticmethod
+            def wait() -> int:
+                return 0
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, patch.dict(
+            os.environ,
+            {"VOICE_AGENT_SYSTEMD_MAIN_PROCESS": "123:456"},
+            clear=True,
+        ), patch(
+            "voice_agent_v2.diagnostics.SYSTEMD_RUNTIME_ROOT", Path(directory),
+        ), patch(
+            "voice_agent_v2.diagnostics.require_lifetime_runtime_root",
+            side_effect=lambda path: path.expanduser().resolve(),
+        ), patch(
+            "voice_agent_v2.diagnostics.subprocess.Popen",
+            return_value=FinishedProcess(),
+        ) as spawn:
+            DiagnosticContentCapture(
+                Path(directory) / "captures",
+                "session-service-custody",
+                opt_in=True,
+                ttl_seconds=60,
+                runtime_root=Path(directory),
+            )
+
+        command = spawn.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--runtime-root") + 1],
+            str(Path(directory).resolve()),
+        )
+        self.assertEqual(
+            command[-2:], ["--service-main-process", "123:456"],
+        )
 
     def test_expiry_guardian_receives_only_minimal_environment(self) -> None:
         class FinishedProcess:

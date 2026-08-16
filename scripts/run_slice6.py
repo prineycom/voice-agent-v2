@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from voice_agent_v2.runtime_directory import SYSTEMD_RUNTIME_ROOT
 from voice_agent_v2.silero_tts import verify_silero_runtime
 from voice_agent_v2.slice6_config import (
     Slice6ConfigurationError,
@@ -46,6 +47,7 @@ SERVER_SECRET_NAMES = frozenset({
     "LIVEKIT_KEYS",
 })
 FORBIDDEN_CLOUD_NAMES = frozenset({"LITELLM_BASE_URL", "LITELLM_TOKEN_FILE"})
+SERVICE_MAIN_PROCESS_NAME = "VOICE_AGENT_SYSTEMD_MAIN_PROCESS"
 SERVE_READINESS_TIMEOUT_SECONDS = 5.0
 SERVE_STATUS_LIMIT_BYTES = 64 * 1024
 OPERATIONAL_STATUS_LIMIT_BYTES = 64 * 1024
@@ -129,6 +131,12 @@ def required(name: str) -> str:
     if value is None or not value or value != value.strip():
         raise Slice6ConfigurationError(f"required server configuration is missing or invalid: {name}")
     return value
+
+
+def systemd_service_main_process(environment: dict[str, str]) -> str | None:
+    if environment.get("XDG_RUNTIME_DIR") != str(SYSTEMD_RUNTIME_ROOT):
+        return None
+    return supervised_process_identity(os.getpid())
 
 
 def without_server_secrets(environment: dict[str, str]) -> dict[str, str]:
@@ -673,6 +681,7 @@ def main() -> int:
     gateway_environment["PYTHONPATH"] = str(ROOT / "src")
     gateway_environment.pop("LIVEKIT_CONFIG", None)
     gateway_environment.pop("LIVEKIT_KEYS", None)
+    gateway_environment.pop(SERVICE_MAIN_PROCESS_NAME, None)
     livekit_environment = without_server_secrets(gateway_environment)
     livekit_environment["LIVEKIT_CONFIG"] = livekit_server_config(node_ip)
     livekit_environment["LIVEKIT_KEYS"] = (
@@ -717,6 +726,9 @@ def main() -> int:
         gateway_environment["VOICE_AGENT_SUPERVISED_LIVEKIT_PROCESS"] = (
             supervised_process_identity(livekit.pid)
         )
+        service_main_process = systemd_service_main_process(dict(os.environ))
+        if service_main_process is not None:
+            gateway_environment[SERVICE_MAIN_PROCESS_NAME] = service_main_process
         gateway = supervisor.start(
             [
                 str(python), "-B", "-m", "uvicorn", "voice_agent_v2.slice6_gateway:app",

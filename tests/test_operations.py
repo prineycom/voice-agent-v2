@@ -235,6 +235,48 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertFalse(result["release_service_apply_required"])
             self.assertNotIn("service_apply_required", result)
 
+    def test_canonical_deploy_fails_before_activation_when_systemd_query_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            arguments = SimpleNamespace(state_root=state, config=state / "runtime.env")
+            activations: list[str] = []
+
+            def deploy(**_arguments: object) -> dict[str, object]:
+                activations.append("activated")
+                return {"changed": True, "status": "activated"}
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli.ReleaseStore, "deploy", side_effect=deploy) as activate,
+                patch.object(
+                    operations_cli, "_systemctl_show",
+                    side_effect=OperationalError(
+                        "systemd_status_failed",
+                        "system service state could not be queried",
+                    ),
+                ),
+                patch.object(operations_cli, "_print") as output,
+                self.assertRaisesRegex(OperationalError, "could not be queried"),
+            ):
+                operations_cli.command_deploy(arguments)
+            self.assertEqual(activations, [])
+            activate.assert_not_called()
+            output.assert_not_called()
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli.ReleaseStore, "deploy", side_effect=deploy),
+                patch.object(
+                    operations_cli, "_systemctl_show", return_value={"load": "loaded"},
+                ),
+                patch.object(operations_cli, "_print") as output,
+            ):
+                operations_cli.command_deploy(arguments)
+            self.assertEqual(activations, ["activated"])
+            self.assertTrue(
+                output.call_args.args[0]["release_service_apply_required"]
+            )
+
     def test_run_exit_status_retries_only_transient_tailnet_unavailability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             arguments = [

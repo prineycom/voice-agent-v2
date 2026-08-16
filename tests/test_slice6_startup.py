@@ -150,6 +150,17 @@ class ParentProcessIdentityTests(unittest.TestCase):
         pid, start_time = identity.split(":", 1)
         self.assertFalse(supervised_process_alive(f"{pid}:{int(start_time) + 1}"))
 
+    def test_only_the_systemd_runtime_exports_main_process_custody(self) -> None:
+        identity = run_slice6.systemd_service_main_process({
+            "XDG_RUNTIME_DIR": str(run_slice6.SYSTEMD_RUNTIME_ROOT),
+        })
+        self.assertEqual(
+            identity, run_slice6.supervised_process_identity(os.getpid()),
+        )
+        self.assertIsNone(run_slice6.systemd_service_main_process({
+            "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}",
+        }))
+
 
 class RuntimePortCustodyTests(unittest.TestCase):
     def test_final_listener_custody_rejects_an_unrelated_live_owner(self) -> None:

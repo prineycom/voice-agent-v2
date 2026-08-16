@@ -121,11 +121,11 @@ def command_validate(arguments: argparse.Namespace) -> None:
 
 
 def command_deploy(arguments: argparse.Namespace) -> None:
+    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+    service = _systemctl_show() if canonical else {"load": "not-applicable"}
     result = ReleaseStore(arguments.state_root).deploy(
         source_root=ROOT, config_path=arguments.config,
     )
-    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
-    service = _systemctl_show() if canonical else {"load": "not-applicable"}
     result["release_service_apply_required"] = bool(
         result.get("changed") is True and service.get("load") == "loaded"
     )
