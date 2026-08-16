@@ -382,6 +382,7 @@ class DiagnosticContentCapture:
                 "diagnostic content capture must remain in the lifetime-scoped private runtime tmpfs"
             )
         self.root = resolved
+        self._runtime_root = resolved_runtime_root
         self.session_id = session_id
         self.path = resolved / f"capture-{session_id}"
         self.ttl_seconds = ttl_seconds
@@ -393,9 +394,11 @@ class DiagnosticContentCapture:
         self._files = 0
         self._bytes = 0
         self._lock = threading.RLock()
-        self.purge_expired(resolved, now=now)
+        self.purge_expired(resolved, now=now, runtime_root=self._runtime_root)
         with _capture_root_lock(resolved):
-            if self._custody_slots_locked(resolved) >= MAX_CAPTURE_DIRECTORIES:
+            if self._custody_slots_locked(
+                resolved, runtime_root=self._runtime_root
+            ) >= MAX_CAPTURE_DIRECTORIES:
                 raise RuntimeError("diagnostic capture root limit reached")
             self.path.mkdir(exist_ok=False, mode=0o700)
             try:
@@ -475,24 +478,51 @@ class DiagnosticContentCapture:
                     self.path,
                     expected_owner_nonce=self._owner_nonce,
                     expected_expires_unix_seconds=self._expires,
+                    runtime_root=self._runtime_root,
                 )
             except ValueError as error:
                 raise RuntimeError("diagnostic capture deletion guard failed") from error
 
     @staticmethod
-    def _owned_manifest(path: Path) -> tuple[Path, dict[str, object]]:
+    def _owned_manifest(
+        path: Path, *, runtime_root: Path | None = None
+    ) -> tuple[Path, dict[str, object]]:
         expanded = path.expanduser()
         if expanded.is_symlink():
             raise ValueError("path is not an owned outside-Git diagnostic capture")
         resolved = expanded.resolve()
+        configured_runtime_root = runtime_root or (
+            Path(value)
+            if (value := os.environ.get("XDG_RUNTIME_DIR"))
+            else Path("/run/user") / str(os.getuid())
+        )
+        verified_runtime_root = require_lifetime_runtime_root(configured_runtime_root)
+        try:
+            directory_status = resolved.stat()
+            root_status = resolved.parent.stat()
+            manifest_path = resolved / "manifest.json"
+            manifest_status = manifest_path.lstat()
+        except OSError as error:
+            raise ValueError("diagnostic capture manifest is unavailable") from error
         if (
             _inside_git_worktree(resolved)
+            or not _inside_directory(resolved, verified_runtime_root)
+            or resolved == verified_runtime_root
             or not resolved.name.startswith("capture-")
-            or not resolved.is_dir()
+            or not stat.S_ISDIR(directory_status.st_mode)
+            or directory_status.st_uid != os.getuid()
+            or directory_status.st_mode & 0o777 != 0o700
+            or not stat.S_ISDIR(root_status.st_mode)
+            or root_status.st_uid != os.getuid()
+            or root_status.st_mode & 0o777 != 0o700
+            or manifest_path.is_symlink()
+            or not stat.S_ISREG(manifest_status.st_mode)
+            or manifest_status.st_uid != os.getuid()
+            or manifest_status.st_mode & 0o777 != 0o600
         ):
-            raise ValueError("path is not an owned outside-Git diagnostic capture")
+            raise ValueError("path is not an owned lifetime diagnostic capture")
         try:
-            document = json.loads((resolved / "manifest.json").read_text(encoding="utf-8"))
+            document = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError("diagnostic capture manifest is unavailable") from error
         if (
@@ -544,7 +574,9 @@ class DiagnosticContentCapture:
             return
 
     @staticmethod
-    def _custody_slots_locked(root: Path) -> int:
+    def _custody_slots_locked(
+        root: Path, *, runtime_root: Path | None = None
+    ) -> int:
         nonces: set[str] = set()
         for lease in root.glob(".capture-guardian-*.lease"):
             name = lease.name
@@ -581,7 +613,9 @@ class DiagnosticContentCapture:
             nonces.add(nonce)
         for directory in root.glob("capture-*"):
             try:
-                _resolved, document = DiagnosticContentCapture._owned_manifest(directory)
+                _resolved, document = DiagnosticContentCapture._owned_manifest(
+                    directory, runtime_root=runtime_root
+                )
             except ValueError:
                 continue
             nonce = document.get("owner_nonce")
@@ -595,8 +629,11 @@ class DiagnosticContentCapture:
         *,
         expected_owner_nonce: str | None = None,
         expected_expires_unix_seconds: float | None = None,
+        runtime_root: Path | None = None,
     ) -> bool:
-        resolved, initial_document = DiagnosticContentCapture._owned_manifest(path)
+        resolved, initial_document = DiagnosticContentCapture._owned_manifest(
+            path, runtime_root=runtime_root
+        )
         guarded_nonce = expected_owner_nonce or str(initial_document["owner_nonce"])
         guarded_expiry = (
             expected_expires_unix_seconds
@@ -604,7 +641,9 @@ class DiagnosticContentCapture:
             else initial_document.get("expires_unix_seconds")
         )
         with _capture_root_lock(resolved.parent):
-            resolved, document = DiagnosticContentCapture._owned_manifest(resolved)
+            resolved, document = DiagnosticContentCapture._owned_manifest(
+                resolved, runtime_root=runtime_root
+            )
             if (
                 document["owner_nonce"] != guarded_nonce
                 or document.get("expires_unix_seconds") != guarded_expiry
@@ -615,10 +654,34 @@ class DiagnosticContentCapture:
 
     @staticmethod
     def purge_expired(
-        root: Path, *, now: Callable[[], float] = time.time
+        root: Path,
+        *,
+        now: Callable[[], float] = time.time,
+        runtime_root: Path | None = None,
     ) -> int:
-        resolved = root.expanduser().resolve()
-        if _inside_git_worktree(resolved) or not resolved.exists():
+        expanded = root.expanduser()
+        if expanded.is_symlink():
+            return 0
+        resolved = expanded.resolve()
+        configured_runtime_root = runtime_root or (
+            Path(value)
+            if (value := os.environ.get("XDG_RUNTIME_DIR"))
+            else Path("/run/user") / str(os.getuid())
+        )
+        try:
+            verified_runtime_root = require_lifetime_runtime_root(
+                configured_runtime_root
+            )
+            root_status = resolved.stat()
+        except (OSError, ValueError):
+            return 0
+        if (
+            _inside_git_worktree(resolved)
+            or not _inside_directory(resolved, verified_runtime_root)
+            or not stat.S_ISDIR(root_status.st_mode)
+            or root_status.st_uid != os.getuid()
+            or root_status.st_mode & 0o777 != 0o700
+        ):
             return 0
         removed = 0
         current_time = float(now())
@@ -638,6 +701,7 @@ class DiagnosticContentCapture:
                         directory,
                         expected_owner_nonce=str(document.get("owner_nonce", "")),
                         expected_expires_unix_seconds=expires,
+                        runtime_root=verified_runtime_root,
                     )
                 except (OSError, ValueError):
                     continue

@@ -30,11 +30,14 @@ def expire_capture(
     *,
     uptime_now: Callable[[], float] = _uptime_seconds,
     sleep: Callable[[float], None] = time.sleep,
+    runtime_root: Path | None = None,
 ) -> bool:
     """Wait until the monotonic deadline, then delete only the same owned capture."""
     while (remaining := expires_uptime_seconds - float(uptime_now())) > 0:
         try:
-            _resolved, document = DiagnosticContentCapture._owned_manifest(path)
+            _resolved, document = DiagnosticContentCapture._owned_manifest(
+                path, runtime_root=runtime_root
+            )
         except ValueError:
             return False
         if (
@@ -48,6 +51,7 @@ def expire_capture(
             path,
             expected_owner_nonce=owner_nonce,
             expected_expires_unix_seconds=expires_unix_seconds,
+            runtime_root=runtime_root,
         )
     except (OSError, ValueError):
         return False

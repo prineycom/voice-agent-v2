@@ -1830,7 +1830,14 @@ class RealtimeSession:
         if publication_id is not None:
             public_payload["server_media_publication_id"] = publication_id
         self._add_metrics(context, public_payload)
-        await self._emit(context.turn_id, event_type, public_payload, terminal=True)
+        cancellation_after_publish = False
+        try:
+            await self._emit(context.turn_id, event_type, public_payload, terminal=True)
+        except asyncio.CancelledError:
+            if context.public_event_published and not context.transport_failed:
+                cancellation_after_publish = True
+            else:
+                raise
         terminal_code = payload.get("code")
         terminal_controller_failure = (
             payload.get("stage") == "llm_provider"
@@ -1854,6 +1861,8 @@ class RealtimeSession:
             await self._degrade_locked("publication", drain_error)
         elif context.rollback_error is not None:
             await self._degrade_locked("controller", context.rollback_error)
+        if cancellation_after_publish:
+            raise asyncio.CancelledError
 
     async def _relay_queued_pcm(self, item: PcmPumpItem) -> None:
         context = item.request
@@ -2269,6 +2278,8 @@ class RealtimeSession:
                 if event_type != "turn.failed":
                     self.turn_counts["failed"] += 1
                 context.transport_failed = True
+            context.cancellation.cancel()
+            self._ensure_context_cleanup(context, wait_for_turn=False)
             context.terminal = True
             self._add_metrics(context, failure)
             failed_event_type = "turn.failed"

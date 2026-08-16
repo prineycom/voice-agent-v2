@@ -424,7 +424,9 @@ class CaptureAndResourceTests(unittest.TestCase):
             self.assertEqual(transcript.stat().st_mode & 0o777, 0o600)
             self.assertEqual(raw.stat().st_mode & 0o777, 0o600)
             self.assertNotIn(str(ROOT), str(capture.path))
-            self.assertTrue(DiagnosticContentCapture.delete_path(capture.path))
+            self.assertTrue(DiagnosticContentCapture.delete_path(
+                capture.path, runtime_root=Path(directory)
+            ))
             self.assertFalse(capture.path.exists())
 
     @patch(
@@ -472,6 +474,7 @@ class CaptureAndResourceTests(unittest.TestCase):
                 *guardians[0],
                 uptime_now=lambda: 0.0,
                 sleep=lambda _delay: self.fail("deleted capture guardian must exit"),
+                runtime_root=Path(directory),
             ))
             DiagnosticContentCapture._release_guardian_lease(
                 guardians[0][0].parent, guardians[0][1]
@@ -520,6 +523,7 @@ class CaptureAndResourceTests(unittest.TestCase):
 
             self.assertTrue(expire_capture(
                 *guardians[0], uptime_now=lambda: uptime[0], sleep=sleep_early,
+                runtime_root=Path(directory),
             ))
             self.assertGreaterEqual(len(delays), 2)
             self.assertFalse(capture.path.exists())
@@ -527,6 +531,7 @@ class CaptureAndResourceTests(unittest.TestCase):
                 *guardians[0],
                 uptime_now=lambda: 500.0,
                 sleep=lambda _delay: self.fail("deleted capture guardian must exit"),
+                runtime_root=Path(directory),
             ))
 
     def test_expiry_guardian_receives_only_minimal_environment(self) -> None:
@@ -561,13 +566,14 @@ class CaptureAndResourceTests(unittest.TestCase):
         self.assertEqual(environment, {"PYTHONUTF8": "1"})
         self.assertNotIn("LIVEKIT_API_SECRET", environment)
 
-    def test_detached_expiry_executable_deletes_after_backend_scope_ends(self) -> None:
+    def test_detached_expiry_executable_refuses_persistent_capture(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             capture = Path(directory) / "capture-independent"
             capture.mkdir(mode=0o700)
             nonce = "a" * 32
-            expires = time.time() + 0.1
-            (capture / "manifest.json").write_text(json.dumps({
+            expires = time.time() - 1
+            manifest = capture / "manifest.json"
+            manifest.write_text(json.dumps({
                 "schema_version": "voice-agent.diagnostic-content-capture.v1",
                 "session_id": "independent",
                 "created_unix_seconds": expires - 1,
@@ -579,7 +585,8 @@ class CaptureAndResourceTests(unittest.TestCase):
                 "root_max_content_bytes": 4_194_304,
                 "explicit_opt_in": True,
             }))
-            process = subprocess.Popen(
+            manifest.chmod(0o600)
+            process = subprocess.run(
                 [
                     sys.executable,
                     str(ROOT / "src" / "voice_agent_v2" / "diagnostic_expiry.py"),
@@ -590,18 +597,15 @@ class CaptureAndResourceTests(unittest.TestCase):
                     "--expires-unix-seconds",
                     str(expires),
                     "--expires-uptime-seconds",
-                    str(time.monotonic() + 0.1),
+                    "0",
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,
+                check=False,
             )
-            deadline = time.monotonic() + 2
-            while capture.exists() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            self.assertFalse(capture.exists())
-            self.assertEqual(process.wait(timeout=2), 0)
+            self.assertEqual(process.returncode, 0)
+            self.assertTrue(capture.exists())
 
     def test_expiry_purge_refuses_unowned_capture_directories(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
@@ -622,11 +626,30 @@ class CaptureAndResourceTests(unittest.TestCase):
                 "expires_unix_seconds": 1,
                 "explicit_opt_in": True,
             }))
+            forged = root / "capture-forged"
+            forged.mkdir(mode=0o700)
+            forged_manifest = forged / "manifest.json"
+            forged_manifest.write_text(json.dumps({
+                "schema_version": "voice-agent.diagnostic-content-capture.v1",
+                "session_id": "forged",
+                "created_unix_seconds": 0,
+                "expires_unix_seconds": 1,
+                "owner_nonce": "a" * 32,
+                "max_files": 16,
+                "max_bytes": 1_048_576,
+                "root_max_captures": 4,
+                "root_max_content_bytes": 4_194_304,
+                "explicit_opt_in": True,
+            }))
+            forged_manifest.chmod(0o600)
             self.assertEqual(
                 DiagnosticContentCapture.purge_expired(root, now=lambda: 2), 0
             )
+            with self.assertRaisesRegex(ValueError, "lifetime diagnostic"):
+                DiagnosticContentCapture.delete_path(forged)
             self.assertTrue(foreign.exists())
             self.assertTrue(mismatched.exists())
+            self.assertTrue(forged.exists())
 
     def test_deterministic_resource_sampler_reports_safe_numeric_metadata(self) -> None:
         files = {

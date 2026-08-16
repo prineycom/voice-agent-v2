@@ -213,6 +213,42 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await session.start_utterance()
 
+    async def test_completed_initial_failure_terminal_closes_before_cancellation(self) -> None:
+        holder: dict[str, asyncio.Task[str]] = {}
+
+        class CancelAfterFailureEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                await super().send(event)
+                if event["type"] == "turn.failed":
+                    holder["caller"].cancel()
+
+        class FailingPrepareAudio(MemoryAudio):
+            async def prepare(self, _turn_id: str, _media_generation: int) -> str:
+                raise RuntimeError("synthetic publication setup failure")
+
+        events = CancelAfterFailureEvents()
+        session = RealtimeSession(
+            session_id="session-initial-terminal-send-race",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=FailingPrepareAudio(),
+        )
+        admission = asyncio.create_task(session.start_utterance())
+        holder["caller"] = admission
+
+        with self.assertRaises(asyncio.CancelledError):
+            await admission
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.failed", "session.degraded"],
+        )
+        self.assertTrue(session.closed)
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
     async def test_cancelled_post_announcement_control_becomes_transport_failure(self) -> None:
         class BlockingSttEvents(MemoryEvents):
             def __init__(self) -> None:
@@ -226,9 +262,10 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
                 await super().send(event)
 
         events = BlockingSttEvents()
+        runner = StreamingRunner()
         session = RealtimeSession(
             session_id="session-nonterminal-cancel",
-            runner=StreamingRunner(),
+            runner=runner,
             event_sink=events,
             audio_sink=MemoryAudio(),
         )
@@ -249,6 +286,10 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         assert context is not None
         self.assertTrue(context.transport_failed)
         self.assertTrue(context.terminal)
+        self.assertTrue(context.cancellation.cancelled)
+        self.assertIsNotNone(context.cancellation_cleanup)
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+        self.assertTrue(runner.cancelled.is_set())
 
     async def test_completed_control_send_commits_before_cancellation_propagates(self) -> None:
         holder: dict[str, asyncio.Task[None]] = {}
