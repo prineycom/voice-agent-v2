@@ -17,7 +17,12 @@ from tests.test_checkpoint_ab import (
     StreamingRunner,
 )
 from voice_agent_v2.diagnostics import PrivacySafeTrace, TraceIdentity
-from voice_agent_v2.observability import ResourceSnapshot, failure_payload, reconstruct_timelines
+from voice_agent_v2.observability import (
+    ComponentHealth,
+    ResourceSnapshot,
+    failure_payload,
+    reconstruct_timelines,
+)
 from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES
 from voice_agent_v2.v2_contracts import EventEnvelopeV2
 from voice_agent_v2.realtime import (
@@ -1246,6 +1251,22 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
             def ready_for_admission(self) -> bool:
                 return False
 
+            def readiness_components(self) -> tuple[ComponentHealth, ...]:
+                return (
+                    ComponentHealth(
+                        "stt", "alive", "ready", True,
+                        "stt", "voice-agent.stt.v1",
+                    ),
+                    ComponentHealth(
+                        "selected_llm", "alive", "ready", True,
+                        "llm", "voice-agent.llm-provider.v1",
+                    ),
+                    ComponentHealth(
+                        "tts", "dead", "unready", True,
+                        "silero", "voice-agent.tts.v2", "silero_pool_not_ready",
+                    ),
+                )
+
         events = MemoryEvents()
         failures: list[tuple[str, str]] = []
         session = RealtimeSession(
@@ -1277,6 +1298,48 @@ class SessionReadinessLossTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tts_health["compatible"])
         with self.assertRaisesRegex(RuntimeError, "session is closed"):
             await session.start_utterance()
+
+    async def test_partial_tts_pool_preserves_alive_but_unready_health(self) -> None:
+        class PartialTtsRunner:
+            def ready_for_admission(self) -> bool:
+                return False
+
+            def admission_failure(self) -> tuple[str, str]:
+                return "tts", "silero_pool_not_ready"
+
+            def readiness_components(self) -> tuple[ComponentHealth, ...]:
+                return (
+                    ComponentHealth(
+                        "stt", "alive", "ready", True,
+                        "stt", "voice-agent.stt.v1",
+                    ),
+                    ComponentHealth(
+                        "selected_llm", "alive", "ready", True,
+                        "llm", "voice-agent.llm-provider.v1",
+                    ),
+                    ComponentHealth(
+                        "tts", "alive", "unready", True,
+                        "silero", "voice-agent.tts.v2", "silero_pool_not_ready",
+                    ),
+                )
+
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-partial-tts",
+            runner=PartialTtsRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        self.assertFalse(await session.ready())
+        degraded = events.events[0]
+        tts_health = next(
+            component for component in degraded["payload"]["health"]["components"]
+            if component["component"] == "tts"
+        )
+        self.assertEqual(tts_health["liveness"], "alive")
+        self.assertEqual(tts_health["readiness"], "unready")
+        self.assertEqual(tts_health["reason_code"], "silero_pool_not_ready")
 
     async def test_reconnect_worker_loss_publishes_degradation_without_ready_ack(self) -> None:
         class ResetLosesReadinessRunner(StreamingRunner):

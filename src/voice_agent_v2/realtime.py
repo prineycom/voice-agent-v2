@@ -513,14 +513,10 @@ class RealtimeSession:
                 "local_inference": "selected_llm",
                 "tts": "tts",
             }.get(failed_stage, "controller")
-            force_dead = any(
-                marker in failure_code
-                for marker in ("unavailable", "crash", "process", "publish_failed")
-            ) or failure_code in {"tts_backend_not_ready", "silero_pool_not_ready"}
             components = [
                 ComponentHealth(
                     component.component,
-                    "dead" if component.component == affected and force_dead else component.liveness,
+                    component.liveness,
                     "unready" if component.component == affected else component.readiness,
                     component.compatible,
                     component.identity,
