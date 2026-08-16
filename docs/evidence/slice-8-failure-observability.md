@@ -16,7 +16,7 @@
 
 Existing boundaries remain in place: `PrivacySafeTrace` stores bounded outside-Git JSONL, `realtime-control.v2` carries public health/failure/timing/provider/count/resource payloads, `voiceReducer` owns client state, and the existing System/Timeline tabs render it. No telemetry server, generalized event bus, control plane, hosted vendor, alternate provider, or TTS/avatar selector was added.
 
-At the Slice 8 checkpoint, the composition remained local LiveKit, Whisper large-v3-turbo, fixed local LFM2.5 Q4_K_M/llama.cpp, exact Silero `v5_5_ru` / `kseniya`, and the renderer-agnostic avatar host with the selected MVP eye and then-configured static safety renderer. Health reports closed the server facts as `provider_mode=local`, `external_transfer=false`, `automatic_fallback=false`, local STT/TTS, `auth_boundary=tailnet`, `wake_enabled=false`, and `selected_avatar_module=mvp-eye-svg-v1`. Current avatar composition is owned by [`architecture.md`](../architecture.md#61-host-and-service-lifecycle).
+At the Slice 8 checkpoint, the composition remained local LiveKit, Whisper large-v3-turbo, fixed local LFM2.5 Q4_K_M/llama.cpp, exact Silero `v5_5_ru` / `kseniya`, and the renderer-agnostic avatar host with the selected MVP eye and then-configured static safety renderer. The active health contract now closes the server facts as `provider_mode=local`, `external_transfer=false`, `automatic_fallback=false`, local STT/TTS, `auth_boundary=loopback`, `wake_enabled=false`, and `selected_avatar_module=mvp-eye-svg-v1`. External exposure is operator-owned and not a failure-matrix dependency. Current composition is owned by [`architecture.md`](../architecture.md#61-host-and-service-lifecycle).
 
 ## Readiness compatibility report
 
@@ -42,7 +42,6 @@ The authoritative dispositions and admission/retry consequences are in [`archite
 | `avatar_runtime_failure` | Controlled render-loop failure callback | Pass against §7.1. |
 | `client_disconnect` | Existing session disconnect cleanup case | Pass against §7.1. |
 | `local_inference_crash` | Controlled GPU failure mapping plus real disposable process loss | Pass against §7.1. |
-| `tailscale_unavailable` | Controlled remote-path loss policy | Pass against §7.1. |
 | `late_duplicate_event` | Strict gate replay plus reducer consequence | Pass against §7.1; focused reducer cases retain the session latch across interruption, completion, reconnect, and later valid turns until reset/new session, with no dropped-event phase/media action. |
 
 A safe real-process case starts a task-owned disposable Python worker, kills it, observes lost liveness, permits exactly one test-only recovery, kills it again, and proves the second restart is blocked. It touches no shared service. The real product runtime is stricter in Slice 8: it performs zero automatic inference request retry and zero automatic service restart; service supervision remains Slice 9. This cannot form an admission/restart loop.
@@ -121,7 +120,6 @@ Not performed or claimed by Slice 8 automation:
 - physical microphone behavior or cleanup on a new private recording;
 - physical speaker audibility, Kseniya quality/joins, or physical interruption timing;
 - Raspberry Pi rendering/performance or a physical browser render crash;
-- an actual Tailscale interface disconnect, because it would disrupt shared remote access/network state;
 - destructive RAM/VRAM exhaustion or a real production-model OOM;
 - killing the shared active LiveKit/model services;
 - 20-turn physical/full-stack acceptance percentiles.

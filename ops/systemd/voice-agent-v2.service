@@ -1,8 +1,7 @@
 [Unit]
-Description=Voice Agent v2 private single-host stack
+Description=Voice Agent v2 loopback-local single-host stack
 Documentation=https://github.com/prineycom/voice-agent-v2/blob/main/docs/architecture.md
-Wants=network-online.target tailscaled.service
-After=network-online.target tailscaled.service
+After=local-fs.target
 StartLimitIntervalSec=600
 StartLimitBurst=2
 

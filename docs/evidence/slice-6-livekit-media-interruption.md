@@ -17,9 +17,9 @@ This report preserves the pre-ADR-0009 Slice 6/Issue #15 checkpoint and distingu
 | Browser | React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, official `livekit-client` `2.21.0` | Locked npm install, typecheck, then-current Vitest suite, and production build passed at the recorded checkpoint. |
 | Inference at this checkpoint | Existing `RealTurnController`, Whisper large-v3-turbo, fixed local official LFM2.5 Q4_K_M on llama.cpp, Qwen3 CustomVoice/`ryan` | Historical pre-ADR-0009 composition; the active branch replaces only this TTS leg as documented in the current evidence report. |
 
-`./setup-slice6` keeps the LiveKit binary/Python environment in the ignored user cache and browser dependencies/build output in ignored directories. It verifies but never downloads/replaces the exact local LFM/llama.cpp cache when present. `.env.slice6`, signing material, models, model caches, recordings, transcripts, generated audio and runtime logs remain outside Git. The foreground runner verifies model/runtime hashes, starts llama.cpp on loopback, gives LiveKit only its config/signing pair, gives the gateway/controller only server configuration it owns, and strips secrets from Tailscale Serve children. No provider token exists in the active stack.
+`./setup-slice6` keeps the LiveKit binary/Python environment in the ignored user cache and browser dependencies/build output in ignored directories. It verifies but never downloads/replaces the exact local LFM/llama.cpp cache when present. `.env.slice6`, signing material, models, model caches, recordings, transcripts, generated audio and runtime logs remain outside Git. The foreground runner verifies model/runtime hashes, starts llama.cpp and LiveKit on loopback, and gives the gateway/controller only server configuration it owns. It starts no external-exposure child. No provider token exists in the active stack.
 
-The browser capability is limited to one generated room, one generated browser identity, microphone publication, agent subscription, and data publication for 300 seconds. Issuance requires the exact loopback or configured tailnet application `Origin`; this blocks cross-site session consumption without adding a second identity system. Decoded grants contain no room create/list/admin/record capability. The browser response has a closed nine-field shape: `session_id`, `stream_epoch`, `livekit_url`, `token`, `expires_in_seconds`, `admission_timeout_ms`, `control_version`, `llm_profile`, and `tts_profile`. The two profiles expose only the verified active local LLM identity and the fixed public TTS profile; the response cannot contain the loopback LFM endpoint, model-management access, provider credential, or LiveKit signing secret.
+The browser capability is limited to one generated room, one generated browser identity, microphone publication, agent subscription, and data publication for 300 seconds. Issuance requires the exact loopback or explicitly configured operator-owned application `Origin`; this blocks cross-site session consumption. Decoded grants contain no room create/list/admin/record capability. The browser response has a closed nine-field shape: `session_id`, `stream_epoch`, `livekit_url`, `token`, `expires_in_seconds`, `admission_timeout_ms`, `control_version`, `llm_profile`, and `tts_profile`. The two profiles expose only the verified active local LLM identity and the fixed public TTS profile; the response cannot contain the loopback LFM endpoint, model-management access, provider credential, or LiveKit signing secret.
 
 ## Automated verification
 
@@ -69,14 +69,13 @@ A current host smoke generated the server config through `livekit_server_config`
 | Path | Configured address | Smoke result |
 | --- | --- | --- |
 | LiveKit signaling/API | `127.0.0.1:7880/tcp` | **Observed listening only on loopback.** |
-| WebRTC UDP media | host Tailscale IPv4 (redacted) `:7882/udp`, interface `tailscale0` | **Observed listening on the tailnet address.** |
+| WebRTC UDP media | loopback `127.0.0.1:7882/udp` in the active configuration | Current application boundary; the original external-address observation is historical. |
 | ICE/TCP media | disabled (`tcp_port: 0`; conventional `7881` absent) | **No `7881` or `7882` TCP listener observed.** |
 | Gateway | production config `127.0.0.1:8000/tcp` | Gateway behavior/security smoke passed on temporary loopback port `18006`; full runner port remains part of the physical gate. |
-| Application HTTPS | explicit Tailscale Serve port, example `8443/tcp` | Configured, **not yet exercised by a second browser**. |
-| Signaling HTTPS | explicit Tailscale Serve port, example `7443/tcp` | Configured, **not yet exercised by a second browser**. |
+| External application/signaling exposure | none owned by the application | Optional and entirely operator-owned; not an acceptance requirement. |
 | TURN/public fallback | none | No implementation or listener added. |
 
-The LiveKit JSON startup observation reported version `1.13.5`, loopback bind, the redacted tailnet node IP, and UDP start `7882`. This proves the server bind, not firewall traversal, certificate behavior, remote ICE selection, or audible media.
+The historical LiveKit JSON startup observation reported version `1.13.5` and UDP start `7882`. The active configuration restricts signaling/media to loopback. Neither observation proves audible media, and external traversal/certificates are outside application acceptance.
 
 ## Local LFM / Issue #15 evidence
 
@@ -121,7 +120,7 @@ Other open limits:
 - foreground development orchestration only, with no restart/reboot/systemd claim;
 - the corrected Silero thresholds still require real canonical-microphone false-positive/miss validation;
 - no physical loopback audio, remote browser, reconnect, or barge-in capture yet;
-- Tailscale HTTPS application/signaling ports have not yet been accepted from a second client.
+- Optional external exposure is not exercised or required by the application contract.
 
 ## Remaining acceptance
 

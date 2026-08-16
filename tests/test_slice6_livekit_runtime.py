@@ -120,7 +120,7 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         )
         settings = types.SimpleNamespace(
             max_sessions=1,
-            livekit_public_url="wss://voice.test.ts.net:7443",
+            livekit_public_url="ws://127.0.0.1:7880",
             room_token_ttl_seconds=300,
             browser_join_timeout_seconds=30,
         )
@@ -152,7 +152,7 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         )
         settings = types.SimpleNamespace(
             max_sessions=1,
-            livekit_public_url="wss://voice.test.ts.net:7443",
+            livekit_public_url="ws://127.0.0.1:7880",
             room_token_ttl_seconds=300,
             browser_join_timeout_seconds=30,
         )
@@ -187,6 +187,51 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(closed, [False])
         self.assertEqual(registry._controllers, {})
 
+    async def test_refuses_constructed_capability_if_readiness_drops_before_issue(self) -> None:
+        runtime = load_runtime()
+        token_requests: list[str] = []
+        closed: list[bool] = []
+        runner = types.SimpleNamespace(
+            public_llm_profile=lambda: {"provider_mode": "local"},
+            tts_profile=types.SimpleNamespace(public_metadata=lambda: {"profile": "test"}),
+        )
+        settings = types.SimpleNamespace(
+            max_sessions=1,
+            livekit_public_url="ws://127.0.0.1:7880",
+            room_token_ttl_seconds=300,
+            browser_join_timeout_seconds=30,
+        )
+        registry = runtime.SessionRegistry.__new__(runtime.SessionRegistry)
+        registry.settings = settings
+        registry.runner = runner
+        registry._controllers = {}
+        registry._lock = asyncio.Lock()
+        registry._accepting = True
+        health = iter((
+            {"overall_readiness": "ready"},
+            {"overall_readiness": "ready"},
+            {"overall_readiness": "unready"},
+        ))
+        registry.operational_health = lambda: next(health)
+
+        async def close(*, notify: bool) -> None:
+            closed.append(notify)
+
+        controller = types.SimpleNamespace(
+            start=lambda: asyncio.sleep(0),
+            close=close,
+            arm_browser_join_timeout=lambda: None,
+            browser_token=lambda: token_requests.append("requested") or "room-token",
+        )
+        with (
+            patch.object(runtime, "LiveKitRoomController", return_value=controller),
+            self.assertRaisesRegex(RuntimeError, "before capability issue"),
+        ):
+            await registry.create()
+        self.assertEqual(token_requests, ["requested"])
+        self.assertEqual(closed, [False])
+        self.assertEqual(registry._controllers, {})
+
     async def test_cleanup_failure_cannot_leak_the_single_admission_slot(self) -> None:
         runtime = load_runtime()
         runner = types.SimpleNamespace(
@@ -195,7 +240,7 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         )
         settings = types.SimpleNamespace(
             max_sessions=1,
-            livekit_public_url="wss://voice.test.ts.net:7443",
+            livekit_public_url="ws://127.0.0.1:7880",
             room_token_ttl_seconds=300,
             browser_join_timeout_seconds=30,
         )
@@ -208,6 +253,7 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         health = iter((
             {"overall_readiness": "ready"},
             {"overall_readiness": "unready"},
+            {"overall_readiness": "ready"},
             {"overall_readiness": "ready"},
             {"overall_readiness": "ready"},
         ))

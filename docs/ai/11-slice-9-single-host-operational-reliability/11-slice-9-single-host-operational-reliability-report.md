@@ -25,8 +25,8 @@
 | Criterion | Status | Evidence |
 | --- | --- | --- |
 | One bounded non-root boot/process owner | ✅ | Tracked system unit; disposable real user-systemd run completed one recovery and blocked the next at `start-limit-hit` |
-| Exact configuration/artifact/runtime compatibility | ✅ | Canonical host validated 13 selected artifacts, pinned Python packages, mode-0600 config, tailnet identity, and local/no-fallback policy; credentials are absent from release identity and require explicit restart after change |
-| Graceful ordered drain and no orphan inference | ✅ | Real full stack reached ready, stopped in declared order, preserved unrelated Serve/443, and left no project process or owned route |
+| Exact configuration/artifact/runtime compatibility | ✅ | Canonical host validated 13 selected artifacts, pinned Python packages, mode-0600 local config, and local/no-fallback policy; credentials are absent from release identity and require explicit restart after change |
+| Graceful ordered drain and no orphan inference | ✅ | Real full stack reached ready, stopped in declared application order, and left no project process; external exposure is outside application custody |
 | One-at-a-time local LLM/LiveKit/gateway/STT/TTS loss | ✅ | Each reached bounded failed state and complete cleanup; no invented provider process or inference retry |
 | Cache/disk/release bounds | ✅ | Fixed limits, non-destructive pressure refusal, retained fixture unchanged, no automatic cleanup |
 | Exact public build/readiness reporting | ✅ | Versioned `/api/status` reports five components, exact build/release, local/no-fallback, and avatar identities; final READY repolls every owned child and public health uses fresh LiveKit/LFM PID-generation custody |
@@ -41,21 +41,21 @@
 
 | Command/check | Result | Notes |
 | --- | --- | --- |
-| `./verify` | ✅ | 310 Python behavioral tests; deterministic trace/PCM hashes pass |
-| `./verify-slice6` | ✅ | Installed runtime, 87 web tests, production/review build, Firefox/LiveKit synthetic media regression |
-| `./verify-slice7` | ✅ | 86 focused web tests and production/review builds |
-| `./verify-slice8` | ✅ | 88 Python and 68 focused web tests; controlled privacy/failure/resource gate |
-| `./verify-slice9` | ✅ | 43 Python and 49 focused web tests; deterministic operations gate |
+| `./verify` | ✅ | 332 Python behavioral tests; deterministic trace/PCM hashes pass |
+| `./verify-slice6` | ✅ | Installed runtime, 88 web tests, production/review build, Firefox/LiveKit synthetic media regression |
+| `./verify-slice7` | ✅ | 87 focused web tests and production/review builds |
+| `./verify-slice8` | ✅ | 90 Python and 69 focused web tests; loopback privacy/failure/resource gate |
+| `./verify-slice9` | ✅ | 52 Python and 50 focused web tests; deterministic loopback operations gate |
 | `./verify-local-lfm` | ✅ | Exact model/runtime, parallel slots, context, streaming, cancellation recovery |
 | `./verify-silero-kseniya` | ✅ | Exact real cache/model/runtime focused verification |
-| `scripts/verify_slice9_host.py` | ✅ | 13 artifacts; exact runtime/config/cache/tailnet; one restart, next blocked; production unit untouched |
+| `scripts/verify_slice9_host.py` | ✅ | 13 artifacts; exact runtime/local-config/cache; one restart, next blocked; production unit untouched |
 | Disposable real release A/B/no-op/rollback | ✅ | Final evidence IDs and complete procedure recorded in Slice 9 evidence |
 | Deployed-release full runtime | ✅ | Ready five-component status, graceful stop, zero orphan, complete inventory unchanged |
-| NM-005..NM-010 focused regressions | ✅ | 38 operations/startup tests plus 23 pinned-runtime readiness/health tests |
+| Review focused regressions | ✅ | 47 operations/startup tests plus 51 pinned-runtime readiness/health/observability tests |
 | `git diff --check` | ✅ | No whitespace errors |
 
 ## Unresolved uncertainty
 
 - Product system unit installation plus a physical reboot was not authorized as safe from the dirty disposable implementation lane.
-- Real post-rollback microphone → Whisper → local LFM → Kseniya playback, 20 physical turns, physical cancellation/avatar measurements, second-device tailnet voice, and Raspberry Pi rendering remain open.
+- Real post-rollback microphone → Whisper → local LFM → Kseniya playback, 20 physical turns, physical cancellation/avatar measurements, and Raspberry Pi rendering remain open. External exposure is not an application acceptance gate.
 - Silero private/noncommercial licensing and separate legal approval remain required by ADR-0009.

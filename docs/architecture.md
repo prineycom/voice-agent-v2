@@ -22,10 +22,10 @@ Untested behavior is not implied by a target diagram.
 
 | ID | Status | Statement |
 | --- | --- | --- |
-| D1 | Decision | V2 is a clean repository. Media, control, STT/TTS, application, and local-inference services run on one Arch Linux PC; the legacy Pi/Desktop inference split is not part of V2. After documented local-LLM failure, one user-operated tailnet LiteLLM gateway is the narrow topology exception and may relay only an approved cloud LLM path. See [ADR-0001](adr/0001-clean-v2-single-host.md) and [ADR-0004](adr/0004-tailnet-litellm-cloud-gateway-evaluation.md). |
+| D1 | Decision | V2 is a clean repository. Every active media, control, STT/TTS, application, and local-inference service runs on one Arch Linux PC; the legacy Pi/Desktop inference split is not part of V2. Historical ADR-0004 external-relay evidence is preserved but is not an active application dependency. See [ADR-0001](adr/0001-clean-v2-single-host.md) and [ADR-0004](adr/0004-tailnet-litellm-cloud-gateway-evaluation.md). |
 | D2 | Decision | LiveKit, STT, and TTS remain local. The original BF16/vLLM local candidate failed its measured gates; ADR-0008 separately selects the measured Q4_K_M/llama.cpp artifact for the active Slice 6 development path. Any future cloud LLM still requires the separate gateway, model, transport, privacy, cost, and measurement gate. Provider failure never causes automatic fallback. See [ADR-0003](adr/0003-local-first-llm-with-explicit-cloud-option.md). |
 | D3 | Decision | The avatar boundary is renderer-agnostic. The MVP module is a deterministic custom animated AI eye; Live2D and 3D are optional later modules. The LLM never emits frames or renderer parameters. See [ADR-0002](adr/0002-renderer-agnostic-avatar-boundary.md). |
-| D4 | Decision | Tailscale membership is sufficient authorization for the private current stage. Protocol credentials are still scoped and protected, but V2 will not invent a second identity system now. |
+| D4 | Decision | The active application is loopback-local. Any optional private-network or reverse-proxy exposure and its access controls are entirely operator-owned; application runtime, operations, readiness, and acceptance never depend on or manage that exposure. |
 | D5 | Decision | Exact STT/LLM/TTS models, quantization, serving choices, and any cloud provider become accepted selections only after repeatable resource, latency, quality, privacy, and required-concurrency gates. An explicit ADR may pin a development candidate before final acceptance only while every remaining gate stays visible; an endpoint or alias alone is not a provider selection. |
 | D6 | Decision | Custom wake work is optional and deferred until after the core MVP. Kiosk operation is outside current scope. |
 | D7 | Decision | The pinned [legacy repository](#34-pinned-legacy-reference) is provenance, not a dependency. A future slice may selectively migrate a proven contract, component, or test only with fresh V2 validation and recorded origin. |
@@ -45,12 +45,12 @@ Untested behavior is not implied by a target diagram.
 
 The canonical Arch PC contains every media, control, STT/TTS, application, and inference process. Historical Slices 2–5 used the operator-fixed failed LiteLLM route under ADR-0005, and ADR-0006 briefly authorized it for Slice 6 implementation. ADR-0008 now supersedes that active path: the combined Slice 6 / Issue #15 app uses only the pinned cache-local official LFM2.5 Q4_K_M artifact on local GPU-enabled llama.cpp. No Slice 6 transcript crosses a cloud/provider boundary, and there is no active LiteLLM credential, endpoint, alias or fallback. Historical cloud evidence remains preserved rather than relabelled.
 
-The ordinary browser may run on the canonical PC. A browser on another tailnet device is an optional presentation endpoint: it performs no required inference or orchestration, but it runs the selected avatar module. On the private ADR-0009 branch, local TTS is fixed directly to Silero/Kseniya and is authorized only for noncommercial evaluation; this does not alter the active local-LFM choice or create a runtime selector.
+The ordinary browser runs locally by default. An operator may independently expose the loopback application through a private reverse proxy, but that exposure is outside application correctness and acceptance. On the private ADR-0009 branch, local TTS is fixed directly to Silero/Kseniya and is authorized only for noncommercial evaluation; this does not alter the active local-LFM choice or create a runtime selector.
 
 ```mermaid
 flowchart LR
     B["Browser client<br/>media, UI, avatar host/module"]
-    T["Private access boundary<br/>loopback or Tailscale"]
+    T["Application access boundary<br/>loopback-local"]
     G["Web gateway<br/>assets and room capability"]
     K["Local LiveKit<br/>realtime media and data"]
     C["Session controller<br/>turn lifecycle and contracts"]
@@ -59,7 +59,7 @@ flowchart LR
     L["Pinned LFM2.5 Q4_K_M<br/>local llama.cpp"]
     V["Local TTS service"]
 
-    B <-->|HTTPS / WebRTC| T
+    B <-->|HTTP / WebRTC on loopback| T
     T <--> G
     T <--> K
     G --> B
@@ -84,10 +84,10 @@ The diagram expresses logical boundaries, not a framework or container decision.
 | STT inference service | Turn bounded or streaming audio into transcript results. | Canonical host | GPU/CPU/RAM, as measured |
 | LLM provider adapter | Present one provider-neutral request/result contract and route only to the explicitly configured provider. | Canonical host | CPU/RAM |
 | Local LLM inference service | Produce response text for an explicitly selected local mode; active Slice 6 uses the fixed ADR-0008 artifact/runtime while full-stack acceptance remains pending. | Canonical host; initially preferred | GPU/CPU/RAM, as measured |
-| LiteLLM gateway | Relay only to the explicitly selected cloud alias; expose safe health/model/usage/error metadata; never choose a default or fallback. | Allowlisted user-operated tailnet node; optional and gated | Network/CPU/RAM |
+| Historical LiteLLM gateway | Preserved evidence for the superseded cloud experiment; it is not used by the active application. | External historical setup | Network/CPU/RAM |
 | Managed cloud LLM | Produce response text only when cloud mode has been explicitly measured, approved, and selected. | Approved external provider; optional | External network/service |
 | TTS inference service | Produce bounded synthesized segments for validated response text behind TTS v2. ADR-0009 uses two CPU-only complete-waveform Silero workers; delivery streams independently after each segment returns. | Canonical host | CPU/RAM, as measured |
-| Browser client | Capture/play media, show session state, host the selected avatar module, and derive speech-synchronous visual input from the local decoded audio signal without treating it as physical-speaker proof. | Local browser by default; tailnet browser optional | Client CPU/GPU |
+| Browser client | Capture/play media, show session state, host the selected avatar module, and derive speech-synchronous visual input from the local decoded audio signal without treating it as physical-speaker proof. | Local browser; optional operator-owned exposure is external | Client CPU/GPU |
 | Avatar module | Render one visual implementation behind the avatar-host boundary. | Browser client | Client CPU/GPU |
 
 ### 3.3 Outside the active boundary
@@ -117,7 +117,7 @@ A V2 slice may consult the pinned tree through authenticated read-only GitHub ac
 
 Media and control remain distinct even when LiveKit transports both.
 
-1. The browser obtains application assets and a short-lived, room-scoped LiveKit capability from the web gateway over the tailnet or loopback.
+1. The local browser obtains application assets and a short-lived, room-scoped LiveKit capability from the loopback web gateway.
 2. The browser joins a realtime session and publishes microphone audio to local LiveKit.
 3. The session controller consumes 20 ms frames resampled by the official LiveKit SDK to 16 kHz mono PCM. Before importing its runtime, the cache-local Silero v6 ONNX model verifies its pinned size and checksum; it then runs on CPU in 32 ms windows and owns public speech admission/barge-in. The configured 96 ms start threshold is combined with the 192 ms minimum-speech gate, continuation uses 0.35 hysteresis, and submitted STT payloads are capped at 15 s. The endpoint decision still waits for 640 ms of silence, while STT input retains up to 256 ms of frozen pre-onset custody and only 160 ms after the last Silero speech window. Absolute energy is privacy-safe telemetry only and cannot start a turn. Rejected noise candidates never emit `turn.listening` or cancel resident inference. This adapts the pinned legacy `infra/pi/agent/agent.py` Silero behavior without importing its competing livekit-agents pipeline.
 4. The controller streams or submits audio to local STT. Partial transcript events may improve feedback; only a final transcript can advance the turn to response generation.
@@ -128,7 +128,7 @@ Media and control remain distinct even when LiveKit transports both.
 9. The browser avatar host routes validated lifecycle, speech-envelope, palette/state, and optional external-target inputs to the selected module. The MVP eye module deterministically owns motion and frames.
 10. Completion, interruption, or failure emits exactly one terminal turn event. All work and turn-bound avatar input for the turn is released or cancelled.
 
-**Decision:** remote microphone audio may travel only from an authorized tailnet client to LiveKit on the canonical host. Raw audio remains in local STT/TTS/media paths and is neither retained by default nor sent to a cloud LLM. In explicitly selected cloud mode, only the final transcript and permitted context cross the approved provider boundary. Synthesized audio may leave the host only through LiveKit to authorized session participants.
+**Decision:** the active microphone/media path is loopback-local. Raw audio remains in local STT/TTS/media paths and is neither retained by default nor sent to a cloud LLM. Optional external transport is entirely operator-owned and not part of application readiness or acceptance. In any separately approved future cloud mode, only the final transcript and permitted context may cross the approved provider boundary.
 
 **Hypothesis:** streaming STT and incremental delivery of bounded complete-waveform TTS segments will meet the latency target with fewer resources than fully buffered turn delivery. The model/provider-budget and real-inference slices must test this.
 
@@ -195,12 +195,12 @@ The avatar host owns validation, module lifecycle, and capability/fallback repor
 
 ### 6.1 Host and service lifecycle
 
-1. `voice-agent-ops` validates the tracked operations schema, ignored mode-`0600` server configuration, exact artifact/runtime identities, tailnet identity, immutable release inventory, and non-destructive disk/cache bounds before service startup. Inventory covers every payload path/type/mode, symlink target, size, and file hash; exact release metadata is bound to the release ID.
+1. `voice-agent-ops` validates the tracked operations schema, ignored mode-`0600` local server configuration, exact artifact/runtime identities, immutable release inventory, and non-destructive disk/cache bounds before service startup. It rejects any selected private configuration tracked by the captured commit. Inventory covers every payload path/type/mode, symlink target, size, and file hash; exact release metadata is bound to the release ID.
 2. The one `voice-agent-v2.service` systemd unit runs as non-root `priney`. Its release tree is read-only, while Python bytecode and other runtime scratch state are explicitly rooted in private mutable runtime/cache paths outside the release. The existing foreground runner remains the child-process owner; no logical role is turned into a second orchestration framework or network service.
-3. Start order is configuration/artifacts, local LLM, LiveKit, gateway/controller-owned STT/TTS/provider adapter, application Serve route, then signaling Serve route. A partial start is closed in the declared stop order and cannot publish success.
-4. LiveKit, the web gateway/controller, and inference owners expose liveness separately from capability readiness. `/api/status` includes a fresh five-component health report, exact build/release identities, fixed local-provider/no-fallback facts, and selected avatar build identity without secrets. The `Type=notify` main process emits systemd readiness only after that report is ready and both foreground tailnet routes passed startup; install/reconciliation and rollback additionally match the reported release ID.
+3. Start order is configuration/artifacts, local LLM, loopback LiveKit, then the loopback gateway/controller-owned STT/TTS/provider adapter. A partial start is closed in the declared stop order and cannot publish success. No external exposure process is started or supervised.
+4. LiveKit, the web gateway/controller, and inference owners expose liveness separately from capability readiness. `/api/status` includes a fresh five-component health report, exact build/release identities, fixed loopback/local-provider/no-fallback facts, and selected avatar build identity without secrets. The `Type=notify` main process emits systemd readiness only after that report is ready and every local listener belongs to its expected supervised process tree; install/reconciliation and rollback additionally match the reported release ID.
 5. The product is ready for a new voice turn only when LiveKit, controller, STT, the explicitly selected LLM provider, and TTS report compatible loaded capabilities. An idle controller-owned worker/provider loss that stays unready for two seconds fails the outer service rather than leaving an unobserved dead inference child.
-6. Graceful shutdown first stops the application route/admission, gives the gateway/controller up to 60 seconds to terminalize/cancel turns and close resident workers, then stops signaling, LiveKit, and local LLM. Service-owned diagnostic guardians bind their lifetime to the authoritative main PID generation, remove their captures, and exit within one poll after that generation ends; development guardians retain the independent TTL behavior. systemd waits for the cgroup and applies its 75-second `KillMode=mixed` hard boundary only to a remaining fault, so a lost runner cannot leave an unbounded process group.
+6. Graceful shutdown first closes application admission, gives the gateway/controller up to 54 seconds to terminalize/cancel turns and close resident workers, then stops LiveKit and local LLM with eight seconds each. The 70-second ordered budget stays below systemd's 75-second hard boundary. Service-owned diagnostic guardians bind their lifetime to the authoritative main PID generation, remove their captures, and exit when that generation ends; development guardians retain independent TTL behavior.
 7. Runtime exit `1` permits one completed restart after five seconds; `StartLimitBurst=2` in 600 seconds makes the next failure actionable and stopped. Compatibility exit `2` is never restarted. Inference requests themselves retain zero retry/fallback.
 8. The browser may connect while inference is unavailable only to show the explicit degraded state; it must not pretend a turn succeeded. Avatar host/MVP eye recovery is versioned client readiness and reconnect behavior, not kiosk/browser process supervision; the ordinary client configures no replacement avatar module.
 
@@ -232,7 +232,7 @@ The historical pre-ADR-0009 LiveKit path forwarded each complete visible provide
 
 ### 6.5 Slice 6 development runtime
 
-The pinned implementation is LiveKit Server `1.13.5`; Python `livekit` `1.1.14`, `livekit-api` `1.2.0`, FastAPI `0.141.1`, and Uvicorn `0.52.1`; and React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, and official `livekit-client` `2.21.0`. The gateway and controller share a Python process but retain separate static/capability, room/media, session, and inference objects. The browser capability expires after 300 seconds and grants only one generated room, microphone publication, agent subscription, and data publication; it has no room-management grant. Issuance also requires the exact loopback or configured tailnet application `Origin`, preventing a cross-site form from consuming the one-session path without inventing a second user identity system. One measured session is admitted at a time.
+The pinned implementation is LiveKit Server `1.13.5`; Python `livekit` `1.1.14`, `livekit-api` `1.2.0`, FastAPI `0.141.1`, and Uvicorn `0.52.1`; and React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, and official `livekit-client` `2.21.0`. The gateway and controller share a Python process but retain separate static/capability, room/media, session, and inference objects. The browser capability expires after 300 seconds and grants only one generated room, microphone publication, agent subscription, and data publication; it has no room-management grant. Issuance also requires the exact loopback or explicitly configured operator-owned application `Origin`, preventing a cross-site form from consuming the one-session path. One measured session is admitted at a time.
 
 The agent reuses `RealTurnController`, Whisper, and local LFM rather than creating a second inference pipeline. Whisper readiness runs one discarded silent request through the public inference path; it accepts an empty hypothesis for that warm-up only when the result is structurally valid, and malformed results leave STT unready. The ADR-0009 composition root replaces only the active TTS leg with one contained Silero/Kseniya TTS v2 adapter; historical Qwen/TTS v1 remains inactive evidence. `LiveTurnRunner` starts and warms exactly two Silero worker processes, publishes initial pool readiness atomically only after both warm-ups finish, and exposes no backend selection surface; direct pool callers remain unready during either warm-up. Live microphone bytes remain memory-only except for the existing fail-closed Whisper temporary-file boundary. Agent PCM uses one persistent 48-kHz session source with its 100-ms sender queue, a process-wide two-segment permit bound spanning synthesis and buffering, and a request-tagged two-block 60-ms pump. Barge-in invalidates the old turn before replacement admission, clears server/browser delivery, and detaches only non-cooperative TTS cleanup; cooperative STT/LFM cleanup still drains safely. Automated lifecycle evidence makes no claim about physical playback. Actual microphone capture, Kseniya audibility, joins, microphone-to-stop timing, and speaker render timing remain physical-browser acceptance measurements.
 
@@ -248,9 +248,9 @@ The mode-`0600` LiveKit configuration is read into one validated private snapsho
 
 Runtime writes are disjoint from that tree. systemd exposes the release read-only and creates private non-root-owned mode-`0700` `/run/voice-agent-v2`, removed on every stop including automatic restart and reboot; boot therefore has no `/run/user/1000` or login-manager dependency, while diagnostic captures may be deleted early and cannot outlive TTL. The execution boundary validates its `pycache` subtree. STT and any historical isolated Python adapter name bounded cache-local bytecode roots, Silero/gateway/entry processes use `-B`, and detached diagnostic expiry processes receive an explicit private runtime-tmpfs prefix even though their environment otherwise remains minimal. The deterministic tracer allocates HOME/XDG cache/temp/bytecode under `VOICE_AGENT_MUTABLE_STATE_ROOT`, the user's runtime directory, or an owner-specific `/var/tmp` fallback. Compatibility never ignores a generated path: repeated recovered-release tracer and full-runtime runs must preserve the complete inventory.
 
-Rollback accepts only that `previous` target and revalidates its inventory, operations schema, referenced current-user mode-`0600` configuration/public fingerprint, external artifacts/runtimes, tailnet identity, and disk/cache preflight before swapping links and restarting the canonical unit. If that unit is installed, its root-owned bytes must already equal the verified target release unit before either pointer moves; rollback never installs a different lifecycle/sandbox policy, while a disposable store with no installed unit remains unprivileged. Reaching the three-release/1-GiB release-store bound or an active-cache bound refuses without deleting any existing release/model/cache. Artifact acquisition and automatic upgrades remain outside runtime.
+Rollback accepts only that `previous` target and revalidates its inventory, operations schema, referenced current-user mode-`0600` local configuration/public fingerprint, external artifacts/runtimes, and disk/cache preflight before swapping links and restarting the canonical unit. If that unit is installed, its root-owned bytes must already equal the verified target release unit before either pointer moves; rollback never installs a different lifecycle/sandbox policy, while a disposable store with no installed unit remains unprivileged. Reaching the three-release/1-GiB release-store bound or an active-cache bound refuses without deleting any existing release/model/cache. Optional external exposure is outside deployment and rollback. Artifact acquisition and automatic upgrades remain outside runtime.
 
-The systemd unit changes no firewall or Tailscale identity/global exposure. Foreground Tailscale Serve ownership is exclusive and fail closed: any pre-existing required route is external ownership, absence is rechecked immediately before each child launch, readiness is bound to that newly spawned child, and only run-owned routes are removed; truly unrelated routes remain untouched. The active local deployment declares cloud LLM inactive; any separately authorized future cloud mode reports external readiness only and can never be listed as a supervised host process or automatic fallback. Avatar host/MVP-eye compatibility is delivered and reported as part of the exact browser build because kiosk/autostart remains excluded.
+The systemd unit starts only loopback-local application processes and changes no firewall, proxy, private-network identity, route, or global exposure. Optional external exposure is an operator-owned setup concern with no application readiness, deployment, rollback, monitoring, cleanup, or acceptance claim. The active local deployment declares cloud LLM inactive; any separately authorized future cloud mode reports external readiness only and can never be listed as a supervised host process or automatic fallback. Avatar host/MVP-eye compatibility is delivered and reported as part of the exact browser build because kiosk/autostart remains excluded.
 
 ## 7. Failure semantics
 
@@ -268,7 +268,6 @@ No failure silently switches LLM provider, moves another inference capability to
 | Avatar module/runtime failure | Soft for voice | Voice and text continue; client exposes visual degradation, prevents runaway motion, and does not select another module silently. |
 | Client disconnect | Hard for that delivery | Controller cancels or expires in-flight work for that participant/session; no unbounded orphan inference. |
 | GPU out of memory or local model process crash | Hard for affected local inference capability | Readiness drops and the current turn terminates explicitly. Slice 9 lets the outer service complete at most one restart in its 600-second window; the next failure remains an actionable failed unit. No inference-request retry or provider switch can amplify/change load or alter privacy. |
-| Tailscale unavailable | Soft for loopback, hard for remote access | Local use may continue; remote clients receive no alternate public exposure. |
 | Late or duplicate event | Soft | Client discards it using session/turn identity and sequence rules. |
 
 ### 7.1 Executable user-state mapping
@@ -285,7 +284,6 @@ No failure silently switches LLM provider, moves another inference capability to
 | Avatar runtime/render failure | `degraded` | Voice/text continue while the failed selected renderer stops and visual degradation is exposed; there is no alternate representation, selector, or fallback module. |
 | Client disconnect | `interrupted` | Current delivery is terminalized and cleaned; no orphan admission. |
 | GPU allocation/model process crash | `unavailable` | Readiness drops; zero inference request retry/provider switch. Foreground Slice 8 performs no automatic service restart. |
-| Tailscale unavailable | `degraded` for the product as a whole, unavailable remotely | Loopback can continue; no public route appears. |
 | Late/duplicate event | `degraded` | Strict drop plus visible/diagnostic count; no retry or phase/media action, and a new session is the bounded recovery boundary. |
 
 The deterministic matrix executes every row. Real-process validation kills only disposable task-owned workers, permits one test-only recovery, then proves a second restart is blocked. Actual model/service supervision remains Slice 9; Slice 8 therefore has a stricter zero-automatic-restart runtime rather than an admission/restart loop.
@@ -331,22 +329,21 @@ The following remain outside Git:
 - private recordings and diagnostic captures;
 - user-specific runtime state.
 
-The browser never receives LiveKit signing secrets, cloud LLM credentials, or inference-management credentials. Provider secrets are injected only into the controller/provider adapter and are redacted from logs, health, and errors. The application does not read or manage Tailscale node credentials; it relies on the host's existing tailnet membership.
+The browser never receives LiveKit signing secrets, cloud LLM credentials, or inference-management credentials. Provider secrets are injected only into the controller/provider adapter and are redacted from logs, health, and errors. The application reads no private-network credentials and manages no external exposure; a selected private server configuration tracked by the release commit is rejected before staging.
 
 Local model artifacts require identity, revision/hash, license/provenance, expected size, and either acquisition instructions or an explicit verify-only canonical-cache precondition in a non-secret manifest. ADR-0008 uses the latter for LFM. ADR-0009 does the same for `config/silero-kseniya-tts-v1.json`: exact model/runtime hashes, `kseniya`, native 48-kHz capability, two-worker/thread bounds, complete-waveform/no-cooperative-cancel facts, and CC BY-NC-SA 4.0 evaluation-only attribution. Setup never downloads, substitutes, copies, relocates, or replaces an absent Silero artifact/runtime, and readiness fails closed. Cloud mode additionally requires a non-secret approval record for provider/model identity, endpoint allowlist, privacy/retention assumptions, and cost/usage observability. A model name alone is not a reproducible or approved configuration.
 
-## 10. Tailscale exposure
+## 10. Local application and external exposure
 
-**Decision:** tailnet membership is the current authorization boundary. This does not mean every process binds to the tailnet.
+**Decision:** Voice Agent v2 is a loopback-local application. Its gateway binds `127.0.0.1:8000`, LiveKit signaling binds `127.0.0.1:7880`, WebRTC UDP is restricted to loopback `7882`, and llama.cpp binds only `127.0.0.1:18080`. ICE/TCP and TURN remain disabled.
 
-- Expose only the HTTPS application entry point and the minimum LiveKit signaling/media paths needed by a tailnet browser.
-- Bind STT, TTS, any selected local LLM, health details, model lifecycle controls, and controller administration to loopback or an equally host-local transport.
-- Bind the fixed llama.cpp OpenAI-compatible endpoint only to `127.0.0.1:18080`. Do not expose it through Tailscale Serve, browser capabilities/assets, or a model-management surface. The app accepts no LiteLLM configuration and has no cloud fallback.
-- Keep LiveKit signing material in the web gateway; issue narrow room capabilities because LiveKit requires them as protocol credentials, not as a second user-auth subsystem.
-- Do not publish a public fallback route or alternate provider route.
-- Slice 6 configures the gateway at loopback TCP `8000` and LiveKit signaling at loopback TCP `7880`; Tailscale Serve terminates application/signaling HTTPS on explicit operator ports (the example uses `8443`/`7443`). The foreground runner initially checks both ports before mutation, then rechecks each required port immediately before its child launch: any existing exact or conflicting mapping fails closed without being changed, and each absent mapping is created serially with readiness bound to the newly spawned foreground child before the next. Cleanup stops only foreground Serve children created by that run; it never resets global Serve state or removes truly unrelated handlers. LiveKit advertises only the host Tailscale IPv4 and binds WebRTC media to UDP `7882` on `tailscale0`; ICE/TCP media (`7881`) and TURN are disabled. A host smoke measured `127.0.0.1:7880`, tailnet UDP `7882`, and no TCP media listener. The configured Tailscale HTTPS paths remain unaccepted until the second-client browser gate.
+- Application code, systemd, operations, readiness, rollback, verification, and acceptance create, mutate, validate, monitor, and remove no external route or proxy.
+- A user may independently expose the local application through an appropriately controlled private reverse proxy or not expose it at all. That setup is non-authoritative and does not change application behavior.
+- Optional public URL configuration defaults to the loopback URLs. Any non-loopback value must use TLS, but its reachability and access policy remain operator-owned.
+- No wildcard/public listener, automatic exposure, firewall change, external-route fallback, or weaker authorization is permitted.
+- LiveKit signing material remains only in the gateway; the browser receives only a narrow room capability.
 
-**Hypothesis:** Tailscale transport plus scoped LiveKit capabilities will meet browser microphone, WebRTC, and interruption requirements without an additional reverse-proxy identity layer. The LiveKit slice must measure this from a second tailnet client.
+Historical Tailscale/cloud-gateway measurements remain historical evidence only. They are not an active dependency, failure row, supervised component, or acceptance requirement.
 
 ## 11. GPU, CPU, and RAM budget
 
@@ -409,7 +406,7 @@ The slice publishes raw numeric results, local rejection evidence when applicabl
 | A sufficiently capable local LLM can coexist with local STT/TTS inside 12 GB VRAM and meet latency/quality gates. | Local-first candidate matrix under required overlap/cancellation; explicit cloud provider evaluation only if it fails. | Slice 2 |
 | One provider-neutral LLM contract can preserve cancellation, privacy, and observability without silent fallback. | Contract and fault tests for selected local or approved cloud mode. | Slice 4 |
 | Local service contracts can stream and cancel without leaking stale work across turns. | Real STT/selected-LLM/TTS tracer tests with correlated terminal outcomes. | Slices 3–5 |
-| Local LiveKit over loopback and Tailscale provides acceptable 48-kHz Kseniya playout, segment joins, and barge-in. | Generation-aware headless deterministic media test plus real browser/tailnet listening and repeated-interruption validation. | Slice 6 / ADR-0009 branch |
+| Local LiveKit over loopback provides acceptable 48-kHz Kseniya playout, segment joins, and barge-in. | Generation-aware headless deterministic media test plus real local-browser listening and repeated-interruption validation. | Slice 6 / ADR-0009 branch |
 | The renderer-agnostic boundary and deterministic custom eye can provide a readable MVP visual. | Dedicated Grill/design output, contract/capability tests, deterministic replay, performance capture, and human visual review. | Design Gate V and Slice 7 |
 | The stack recovers predictably from process, provider, GPU, network, and browser failures. | Fault matrix, soak, restart, and resource evidence. | Slices 8–9 |
 | Wake activation is worth its privacy/resource cost. | Explicit post-MVP decision and measured recall/false accepts. | Optional Slice 10 |

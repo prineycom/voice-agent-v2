@@ -13,7 +13,7 @@
   "automatic_fallback": false,
   "stt_location": "local",
   "tts_location": "local",
-  "auth_boundary": "tailnet",
+  "auth_boundary": "loopback",
   "wake_enabled": false,
   "selected_avatar_module": "mvp-eye-svg-v1"
 }

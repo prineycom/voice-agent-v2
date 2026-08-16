@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 from .runtime_directory import require_lifetime_runtime_root
 
 
-TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 LOOPBACK_APP_ORIGIN = "http://127.0.0.1:8000"
 BUILD_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{40})$")
 RELEASE_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{24})$")
@@ -24,10 +23,7 @@ class Slice6ConfigurationError(ValueError):
     pass
 
 
-def livekit_server_config(node_ip: str) -> str:
-    address = ipaddress.ip_address(node_ip)
-    if address not in TAILSCALE_NETWORK:
-        raise Slice6ConfigurationError("SLICE6_LIVEKIT_NODE_IP must be this host's Tailscale IPv4 address")
+def livekit_server_config() -> str:
     config = {
         "port": 7880,
         "bind_addresses": ["127.0.0.1"],
@@ -35,9 +31,9 @@ def livekit_server_config(node_ip: str) -> str:
             "tcp_port": 0,
             "udp_port": 7882,
             "use_external_ip": False,
-            "node_ip": str(address),
-            "interfaces": {"includes": ["tailscale0"]},
-            "ips": {"includes": [f"{address}/32"]},
+            "node_ip": "127.0.0.1",
+            "interfaces": {"includes": ["lo"]},
+            "ips": {"includes": ["127.0.0.1/32"]},
         },
         "room": {
             "auto_create": True,
@@ -157,23 +153,28 @@ class Slice6Settings:
             loopback=True,
         )
         public_url = _url(
-            _required(values, "LIVEKIT_PUBLIC_URL"),
+            values.get("LIVEKIT_PUBLIC_URL", "ws://127.0.0.1:7880"),
             name="LIVEKIT_PUBLIC_URL",
-            schemes={"wss"},
+            schemes={"ws", "wss"},
         )
         app_public_url = _url(
-            _required(values, "SLICE6_APP_PUBLIC_URL"),
+            values.get("SLICE6_APP_PUBLIC_URL", LOOPBACK_APP_ORIGIN),
             name="SLICE6_APP_PUBLIC_URL",
-            schemes={"https"},
+            schemes={"http", "https"},
         )
-        if urlsplit(public_url).hostname != urlsplit(app_public_url).hostname:
-            raise Slice6ConfigurationError(
-                "application and LiveKit public URLs must use the same tailnet host"
-            )
-        if urlsplit(public_url).port == urlsplit(app_public_url).port:
-            raise Slice6ConfigurationError(
-                "application and LiveKit public HTTPS ports must differ"
-            )
+        for name, value, secure_scheme in (
+            ("LIVEKIT_PUBLIC_URL", public_url, "wss"),
+            ("SLICE6_APP_PUBLIC_URL", app_public_url, "https"),
+        ):
+            parsed = urlsplit(value)
+            try:
+                loopback = ipaddress.ip_address(str(parsed.hostname)).is_loopback
+            except ValueError:
+                loopback = parsed.hostname == "localhost"
+            if not loopback and parsed.scheme != secure_scheme:
+                raise Slice6ConfigurationError(
+                    f"non-loopback {name} must use {secure_scheme}"
+                )
         if any(name.startswith("LITELLM_") for name in values):
             raise Slice6ConfigurationError(
                 "LiteLLM configuration is forbidden in the local-LFM Slice 6 runtime"

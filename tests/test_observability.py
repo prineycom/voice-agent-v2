@@ -321,7 +321,6 @@ class ReadinessAndFailurePolicyTests(unittest.TestCase):
             "Avatar module or runtime failure",
             "Client disconnect",
             "GPU out of memory or local model process crash",
-            "Tailscale unavailable",
             "Late or duplicate event",
         }
         self.assertEqual({case.architecture_failure for case in FAILURE_MATRIX}, expected_rows)
@@ -358,8 +357,8 @@ class CaptureAndResourceTests(unittest.TestCase):
             "LIVEKIT_API_KEY": "test-key",
             "LIVEKIT_API_SECRET": "x" * 32,
             "LIVEKIT_INTERNAL_URL": "ws://127.0.0.1:7880",
-            "LIVEKIT_PUBLIC_URL": "wss://voice.test.ts.net:7443",
-            "SLICE6_APP_PUBLIC_URL": "https://voice.test.ts.net:8443",
+            "LIVEKIT_PUBLIC_URL": "ws://127.0.0.1:7880",
+            "SLICE6_APP_PUBLIC_URL": "http://127.0.0.1:8000",
         }
 
     def test_runtime_capture_configuration_is_explicit_and_off_by_default(self) -> None:

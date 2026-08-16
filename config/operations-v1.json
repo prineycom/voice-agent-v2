@@ -7,7 +7,7 @@
     "provider_identity": "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M",
     "automatic_fallback": false,
     "wake_enabled": false,
-    "auth_boundary": "tailnet"
+    "auth_boundary": "loopback"
   },
   "lifecycle": {
     "start_order": [
@@ -15,18 +15,14 @@
       "artifacts",
       "local-llm",
       "livekit",
-      "gateway-controller-stt-tts-provider",
-      "tailnet-app-route",
-      "tailnet-signal-route"
+      "gateway-controller-stt-tts-provider"
     ],
     "stop_order": [
-      "tailnet-app-route",
       "gateway-controller-stt-tts-provider",
-      "tailnet-signal-route",
       "livekit",
       "local-llm"
     ],
-    "graceful_drain_seconds": 60,
+    "graceful_drain_seconds": 54,
     "hard_stop_seconds": 75,
     "restart_policy": {
       "mode": "on-failure",

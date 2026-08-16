@@ -53,7 +53,6 @@ def graceful_process_custody() -> dict[str, object]:
     supervisor = ProcessSupervisor()
     roles = (
         "local-llm", "livekit", "gateway-controller-stt-tts-provider",
-        "tailnet-app-route", "tailnet-signal-route",
     )
     try:
         for role in roles:
@@ -142,7 +141,6 @@ def main() -> int:
         "shared_service_touched": False,
         "physical_reboot_claimed": False,
         "physical_voice_claimed": False,
-        "tailnet_disconnect_claimed": False,
     }
     print(json.dumps(report, ensure_ascii=True, sort_keys=True, indent=2))
     return 0

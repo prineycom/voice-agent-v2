@@ -31,14 +31,14 @@ const readyHealth: HealthReadinessReport = {
   overall_readiness: 'ready',
   components: readyComponents,
   provider_mode: 'local', external_transfer: false, automatic_fallback: false,
-  stt_location: 'local', tts_location: 'local', auth_boundary: 'tailnet',
+  stt_location: 'local', tts_location: 'local', auth_boundary: 'loopback',
   wake_enabled: false, selected_avatar_module: 'mvp-eye-svg-v1',
 }
 
 const capability: SessionCapability = {
   session_id: 'session-test-0001',
   stream_epoch: 1,
-  livekit_url: 'wss://voice.test.ts.net:7443',
+  livekit_url: 'wss://voice.example.invalid:7443',
   token: 'x'.repeat(32),
   expires_in_seconds: 300,
   admission_timeout_ms: 30_000,

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 
 from .operations import (
@@ -16,7 +17,6 @@ from .operations import (
     DEFAULT_MANIFEST_RELATIVE,
     DEFAULT_STATE_ROOT,
     OperationalError,
-    RUNTIME_FAILURE_EXIT_STATUS,
     ReleaseStore,
     evaluate_sustained_run,
     execute_release,
@@ -61,6 +61,83 @@ def _sudo(*arguments: str, allowed: tuple[int, ...] = (0,)) -> subprocess.Comple
     if result.returncode not in allowed:
         raise OperationalError("systemd_install_failed", "sudo -n system operation failed")
     return result
+
+
+def _normalized_unit(path: Path) -> dict[str, dict[str, list[str]]]:
+    sections: dict[str, dict[str, list[str]]] = {}
+    current: dict[str, list[str]] | None = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise OperationalError(
+            "systemd_unit_incompatible", "release systemd unit is unreadable",
+        ) from error
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = sections.setdefault(line[1:-1], {})
+            continue
+        if current is None or "=" not in line:
+            raise OperationalError(
+                "systemd_unit_incompatible", "release systemd unit syntax is invalid",
+            )
+        name, value = line.split("=", 1)
+        current.setdefault(name, []).append(value)
+    return sections
+
+
+def _validate_systemd_unit(path: Path) -> None:
+    unit = _normalized_unit(path)
+    required = {
+        ("Unit", "After"): ["local-fs.target"],
+        ("Unit", "StartLimitIntervalSec"): ["600"],
+        ("Unit", "StartLimitBurst"): ["2"],
+        ("Service", "Type"): ["notify"],
+        ("Service", "NotifyAccess"): ["main"],
+        ("Service", "User"): ["priney"],
+        ("Service", "Group"): ["priney"],
+        ("Service", "RuntimeDirectory"): ["voice-agent-v2"],
+        ("Service", "RuntimeDirectoryMode"): ["0700"],
+        ("Service", "RuntimeDirectoryPreserve"): ["no"],
+        ("Service", "ExecStart"): [
+            "%h/.local/share/voice-agent-v2/current/voice-agent-ops run"
+        ],
+        ("Service", "Restart"): ["on-failure"],
+        ("Service", "RestartSec"): ["5s"],
+        ("Service", "RestartPreventExitStatus"): ["2"],
+        ("Service", "TimeoutStopSec"): ["75s"],
+        ("Service", "KillMode"): ["mixed"],
+        ("Service", "UMask"): ["0077"],
+    }
+    if any(unit.get(section, {}).get(name) != expected for (section, name), expected in required.items()):
+        raise OperationalError(
+            "systemd_unit_incompatible", "release systemd lifecycle policy is incompatible",
+        )
+    with tempfile.TemporaryDirectory(prefix="voice-agent-unit-") as temporary:
+        disposable = Path(temporary) / SERVICE_NAME
+        lines = path.read_text(encoding="utf-8").splitlines()
+        disposable.write_text("\n".join(
+            "WorkingDirectory=/" if line.startswith("WorkingDirectory=")
+            else "ExecStart=/usr/bin/true" if line.startswith("ExecStart=")
+            else line
+            for line in lines
+        ) + "\n", encoding="utf-8")
+        try:
+            result = subprocess.run(
+                ["systemd-analyze", "verify", str(disposable)],
+                capture_output=True, text=True, timeout=15, check=False,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise OperationalError(
+                "systemd_unit_incompatible", "systemd unit verification is unavailable",
+            ) from error
+        if result.returncode != 0 or len((result.stdout + result.stderr).encode()) > 64 * 1024:
+            raise OperationalError(
+                "systemd_unit_incompatible", "systemd rejected the release unit",
+            )
 
 
 def _systemctl_show() -> dict[str, object]:
@@ -255,6 +332,7 @@ def _install_service_locked(
     unit = current / "ops/systemd/voice-agent-v2.service"
     if not unit.is_file():
         raise OperationalError("systemd_unit_incompatible", "release systemd unit is missing")
+    _validate_systemd_unit(unit)
     exists = _sudo("test", "-e", str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
     identical = exists and _sudo("cmp", "-s", str(unit), str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
     changed = not identical
@@ -313,8 +391,12 @@ def command_rollback(arguments: argparse.Namespace) -> None:
             if canonical and (service_loaded or SYSTEM_UNIT_PATH.exists())
             else None
         )
+        previous = store.previous()
+        if unit_boundary is not None and previous is not None:
+            _validate_systemd_unit(previous / "ops/systemd/voice-agent-v2.service")
         result = store.rollback(required_system_unit=unit_boundary)
         if service_loaded:
+            _sudo("systemctl", "daemon-reload")
             _sudo("systemctl", "restart", SERVICE_NAME)
             active = _sudo(
                 "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
@@ -359,7 +441,7 @@ def parser() -> argparse.ArgumentParser:
     )
     subcommands = result.add_subparsers(dest="command", required=True)
 
-    validate = subcommands.add_parser("validate", help="validate config, artifacts, caches, disk, and tailnet")
+    validate = subcommands.add_parser("validate", help="validate local config, artifacts, caches, and disk")
     validate.add_argument("--config", type=_configuration, required=True)
     validate.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
     validate.set_defaults(function=command_validate)
@@ -405,8 +487,6 @@ def main() -> int:
         arguments.function(arguments)
     except OperationalError as error:
         print(f"voice-agent-ops failed: {error.code}: {error}", file=sys.stderr)
-        if arguments.command == "run" and error.code == "tailnet_unavailable":
-            return RUNTIME_FAILURE_EXIT_STATUS
         return CONFIGURATION_EXIT_STATUS
     except KeyboardInterrupt:
         print("voice-agent-ops failed: interrupted", file=sys.stderr)

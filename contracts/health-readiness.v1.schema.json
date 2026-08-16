@@ -41,7 +41,7 @@
     "automatic_fallback": {"const": false},
     "stt_location": {"const": "local"},
     "tts_location": {"const": "local"},
-    "auth_boundary": {"const": "tailnet"},
+    "auth_boundary": {"const": "loopback"},
     "wake_enabled": {"const": false},
     "selected_avatar_module": {"const": "mvp-eye-svg-v1"}
   }

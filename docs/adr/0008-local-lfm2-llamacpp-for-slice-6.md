@@ -40,7 +40,7 @@ Historical ADR-0005/0006 evidence remains unchanged as the record of prior decis
 
 - The local model consumes approximately 2.9 GiB process VRAM in the focused two-slot server run; full coexistence with Whisper, Qwen3, LiveKit and a real browser remains a required measured gate.
 - The prior isolated benchmark is provenance, not proof that the final full stack fits or that human response quality is accepted.
-- Physical microphone/listening, remote tailnet, actual playout interruption, subjective usefulness, and sustained full-stack resources remain Pasha-owned evidence and must not be fabricated.
+- Physical local microphone/listening, actual playout interruption, subjective usefulness, and sustained full-stack resources remain Pasha-owned evidence and must not be fabricated. External exposure is not an application acceptance requirement.
 - The foreground test deployment is not Slice 9 autostart/reboot/supervision.
 
 ## Alternatives considered

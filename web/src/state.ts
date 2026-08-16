@@ -40,7 +40,7 @@ export interface HealthReadinessReport {
   automatic_fallback: false
   stt_location: 'local'
   tts_location: 'local'
-  auth_boundary: 'tailnet'
+  auth_boundary: 'loopback'
   wake_enabled: false
   selected_avatar_module: 'mvp-eye-svg-v1'
 }
@@ -266,7 +266,7 @@ export function parseHealthReadinessReport(value: unknown): HealthReadinessRepor
     || value.automatic_fallback !== false
     || value.stt_location !== 'local'
     || value.tts_location !== 'local'
-    || value.auth_boundary !== 'tailnet'
+    || value.auth_boundary !== 'loopback'
     || value.wake_enabled !== false
     || value.selected_avatar_module !== 'mvp-eye-svg-v1'
     || !Array.isArray(value.components)

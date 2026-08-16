@@ -1474,10 +1474,10 @@ class SessionRegistry:
         async with self._lock:
             if not self._accepting:
                 raise RuntimeError("the voice stack is draining")
-            if self.operational_health()["overall_readiness"] != "ready":
-                raise RuntimeError("the voice stack is unavailable")
             if len(self._controllers) >= self.settings.max_sessions:
                 raise SessionCapacityError("the single measured Slice 6 session is in use")
+            if self.operational_health()["overall_readiness"] != "ready":
+                raise RuntimeError("the voice stack is unavailable")
             session_id = f"session-{secrets.token_hex(12)}"
             room_name = f"voice-{session_id}"
             browser_identity = f"browser-{session_id}"
@@ -1511,6 +1511,8 @@ class SessionRegistry:
                 "tts_profile": tts_profile,
             }
             controller.arm_browser_join_timeout()
+            if self.operational_health()["overall_readiness"] != "ready":
+                raise RuntimeError("the voice stack became unavailable before capability issue")
         except BaseException:
             try:
                 await controller.close(notify=False)

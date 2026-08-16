@@ -215,6 +215,7 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
 
     cancelled_registry = SessionRegistry(settings)
     cancelled_registry._accepting = True
+    cancelled_registry.operational_health = lambda: {"overall_readiness": "ready"}
     with patch(
         "voice_agent_v2.livekit_runtime.LiveKitRoomController",
         return_value=startup_controller,
@@ -362,8 +363,8 @@ def main() -> int:
         "LIVEKIT_API_KEY": "slice6-test-key",
         "LIVEKIT_API_SECRET": "s" * 32,
         "LIVEKIT_INTERNAL_URL": "ws://127.0.0.1:7880",
-        "LIVEKIT_PUBLIC_URL": "wss://voice.test.ts.net:7443",
-        "SLICE6_APP_PUBLIC_URL": "https://voice.test.ts.net:8443",
+        "LIVEKIT_PUBLIC_URL": "ws://127.0.0.1:7880",
+        "SLICE6_APP_PUBLIC_URL": "http://127.0.0.1:8000",
     }, project_root=ROOT)
     controller = object.__new__(LiveKitRoomController)
     controller.settings = settings

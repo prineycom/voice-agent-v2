@@ -11,6 +11,7 @@ import fcntl
 import glob
 import hashlib
 import io
+import ipaddress
 import json
 import math
 import os
@@ -33,7 +34,6 @@ DEFAULT_MANIFEST_RELATIVE = Path("config/operations-v1.json")
 DEFAULT_STATE_ROOT = Path("~/.local/share/voice-agent-v2").expanduser()
 CONFIGURATION_EXIT_STATUS = 2
 RUNTIME_FAILURE_EXIT_STATUS = 1
-TAILSCALE_NETWORK_PREFIX = "100."
 MAX_COMMAND_OUTPUT_BYTES = 64 * 1024
 ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 BUILD_ID = re.compile(r"^[0-9a-f]{40}$")
@@ -84,11 +84,7 @@ ALLOWED_CONFIGURATION_NAMES = frozenset({
     "LIVEKIT_API_SECRET",
     "LIVEKIT_INTERNAL_URL",
     "LIVEKIT_PUBLIC_URL",
-    "SLICE6_LIVEKIT_NODE_IP",
     "SLICE6_APP_PUBLIC_URL",
-    "SLICE6_APP_HTTPS_PORT",
-    "SLICE6_SIGNAL_HTTPS_PORT",
-    "SLICE6_ENABLE_TAILSCALE_SERVE",
     "VOICE_AGENT_DIAGNOSTIC_CAPTURE",
     "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT",
     "VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS",
@@ -98,12 +94,6 @@ REQUIRED_CONFIGURATION_NAMES = frozenset({
     "LIVEKIT_API_KEY",
     "LIVEKIT_API_SECRET",
     "LIVEKIT_INTERNAL_URL",
-    "LIVEKIT_PUBLIC_URL",
-    "SLICE6_LIVEKIT_NODE_IP",
-    "SLICE6_APP_PUBLIC_URL",
-    "SLICE6_APP_HTTPS_PORT",
-    "SLICE6_SIGNAL_HTTPS_PORT",
-    "SLICE6_ENABLE_TAILSCALE_SERVE",
 })
 
 
@@ -218,28 +208,29 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         and deployment.get("provider_identity") == EXPECTED_PROVIDER_IDENTITY
         and deployment.get("automatic_fallback") is False
         and deployment.get("wake_enabled") is False
-        and deployment.get("auth_boundary") == "tailnet"
+        and deployment.get("auth_boundary") == "loopback"
     ):
         raise OperationalError("operations_manifest_incompatible", "fixed provider/security policy changed")
     start_order = lifecycle.get("start_order")
     stop_order = lifecycle.get("stop_order")
     expected_start = [
         "configuration", "artifacts", "local-llm", "livekit",
-        "gateway-controller-stt-tts-provider", "tailnet-app-route", "tailnet-signal-route",
+        "gateway-controller-stt-tts-provider",
     ]
     expected_stop = [
-        "tailnet-app-route", "gateway-controller-stt-tts-provider",
-        "tailnet-signal-route", "livekit", "local-llm",
+        "gateway-controller-stt-tts-provider", "livekit", "local-llm",
     ]
     restart = lifecycle.get("restart_policy")
     if start_order != expected_start or stop_order != expected_stop or not isinstance(restart, dict):
         raise OperationalError("operations_manifest_incompatible", "service ordering is incompatible")
     if not (
         restart.get("mode") == "on-failure"
+        and restart.get("restart_seconds") == 5
+        and restart.get("start_limit_interval_seconds") == 600
         and restart.get("start_limit_burst") == 2
         and restart.get("automatic_recoveries_per_failure_window") == 1
         and restart.get("configuration_exit_status") == CONFIGURATION_EXIT_STATUS
-        and lifecycle.get("graceful_drain_seconds") == 60
+        and lifecycle.get("graceful_drain_seconds") == 54
         and lifecycle.get("hard_stop_seconds") == 75
     ):
         raise OperationalError("operations_manifest_incompatible", "restart/drain policy is incompatible")
@@ -353,24 +344,16 @@ def parse_server_configuration(path: Path) -> dict[str, str]:
     return values
 
 
-def _bounded_port(value: str, *, name: str) -> int:
-    try:
-        port = int(value)
-    except ValueError as error:
-        raise OperationalError("configuration_invalid", f"{name} is invalid") from error
-    if not 1 <= port <= 65535 or str(port) != value:
-        raise OperationalError("configuration_invalid", f"{name} is invalid")
-    return port
-
-
-def _validated_url(value: str, *, scheme: str, loopback: bool = False) -> object:
+def _validated_url(
+    value: str, *, schemes: set[str], loopback: bool = False,
+) -> object:
     try:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError as error:
         raise OperationalError("configuration_invalid", "configured URL is invalid") from error
     if (
-        parsed.scheme != scheme or not parsed.hostname or parsed.username is not None
+        parsed.scheme not in schemes or not parsed.hostname or parsed.username is not None
         or parsed.password is not None or parsed.path not in {"", "/"}
         or parsed.query or parsed.fragment or port is None
     ):
@@ -385,36 +368,37 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
     api_secret = values["LIVEKIT_API_SECRET"]
     if len(api_key) > 128 or not 16 <= len(api_secret) <= 256:
         raise OperationalError("configuration_invalid", "LiveKit signing material is outside bounds")
-    internal = _validated_url(values["LIVEKIT_INTERNAL_URL"], scheme="ws", loopback=True)
-    public = _validated_url(values["LIVEKIT_PUBLIC_URL"], scheme="wss")
-    app = _validated_url(values["SLICE6_APP_PUBLIC_URL"], scheme="https")
-    app_port = _bounded_port(values["SLICE6_APP_HTTPS_PORT"], name="application HTTPS port")
-    signal_port = _bounded_port(values["SLICE6_SIGNAL_HTTPS_PORT"], name="signaling HTTPS port")
-    if public.hostname != app.hostname or public.port != signal_port or app.port != app_port:
-        raise OperationalError("configuration_invalid", "tailnet URL/port identity is inconsistent")
-    if app_port == signal_port:
-        raise OperationalError("configuration_invalid", "application and signaling HTTPS ports must differ")
+    internal = _validated_url(
+        values["LIVEKIT_INTERNAL_URL"], schemes={"ws"}, loopback=True,
+    )
+    public = _validated_url(
+        values.get("LIVEKIT_PUBLIC_URL", "ws://127.0.0.1:7880"),
+        schemes={"ws", "wss"},
+    )
+    app = _validated_url(
+        values.get("SLICE6_APP_PUBLIC_URL", "http://127.0.0.1:8000"),
+        schemes={"http", "https"},
+    )
     if internal.hostname not in {"127.0.0.1", "localhost", "::1"} or internal.port != 7880:
         raise OperationalError("configuration_invalid", "LiveKit internal endpoint changed")
-    node_ip = values["SLICE6_LIVEKIT_NODE_IP"]
-    try:
-        octets = [int(part) for part in node_ip.split(".")]
-    except ValueError as error:
-        raise OperationalError("configuration_invalid", "tailnet node IPv4 is invalid") from error
-    if len(octets) != 4 or any(not 0 <= part <= 255 for part in octets):
-        raise OperationalError("configuration_invalid", "tailnet node IPv4 is invalid")
-    numeric = sum(part << (24 - index * 8) for index, part in enumerate(octets))
-    if not (0x64400000 <= numeric <= 0x647FFFFF):
-        raise OperationalError("configuration_invalid", "tailnet node IPv4 is outside 100.64.0.0/10")
-    if values["SLICE6_ENABLE_TAILSCALE_SERVE"] != "1":
-        raise OperationalError("configuration_invalid", "tailnet Serve must be explicitly enabled")
+    for parsed, secure_scheme in ((public, "wss"), (app, "https")):
+        try:
+            is_loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            is_loopback = parsed.hostname == "localhost"
+        if not is_loopback and parsed.scheme != secure_scheme:
+            raise OperationalError(
+                "configuration_invalid", "non-loopback public URL must use TLS",
+            )
     capture = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE", "0")
     capture_root = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT")
     if capture not in {"0", "1"} or (capture == "0" and capture_root is not None):
         raise OperationalError("configuration_invalid", "diagnostic capture opt-in is invalid")
     if capture == "1":
         runtime_root = SYSTEMD_RUNTIME_ROOT
-        configured_capture_root = Path(capture_root) if capture_root else None
+        configured_capture_root = (
+            Path(capture_root).resolve(strict=False) if capture_root else None
+        )
         if (
             configured_capture_root is None or not configured_capture_root.is_absolute()
             or configured_capture_root == runtime_root
@@ -429,14 +413,16 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
         if "VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS" in values:
             raise OperationalError("configuration_invalid", "diagnostic capture TTL requires opt-in")
         ttl = None
+    effective_values = dict(values)
+    effective_values.setdefault("LIVEKIT_PUBLIC_URL", "ws://127.0.0.1:7880")
+    effective_values.setdefault("SLICE6_APP_PUBLIC_URL", "http://127.0.0.1:8000")
     public_values = {
-        name: value for name, value in values.items() if name not in SECRET_CONFIGURATION_NAMES
+        name: value for name, value in effective_values.items()
+        if name not in SECRET_CONFIGURATION_NAMES
     }
     return {
         "public_values": public_values,
         "public_fingerprint": _sha256_bytes(_canonical_json(public_values)),
-        "tailnet_hostname": app.hostname,
-        "tailnet_node_ip": node_ip,
         "diagnostic_capture_ttl_seconds": ttl,
         "secret_configuration": "present-and-redacted",
     }
@@ -624,45 +610,9 @@ def verify_disk_policy(
     return usage.free, measured
 
 
-def verify_tailnet(configuration: Mapping[str, object]) -> None:
-    try:
-        result = subprocess.run(
-            ["tailscale", "status", "--json"], capture_output=True, text=True,
-            timeout=5, check=False,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
-        )
-    except FileNotFoundError as error:
-        raise OperationalError("tailnet_incompatible", "Tailscale CLI is unavailable") from error
-    except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
-        raise OperationalError("tailnet_unavailable", "Tailscale readiness is unavailable") from error
-    if len(result.stdout.encode("utf-8")) > MAX_COMMAND_OUTPUT_BYTES:
-        raise OperationalError("tailnet_unavailable", "Tailscale readiness is unavailable")
-    try:
-        document = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise OperationalError("tailnet_unavailable", "Tailscale readiness is invalid") from error
-    if not isinstance(document, dict):
-        raise OperationalError("tailnet_unavailable", "Tailscale readiness is invalid")
-    if document.get("BackendState") == "NeedsLogin":
-        raise OperationalError("tailnet_incompatible", "Tailscale authentication is incompatible")
-    if result.returncode != 0:
-        raise OperationalError("tailnet_unavailable", "Tailscale readiness is unavailable")
-    self_status = document.get("Self")
-    if not isinstance(self_status, dict) or self_status.get("Online") is not True:
-        raise OperationalError("tailnet_unavailable", "Tailscale self is not online")
-    dns_name = self_status.get("DNSName")
-    addresses = self_status.get("TailscaleIPs")
-    if not (
-        isinstance(dns_name, str)
-        and dns_name.removesuffix(".") == configuration["tailnet_hostname"]
-        and isinstance(addresses, list) and configuration["tailnet_node_ip"] in addresses
-    ):
-        raise OperationalError("tailnet_incompatible", "Tailscale identity does not match configuration")
-
-
 def validate_host(
     *, source_root: Path, config_path: Path, state_root: Path = DEFAULT_STATE_ROOT,
-    verify_tailnet_state: bool = True, verify_artifact_state: bool = True,
+    verify_artifact_state: bool = True,
     configuration_values: Mapping[str, str] | None = None,
 ) -> ValidationReport:
     manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
@@ -685,8 +635,6 @@ def validate_host(
     available, caches = verify_disk_policy(
         manifest, home=Path.home(), filesystem_path=filesystem_path,
     )
-    if verify_tailnet_state:
-        verify_tailnet(configuration)
     return ValidationReport(
         build_id=None,
         release_id=None,
@@ -890,6 +838,18 @@ class ReleaseStore:
         tree = _run_git(source_root, "rev-parse", f"{commit}^{{tree}}")
         if not BUILD_ID.fullmatch(commit) or not BUILD_ID.fullmatch(tree):
             raise OperationalError("source_unavailable", "committed source identity is invalid")
+        try:
+            configuration_relative = config_path.relative_to(source_root).as_posix()
+        except ValueError:
+            configuration_relative = None
+        if configuration_relative is not None and _run_git(
+            source_root, "ls-tree", "-r", "--name-only", commit, "--",
+            configuration_relative,
+        ):
+            raise OperationalError(
+                "configuration_tracked",
+                "selected private server configuration is tracked by the release commit",
+            )
         host_report = validate_host(
             source_root=source_root, config_path=config_path, state_root=self.state_root,
         )

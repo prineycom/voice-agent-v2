@@ -287,7 +287,7 @@ Run blind/fixed listening review, repeated and sustained real-inference tracer t
 >
 > **Combined Slice 6 / Issue #15 checkpoint (2026-08-12):** the first physical Firefox attempt failed and remains failed evidence. The corrected local LFM/VAD/LiveKit boundaries passed automated checks, but physical acceptance remained open.
 >
-> **Private Silero/Kseniya native-48 evaluation branch (2026-08-14):** ADR-0009 adds TTS/event/control v2 without mutating v1, fixes active composition directly to exact cache-local Silero `v5_5_ru` / `kseniya`, keeps microphone/VAD/Whisper at mono 16 kHz, and sends native mono 48-kHz output through two isolated resident workers and generation-gated browser playback. There is no TTS selector, Qwen adapter, co-start, retry, or fallback. Deterministic contracts/media/browser checks and focused two-worker/VAD/STT evidence pass; Pasha's Kseniya audibility, joins, rapid physical interruption, tailnet, and full-stack resource acceptance remain required. The branch is unmerged and carries no production/commercial authority.
+> **Private Silero/Kseniya native-48 evaluation branch (2026-08-14):** ADR-0009 adds TTS/event/control v2 without mutating v1, fixes active composition directly to exact cache-local Silero `v5_5_ru` / `kseniya`, keeps microphone/VAD/Whisper at mono 16 kHz, and sends native mono 48-kHz output through two isolated resident workers and generation-gated browser playback. There is no TTS selector, Qwen adapter, co-start, retry, or fallback. Deterministic contracts/media/browser checks and focused two-worker/VAD/STT evidence pass; Pasha's Kseniya audibility, joins, rapid physical interruption, and loopback full-stack resource acceptance remain required. External exposure is operator-owned and not an application gate. The branch is unmerged and carries no production/commercial authority.
 
 ### User-visible outcome
 
@@ -296,11 +296,11 @@ A user opens the private web app, speaks over LiveKit, hears the locally synthes
 ### Included scope
 
 - Local LiveKit server, minimal web gateway, and minimal browser conversation UI.
-- Tailscale/loopback HTTPS entry, scoped room capability, WebRTC microphone/agent audio, and versioned control events.
+- Loopback HTTP entry, scoped room capability, WebRTC microphone/agent audio, and versioned control events; optional external exposure is operator-owned.
 - Session reconnect behavior and full request/turn/media-generation barge-in cancellation across controller, selected LLM provider, TTS, published audio, and queued client output.
 - Backend-neutral TTS v2 plus one fixed Silero/Kseniya adapter, deterministic segmentation/shaping, two resident workers, explicit input16/output48 formats, and native 48-kHz LiveKit frames.
 - Headless deterministic media test plus real browser validation.
-- Minimum tailnet port/exposure documentation based on actual results.
+- Exact loopback listener documentation; no application-managed external exposure.
 
 ### Excluded scope
 
@@ -312,7 +312,7 @@ A user opens the private web app, speaks over LiveKit, hears the locally synthes
 
 ### Acceptance criteria
 
-- Loopback browser and a second tailnet browser can connect using only tailnet membership plus protocol-required room capability.
+- The local loopback browser can connect using the protocol-required room capability; external clients are outside application acceptance.
 - STT/TTS/local LFM inference and all management endpoints remain host-local. The active app makes no cloud LLM request, requires no provider credential/endpoint, and exposes no inference endpoint or LiveKit signing material to the browser.
 - Published mono 16-kHz microphone audio yields one correlated transcript and an audible Kseniya response delivered as native mono 48-kHz PCM over LiveKit.
 - Barge-in marks the prior turn interrupted, immediately suspends only the matching browser media generation, clears old server delivery, permits only an active non-cooperative Silero call to finish silently, and completes a new turn without stale PCM/completion or correlation leaks. A rapid second valid interruption obeys the same rule; invalid/old controls do nothing.
@@ -322,13 +322,13 @@ A user opens the private web app, speaks over LiveKit, hears the locally synthes
 
 ### Validation method
 
-Run network-denied deterministic headless media tests, then selected-provider real-inference loopback and tailnet browser sessions. Capture endpoint-to-playout timing and a scripted/observed barge-in trace. Review actual bind addresses and tailnet exposure.
+Run network-denied deterministic headless media tests, then a selected-provider real-inference loopback browser session. Capture endpoint-to-playout timing and a scripted/observed barge-in trace. Review actual loopback bind addresses without configuring external exposure.
 
 ### Evidence required before Design Gate V
 
 - Headless success/fault/interruption results: deterministic pass recorded in [`docs/evidence/slice-6-livekit-media-interruption.md`](evidence/slice-6-livekit-media-interruption.md); TTS v2/native48/two-worker evidence is recorded separately in [`docs/evidence/silero-kseniya-48k-private-evaluation.md`](evidence/silero-kseniya-48k-private-evaluation.md).
-- Real loopback and second-tailnet-client latency traces: **pending physical-browser gate**.
-- Redacted bind/port and scoped-capability review: server bind/capability pass recorded; Tailscale HTTPS/browser path pending.
+- Real loopback latency traces: **pending physical-browser gate**.
+- Redacted loopback bind/port and scoped-capability review: server bind/capability pass recorded; external exposure is not an application gate.
 - Browser capture showing conversation, transcript state, audible response, reconnect safety, and successful barge-in: **pending physical-browser gate**.
 - Focused local-LFM identity/two-slot/visible-answer/cancellation evidence: pass. Focused exact Silero identity/two-worker/native48/obsolete-current/VAD-Whisper evidence: pass. Combined llama.cpp + Whisper + two Silero workers + LiveKit + browser sustained resource evidence inside the 12 GB host budget: **pending physical-browser/full-stack gate**.
 
@@ -410,7 +410,7 @@ Run module-contract bounds/property tests, seeded deterministic fixture replay, 
 
 ## Slice 8 — Failure semantics and privacy-safe observability
 
-> **Implementation checkpoint (2026-08-16):** `./verify-slice8` passes the complete controlled architecture failure map, typed liveness/readiness compatibility, metadata-only timeline/percentile reconstruction, default-log privacy review, public capture-deletion path, disposable real-process bounded recovery, safe 16-MiB/100-ms resource pressure, and focused browser state/render boundaries. Evidence and exact physical/shared/destructive gaps are recorded in [`slice-8-failure-observability.md`](evidence/slice-8-failure-observability.md). Physical microphone/audibility/Raspberry Pi, actual tailnet-interface loss, destructive OOM, shared-service kill, and 20-turn full-stack acceptance percentiles remain unclaimed; none is replaced by synthetic evidence.
+> **Implementation checkpoint (2026-08-16):** `./verify-slice8` passes the complete application failure map, typed liveness/readiness compatibility, metadata-only timeline/percentile reconstruction, default-log privacy review, public capture-deletion path, disposable real-process bounded recovery, safe 16-MiB/100-ms resource pressure, and focused browser state/render boundaries. Evidence and exact physical/shared/destructive gaps are recorded in [`slice-8-failure-observability.md`](evidence/slice-8-failure-observability.md). Physical microphone/audibility/Raspberry Pi, destructive OOM, shared-service kill, and 20-turn full-stack acceptance percentiles remain unclaimed; external exposure is outside the application matrix.
 
 ### User-visible outcome
 
@@ -444,7 +444,7 @@ When any core capability fails, the app tells the user whether it is unavailable
 
 ### Validation method
 
-Run the deterministic fault matrix, real-process kill/recovery cases, resource-pressure test inside safe limits, tailnet disconnect, browser render fault, and a privacy review of default logs. Reconstruct a turn timeline using only emitted metadata.
+Run the deterministic application fault matrix, real-process kill/recovery cases, resource-pressure test inside safe limits, browser render fault, and a privacy review of default logs. Reconstruct a turn timeline using only emitted metadata. Do not manipulate operator-owned external exposure.
 
 ### Evidence required before Slice 9
 
@@ -455,7 +455,7 @@ Run the deterministic fault matrix, real-process kill/recovery cases, resource-p
 
 ## Slice 9 — Single-host operational reliability
 
-> **Implementation checkpoint (2026-08-16):** the tracked systemd/release boundary, exact host artifact/config/cache preflight, public build/readiness report, declared graceful drain, one-recovery restart window, owned and controller-child process-loss handling, deterministic 20-turn resource/avatar threshold evaluation, identical-deploy no-op, incompatible-config refusal, and verified prior-release rollback pass. Canonical-host exact-cache validation, disposable real-systemd start limiting, real full-stack ready/graceful stop, and one-at-a-time local LLM/LiveKit/gateway/STT/TTS loss with no surviving project process were exercised. A physical reboot, installed production unit across reboot, physical 20-turn microphone/audibility/avatar soak, real voice turn after rollback, second-device tailnet voice turn, and Raspberry Pi frame acceptance remain unclaimed, so core MVP physical sign-off is still pending. See [`slice-9-single-host-reliability.md`](evidence/slice-9-single-host-reliability.md).
+> **Implementation checkpoint (2026-08-16):** the tracked systemd/release boundary, exact host artifact/local-config/cache preflight, public build/readiness report, declared graceful drain, one-recovery restart window, owned and controller-child process-loss handling, deterministic 20-turn resource/avatar threshold evaluation, identical-deploy no-op, incompatible-config refusal, and verified prior-release rollback pass. Canonical-host exact-cache validation, disposable real-systemd start limiting, real loopback full-stack ready/graceful stop, and one-at-a-time local LLM/LiveKit/gateway/STT/TTS loss with no surviving project process were exercised. A physical reboot, installed production unit across reboot, physical 20-turn microphone/audibility/avatar soak, real voice turn after rollback, and Raspberry Pi frame acceptance remain unclaimed, so core MVP physical sign-off is still pending. External exposure is entirely operator-owned and not a Slice 9 acceptance requirement. See [`slice-9-single-host-reliability.md`](evidence/slice-9-single-host-reliability.md).
 
 ### User-visible outcome
 
@@ -490,14 +490,14 @@ After a normal host boot or a bounded service failure, the private app reaches a
 
 ### Validation method
 
-Perform idempotence checks, controlled reboot, one-at-a-time service failure/recovery, sustained real conversation/animation run, incompatible-config rejection, disk-pressure preflight, and rollback rehearsal. Finish with root verification and one tailnet voice turn.
+Perform idempotence checks, controlled reboot, one-at-a-time service failure/recovery, sustained real local conversation/animation run, incompatible-config rejection, disk-pressure preflight, and rollback rehearsal. Finish with root verification and one loopback voice turn; external exposure is not part of this slice.
 
 ### Evidence required for core MVP completion and before Slice 10
 
 - Reboot/readiness and service-recovery report.
 - Sustained-run latency/resource/turn-success summary.
 - Configuration/artifact verification output and rollback trace.
-- Root verification and tailnet conversation evidence from the recovered stack.
+- Root verification and loopback conversation evidence from the recovered stack.
 - Explicit core MVP sign-off; wake remains absent and non-blocking.
 
 ## Slice 10 — Optional wake activation
@@ -535,7 +535,7 @@ If explicitly authorized after the core MVP, a user can activate the ready voice
 
 ### Validation method
 
-Run fixed positive/negative/noise corpora, a sustained ambient false-accept session, latency/resource capture, artifact corruption, enable/disable rollback, and a real tailnet hands-free conversation. If custom training occurs, reproduce the model from pinned inputs/tooling while separately verifying private-data deletion.
+Run fixed positive/negative/noise corpora, a sustained ambient false-accept session, latency/resource capture, artifact corruption, enable/disable rollback, and a real loopback hands-free conversation. If custom training occurs, reproduce the model from pinned inputs/tooling while separately verifying private-data deletion. External exposure remains outside application acceptance.
 
 ### Evidence required to close the optional slice
 

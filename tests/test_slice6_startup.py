@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import copy
-import io
+import json
 import os
 from pathlib import Path
-import socket
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,47 +12,11 @@ from scripts import run_slice6
 from voice_agent_v2.slice6_config import Slice6ConfigurationError
 
 
-HOSTNAME = "priney-arch.darter-smoot.ts.net"
-APP_TARGET = "http://127.0.0.1:8000"
-SIGNAL_TARGET = "http://127.0.0.1:7880"
-ROUTES = ((8443, APP_TARGET), (7443, SIGNAL_TARGET))
-
-
-def serve_document(*routes: tuple[int, str]) -> dict[str, object]:
-    tcp: dict[str, object] = {"443": {"HTTPS": True}}
-    web: dict[str, object] = {
-        f"{HOSTNAME}:443": {
-            "Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}
-        }
-    }
-    for port, target in routes:
-        tcp[str(port)] = {"HTTPS": True}
-        web[f"{HOSTNAME}:{port}"] = {"Handlers": {"/": {"Proxy": target}}}
-    return {"TCP": tcp, "Web": web}
-
-
-def foreground_serve_document(*routes: tuple[int, str]) -> dict[str, object]:
-    document = serve_document()
-    document["Foreground"] = {
-        f"owner-{port}": {
-            "TCP": {str(port): {"HTTPS": True}},
-            "Web": {
-                f"{HOSTNAME}:{port}": {"Handlers": {"/": {"Proxy": target}}}
-            },
-        }
-        for port, target in routes
-    }
-    return document
-
-
 class FakeProcess:
-    def __init__(
-        self, *, returncode: int | None = None, output: bytes = run_slice6.SERVE_PROCESS_READY_MARKER,
-    ) -> None:
+    def __init__(self, *, returncode: int | None = None) -> None:
         self.returncode = returncode
         self.terminated = False
         self.killed = False
-        self.stdout = io.BytesIO(output)
 
     def poll(self) -> int | None:
         return self.returncode
@@ -145,6 +106,15 @@ class SystemdReadinessTests(unittest.TestCase):
         self.assertTrue(notifier.closed)
 
 
+class LoopbackRuntimeConfigurationTests(unittest.TestCase):
+    def test_livekit_server_is_restricted_to_loopback(self) -> None:
+        document = json.loads(run_slice6.livekit_server_config())
+        self.assertEqual(document["bind_addresses"], ["127.0.0.1"])
+        self.assertEqual(document["rtc"]["node_ip"], "127.0.0.1")
+        self.assertEqual(document["rtc"]["interfaces"], {"includes": ["lo"]})
+        self.assertEqual(document["rtc"]["ips"], {"includes": ["127.0.0.1/32"]})
+
+
 class ParentProcessIdentityTests(unittest.TestCase):
     def test_linux_process_identity_rejects_stale_generation(self) -> None:
         identity = run_slice6.supervised_process_identity(os.getpid())
@@ -168,40 +138,43 @@ class ParentProcessIdentityTests(unittest.TestCase):
 
 class RuntimePortCustodyTests(unittest.TestCase):
     def test_final_listener_custody_rejects_an_unrelated_live_owner(self) -> None:
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        port = listener.getsockname()[1]
-        owned = FakeProcess()
-        owned.pid = os.getpid()
-        supervisor = run_slice6.ProcessSupervisor()
-        supervisor.processes.append(owned)
-        supervisor._roles[id(owned)] = "fixture"
-        try:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            net = proc / "net"
+            net.mkdir()
+            header = "slot local remote state queues timers retrnsmt uid timeout inode\n"
+            (net / "tcp").write_text(
+                header + "0: 0100007F:1F40 00000000:0000 0A 0 0 0 1000 0 555\n",
+                encoding="ascii",
+            )
+            for name in ("tcp6", "udp", "udp6"):
+                (net / name).write_text(header, encoding="ascii")
+            process = proc / "123"
+            (process / "task/123").mkdir(parents=True)
+            (process / "task/123/children").write_text("", encoding="ascii")
+            (process / "fd").mkdir()
+            descriptor = process / "fd/3"
+            descriptor.symlink_to("socket:[555]")
+            owned = FakeProcess()
+            owned.pid = 123
+            supervisor = run_slice6.ProcessSupervisor()
+            supervisor.processes.append(owned)
+            supervisor._roles[id(owned)] = "fixture"
             run_slice6.require_runtime_listener_custody(
-                supervisor, requirements=(("fixture", "tcp", port),),
+                supervisor,
+                proc_root=proc,
+                requirements=(("fixture", "tcp", 8000),),
             )
-            unrelated = subprocess.Popen(
-                [sys.executable, "-I", "-c", "import time; time.sleep(30)"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            supervisor.processes[0] = unrelated
-            supervisor._roles = {id(unrelated): "fixture"}
-            try:
-                with self.assertRaisesRegex(
-                    run_slice6.ServiceProcessFailure, "not owned",
-                ):
-                    run_slice6.require_runtime_listener_custody(
-                        supervisor, requirements=(("fixture", "tcp", port),),
-                    )
-            finally:
-                unrelated.terminate()
-                unrelated.wait(timeout=5)
-        finally:
-            listener.close()
+            descriptor.unlink()
+            descriptor.symlink_to("socket:[777]")
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "not owned",
+            ):
+                run_slice6.require_runtime_listener_custody(
+                    supervisor,
+                    proc_root=proc,
+                    requirements=(("fixture", "tcp", 8000),),
+                )
 
     def test_preexisting_runtime_listener_fails_before_child_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -265,7 +238,7 @@ class Slice6WrapperEnvironmentTests(unittest.TestCase):
                 "LITELLM_BASE_URL": "https://ambient.invalid",
                 "LITELLM_TOKEN_FILE": "/ambient/token",
             },
-            configured={"SLICE6_ENABLE_TAILSCALE_SERVE": "1"},
+            configured={},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -284,353 +257,8 @@ class Slice6WrapperEnvironmentTests(unittest.TestCase):
                 run_slice6.main()
 
 
-class TailscaleServeOwnershipTests(unittest.TestCase):
-    def test_transient_offline_state_is_recoverable_but_identity_and_auth_are_static(self) -> None:
-        with self.assertRaisesRegex(
-            run_slice6.ServiceProcessFailure, "not online",
-        ):
-            run_slice6.validate_tailnet_identity(
-                {"BackendState": "Running", "Self": {"Online": False}},
-                node_ip="100.64.0.10",
-                hostname=HOSTNAME,
-            )
-        for document in (
-            {"BackendState": "NeedsLogin"},
-            {
-                "BackendState": "Running",
-                "Self": {
-                    "Online": True,
-                    "DNSName": "other.example.ts.net",
-                    "TailscaleIPs": ["100.64.0.10"],
-                },
-            },
-        ):
-            with self.subTest(document=document), self.assertRaises(
-                Slice6ConfigurationError,
-            ):
-                run_slice6.validate_tailnet_identity(
-                    document,
-                    node_ip="100.64.0.10",
-                    hostname=HOSTNAME,
-                )
-
-    def test_duplicate_route_ports_fail_before_status_or_mutation(self) -> None:
-        supervisor = run_slice6.ProcessSupervisor()
-        with patch.object(run_slice6, "read_tailscale_serve_status") as read_status:
-            with self.assertRaisesRegex(Slice6ConfigurationError, "ports must differ"):
-                run_slice6.reconcile_serve_routes(
-                    supervisor=supervisor,
-                    environment={},
-                    hostname=HOSTNAME,
-                    routes=((8443, APP_TARGET), (8443, SIGNAL_TARGET)),
-                )
-        read_status.assert_not_called()
-        self.assertEqual(supervisor.processes, [])
-
-    def test_route_states_accept_exact_reject_conflict_and_preserve_unrelated(self) -> None:
-        original = serve_document((8443, APP_TARGET))
-        document = copy.deepcopy(original)
-        self.assertEqual(
-            run_slice6.serve_route_state(
-                document, hostname=HOSTNAME, https_port=8443, target=APP_TARGET,
-            ),
-            "preexisting",
-        )
-        self.assertEqual(
-            run_slice6.serve_route_state(
-                document, hostname=HOSTNAME, https_port=7443, target=SIGNAL_TARGET,
-            ),
-            "absent",
-        )
-        self.assertEqual(
-            run_slice6.serve_route_state(
-                document, hostname=HOSTNAME, https_port=8443, target=SIGNAL_TARGET,
-            ),
-            "conflict",
-        )
-        foreground = foreground_serve_document((8443, APP_TARGET))
-        self.assertEqual(
-            run_slice6.serve_route_state(
-                foreground, hostname=HOSTNAME, https_port=8443, target=APP_TARGET,
-            ),
-            "preexisting",
-        )
-        self.assertEqual(document, original)
-        self.assertEqual(
-            document["Web"][f"{HOSTNAME}:443"]["Handlers"]["/"]["Proxy"],
-            "http://127.0.0.1:3000",
-        )
-
-    def test_exact_preexisting_routes_fail_closed_without_touching_external_routes(self) -> None:
-        for document in (serve_document(*ROUTES), foreground_serve_document(*ROUTES)):
-            with self.subTest(foreground="Foreground" in document):
-                original = copy.deepcopy(document)
-                supervisor = run_slice6.ProcessSupervisor()
-                with (
-                    patch.object(run_slice6, "read_tailscale_serve_status", return_value=document),
-                    patch.object(run_slice6.subprocess, "Popen") as popen,
-                    self.assertRaisesRegex(
-                        Slice6ConfigurationError, "externally owned or conflicting",
-                    ),
-                ):
-                    run_slice6.reconcile_serve_routes(
-                        supervisor=supervisor,
-                        environment={},
-                        hostname=HOSTNAME,
-                        routes=ROUTES,
-                    )
-                self.assertEqual(supervisor.processes, [])
-                popen.assert_not_called()
-                self.assertEqual(document, original)
-                self.assertEqual(
-                    document["Web"][f"{HOSTNAME}:443"]["Handlers"]["/"]["Proxy"],
-                    "http://127.0.0.1:3000",
-                )
-
-    def test_absent_routes_are_created_serially_and_both_children_are_supervised(self) -> None:
-        events: list[str] = []
-        commands: list[list[str]] = []
-        app_process = FakeProcess()
-        signal_process = FakeProcess()
-        statuses = iter([
-            serve_document(),
-            serve_document(),
-            foreground_serve_document((8443, APP_TARGET)),
-            foreground_serve_document((8443, APP_TARGET)),
-            foreground_serve_document(*ROUTES),
-        ])
-
-        def read_status(_environment: dict[str, str], *, timeout: float = 5.0) -> dict[str, object]:
-            events.append("status")
-            return next(statuses)
-
-        def popen(command: list[str], **_kwargs: object) -> FakeProcess:
-            commands.append(command)
-            port = "8443" if "--https=8443" in command else "7443"
-            events.append(f"start-{port}")
-            return app_process if port == "8443" else signal_process
-
-        supervisor = run_slice6.ProcessSupervisor()
-        with (
-            patch.object(run_slice6, "read_tailscale_serve_status", side_effect=read_status),
-            patch.object(run_slice6.subprocess, "Popen", side_effect=popen),
-        ):
-            states = run_slice6.reconcile_serve_routes(
-                supervisor=supervisor,
-                environment={},
-                hostname=HOSTNAME,
-                routes=ROUTES,
-            )
-        self.assertEqual(
-            events,
-            [
-                "status", "status", "start-8443", "status",
-                "status", "start-7443", "status",
-            ],
-        )
-        self.assertEqual(states, {8443: "owned", 7443: "owned"})
-        self.assertEqual(commands, [
-            ["tailscale", "serve", "--yes", "--https=8443", APP_TARGET],
-            ["tailscale", "serve", "--yes", "--https=7443", SIGNAL_TARGET],
-        ])
-        self.assertEqual(supervisor.processes, [app_process, signal_process])
-        supervisor.close()
-        self.assertTrue(app_process.terminated)
-        self.assertTrue(signal_process.terminated)
-
-    def test_external_route_appearing_before_launch_blocks_the_child(self) -> None:
-        statuses = iter([
-            serve_document(),
-            foreground_serve_document((8443, APP_TARGET)),
-        ])
-        supervisor = run_slice6.ProcessSupervisor()
-        with (
-            patch.object(
-                run_slice6, "read_tailscale_serve_status",
-                side_effect=lambda *_args, **_kwargs: next(statuses),
-            ),
-            patch.object(run_slice6.subprocess, "Popen") as popen,
-            self.assertRaisesRegex(
-                Slice6ConfigurationError, "became externally owned",
-            ),
-        ):
-            run_slice6.reconcile_serve_routes(
-                supervisor=supervisor,
-                environment={},
-                hostname=HOSTNAME,
-                routes=ROUTES,
-            )
-        popen.assert_not_called()
-        self.assertEqual(supervisor.processes, [])
-
-    def test_external_route_cannot_satisfy_spawned_child_readiness(self) -> None:
-        process = FakeProcess(output=b"")
-        external = foreground_serve_document((8443, APP_TARGET))
-        supervisor = run_slice6.ProcessSupervisor()
-        statuses = [serve_document(), serve_document()]
-
-        def read_status(*_args: object, **_kwargs: object) -> dict[str, object]:
-            if statuses:
-                return statuses.pop(0)
-            return external
-
-        with (
-            patch.object(run_slice6, "read_tailscale_serve_status", side_effect=read_status),
-            patch.object(run_slice6.subprocess, "Popen", return_value=process),
-            self.assertRaisesRegex(
-                run_slice6.ServiceProcessFailure, "did not register",
-            ),
-        ):
-            run_slice6.reconcile_serve_routes(
-                supervisor=supervisor,
-                environment={},
-                hostname=HOSTNAME,
-                routes=ROUTES,
-                timeout=0.01,
-            )
-        self.assertEqual(supervisor.processes, [process])
-
-    def test_conflicting_second_route_blocks_all_mutation(self) -> None:
-        document = serve_document((7443, "http://127.0.0.1:9999"))
-        supervisor = run_slice6.ProcessSupervisor()
-        with (
-            patch.object(run_slice6, "read_tailscale_serve_status", return_value=document),
-            patch.object(run_slice6.subprocess, "Popen") as popen,
-        ):
-            with self.assertRaisesRegex(Slice6ConfigurationError, "HTTPS/7443"):
-                run_slice6.reconcile_serve_routes(
-                    supervisor=supervisor,
-                    environment={},
-                    hostname=HOSTNAME,
-                    routes=ROUTES,
-                )
-        popen.assert_not_called()
-        self.assertEqual(supervisor.processes, [])
-        self.assertEqual(document, serve_document((7443, "http://127.0.0.1:9999")))
-
-    def test_etag_style_early_exit_is_registered_before_failure_cleanup(self) -> None:
-        exited = FakeProcess(returncode=1)
-        supervisor = run_slice6.ProcessSupervisor()
-        with (
-            patch.object(run_slice6, "read_tailscale_serve_status", return_value=serve_document()),
-            patch.object(run_slice6.subprocess, "Popen", return_value=exited),
-        ):
-            with self.assertRaisesRegex(
-                run_slice6.ServiceProcessFailure, "exited before readiness",
-            ):
-                try:
-                    run_slice6.reconcile_serve_routes(
-                        supervisor=supervisor,
-                        environment={},
-                        hostname=HOSTNAME,
-                        routes=ROUTES,
-                    )
-                finally:
-                    supervisor.close()
-        self.assertEqual(supervisor.processes, [exited])
-
-    def test_second_route_etag_exit_cleans_the_first_owned_route(self) -> None:
-        first = FakeProcess()
-        second = FakeProcess(returncode=1)
-        statuses = iter([
-            serve_document(),
-            serve_document(),
-            foreground_serve_document((8443, APP_TARGET)),
-            foreground_serve_document((8443, APP_TARGET)),
-        ])
-        supervisor = run_slice6.ProcessSupervisor()
-        with (
-            patch.object(
-                run_slice6,
-                "read_tailscale_serve_status",
-                side_effect=lambda *_args, **_kwargs: next(statuses),
-            ),
-            patch.object(run_slice6.subprocess, "Popen", side_effect=[first, second]),
-        ):
-            with self.assertRaisesRegex(
-                run_slice6.ServiceProcessFailure,
-                "HTTPS/7443 exited before readiness",
-            ):
-                try:
-                    run_slice6.reconcile_serve_routes(
-                        supervisor=supervisor,
-                        environment={},
-                        hostname=HOSTNAME,
-                        routes=ROUTES,
-                    )
-                finally:
-                    supervisor.close()
-        self.assertEqual(supervisor.processes, [first, second])
-        self.assertTrue(first.terminated)
-
-    def test_readiness_timeout_cleans_the_owned_foreground_child(self) -> None:
-        process = FakeProcess()
-        supervisor = run_slice6.ProcessSupervisor()
-        with (
-            patch.object(run_slice6, "read_tailscale_serve_status", return_value=serve_document()),
-            patch.object(run_slice6.subprocess, "Popen", return_value=process),
-        ):
-            with self.assertRaisesRegex(
-                run_slice6.ServiceProcessFailure, "did not register",
-            ):
-                try:
-                    run_slice6.reconcile_serve_routes(
-                        supervisor=supervisor,
-                        environment={},
-                        hostname=HOSTNAME,
-                        routes=ROUTES,
-                        timeout=0.01,
-                    )
-                finally:
-                    supervisor.close()
-        self.assertTrue(process.terminated)
-
-    def test_exception_starting_second_route_is_recoverable_and_cleans_first_child(self) -> None:
-        first = FakeProcess()
-        statuses = iter([
-            serve_document(),
-            serve_document(),
-            foreground_serve_document((8443, APP_TARGET)),
-            foreground_serve_document((8443, APP_TARGET)),
-        ])
-        supervisor = run_slice6.ProcessSupervisor()
-        with (
-            patch.object(run_slice6, "read_tailscale_serve_status", side_effect=lambda *_args, **_kwargs: next(statuses)),
-            patch.object(run_slice6.subprocess, "Popen", side_effect=[first, OSError("launch failed")]),
-        ):
-            with self.assertRaisesRegex(
-                run_slice6.ServiceProcessFailure, "could not start",
-            ):
-                try:
-                    run_slice6.reconcile_serve_routes(
-                        supervisor=supervisor,
-                        environment={},
-                        hostname=HOSTNAME,
-                        routes=ROUTES,
-                    )
-                finally:
-                    supervisor.close()
-        self.assertEqual(supervisor.processes, [first])
-        self.assertTrue(first.terminated)
-
-    def test_owned_route_disappearance_is_a_runtime_failure(self) -> None:
-        route = FakeProcess()
-        supervisor = run_slice6.ProcessSupervisor()
-        with patch.object(run_slice6.subprocess, "Popen", return_value=route):
-            supervisor.start(
-                ["tailscale", "serve", "--yes", "--https=8443", APP_TARGET],
-                role="tailnet-app-route",
-            )
-        route.returncode = 1
-        with self.assertRaisesRegex(
-            run_slice6.ServiceProcessFailure,
-            "tailnet-app-route",
-        ):
-            run_slice6.require_supervised_children_alive(
-                supervisor, phase="during runtime",
-            )
-
-    def test_ctrl_c_path_stops_owned_children_in_reverse_without_touching_external_routes(self) -> None:
+class SupervisorLifecycleTests(unittest.TestCase):
+    def test_ctrl_c_path_stops_owned_children_without_touching_external_exposure(self) -> None:
         first = FakeProcess()
         second = FakeProcess()
         supervisor = run_slice6.ProcessSupervisor()
@@ -644,13 +272,11 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
         self.assertFalse(first.killed)
         self.assertFalse(second.killed)
 
-    def test_operational_shutdown_closes_admission_then_drains_before_media_and_inference(self) -> None:
+    def test_operational_shutdown_drains_before_media_and_inference_within_hard_stop(self) -> None:
         roles = (
             "local-llm",
             "livekit",
             "gateway-controller-stt-tts-provider",
-            "tailnet-app-route",
-            "tailnet-signal-route",
         )
         processes = [FakeProcess() for _role in roles]
         supervisor = run_slice6.ProcessSupervisor()
@@ -666,9 +292,14 @@ class TailscaleServeOwnershipTests(unittest.TestCase):
         with patch.object(run_slice6, "stop", side_effect=record_stop):
             supervisor.close(run_slice6.SHUTDOWN_ORDER)
         self.assertEqual([role for role, _timeout in stopped], list(run_slice6.SHUTDOWN_ORDER))
-        self.assertEqual(dict(stopped)["gateway-controller-stt-tts-provider"], 60.0)
+        self.assertEqual(
+            dict(stopped)["gateway-controller-stt-tts-provider"], 54.0,
+        )
+        self.assertLess(sum(timeout for _role, timeout in stopped), 75.0)
         self.assertLess(
-            [role for role, _timeout in stopped].index("gateway-controller-stt-tts-provider"),
+            [role for role, _timeout in stopped].index(
+                "gateway-controller-stt-tts-provider"
+            ),
             [role for role, _timeout in stopped].index("livekit"),
         )
 

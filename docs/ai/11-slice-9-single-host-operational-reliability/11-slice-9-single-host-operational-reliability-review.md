@@ -38,26 +38,26 @@
 
 | Finding | Reason |
 | --- | --- |
-| Physical reboot, physical voice/avatar soak, second tailnet device, Raspberry Pi | These are evidence gaps, not code-review fixes; performing them was unsafe or physically unavailable in this lane and they remain unclaimed |
+| Physical reboot, physical voice/avatar soak, Raspberry Pi | These are evidence gaps, not code-review fixes; performing them was unsafe or physically unavailable in this lane and they remain unclaimed. External exposure is not an application acceptance gate. |
 
 ## Validation
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | ✅ | 310 behavioral tests, deterministic trace/PCM |
-| `./verify-slice6` | ✅ | Runtime contract, 87 web tests, builds, Firefox/LiveKit synthetic media |
-| `./verify-slice7` | ✅ | 86 focused web tests/builds |
-| `./verify-slice8` | ✅ | 88 Python + 68 web controlled failure/privacy checks |
-| `./verify-slice9` | ✅ | 43 Python + 49 web operational checks |
+| `./verify` | ✅ | 332 behavioral tests, deterministic trace/PCM |
+| `./verify-slice6` | ✅ | Runtime contract, 88 web tests, builds, Firefox/LiveKit synthetic media |
+| `./verify-slice7` | ✅ | 87 focused web tests/builds |
+| `./verify-slice8` | ✅ | 90 Python + 69 web loopback failure/privacy checks |
+| `./verify-slice9` | ✅ | 52 Python + 50 web loopback operational checks |
 | `./verify-local-lfm` | ✅ | Exact real local LFM runtime/model/parallel/cancellation |
 | `./verify-silero-kseniya` | ✅ | Exact real Silero/Kseniya cache/runtime |
 | `verify_slice9_host.py` | ✅ | 13 artifacts, one recovery, next blocked, production unit untouched |
 | Real disposable A/B/no-op/rollback + Type=notify | ✅ | Exact release readiness, repeated tracer, byte-identical inventory, graceful zero-orphan stop |
-| NM-005..NM-010 focused regressions | ✅ | 38 operations/startup tests plus 23 pinned-runtime readiness/health tests |
+| Review focused regressions | ✅ | 47 operations/startup tests plus 51 pinned-runtime readiness/health/observability tests |
 | `git diff --check` | ✅ | No whitespace errors |
 
 ## Recommendations
 
 - Commit the reviewed Slice 9 implementation as one vertical slice.
-- Keep physical reboot/voice/avatar/tailnet-device/Raspberry Pi evidence open and do not claim core MVP sign-off.
+- Keep physical reboot/voice/avatar/Raspberry Pi evidence open and do not claim core MVP sign-off; do not add an external-exposure acceptance dependency.
 - Run the configured no-mistakes/PR gate only when firstmate authorizes that separate ship step.

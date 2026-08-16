@@ -23,4 +23,4 @@ PYTHONPATH="$ROOT/src:$ROOT" "$PYTHON" -B "$ROOT/scripts/verify_slice9.py"
 )
 
 printf '%s\n' 'Slice 9 deterministic operations/recovery/idempotence/rollback/resource boundaries: PASS'
-printf '%s\n' 'Physical reboot/microphone/audibility/tailnet voice/Raspberry Pi/full-stack soak: NOT CLAIMED'
+printf '%s\n' 'Physical reboot/microphone/audibility/Raspberry Pi/full-stack soak: NOT CLAIMED'

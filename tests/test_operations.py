@@ -35,7 +35,6 @@ from voice_agent_v2.operations import (
     validate_server_configuration,
     verify_artifacts,
     verify_disk_policy,
-    verify_tailnet,
     verify_tracked_manifest_alignment,
 )
 from voice_agent_v2.runtime_directory import SYSTEMD_RUNTIME_ROOT
@@ -44,7 +43,7 @@ from voice_agent_v2.slice6_config import Slice6Settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTNAME = "priney-arch.example.ts.net"
+HOSTNAME = "voice.example.invalid"
 
 
 def configuration_values(secret: str = "0123456789abcdef") -> dict[str, str]:
@@ -52,12 +51,8 @@ def configuration_values(secret: str = "0123456789abcdef") -> dict[str, str]:
         "LIVEKIT_API_KEY": "slice9key",
         "LIVEKIT_API_SECRET": secret,
         "LIVEKIT_INTERNAL_URL": "ws://127.0.0.1:7880",
-        "LIVEKIT_PUBLIC_URL": f"wss://{HOSTNAME}:7443",
-        "SLICE6_LIVEKIT_NODE_IP": "100.64.0.10",
-        "SLICE6_APP_PUBLIC_URL": f"https://{HOSTNAME}:8443",
-        "SLICE6_APP_HTTPS_PORT": "8443",
-        "SLICE6_SIGNAL_HTTPS_PORT": "7443",
-        "SLICE6_ENABLE_TAILSCALE_SERVE": "1",
+        "LIVEKIT_PUBLIC_URL": "ws://127.0.0.1:7880",
+        "SLICE6_APP_PUBLIC_URL": "http://127.0.0.1:8000",
     }
 
 
@@ -99,7 +94,19 @@ class OperationsManifestTests(unittest.TestCase):
         )
         self.assertEqual(components["cloud-llm"]["supervision"], "external-readiness-only")
         self.assertFalse(components["cloud-llm"]["active"])
-        self.assertEqual(manifest["lifecycle"]["restart_policy"]["automatic_recoveries_per_failure_window"], 1)
+        self.assertEqual(manifest["deployment"]["auth_boundary"], "loopback")
+        self.assertFalse(any(
+            "tailnet" in role or "tailscale" in role
+            for role in (
+                *manifest["lifecycle"]["start_order"],
+                *manifest["lifecycle"]["stop_order"],
+            )
+        ))
+        restart = manifest["lifecycle"]["restart_policy"]
+        self.assertEqual(restart["automatic_recoveries_per_failure_window"], 1)
+        self.assertEqual(restart["restart_seconds"], 5)
+        self.assertEqual(restart["start_limit_interval_seconds"], 600)
+        self.assertEqual(manifest["lifecycle"]["graceful_drain_seconds"], 54)
         self.assertEqual(manifest["disk"]["cleanup_policy"], "refuse-without-deleting")
         verify_tracked_manifest_alignment(source_root=ROOT, operations_manifest=manifest)
         with tempfile.TemporaryDirectory() as temporary:
@@ -117,14 +124,18 @@ class OperationsManifestTests(unittest.TestCase):
         )
         self.assertEqual(verification.returncode, 0, verification.stderr)
 
+        operations_cli._validate_systemd_unit(unit_path)
         document = normalized_systemd_unit(unit_path)
         service = document["Service"]
         unit = document["Unit"]
+        self.assertEqual(unit["After"], ["local-fs.target"])
+        self.assertNotIn("Wants", unit)
         self.assertEqual(unit["StartLimitBurst"], ["2"])
         self.assertEqual(unit["StartLimitIntervalSec"], ["600"])
         self.assertEqual(service["Type"], ["notify"])
         self.assertEqual(service["NotifyAccess"], ["main"])
         self.assertEqual(service["Restart"], ["on-failure"])
+        self.assertEqual(service["RestartSec"], ["5s"])
         self.assertEqual(service["RestartPreventExitStatus"], ["2"])
         self.assertEqual(service["TimeoutStopSec"], ["75s"])
         self.assertEqual(service["KillMode"], ["mixed"])
@@ -155,7 +166,7 @@ class ServiceApplicationTests(unittest.TestCase):
         release = state / "releases" / ("a" * 24)
         unit = release / "ops/systemd/voice-agent-v2.service"
         unit.parent.mkdir(parents=True)
-        unit.write_text("[Service]\n", encoding="utf-8")
+        shutil.copy2(ROOT / "ops/systemd/voice-agent-v2.service", unit)
         (state / "current").symlink_to(f"releases/{release.name}")
         return state, release, SimpleNamespace(state_root=state, restart=False)
 
@@ -375,19 +386,6 @@ class ServiceApplicationTests(unittest.TestCase):
             with ReleaseStore(state).locked():
                 pass
 
-    def test_run_exit_status_retries_only_transient_tailnet_unavailability(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            arguments = [
-                "voice-agent-ops", "run", "--state-root", str(Path(temporary).resolve()),
-            ]
-            for code, expected in (("tailnet_unavailable", 1), ("tailnet_incompatible", 2)):
-                with self.subTest(code=code), patch.object(sys, "argv", arguments), patch.object(
-                    operations_cli,
-                    "execute_release",
-                    side_effect=OperationalError(code, "content-free failure"),
-                ), redirect_stderr(StringIO()):
-                    self.assertEqual(operations_cli.main(), expected)
-
     def test_canonical_rollback_fails_closed_when_systemd_state_query_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
@@ -477,6 +475,49 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertFalse(output.call_args.args[0]["service_restarted"])
             sudo.assert_not_called()
 
+    def test_installed_service_rollback_reloads_before_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            releases = state / "releases"
+            current = releases / ("1" * 24)
+            previous = releases / ("2" * 24)
+            unit_bytes = (ROOT / "ops/systemd/voice-agent-v2.service").read_bytes()
+            for release in (current, previous):
+                unit = release / "ops/systemd/voice-agent-v2.service"
+                unit.parent.mkdir(parents=True)
+                unit.write_bytes(unit_bytes)
+            (state / "current").symlink_to(f"releases/{current.name}")
+            (state / "previous").symlink_to(f"releases/{previous.name}")
+            installed = root / "voice-agent-v2.service"
+            installed.write_bytes(unit_bytes)
+            calls: list[tuple[str, ...]] = []
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(
+                    operations_cli, "_systemctl_show",
+                    return_value={"load": "loaded", "active": "active"},
+                ),
+                patch(
+                    "voice_agent_v2.operations.validate_release",
+                    side_effect=lambda path, **_kwargs: {"build_id": path.name[0] * 40},
+                ),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_wait_for_runtime_release"),
+                patch.object(operations_cli, "_print"),
+            ):
+                operations_cli.command_rollback(SimpleNamespace(state_root=state))
+            self.assertLess(
+                calls.index(("systemctl", "daemon-reload")),
+                calls.index(("systemctl", "restart", operations_cli.SERVICE_NAME)),
+            )
+
     def test_installed_service_rollback_rejects_a_different_prior_unit_before_swap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -486,16 +527,22 @@ class ServiceApplicationTests(unittest.TestCase):
             previous = releases / ("2" * 24)
             for release in (current, previous):
                 (release / "ops/systemd").mkdir(parents=True)
-            (current / "ops/systemd/voice-agent-v2.service").write_text(
-                "[Service]\nKillMode=mixed\n", encoding="utf-8",
+            installed_bytes = (
+                ROOT / "ops/systemd/voice-agent-v2.service"
+            ).read_bytes()
+            (current / "ops/systemd/voice-agent-v2.service").write_bytes(
+                installed_bytes
             )
-            (previous / "ops/systemd/voice-agent-v2.service").write_text(
-                "[Service]\nKillMode=control-group\n", encoding="utf-8",
+            (previous / "ops/systemd/voice-agent-v2.service").write_bytes(
+                installed_bytes.replace(
+                    b"Description=Voice Agent v2 loopback-local single-host stack",
+                    b"Description=Voice Agent v2 prior compatible single-host stack",
+                )
             )
             (state / "current").symlink_to(f"releases/{current.name}")
             (state / "previous").symlink_to(f"releases/{previous.name}")
             installed_unit = root / "voice-agent-v2.service"
-            installed_unit.write_text("[Service]\nKillMode=mixed\n", encoding="utf-8")
+            installed_unit.write_bytes(installed_bytes)
             arguments = SimpleNamespace(state_root=state)
 
             with (
@@ -515,10 +562,7 @@ class ServiceApplicationTests(unittest.TestCase):
 
             self.assertEqual((state / "current").resolve(), current.resolve())
             self.assertEqual((state / "previous").resolve(), previous.resolve())
-            self.assertEqual(
-                installed_unit.read_text(encoding="utf-8"),
-                "[Service]\nKillMode=mixed\n",
-            )
+            self.assertEqual(installed_unit.read_bytes(), installed_bytes)
             sudo.assert_not_called()
 
 
@@ -556,56 +600,27 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
         })
         report = validate_server_configuration(values)
         self.assertEqual(report["diagnostic_capture_ttl_seconds"], 900)
-        values["VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT"] = (
-            f"/run/user/{os.geteuid()}/voice-agent-v2/private-captures"
-        )
-        with self.assertRaisesRegex(OperationalError, "capture root is invalid"):
-            validate_server_configuration(values)
-
-    def test_equal_public_https_ports_are_rejected(self) -> None:
-        values = configuration_values()
-        values["LIVEKIT_PUBLIC_URL"] = f"wss://{HOSTNAME}:8443"
-        values["SLICE6_SIGNAL_HTTPS_PORT"] = "8443"
-        with self.assertRaisesRegex(OperationalError, "ports must differ"):
-            validate_server_configuration(values)
-
-    def test_tailnet_temporarily_offline_is_retryable_but_identity_and_auth_are_static(self) -> None:
-        configuration = {
-            "tailnet_hostname": HOSTNAME,
-            "tailnet_node_ip": "100.64.0.10",
-        }
-        offline = subprocess.CompletedProcess(
-            [], 0, json.dumps({
-                "BackendState": "Running",
-                "Self": {
-                    "Online": False,
-                    "DNSName": HOSTNAME,
-                    "TailscaleIPs": ["100.64.0.10"],
-                },
-            }), "",
-        )
-        with patch("voice_agent_v2.operations.subprocess.run", return_value=offline):
-            with self.assertRaises(OperationalError) as unavailable:
-                verify_tailnet(configuration)
-        self.assertEqual(unavailable.exception.code, "tailnet_unavailable")
-        for document in (
-            {"BackendState": "NeedsLogin"},
-            {
-                "BackendState": "Running",
-                "Self": {
-                    "Online": True,
-                    "DNSName": "other.example.ts.net",
-                    "TailscaleIPs": ["100.64.0.10"],
-                },
-            },
+        for invalid in (
+            f"/run/user/{os.geteuid()}/voice-agent-v2/private-captures",
+            "/run/voice-agent-v2/../other/private-captures",
         ):
-            result = subprocess.CompletedProcess([], 0, json.dumps(document), "")
-            with self.subTest(document=document), patch(
-                "voice_agent_v2.operations.subprocess.run", return_value=result,
+            values["VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                OperationalError, "capture root is invalid",
             ):
-                with self.assertRaises(OperationalError) as incompatible:
-                    verify_tailnet(configuration)
-            self.assertEqual(incompatible.exception.code, "tailnet_incompatible")
+                validate_server_configuration(values)
+
+    def test_non_loopback_public_urls_require_tls(self) -> None:
+        for name, value in (
+            ("LIVEKIT_PUBLIC_URL", f"ws://{HOSTNAME}:7880"),
+            ("SLICE6_APP_PUBLIC_URL", f"http://{HOSTNAME}:8000"),
+        ):
+            values = configuration_values()
+            values[name] = value
+            with self.subTest(name=name), self.assertRaisesRegex(
+                OperationalError, "must use TLS",
+            ):
+                validate_server_configuration(values)
 
     def test_unknown_provider_configuration_is_rejected_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -655,6 +670,33 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
 
 
 class ReleaseAndRollbackTests(unittest.TestCase):
+    def test_deploy_rejects_a_selected_private_config_tracked_by_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            config = source / "private.env"
+            write_configuration(config, configuration_values("tracked-secret-value"))
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.name", "Release Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.email", "release@test.invalid"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(source), "add", "private.env"], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "commit", "-qm", "tracked config"],
+                check=True,
+            )
+            with self.assertRaisesRegex(OperationalError, "configuration is tracked"):
+                ReleaseStore(root / "state").deploy(
+                    source_root=source, config_path=config,
+                )
+            self.assertFalse((root / "state" / "current").exists())
+
     @staticmethod
     def _complete_inventory(root: Path) -> bytes:
         records: dict[str, dict[str, object]] = {}

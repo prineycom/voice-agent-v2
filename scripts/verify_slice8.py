@@ -282,7 +282,6 @@ def main() -> int:
         "privacy_timeline_capture": metadata_timeline_and_capture_evidence(),
         "fault_matrix_readiness": failure_and_readiness_evidence(),
         "controlled_not_physical": {
-            "tailnet_disconnect": True,
             "browser_render_fault": True,
             "gpu_oom": True,
         },
@@ -290,7 +289,6 @@ def main() -> int:
             "physical microphone behavior",
             "physical audibility",
             "Raspberry Pi rendering",
-            "actual tailnet interface shutdown",
             "destructive GPU or RAM exhaustion",
         ],
     }

@@ -11,7 +11,7 @@
 
 - tracked [`config/operations-v1.json`](../../config/operations-v1.json) owns component coverage, start/stop order, restart/drain limits, exact selected artifacts/runtimes, non-destructive disk/cache/release limits, contract/client identities, inactive-cloud reporting, and sustained thresholds;
 - tracked [`voice-agent-v2.service`](../../ops/systemd/voice-agent-v2.service) is one system-level systemd service running as non-root `priney`; systemd owns boot and the outer cgroup, not inference requests or provider choice;
-- the existing foreground runner still owns local LFM, LiveKit, the gateway/controller and its STT/two-worker TTS/provider children, and exact foreground Tailscale Serve routes;
+- the existing foreground runner owns only local LFM, loopback LiveKit, and the loopback gateway/controller with its STT/two-worker TTS/provider children; external exposure is entirely operator-owned;
 - [`voice_agent_v2.operations`](../../src/voice_agent_v2/operations.py) validates/stages immutable clean-commit releases and allows rollback only to the recorded freshly compatible prior release;
 - `/api/status` reports one fresh five-component server health document plus build/release, fixed local provider/no-fallback, avatar-host contract, and MVP-eye identity without a secret;
 - avatar host/MVP eye remain versioned browser-build/readiness responsibilities. Kiosk/browser autostart is not introduced;
@@ -35,7 +35,7 @@ Observed content-free result:
 | Operations schema/provider/security | `voice-agent.operations.v1`, local, external provider not supervised, automatic fallback false |
 | Selected artifacts | Exact LiveKit, VAD, complete selected Whisper file set, llama.cpp/LFM, Silero model/Python/Torch files passed size/hash/executable checks |
 | Python runtimes | Exact Slice 6 FastAPI/Uvicorn/LiveKit/ONNX/numpy and selected STT faster-whisper/CTranslate2/numpy versions passed |
-| Server configuration | Required names/URLs/ports/tailnet identity passed; signing values remained redacted and were never copied/printed |
+| Server configuration | Required local names/loopback defaults passed; signing values remained redacted and were never copied/printed |
 | Free disk | About 838 GB observed, above the fixed 8-GiB refusal bound |
 | Active caches | Slice 6 ~310 MB/2 GiB; selected STT model ~1.62 GB/2 GiB; STT runtime ~2.87 GB/4 GiB; STT state ~8.3 MB/1 GiB; local LFM ~3.39 GB/5 GiB; Silero runtime ~1.87 GB/2 GiB; Silero state ~30 KB/1 GiB |
 | Release store | At most 3 releases and 1 GiB total; reaching either bound refuses without deleting anything |
@@ -46,7 +46,7 @@ The release embeds the exact Git commit in the ordinary Vite build and records a
 
 A post-review security correction replaced the internal operational-release v1 shape with v2 and removed the earlier secret-derived configuration revision rather than replacing it with another private key. A release now persists neither LiveKit credentials nor a verifier derived from them. The execution boundary returns one parsed, validated private snapshot and passes those exact values to the foreground runtime without rereading the file. Credential-only changes are deliberately outside release identity and out-of-band detection: after editing the mode-`0600` private configuration, the operator must run `voice-agent-ops install-service --restart` to revalidate the active release/configuration, force a restart even at unchanged release ID, wait for exact-release readiness, and then check status. `release_service_apply_required` covers only release/unit payload changes. The disposable release IDs recorded below predate this no-key correction and remain historical evidence, not current identity fixtures; no production unit or release required migration.
 
-The same correction makes final systemd readiness require the expected build/release report and a second live poll of every owned child, rejects pre-existing runtime-port owners before spawning, and feeds fresh PID/start-time custody for parent-owned LiveKit and local LFM into the five-component public report. Required Tailscale Serve routes now use exclusive fail-closed ownership: both initial preflight and the immediate pre-launch recheck reject external exact/conflicting routes, and observed readiness requires the newly spawned foreground child's successful configuration acknowledgement plus its new session entry; truly unrelated mappings remain untouched. Focused regressions cover the exact configuration snapshot at `execve`, absent persisted secret verifier, stale PID generations, occupied ports, build/release mismatch, immediate parent-process loss, and invalid sustained measurements. A subsequent review closes the remaining boot and listener-custody gaps: systemd owns a private `/run/voice-agent-v2` directory without a login-manager dependency, duplicate public HTTPS ports fail at both configuration and route reconciliation, transient tailnet unavailability is restartable but incompatible identity/authentication is not, overflow measurements fail validation, and final readiness maps every local listener inode back to its expected supervised process tree. The final review makes that runtime directory non-preserving so diagnostic captures are deleted on restart rather than losing their TTL guardian, rechecks full fresh operational/PID-generation readiness at session admission, and adds the explicit unchanged-release credential restart path without a secret verifier. No new physical reboot, microphone, audibility, second-device, avatar-soak, or Raspberry Pi evidence is claimed by these follow-ups.
+The same correction makes final systemd readiness require the expected build/release report and a second live poll of every owned child, rejects pre-existing local runtime-port owners before spawning, and feeds fresh PID/start-time custody for parent-owned LiveKit and local LFM into the five-component public report. Focused regressions cover the exact configuration snapshot at `execve`, absent persisted secret verifier, stale PID generations, occupied ports, build/release mismatch, immediate parent-process loss, and invalid sustained measurements. Subsequent review closes boot, listener-custody, and admission races: systemd owns a private `/run/voice-agent-v2` directory without a login-manager dependency, overflow measurements fail controlled validation, final readiness maps every local listener inode to its expected supervised process tree, diagnostic captures are deleted on restart rather than losing their TTL guardian, full fresh readiness is rechecked immediately before capability issue, and credential rotation has an explicit unchanged-release restart path without a secret verifier. Pasha's final exposure decision removes all proxy/private-network coupling: the application, systemd, operations, readiness, rollback, verification, and acceptance are loopback-local and manage no external route. No new physical reboot, microphone, audibility, avatar-soak, or Raspberry Pi evidence is claimed by these follow-ups.
 
 ### Immutable-release writer diagnosis and correction
 
@@ -72,7 +72,7 @@ The correction did not exclude any path or relax compatibility. Tracer HOME/cach
 
 ## Idempotence, incompatibility, and rollback rehearsal
 
-A disposable clean two-commit Git source under `/var/tmp` used the real public `voice-agent-ops` commands, real canonical external artifact/config/tailnet preflight, and ordinary client build:
+A disposable clean two-commit Git source under `/var/tmp` used the real public `voice-agent-ops` commands, real canonical artifact/local-config preflight, and ordinary client build. The original rehearsal also observed then-configured external exposure, but that observation is historical and no longer part of the application contract:
 
 1. release A activated;
 2. exact release A reapplication returned `status=no-op`, `changed=false`, with the same release ID;
@@ -86,7 +86,7 @@ A disposable clean two-commit Git source under `/var/tmp` used the real public `
 
 The final reviewed rehearsal used payload-bound release A `d5be2533e13da98992cc3373`, release B `4bb3aebd03ec318792ff6118`, and restored A. Those IDs are disposable evidence identities, not production deployment claims. The restored release then ran beneath a unique real disposable user-systemd `Type=notify` unit: its start job returned only after exact-release readiness at 23.102 seconds, and graceful stop left zero project processes while the complete inventory remained unchanged.
 
-Focused executable tests additionally corrupt a prior release and prove rollback leaves both current/previous links unchanged. For an installed canonical service, a target release unit that differs from the installed root-owned unit is rejected before either link moves, without replacing or restarting that unit; disposable rollback with no installed unit remains unprivileged. No arbitrary commit can be supplied to rollback. A changed/missing prior config path, public config fingerprint, file inventory, operations manifest, client build, external artifact/runtime, tailnet identity, disk/cache gate, or secret-file ownership/mode prevents the swap.
+Focused executable tests additionally corrupt a prior release and prove rollback leaves both current/previous links unchanged. For an installed canonical service, a target release unit that differs from the installed root-owned unit is rejected before either link moves, without replacing or restarting that unit; disposable rollback with no installed unit remains unprivileged. No arbitrary commit can be supplied to rollback. A changed/missing prior config path, public config fingerprint, file inventory, operations manifest, client build, external artifact/runtime, disk/cache gate, or secret-file ownership/mode prevents the swap. External exposure is neither checked nor changed.
 
 The full deterministic root gate is run again from the source in cumulative verification. The focused recovered-release command uses the same public tracer with `--tracer-only`; it deliberately avoids recursively executing the repository test suite and is not a substitute for `./verify`. A **real voice turn after rollback was not performed**; it remains part of the physical acceptance gap rather than being inferred from the deterministic tracer or startup smoke.
 
@@ -95,20 +95,19 @@ The full deterministic root gate is run again from the source in cumulative veri
 Start order is:
 
 ```text
-configuration → artifacts → local LLM → LiveKit → gateway/controller/STT/TTS/provider
-→ application Serve route → signaling Serve route
+configuration → artifacts → local LLM → loopback LiveKit
+→ loopback gateway/controller/STT/TTS/provider
 ```
 
 Stop order is:
 
 ```text
-application Serve route/admission → gateway/controller turn + resident-worker drain
-→ signaling Serve route → LiveKit → local LLM
+gateway admission + turn/resident-worker drain → LiveKit → local LLM
 ```
 
-The gateway drain is 60 seconds. Service-owned diagnostic guardians recheck the authoritative main PID generation every second, remove their captures, and exit when it ends, while development guardians retain their independent TTL. systemd waits for that bounded cleanup and applies a 75-second hard `KillMode=mixed` boundary only to a remaining fault, so normal stop remains ordered while a lost runner cannot leave an unbounded cgroup. The unit uses `Type=notify`; the main process emits readiness only after the five-component report and both exact tailnet routes pass, while install/reconciliation and rollback also match the public release ID. Runtime exit `1` may complete one restart after five seconds; `StartLimitBurst=2` inside 600 seconds stops the next attempt. Compatibility exit `2` is `RestartPreventExitStatus` and never retries. This service recovery is not an inference request retry.
+The gateway drain is bounded at 54 seconds, followed by eight seconds each for LiveKit and local LLM; the 70-second ordered total remains below systemd's 75-second hard `KillMode=mixed` boundary. Service-owned diagnostic guardians remove their captures and exit when the authoritative main PID generation ends, while development guardians retain independent TTL. The unit uses `Type=notify`; the main process emits readiness only after the five-component report passes and every local listener belongs to its expected process tree, while install/reconciliation and rollback also match the public release ID. Runtime exit `1` may complete one restart after five seconds; `StartLimitBurst=2` inside 600 seconds stops the next attempt. Compatibility exit `2` is `RestartPreventExitStatus` and never retries. This service recovery is not an inference request retry.
 
-`./verify-slice9` started and gracefully stopped five disposable owned processes in the exact declared order, with zero orphans and zero hard kills. On the real canonical stack:
+The current `./verify-slice9` starts and gracefully stops three disposable application-owned processes in the exact declared order, with zero orphans and zero hard kills. On the real canonical stack:
 
 - local LFM loss produced runtime exit `1`, full reverse cleanup, and no surviving project process;
 - LiveKit loss produced the same bounded failed state and cleanup;
@@ -117,7 +116,7 @@ The gateway drain is 60 seconds. Service-owned diagnostic guardians recheck the 
 - one of the exact two selected TTS workers did the same;
 - provider-adapter state is owned by the gateway and selected local LLM readiness; it has no invented process to kill. Local-LLM loss covers the active provider process, and no alternate provider/model/module started.
 
-A separate normal real-stack run reached fresh overall ready, returned the public local/no-fallback/avatar/build facts, accepted no session, and returned the same five-component ready document through loopback and the host's tailnet HTTPS/8443 route. It then stopped gracefully. This is tailnet readiness only, not a browser voice turn. Uvicorn completed application shutdown before LiveKit and local LFM stopped. Final checks found no `run_slice6.py`, llama-server, LiveKit, Whisper, or Silero worker. Owned HTTPS/8443 and HTTPS/7443 routes were absent afterward; the unrelated pre-existing HTTPS/443 mapping was byte-semantically preserved.
+A separate historical normal real-stack run reached fresh overall ready, returned the public local/no-fallback/avatar/build facts, accepted no session, and returned the same five-component document through loopback. That run also observed the then-configured external HTTPS setup; this is preserved only as historical environment evidence and makes no current exposure/readiness claim. Uvicorn completed application shutdown before LiveKit and local LFM stopped, and final checks found no `run_slice6.py`, llama-server, LiveKit, Whisper, or Silero worker.
 
 The canonical host's real user systemd manager also ran one unique disposable transient service with the production restart/start-limit properties. It executed twice (initial plus one completed recovery), scheduled the next restart job, blocked it at the start limit, and remained `failed/start-limit-hit`. The transient unit was stopped/reset and removed; no production unit/shared service was touched.
 
@@ -151,7 +150,7 @@ This proves threshold evaluation, sample-count enforcement, and bounded scalar/r
 ./verify-silero-kseniya
 ```
 
-The host script performs read-only selected-artifact/config/cache/tailnet checks plus one disposable user-systemd service. It does not install the product unit. Exact cumulative results are also recorded in the Slice 9 do report.
+The host script performs read-only selected-artifact/local-config/cache checks plus one disposable user-systemd service; it does not inspect external exposure. It does not install the product unit. Exact cumulative results are also recorded in the Slice 9 do report.
 
 ## Reboot safety decision and exact physical gaps
 
@@ -162,7 +161,7 @@ No physical reboot was performed. At the reboot decision point:
 - the production unit/release was intentionally not installed from a disposable unmerged worktree;
 - therefore the brief's required clean committed durable continuation and no-other-worker gate could not be proven.
 
-Risking the host or relying on this interactive agent to survive reboot would have violated the explicit safety contract. The closest safe path was exercised instead: real systemd restart limiting, real full-stack startup/graceful stop, real owned/controller-child loss, repeated clean recovery starts, exact post-stop orphan/route cleanup, and verified release rollback in disposable state.
+Risking the host or relying on this interactive agent to survive reboot would have violated the explicit safety contract. The closest safe path was exercised instead: real systemd restart limiting, real full-stack startup/graceful stop, real owned/controller-child loss, repeated clean recovery starts, exact post-stop orphan cleanup, and verified release rollback in disposable state.
 
 Still not performed or claimed:
 
@@ -170,7 +169,6 @@ Still not performed or claimed:
 - one real microphone → Whisper → selected local LFM → Kseniya voice turn after rollback;
 - 20 physical/full-stack turns with actual latency/resource/interrupt/avatar-frame observations;
 - physical Kseniya audibility/joins, rapid barge-in timing, or speaker playback timing;
-- a second-device tailnet browser voice turn (the local host routes were exercised, not remote physical media);
 - Raspberry Pi frame-rate/visual acceptance;
 - separate licensing/legal approval required by ADR-0009.
 
@@ -182,6 +180,5 @@ Consequently this change does **not** assert the roadmap's physical core-MVP sig
 - production release state under `~/.local/share/voice-agent-v2`: not created by this lane;
 - disposable transient systemd unit: reset/removed;
 - Voice Agent runner/model/LiveKit/Whisper/Silero processes: none;
-- owned HTTPS/8443 and HTTPS/7443 foreground routes: none;
-- unrelated pre-existing Tailscale Serve HTTPS/443 mapping: preserved;
+- optional external exposure: not inspected or changed by the application lane;
 - firewalld, public exposure, bootloader, disks, unrelated services, user data, wake, kiosk/autostart: unchanged.

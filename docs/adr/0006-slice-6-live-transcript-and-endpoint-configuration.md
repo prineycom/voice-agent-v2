@@ -42,7 +42,7 @@ This decision must be committed before the first new Slice 6 real live transcrip
 - The accepted current HTTP hop and opaque onward route are not production privacy/security approval.
 - Private transcript disclosure, availability, latency, empty responses, and provider identity remain bounded only by the prior narrow controls and Pasha's exception.
 - A missing or invalid `LITELLM_BASE_URL` now makes cloud-provider readiness fail closed; there is intentionally no compatibility fallback.
-- Real loopback and second-tailnet-browser evidence is still required and cannot be inferred from deterministic tests.
+- Real local-browser evidence is still required and cannot be inferred from deterministic tests. The former second-device exposure gate is superseded by ADR-0013; optional exposure is operator-owned.
 
 ## Alternatives considered
 
