@@ -283,25 +283,63 @@ class SupervisorLifecycleTests(unittest.TestCase):
         with patch.object(run_slice6.subprocess, "Popen", side_effect=processes):
             for role in roles:
                 supervisor.start(["fixture"], role=role)
-        stopped: list[tuple[str, float]] = []
+        stopped: list[tuple[str, float, float, float | None]] = []
 
-        def record_stop(process: FakeProcess, *, timeout: float = 5.0) -> None:
-            stopped.append((supervisor.role(process), timeout))
+        def record_stop(
+            process: FakeProcess,
+            *,
+            timeout: float = 5.0,
+            kill_timeout: float = 1.0,
+            deadline: float | None = None,
+        ) -> None:
+            stopped.append((supervisor.role(process), timeout, kill_timeout, deadline))
             process.terminate()
 
         with patch.object(run_slice6, "stop", side_effect=record_stop):
             supervisor.close(run_slice6.SHUTDOWN_ORDER)
-        self.assertEqual([role for role, _timeout in stopped], list(run_slice6.SHUTDOWN_ORDER))
+        self.assertEqual([role for role, *_budget in stopped], list(run_slice6.SHUTDOWN_ORDER))
+        budgets = {role: (grace, kill) for role, grace, kill, _deadline in stopped}
         self.assertEqual(
-            dict(stopped)["gateway-controller-stt-tts-provider"], 54.0,
+            budgets["gateway-controller-stt-tts-provider"], (54.0, 1.0),
         )
-        self.assertLess(sum(timeout for _role, timeout in stopped), 75.0)
+        self.assertEqual(len({deadline for *_budget, deadline in stopped}), 1)
         self.assertLess(
-            [role for role, _timeout in stopped].index(
+            sum(grace + kill for _role, grace, kill, _deadline in stopped),
+            75.0,
+        )
+        self.assertLess(
+            [role for role, *_budget in stopped].index(
                 "gateway-controller-stt-tts-provider"
             ),
-            [role for role, _timeout in stopped].index("livekit"),
+            [role for role, *_budget in stopped].index("livekit"),
         )
+
+    def test_forced_stop_reaps_within_its_total_role_budget(self) -> None:
+        class StubbornProcess(FakeProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self.wait_timeouts: list[float] = []
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout: float | None = None) -> int:
+                assert timeout is not None
+                self.wait_timeouts.append(timeout)
+                if not self.killed:
+                    raise subprocess.TimeoutExpired("fixture", timeout)
+                self.returncode = -9
+                return self.returncode
+
+            def kill(self) -> None:
+                self.killed = True
+
+        process = StubbornProcess()
+        run_slice6.stop(process, timeout=0.05, kill_timeout=0.02)
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(len(process.wait_timeouts), 2)
+        self.assertLessEqual(sum(process.wait_timeouts), 0.07)
 
 
 if __name__ == "__main__":

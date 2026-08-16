@@ -565,6 +565,35 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertEqual(installed_unit.read_bytes(), installed_bytes)
             sudo.assert_not_called()
 
+    def test_disposable_status_does_not_report_the_canonical_service_or_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "disposable-state"
+            current = state / "releases" / ("1" * 24)
+            arguments = SimpleNamespace(state_root=state)
+            with (
+                patch.object(operations_cli.ReleaseStore, "current", return_value=current),
+                patch.object(operations_cli, "validate_release", return_value={
+                    "release_id": current.name,
+                    "build_id": "a" * 40,
+                    "provider_mode": "local",
+                }),
+                patch.object(operations_cli, "_systemctl_show") as systemctl_show,
+                patch.object(operations_cli, "_runtime_status") as runtime_status,
+                patch.object(operations_cli, "_print") as output,
+            ):
+                operations_cli.command_status(arguments)
+
+            report = output.call_args.args[0]
+            self.assertEqual(report["compatibility"], "compatible")
+            self.assertFalse(report["service"]["applicable"])
+            self.assertEqual(report["service"]["active"], "not-applicable")
+            self.assertFalse(report["runtime"]["applicable"])
+            self.assertEqual(
+                report["runtime"]["overall_readiness"], "not-applicable",
+            )
+            systemctl_show.assert_not_called()
+            runtime_status.assert_not_called()
+
 
 class ConfigurationAndArtifactTests(unittest.TestCase):
     def test_config_is_mode_guarded_without_persistable_secret_verifier(self) -> None:

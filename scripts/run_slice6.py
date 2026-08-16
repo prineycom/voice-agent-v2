@@ -61,11 +61,15 @@ SHUTDOWN_ORDER = (
     "livekit",
     "local-llm",
 )
-STOP_TIMEOUTS = {
-    "gateway-controller-stt-tts-provider": 54.0,
-    "livekit": 8.0,
-    "local-llm": 8.0,
+STOP_BUDGETS = {
+    "gateway-controller-stt-tts-provider": (54.0, 1.0),
+    "livekit": (8.0, 1.0),
+    "local-llm": (8.0, 1.0),
 }
+SHUTDOWN_TIMEOUT_SECONDS = sum(
+    graceful_timeout + kill_timeout
+    for graceful_timeout, kill_timeout in STOP_BUDGETS.values()
+)
 
 
 class ServiceProcessFailure(RuntimeError):
@@ -99,6 +103,7 @@ class ProcessSupervisor:
 
     def close(self, order: tuple[str, ...] | None = None) -> None:
         first_error: BaseException | None = None
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
         ordered: list[subprocess.Popen] = []
         if order is not None:
             for role in order:
@@ -109,8 +114,15 @@ class ProcessSupervisor:
         ordered.extend(process for process in reversed(self.processes) if process not in ordered)
         for process in ordered:
             try:
-                timeout = STOP_TIMEOUTS.get(self.role(process), 5.0)
-                stop(process, timeout=timeout)
+                graceful_timeout, kill_timeout = STOP_BUDGETS.get(
+                    self.role(process), (4.0, 1.0),
+                )
+                stop(
+                    process,
+                    timeout=graceful_timeout,
+                    kill_timeout=kill_timeout,
+                    deadline=deadline,
+                )
             except BaseException as error:
                 if first_error is None:
                     first_error = error
@@ -229,6 +241,7 @@ def gateway_operational_ready(
         return bool(
             isinstance(health, dict)
             and health.get("overall_readiness") == "ready"
+            and document.get("accepting") is True
             and document.get("provider_mode") == "local"
             and document.get("external_provider_supervised") is False
             and document.get("automatic_fallback") is False
@@ -408,15 +421,23 @@ def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: floa
     raise ServiceProcessFailure(f"{name} did not {readiness} within {timeout:.0f}s")
 
 
-def stop(process: subprocess.Popen, *, timeout: float = 5.0) -> None:
+def stop(
+    process: subprocess.Popen,
+    *,
+    timeout: float = 5.0,
+    kill_timeout: float = 1.0,
+    deadline: float | None = None,
+) -> None:
     if process.poll() is not None:
         return
+    if deadline is None:
+        deadline = time.monotonic() + timeout + kill_timeout
     process.terminate()
     try:
-        process.wait(timeout=timeout)
+        process.wait(timeout=min(timeout, max(0.0, deadline - time.monotonic())))
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=min(kill_timeout, max(0.0, deadline - time.monotonic())))
 
 
 def main() -> int:

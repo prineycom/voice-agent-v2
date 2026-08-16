@@ -15,6 +15,28 @@ running() {
   tr '\000' ' ' < "/proc/$PID/cmdline" | grep -F "$ROOT/scripts/run_slice6.py" >/dev/null
 }
 
+operational_ready() {
+  EXPECTED_BUILD=$1
+  STATUS_DOCUMENT=$(curl --fail --silent --show-error "$LOOPBACK_STATUS") || return 1
+  printf '%s\n' "$STATUS_DOCUMENT" | python3 -c '
+import json
+import sys
+
+try:
+    status = json.load(sys.stdin)
+except (OSError, UnicodeError, ValueError):
+    raise SystemExit(1)
+health = status.get("health") if isinstance(status, dict) else None
+ready = (
+    isinstance(health, dict)
+    and status.get("build_id") == sys.argv[1]
+    and status.get("accepting") is True
+    and health.get("overall_readiness") == "ready"
+)
+raise SystemExit(0 if ready else 1)
+' "$EXPECTED_BUILD"
+}
+
 start() {
   if running; then
     echo "Live review stand is already running (PID $(cat "$PID_FILE"))"
@@ -55,7 +77,7 @@ start() {
       exit 1
     fi
     if curl --fail --silent --show-error "$LOOPBACK_URL" >/dev/null \
-      && curl --fail --silent --show-error "$LOOPBACK_STATUS" >/dev/null; then
+      && operational_ready "$BUILD"; then
       echo "Live review stand started"
       echo "commit: $BUILD"
       echo "local: $LOOPBACK_URL"
@@ -93,12 +115,14 @@ stop() {
 status() {
   if running; then
     PID=$(cat "$PID_FILE")
-    if curl --fail --silent --show-error "$LOOPBACK_STATUS" >/dev/null; then
+    BUILD=$(git -C "$ROOT" rev-parse HEAD)
+    if operational_ready "$BUILD"; then
       echo "running: PID $PID"
+      echo "commit: $BUILD"
       echo "local: $LOOPBACK_URL"
       return
     fi
-    echo "degraded: PID $PID is alive but the application API is unreachable" >&2
+    echo "degraded: PID $PID is alive but exact-build readiness is unavailable" >&2
     exit 1
   fi
   echo "stopped"

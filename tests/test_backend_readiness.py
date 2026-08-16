@@ -28,6 +28,7 @@ class BackendReadinessTests(unittest.TestCase):
             "automatic_fallback": False,
             "build_id": "a" * 40,
             "release_id": "b" * 24,
+            "accepting": True,
             "health": {"overall_readiness": "ready"},
         }
 
@@ -59,6 +60,9 @@ class BackendReadinessTests(unittest.TestCase):
                 report["health"] = {"overall_readiness": "unready"}
                 self.assertFalse(run_slice6.gateway_operational_ready())
                 report["health"] = {"overall_readiness": "ready"}
+                report["accepting"] = False
+                self.assertFalse(run_slice6.gateway_operational_ready())
+                report["accepting"] = True
                 report["automatic_fallback"] = True
                 self.assertFalse(run_slice6.gateway_operational_ready())
         finally:

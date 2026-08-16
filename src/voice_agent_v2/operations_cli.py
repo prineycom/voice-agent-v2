@@ -247,16 +247,37 @@ def command_status(arguments: argparse.Namespace) -> None:
                 "build_id": document["build_id"],
                 "provider_mode": document["provider_mode"],
             }
-    service = _systemctl_show()
-    public_status = _runtime_status() if service["active"] == "active" else None
-    health = public_status.get("health") if isinstance(public_status, dict) else None
-    runtime = {
-        "reachable": public_status is not None,
-        "release_id": public_status.get("release_id") if public_status else None,
-        "build_id": public_status.get("build_id") if public_status else None,
-        "overall_readiness": health.get("overall_readiness") if isinstance(health, dict) else None,
-        "accepting": public_status.get("accepting") if public_status else False,
-    }
+    canonical = arguments.state_root.resolve() == DEFAULT_STATE_ROOT.resolve()
+    if canonical:
+        service = {"applicable": True, **_systemctl_show()}
+        public_status = _runtime_status() if service["active"] == "active" else None
+        health = public_status.get("health") if isinstance(public_status, dict) else None
+        runtime = {
+            "applicable": True,
+            "reachable": public_status is not None,
+            "release_id": public_status.get("release_id") if public_status else None,
+            "build_id": public_status.get("build_id") if public_status else None,
+            "overall_readiness": health.get("overall_readiness") if isinstance(health, dict) else None,
+            "accepting": public_status.get("accepting") if public_status else False,
+        }
+    else:
+        service = {
+            "applicable": False,
+            "load": "not-applicable",
+            "active": "not-applicable",
+            "substate": "not-applicable",
+            "result": "not-applicable",
+            "restart_count": None,
+            "main_exit_status": None,
+        }
+        runtime = {
+            "applicable": False,
+            "reachable": False,
+            "release_id": None,
+            "build_id": None,
+            "overall_readiness": "not-applicable",
+            "accepting": False,
+        }
     _print({
         "schema_version": "voice-agent.operational-status.v1",
         "compatibility": compatibility,
@@ -303,6 +324,7 @@ def _wait_for_runtime_release(release_id: str, *, timeout: float = 90.0) -> None
             and document.get("release_id") == release_id
             and isinstance(health, dict)
             and health.get("overall_readiness") == "ready"
+            and document.get("accepting") is True
         ):
             return
         service = _systemctl_show()
