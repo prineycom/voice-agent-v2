@@ -76,6 +76,13 @@ _SAFE_STRING_FIELD_KEYS = frozenset({
 })
 
 
+def safe_reason_code(value: str) -> bool:
+    return (
+        1 <= len(value) <= 64
+        and all(character in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in value)
+    )
+
+
 def safe_observation_key(value: str) -> bool:
     lowered = value.lower()
     return (
@@ -172,7 +179,7 @@ class ComponentHealth:
             or not isinstance(self.compatible, bool)
             or not 1 <= len(self.identity) <= 256
             or not 1 <= len(self.contract_version) <= 128
-            or self.reason_code is not None and not safe_observation_key(self.reason_code)
+            or self.reason_code is not None and not safe_reason_code(self.reason_code)
             or type(self.retry_count) is not int
             or type(self.retry_limit) is not int
             or not 0 <= self.retry_count <= self.retry_limit <= 16
@@ -655,8 +662,11 @@ def percentile_report(
             if type(value := timeline.as_dict().get(name)) in {int, float}
         ]
         timing_output[name] = {
-            f"p{percentile}": _nearest_rank(values, percentile)
-            for percentile in percentiles
+            "sample_count": len(values),
+            **{
+                f"p{percentile}": _nearest_rank(values, percentile)
+                for percentile in percentiles
+            },
         }
     resource_values: dict[str, list[float]] = {
         str(name): [] for name in resource_names if isinstance(name, str)
@@ -677,7 +687,10 @@ def percentile_report(
                 resource_values[name].append(float(value))
     for name, values in resource_values.items():
         resource_output[name] = {
-            f"p{percentile}": _nearest_rank(values, percentile)
-            for percentile in percentiles
+            "sample_count": len(values),
+            **{
+                f"p{percentile}": _nearest_rank(values, percentile)
+                for percentile in percentiles
+            },
         }
     return report

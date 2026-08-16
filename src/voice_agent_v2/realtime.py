@@ -1728,6 +1728,8 @@ class RealtimeSession:
             and terminal_code == "context_commit_failed"
         ):
             await self._degrade_locked("controller", terminal_code)
+        elif stage == "publication" and public_payload.get("admit_turn") is False:
+            await self._degrade_locked(stage, code)
         elif admission is not None and not admission():
             readiness_stage, readiness_code = self._readiness_failure()
             await self._degrade_locked(readiness_stage, readiness_code)
@@ -2156,6 +2158,8 @@ class RealtimeSession:
                 if not context.transport_failed:
                     if event_type == "turn.completed" and self.turn_counts["completed"] > 0:
                         self.turn_counts["completed"] -= 1
+                    if event_type == "turn.interrupted" and self.turn_counts["interrupted"] > 0:
+                        self.turn_counts["interrupted"] -= 1
                     if event_type != "turn.failed":
                         self.turn_counts["failed"] += 1
                     context.transport_failed = True

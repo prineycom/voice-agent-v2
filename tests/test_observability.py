@@ -211,11 +211,36 @@ class ObservationContractTests(unittest.TestCase):
             report["resource_percentiles"]["gpu_vram_used_mib"]["p99"],
             2900.0,
         )
+        self.assertEqual(
+            report["timing_percentiles_ms"]["provider_completion_ms"]["sample_count"],
+            1,
+        )
+        self.assertEqual(
+            report["timing_percentiles_ms"]["cancellation_latency_ms"]["sample_count"],
+            0,
+        )
+        self.assertEqual(
+            report["resource_percentiles"]["gpu_vram_used_mib"]["sample_count"],
+            1,
+        )
         serialized = json.dumps(report, ensure_ascii=False)
         self.assertNotIn("private transcript", serialized)
 
 
 class ReadinessAndFailurePolicyTests(unittest.TestCase):
+    def test_reason_codes_are_closed_identifiers_not_content_fields(self) -> None:
+        valid = ComponentHealth(
+            "livekit", "alive", "unready", True,
+            "livekit", "control-v2", "audio_stream_failed",
+        )
+        self.assertEqual(valid.as_dict()["reason_code"], "audio_stream_failed")
+        invalid = ComponentHealth(
+            "livekit", "alive", "unready", True,
+            "livekit", "control-v2", "private words",
+        )
+        with self.assertRaisesRegex(ValueError, "component health"):
+            invalid.as_dict()
+
     def test_alive_but_incompatible_is_not_ready(self) -> None:
         components = tuple(
             ComponentHealth(

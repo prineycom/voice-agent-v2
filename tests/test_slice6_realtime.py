@@ -128,6 +128,54 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(failed["fields"]["turn_failure_count"], 1)
             self.assertNotIn("turn.completed", [event["type"] for event in events.events])
 
+    async def test_interruption_publish_failure_replaces_terminal_counter(self) -> None:
+        class FailingInterruptEvents(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.interrupted":
+                    raise RuntimeError("synthetic interruption publish failure")
+                await super().send(event)
+
+        session = RealtimeSession(
+            session_id="session-interrupt-publish-failure",
+            runner=StreamingRunner(),
+            event_sink=FailingInterruptEvents(),
+            audio_sink=MemoryAudio(write_delay=0.2),
+        )
+        await session.submit_utterance(b"\0\0" * 320)
+
+        with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+            await session.interrupt()
+
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+
+    async def test_publication_failure_blocks_later_turn_admission(self) -> None:
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-publication-failure",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        await session.start_utterance()
+        context = session._active
+        self.assertIsNotNone(context)
+        assert context is not None
+        await session._terminate_failed_turn(
+            context,
+            "turn.failed",
+            {"outcome": "failed", "stage": "publication", "code": "audio_stream_failed"},
+        )
+
+        failed = next(event for event in events.events if event["type"] == "turn.failed")
+        self.assertEqual(failed["payload"]["failure_matrix_id"], "livekit_unavailable")
+        self.assertFalse(failed["payload"]["admit_turn"])
+        self.assertIn("session.degraded", [event["type"] for event in events.events])
+        self.assertFalse(await session.ready())
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
     async def test_resource_sampling_never_blocks_endpoint_admission(self) -> None:
         class SlowSampler:
             def sample(self) -> ResourceSnapshot:

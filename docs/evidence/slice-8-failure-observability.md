@@ -58,7 +58,7 @@ A safe real-process case starts a task-owned disposable Python worker, kills it,
 - total turn;
 - CPU, host RAM, process RSS, GPU VRAM, and GPU utilization.
 
-It requires at least 20 turns before percentiles may be called acceptance evidence. Smaller samples remain honest diagnostic output with `turn_count`.
+It requires at least 20 turns before percentiles may be called acceptance evidence. Smaller samples remain honest diagnostic output with `turn_count`, and every timing/resource distribution carries its own `sample_count` so optional/missing observations never borrow the global turn N.
 
 The bounded verifier emits one synthetic metadata-only turn and reconstructs, without input/output content:
 
