@@ -177,6 +177,44 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await session.start_utterance()
 
+    async def test_completed_control_send_commits_before_cancellation_propagates(self) -> None:
+        holder: dict[str, asyncio.Task[None]] = {}
+
+        class CancelCallerAfterSend(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                await super().send(event)
+                holder["caller"].cancel()
+
+        events = CancelCallerAfterSend()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+        session = RealtimeSession(
+            session_id="session-control-send-race",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+        turn_id = await session.start_utterance(announce=False)
+        caller = asyncio.create_task(
+            session._emit(turn_id, "turn.listening", {"state": "listening"})
+        )
+        holder["caller"] = caller
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        context = session._active
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertTrue(context.public_event_published)
+        self.assertEqual([event["type"] for event in events.events], ["turn.listening"])
+        self.assertTrue(any(
+            stage == "control" and event == "published"
+            for stage, event, _fields in observations
+        ))
+
     async def test_media_sink_cancellation_after_listening_terminalizes_turn(self) -> None:
         class CancelMediaEvents(MemoryEvents):
             async def send(self, event: dict[str, object]) -> None:
@@ -385,7 +423,7 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await finish
         for _attempt in range(20):
-            if session.closed:
+            if any(event["type"] == "session.degraded" for event in events.events):
                 break
             await asyncio.sleep(0.01)
 

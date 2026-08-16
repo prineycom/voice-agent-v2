@@ -2248,10 +2248,40 @@ class RealtimeSession:
         terminal: bool = False,
     ) -> None:
         event = self._reserve_public_event(turn_id, event_type, payload, terminal=terminal)
+        send_task = asyncio.create_task(
+            self.event_sink.send(event),
+            name=f"control-send-{event_type}-{turn_id}",
+        )
+        cancellation_after_success = False
+
+        async def cancel_unfinished_send() -> None:
+            if send_task.done():
+                return
+            send_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(send_task), CONTROL_PUBLISH_BOUND_MS / 1000
+                )
+            except BaseException:
+                pass
+
         try:
-            await asyncio.wait_for(
-                self.event_sink.send(event), CONTROL_PUBLISH_BOUND_MS / 1000
-            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(send_task), CONTROL_PUBLISH_BOUND_MS / 1000
+                )
+            except asyncio.CancelledError:
+                if send_task.done() and not send_task.cancelled():
+                    send_error = send_task.exception()
+                    if send_error is not None:
+                        raise send_error
+                    cancellation_after_success = True
+                else:
+                    await cancel_unfinished_send()
+                    raise
+            except TimeoutError:
+                await cancel_unfinished_send()
+                raise
             context = self._active
             if (
                 turn_id != SESSION_TURN_ID
@@ -2265,6 +2295,8 @@ class RealtimeSession:
             self._trace(
                 "control", "published", turn_id=turn_id, **observation_fields
             )
+            if cancellation_after_success:
+                raise asyncio.CancelledError
         except Exception as error:
             failure = {
                 "outcome": "failed",
