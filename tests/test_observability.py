@@ -645,7 +645,7 @@ class CaptureAndResourceTests(unittest.TestCase):
             self.assertEqual(
                 DiagnosticContentCapture.purge_expired(root, now=lambda: 2), 0
             )
-            with self.assertRaisesRegex(ValueError, "lifetime diagnostic"):
+            with self.assertRaisesRegex(ValueError, r"lifetime(?:-scoped| diagnostic)"):
                 DiagnosticContentCapture.delete_path(forged)
             self.assertTrue(foreign.exists())
             self.assertTrue(mismatched.exists())
