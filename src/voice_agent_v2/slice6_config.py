@@ -149,9 +149,14 @@ class Slice6Settings:
         internal_url = _url(
             _required(values, "LIVEKIT_INTERNAL_URL"),
             name="LIVEKIT_INTERNAL_URL",
-            schemes={"ws", "wss"},
+            schemes={"ws"},
             loopback=True,
         )
+        internal_endpoint = urlsplit(internal_url)
+        if internal_endpoint.hostname != "127.0.0.1" or internal_endpoint.port != 7880:
+            raise Slice6ConfigurationError(
+                "LIVEKIT_INTERNAL_URL must match the IPv4 loopback listener"
+            )
         public_url = _url(
             values.get("LIVEKIT_PUBLIC_URL", "ws://127.0.0.1:7880"),
             name="LIVEKIT_PUBLIC_URL",

@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -451,7 +452,21 @@ def _install_service_locked(
     if not unit.is_file():
         raise OperationalError("systemd_unit_incompatible", "release systemd unit is missing")
     _validate_systemd_unit(unit)
-    exists = _sudo("test", "-e", str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
+    try:
+        installed_metadata = SYSTEM_UNIT_PATH.lstat()
+    except FileNotFoundError:
+        exists = False
+    except OSError as error:
+        raise OperationalError(
+            "systemd_unit_incompatible", "installed systemd unit is unavailable",
+        ) from error
+    else:
+        exists = True
+        if not stat.S_ISREG(installed_metadata.st_mode):
+            raise OperationalError(
+                "systemd_unit_incompatible",
+                "installed systemd unit must be an unmasked regular file",
+            )
     identical = exists and _sudo(
         "cmp", "-s", str(unit), str(SYSTEM_UNIT_PATH), allowed=(0, 1),
     ).returncode == 0
@@ -468,7 +483,7 @@ def _install_service_locked(
         backup = Path(temporary) / SERVICE_NAME
         if unit_changed and exists:
             _sudo(
-                "cp", "--preserve=mode,ownership,timestamps",
+                "cp", "--archive", "--no-dereference", "--",
                 str(SYSTEM_UNIT_PATH), str(backup),
             )
         unit_attempted = False
@@ -512,12 +527,13 @@ def _install_service_locked(
             try:
                 if unit_attempted:
                     if exists:
+                        _sudo("rm", "-f", "--", str(SYSTEM_UNIT_PATH))
                         _sudo(
-                            "install", "-o", "root", "-g", "root", "-m", "0644",
+                            "cp", "--archive", "--no-dereference", "--",
                             str(backup), str(SYSTEM_UNIT_PATH),
                         )
                     else:
-                        _sudo("rm", "-f", str(SYSTEM_UNIT_PATH))
+                        _sudo("rm", "-f", "--", str(SYSTEM_UNIT_PATH))
                     _sudo("systemctl", "daemon-reload")
                 if enable_attempted:
                     _sudo(

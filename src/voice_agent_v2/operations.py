@@ -106,14 +106,69 @@ EXPECTED_ARTIFACT_NAMES = frozenset({
     "llama-server-b10357", "lfm2.5-q4-k-m", "silero-v5-5-ru",
     "silero-python", "silero-torch-extension", "silero-libtorch-cpu",
 })
+EXPECTED_PYTHON_RUNTIMES = {
+    "slice6": {
+        "name": "slice6",
+        "python": "{home}/.cache/voice-agent-v2/slice-6/runtime/venv/bin/python",
+        "packages": {
+            "fastapi": "0.141.1",
+            "uvicorn": "0.52.1",
+            "livekit": "1.1.14",
+            "livekit-api": "1.2.0",
+            "onnxruntime": "1.28.0",
+            "numpy": "2.5.2",
+        },
+    },
+    "stt": {
+        "name": "stt",
+        "python": "{home}/.cache/voice-agent-v2/slice-2/runtime/stt-tts-venv/bin/python",
+        "packages": {
+            "faster-whisper": "1.2.1",
+            "ctranslate2": "4.8.1",
+            "numpy": "2.5.2",
+        },
+    },
+}
+EXPECTED_CACHE_ROOTS = {
+    "slice6-runtime": {
+        "name": "slice6-runtime",
+        "path": "{home}/.cache/voice-agent-v2/slice-6",
+        "maximum_bytes": 2_147_483_648,
+    },
+    "stt-model": {
+        "name": "stt-model",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/artifacts/stt-whisper-large-v3-turbo",
+        "maximum_bytes": 2_147_483_648,
+    },
+    "stt-runtime": {
+        "name": "stt-runtime",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/runtime/stt-tts-venv",
+        "maximum_bytes": 4_294_967_296,
+    },
+    "stt-service-state": {
+        "name": "stt-service-state",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/raw",
+        "maximum_bytes": 1_073_741_824,
+    },
+    "local-lfm-runtime": {
+        "name": "local-lfm-runtime",
+        "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4",
+        "maximum_bytes": 5_368_709_120,
+    },
+    "silero-runtime": {
+        "name": "silero-runtime",
+        "path": "{home}/.cache/voice-agent-v2/experiments/silero-baya-tts",
+        "maximum_bytes": 2_147_483_648,
+    },
+    "silero-state": {
+        "name": "silero-state",
+        "path": "{home}/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship",
+        "maximum_bytes": 1_073_741_824,
+    },
+}
 EXPECTED_CACHE_BOUNDS = {
-    "slice6-runtime": 2_147_483_648,
-    "stt-model": 2_147_483_648,
-    "stt-runtime": 4_294_967_296,
-    "stt-service-state": 1_073_741_824,
-    "local-lfm-runtime": 5_368_709_120,
-    "silero-runtime": 2_147_483_648,
-    "silero-state": 1_073_741_824,
+    name: int(cache["maximum_bytes"])
+    for name, cache in EXPECTED_CACHE_ROOTS.items()
 }
 EXPECTED_SUSTAINED_ACCEPTANCE = {
     "minimum_turns": 20,
@@ -313,23 +368,28 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         for artifact in artifacts if isinstance(artifact, dict)
     ):
         raise OperationalError("operations_manifest_invalid", "artifact checksum declaration is invalid")
-    if not isinstance(runtimes, list) or {
-        runtime.get("name") for runtime in runtimes if isinstance(runtime, dict)
-    } != {"slice6", "stt"}:
-        raise OperationalError("operations_manifest_incompatible", "selected Python runtime set changed")
+    if not isinstance(runtimes, list) or any(
+        not isinstance(runtime, dict) or not isinstance(runtime.get("name"), str)
+        for runtime in runtimes
+    ):
+        raise OperationalError("operations_manifest_invalid", "Python runtime declarations are invalid")
+    observed_runtimes = {str(runtime["name"]): runtime for runtime in runtimes}
+    if len(observed_runtimes) != len(runtimes) or observed_runtimes != EXPECTED_PYTHON_RUNTIMES:
+        raise OperationalError("operations_manifest_incompatible", "selected Python runtime contract changed")
     cache_roots = disk.get("cache_roots")
-    if not isinstance(cache_roots, list):
-        raise OperationalError("operations_manifest_invalid", "cache bounds are invalid")
-    observed_cache_bounds = {
-        cache.get("name"): cache.get("maximum_bytes")
-        for cache in cache_roots if isinstance(cache, dict)
-    }
+    if not isinstance(cache_roots, list) or any(
+        not isinstance(cache, dict) or not isinstance(cache.get("name"), str)
+        for cache in cache_roots
+    ):
+        raise OperationalError("operations_manifest_invalid", "cache root declarations are invalid")
+    observed_cache_roots = {str(cache["name"]): cache for cache in cache_roots}
+    if len(observed_cache_roots) != len(cache_roots) or observed_cache_roots != EXPECTED_CACHE_ROOTS:
+        raise OperationalError("operations_manifest_incompatible", "cache root contract changed")
     if not (
         disk.get("cleanup_policy") == "refuse-without-deleting"
         and disk.get("minimum_free_bytes") == 8_589_934_592
         and disk.get("release_maximum_count") == 3
         and disk.get("release_maximum_bytes") == 1_073_741_824
-        and observed_cache_bounds == EXPECTED_CACHE_BOUNDS
         and sustained == EXPECTED_SUSTAINED_ACCEPTANCE
     ):
         raise OperationalError("operations_manifest_incompatible", "disk/cache/sustained policy changed")
@@ -520,7 +580,7 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
         values.get("SLICE6_APP_PUBLIC_URL", "http://127.0.0.1:8000"),
         schemes={"http", "https"},
     )
-    if internal.hostname not in {"127.0.0.1", "localhost", "::1"} or internal.port != 7880:
+    if internal.hostname != "127.0.0.1" or internal.port != 7880:
         raise OperationalError("configuration_invalid", "LiveKit internal endpoint changed")
     for parsed, secure_scheme in ((public, "wss"), (app, "https")):
         try:
@@ -1692,7 +1752,7 @@ def evaluate_sustained_run(
     checks = (
         (success_ratio >= float(thresholds["minimum_turn_success_ratio"]), "turn_success"),
         (float(result["p95_total_turn_ms"]) <= float(thresholds["maximum_p95_total_turn_ms"]), "turn_latency"),
-        (not cancellations or float(result["p95_cancellation_latency_ms"]) <= float(thresholds["maximum_p95_cancellation_latency_ms"]), "cancellation"),
+        (bool(cancellations) and float(result["p95_cancellation_latency_ms"]) <= float(thresholds["maximum_p95_cancellation_latency_ms"]), "cancellation"),
         (float(result["process_rss_growth_mib"]) <= float(thresholds["maximum_process_rss_growth_mib"]), "rss_growth"),
         (float(result["gpu_vram_growth_mib"]) <= float(thresholds["maximum_gpu_vram_growth_mib"]), "vram_growth"),
         (isinstance(avatar.get("healthy_frame_ratio"), (int, float)) and float(avatar["healthy_frame_ratio"]) >= float(thresholds["minimum_avatar_healthy_frame_ratio"]), "avatar_health"),

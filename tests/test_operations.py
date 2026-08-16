@@ -148,6 +148,48 @@ class OperationsManifestTests(unittest.TestCase):
                     ):
                         load_operations_manifest(path)
 
+    def test_manifest_rejects_runtime_and_cache_root_contract_drift(self) -> None:
+        manifest = json.loads(
+            (ROOT / DEFAULT_MANIFEST_RELATIVE).read_text(encoding="utf-8")
+        )
+        mutations = (
+            ("runtime-python", lambda value: value["python_runtimes"][0].update(
+                python="/usr/bin/python3",
+            )),
+            ("runtime-packages", lambda value: value["python_runtimes"][1].update(
+                packages={},
+            )),
+            ("cache-path", lambda value: value["disk"]["cache_roots"][0].update(
+                path="{home}/.cache/unrelated",
+            )),
+            ("cache-fields", lambda value: value["disk"]["cache_roots"][1].update(
+                optional=True,
+            )),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "operations.json"
+            for label, mutate in mutations:
+                with self.subTest(contract=label):
+                    changed = json.loads(json.dumps(manifest))
+                    mutate(changed)
+                    path.write_text(json.dumps(changed), encoding="utf-8")
+                    with self.assertRaisesRegex(OperationalError, "contract changed"):
+                        load_operations_manifest(path)
+
+    def test_server_configuration_rejects_internal_endpoints_not_served_by_livekit(self) -> None:
+        for endpoint in ("ws://[::1]:7880", "ws://localhost:7880", "wss://127.0.0.1:7880"):
+            with self.subTest(endpoint=endpoint):
+                values = configuration_values()
+                values["LIVEKIT_INTERNAL_URL"] = endpoint
+                with self.assertRaisesRegex(
+                    OperationalError, "internal endpoint changed|configured URL is invalid",
+                ):
+                    validate_server_configuration(values)
+                with self.assertRaisesRegex(
+                    ValueError, "IPv4 loopback listener|invalid URL",
+                ):
+                    Slice6Settings.from_environment(values, project_root=ROOT)
+
     def test_systemd_unit_matches_executable_restart_and_process_custody_contract(self) -> None:
         unit_path = ROOT / "ops/systemd/voice-agent-v2.service"
         verification = subprocess.run(
@@ -299,9 +341,30 @@ class ServiceApplicationTests(unittest.TestCase):
         (state / "current").symlink_to(f"releases/{release.name}")
         return state, release, SimpleNamespace(state_root=state, restart=False)
 
+    def test_install_service_rejects_a_masked_existing_unit_without_replacing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, _release, arguments = self._fixture(root)
+            installed = root / "installed.service"
+            installed.symlink_to("/dev/null")
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(operations_cli, "validate_release", return_value={}),
+                patch.object(operations_cli, "_sudo") as sudo,
+                self.assertRaisesRegex(OperationalError, "unmasked regular file"),
+            ):
+                operations_cli.command_install_service(arguments)
+            self.assertTrue(installed.is_symlink())
+            self.assertEqual(os.readlink(installed), "/dev/null")
+            sudo.assert_not_called()
+
     def test_reapplying_ready_service_is_a_no_op(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            state, release, arguments = self._fixture(Path(temporary))
+            root = Path(temporary)
+            state, release, arguments = self._fixture(root)
+            installed = root / "installed.service"
+            shutil.copy2(release / "ops/systemd/voice-agent-v2.service", installed)
             calls: list[tuple[str, ...]] = []
 
             def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
@@ -310,6 +373,7 @@ class ServiceApplicationTests(unittest.TestCase):
 
             with (
                 patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
                 patch.object(operations_cli, "validate_release", return_value={}),
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
                 patch.object(operations_cli, "_validate_effective_systemd_service"),
@@ -330,7 +394,10 @@ class ServiceApplicationTests(unittest.TestCase):
 
     def test_identical_unit_retries_daemon_reload_after_a_prior_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            state, release, arguments = self._fixture(Path(temporary))
+            root = Path(temporary)
+            state, release, arguments = self._fixture(root)
+            installed = root / "installed.service"
+            shutil.copy2(release / "ops/systemd/voice-agent-v2.service", installed)
             reload_attempts = 0
 
             def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
@@ -345,6 +412,7 @@ class ServiceApplicationTests(unittest.TestCase):
 
             with (
                 patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
                 patch.object(operations_cli, "validate_release", return_value={}),
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
                 patch.object(operations_cli, "_validate_effective_systemd_service"),
@@ -432,16 +500,22 @@ class ServiceApplicationTests(unittest.TestCase):
                 index for index, command in enumerate(calls)
                 if command and command[0] == "install"
             ]
+            restore_copies = [
+                index for index, command in enumerate(calls)
+                if command[:4] == ("cp", "--archive", "--no-dereference", "--")
+            ]
             reloads = [
                 index for index, command in enumerate(calls)
                 if command == ("systemctl", "daemon-reload")
             ]
-            self.assertEqual(len(installs), 2)
+            self.assertEqual(len(installs), 1)
+            self.assertEqual(len(restore_copies), 2)
             self.assertEqual(len(reloads), 2)
+            self.assertLess(restore_copies[0], installs[0])
             self.assertLess(installs[0], reloads[0])
-            self.assertLess(reloads[0], installs[1])
-            self.assertLess(installs[1], reloads[1])
-            self.assertEqual(calls[installs[1]][-1], str(installed))
+            self.assertLess(reloads[0], restore_copies[1])
+            self.assertLess(restore_copies[1], reloads[1])
+            self.assertEqual(calls[restore_copies[1]][-1], str(installed))
             self.assertFalse(any(
                 command[:2] in {
                     ("systemctl", "enable"),
@@ -489,7 +563,12 @@ class ServiceApplicationTests(unittest.TestCase):
                 operations_cli.command_install_service(arguments)
 
             installs = [command for command in calls if command[:1] == ("install",)]
-            self.assertEqual(len(installs), 2)
+            restore_copies = [
+                command for command in calls
+                if command[:4] == ("cp", "--archive", "--no-dereference", "--")
+            ]
+            self.assertEqual(len(installs), 1)
+            self.assertEqual(len(restore_copies), 2)
             self.assertEqual(
                 calls.count(("systemctl", "daemon-reload")), 2,
             )
@@ -1645,6 +1724,22 @@ class LifecycleAndSustainedTests(unittest.TestCase):
         with self.assertRaisesRegex(OperationalError, "turn_success"):
             evaluate_sustained_run(
                 manifest, turns=turns, avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
+            )
+
+    def test_sustained_acceptance_requires_cancellation_evidence(self) -> None:
+        manifest = load_operations_manifest(ROOT / DEFAULT_MANIFEST_RELATIVE)
+        turns = [{
+            "outcome": "completed",
+            "total_turn_ms": 1000,
+            "cancellation_latency_ms": None,
+            "process_rss_mib": 1000,
+            "gpu_vram_used_mib": 3000,
+        } for _index in range(20)]
+        with self.assertRaisesRegex(OperationalError, "cancellation"):
+            evaluate_sustained_run(
+                manifest,
+                turns=turns,
+                avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
             )
 
     def test_sustained_report_rejects_oversized_json_integer_without_traceback(self) -> None:
