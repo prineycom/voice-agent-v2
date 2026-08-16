@@ -230,6 +230,7 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         and restart.get("start_limit_burst") == 2
         and restart.get("automatic_recoveries_per_failure_window") == 1
         and restart.get("configuration_exit_status") == CONFIGURATION_EXIT_STATUS
+        and lifecycle.get("startup_hard_seconds") == 300
         and lifecycle.get("graceful_drain_seconds") == 54
         and lifecycle.get("hard_stop_seconds") == 75
     ):

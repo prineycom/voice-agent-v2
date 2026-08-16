@@ -60,7 +60,7 @@ SYSTEMD_UNIT_CONTRACT = {
         "Restart": ["on-failure"],
         "RestartSec": ["5s"],
         "RestartPreventExitStatus": ["2"],
-        "TimeoutStartSec": ["120s"],
+        "TimeoutStartSec": ["300s"],
         "TimeoutStopSec": ["75s"],
         "KillMode": ["mixed"],
         "KillSignal": ["SIGTERM"],

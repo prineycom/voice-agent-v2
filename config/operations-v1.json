@@ -22,6 +22,7 @@
       "livekit",
       "local-llm"
     ],
+    "startup_hard_seconds": 300,
     "graceful_drain_seconds": 54,
     "hard_stop_seconds": 75,
     "restart_policy": {
