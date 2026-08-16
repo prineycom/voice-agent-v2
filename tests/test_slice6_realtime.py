@@ -214,6 +214,100 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
         next_turn = await session.start_utterance()
         self.assertEqual(next_turn, "turn-00000002")
 
+    async def test_cancelled_announcement_media_failure_closes_session(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+                self.media_release = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await self.media_release.wait()
+                await super().send(event)
+
+        class FailingClearAudio(MemoryAudio):
+            async def clear(self, turn_id: str) -> str | None:
+                self.cleared.append(turn_id)
+                raise RuntimeError("synthetic media drain failure")
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-drain-failure",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=FailingClearAudio(),
+        )
+        await session.start_utterance(announce=False)
+        finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        await asyncio.wait_for(events.media_started.wait(), 0.5)
+
+        finish.cancel()
+        events.media_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await finish
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            [
+                "turn.listening",
+                "turn.media-ready",
+                "turn.interrupted",
+                "session.degraded",
+            ],
+        )
+        degraded = events.events[-1]
+        self.assertEqual(degraded["payload"]["stage"], "publication")
+        self.assertEqual(degraded["payload"]["code"], "audio_drain_failed")
+        self.assertTrue(session.closed)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await session.start_utterance()
+
+    async def test_cancelled_announcement_observes_rollback_failure(self) -> None:
+        class BlockingMediaEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.media_started = asyncio.Event()
+                self.media_release = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.media-ready":
+                    self.media_started.set()
+                    await self.media_release.wait()
+                await super().send(event)
+
+        class FailingRollbackRunner(StreamingRunner):
+            def discard_turn(self, _session_id: str, _turn_id: str) -> None:
+                raise RuntimeError("synthetic rollback failure")
+
+        events = BlockingMediaEvents()
+        session = RealtimeSession(
+            session_id="session-announcement-rollback-failure",
+            runner=FailingRollbackRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        finish = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        await asyncio.wait_for(events.media_started.wait(), 0.5)
+
+        finish.cancel()
+        events.media_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await finish
+        for _attempt in range(20):
+            if session.closed:
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertTrue(session.closed)
+        degraded = next(
+            event for event in events.events if event["type"] == "session.degraded"
+        )
+        self.assertEqual(degraded["payload"]["stage"], "controller")
+        self.assertEqual(degraded["payload"]["code"], "context_rollback_failed")
+
     async def test_resource_sampling_never_blocks_endpoint_admission(self) -> None:
         class SlowSampler:
             def sample(self) -> ResourceSnapshot:
@@ -921,6 +1015,28 @@ class ControlEventGateTests(unittest.TestCase):
         self.assertFalse(gate.accept(self.event(4, "turn.thinking")))
         self.assertFalse(gate.accept(self.event(5, "turn.playout-ready")))
         self.assertEqual(gate.drop_count, 3)
+
+    def test_enriched_publication_failure_is_valid_first_turn_terminal(self) -> None:
+        gate = ControlEventGate("session-test")
+        failure = self.event(
+            2,
+            "turn.failed",
+            terminal=True,
+            payload={
+                "outcome": "failed",
+                "stage": "publication",
+                "code": "audio_publication_unavailable",
+                "dependency_class": "hard",
+                "failure_matrix_id": "livekit_unavailable",
+                "admit_turn": False,
+                "user_state": "retrying",
+            },
+        )
+
+        self.assertTrue(gate.accept(self.event(1, "session.ready")))
+        self.assertTrue(gate.accept(failure))
+        self.assertTrue(gate.current_turn_terminal)
+        self.assertEqual(gate.drop_count, 0)
 
     def test_immediate_completion_after_server_pcm_is_admitted(self) -> None:
         gate = ControlEventGate("session-test")

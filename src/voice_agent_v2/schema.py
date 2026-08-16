@@ -74,6 +74,7 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
                 or type(value) is float and math.isfinite(value)
             ),
             "boolean": lambda value: isinstance(value, bool),
+            "null": lambda value: value is None,
         }
         if expected_type not in predicates or not predicates[expected_type](instance):
             raise SchemaViolation(f"{path}: expected {expected_type}")
@@ -111,14 +112,29 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
         missing = [key for key in required if key not in instance]
         if missing:
             raise SchemaViolation(f"{path}: missing required properties {missing}")
+        if "maxProperties" in schema and len(instance) > schema["maxProperties"]:
+            raise SchemaViolation(f"{path}: object has too many properties")
+        if "propertyNames" in schema:
+            for key in instance:
+                validate(key, schema["propertyNames"], f"{path}.{key}")
         properties = schema.get("properties", {})
-        if schema.get("additionalProperties") is False:
-            extras = sorted(set(instance) - set(properties))
-            if extras:
-                raise SchemaViolation(f"{path}: unexpected properties {extras}")
+        pattern_properties = schema.get("patternProperties", {})
+        evaluated: set[str] = set()
         for key, value in instance.items():
             if key in properties:
                 validate(value, properties[key], f"{path}.{key}")
+                evaluated.add(key)
+            for pattern, subschema in pattern_properties.items():
+                if re.search(pattern, key) is not None:
+                    validate(value, subschema, f"{path}.{key}")
+                    evaluated.add(key)
+        extras = sorted(set(instance) - evaluated)
+        additional = schema.get("additionalProperties", True)
+        if additional is False and extras:
+            raise SchemaViolation(f"{path}: unexpected properties {extras}")
+        if isinstance(additional, dict):
+            for key in extras:
+                validate(instance[key], additional, f"{path}.{key}")
 
     if isinstance(instance, list):
         if len(instance) < schema.get("minItems", 0):

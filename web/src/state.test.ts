@@ -282,6 +282,54 @@ describe('checkpoint A browser state', () => {
     expect(gate.accept(event(4, 'turn.thinking'))).toBe(false)
   })
 
+  it('reconstructs an enriched publication failure before listening', () => {
+    const failure = event(2, 'turn.failed', 'turn-00000001', {
+      outcome: 'failed',
+      stage: 'publication',
+      code: 'audio_publication_unavailable',
+      dependency_class: 'hard',
+      failure_matrix_id: 'livekit_unavailable',
+      admit_turn: false,
+      user_state: 'retrying',
+      retry_count: 1,
+      retry_limit: 10,
+      total_turn_ms: 12,
+      provider_mode: 'local',
+    })
+    const gate = new RealtimeControlGate(capability.session_id, 1)
+
+    expect(gate.accept(event(1, 'session.ready'))).toBe(true)
+    expect(gate.accept(failure)).toBe(true)
+
+    const state = apply([event(1, 'session.ready'), failure])
+    expect(state.currentTurnTerminal).toBe(true)
+    expect(state.currentTurnId).toBe('turn-00000001')
+    expect(state.availability).toBe('retrying')
+    expect(state.failureStage).toBe('publication')
+    expect(state.failureCode).toBe('audio_publication_unavailable')
+    expect(state.droppedEvents).toBe(0)
+    expect(state.lateControlDegraded).toBe(false)
+    expect(state.history).toEqual([
+      expect.objectContaining({
+        turnId: 'turn-00000001',
+        outcome: 'failed',
+        user: '',
+        assistant: '',
+        userState: 'retrying',
+        failureStage: 'publication',
+        failureCode: 'audio_publication_unavailable',
+        totalTurnMs: 12,
+        providerMode: 'local',
+      }),
+    ])
+
+    expect(new RealtimeControlGate(capability.session_id, 1).accept(
+      event(1, 'turn.failed', 'turn-00000001', {
+        stage: 'publication', dependency_class: 'hard', admit_turn: false,
+      }),
+    )).toBe(false)
+  })
+
   it('surfaces a late or duplicate control as degraded without changing voice phase', () => {
     let state = apply([
       event(1, 'session.ready'),

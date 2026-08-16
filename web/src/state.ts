@@ -399,7 +399,7 @@ export class RealtimeControlGate {
       this.lastSequence = event.sequence
       return true
     }
-    if (event.type === 'turn.listening') {
+    if (event.type === 'turn.listening' || initialPublicationFailure(event)) {
       if (
         !this.currentTurnTerminal
         || this.currentTurnId === event.turn_id
@@ -411,7 +411,7 @@ export class RealtimeControlGate {
       this.currentTurnGeneration = event.turn_generation
       this.currentRequestId = event.request_id
       this.currentMediaGeneration = event.media_generation
-      this.currentTurnTerminal = false
+      this.currentTurnTerminal = event.terminal
       this.lastTurnEvent = event.type
     } else {
       if (
@@ -504,6 +504,21 @@ function drop(state: VoiceState): VoiceState {
 
 function hasLateControlDegradation(state: VoiceState): boolean {
   return state.lateControlDegraded
+}
+
+function initialPublicationFailure(event: ControlEvent): boolean {
+  return (
+    event.type === 'turn.failed'
+    && event.terminal
+    && event.payload.outcome === 'failed'
+    && event.payload.stage === 'publication'
+    && typeof event.payload.code === 'string'
+    && /^[a-z0-9_]{1,64}$/.test(event.payload.code)
+    && event.payload.dependency_class === 'hard'
+    && event.payload.failure_matrix_id === 'livekit_unavailable'
+    && event.payload.admit_turn === false
+    && event.payload.user_state === 'retrying'
+  )
 }
 
 function validTurnTransition(previous: ControlEventType | null, next: ControlEventType): boolean {
@@ -737,8 +752,14 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   }
 
   let next = state
-  if (event.type === 'turn.listening') {
-    if (!state.currentTurnTerminal || state.currentTurnId === event.turn_id) return drop(state)
+  if (event.type === 'turn.listening' || initialPublicationFailure(event)) {
+    if (
+      !state.currentTurnTerminal
+      || state.currentTurnId === event.turn_id
+      || event.turn_generation < 1
+      || event.request_id === 'session'
+      || event.media_generation < 1
+    ) return drop(state)
     const item: TurnHistoryItem = {
       turnId: event.turn_id,
       user: '',
@@ -756,7 +777,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       currentRequestId: event.request_id,
       currentMediaGeneration: event.media_generation,
       currentTurnTerminal: false,
-      lastTurnEvent: event.type,
+      lastTurnEvent: 'turn.listening',
       phase: 'listening',
       availability: preserveLateDegradation ? 'degraded' : 'available',
       transcript: '',
@@ -767,28 +788,28 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       failureCode: preserveLateDegradation ? state.failureCode : null,
       retryCount: preserveLateDegradation ? state.retryCount : 0,
       retryLimit: preserveLateDegradation ? state.retryLimit : 0,
-      lastSequence: event.sequence,
+      lastSequence: event.type === 'turn.listening' ? event.sequence : state.lastSequence,
     }
-    return next
+    if (event.type === 'turn.listening') return next
   }
   if (
-    event.turn_id !== state.currentTurnId
-    || event.turn_generation !== state.currentTurnGeneration
-    || event.request_id !== state.currentRequestId
-    || event.media_generation !== state.currentMediaGeneration
-    || state.currentTurnTerminal
-    || !validTurnTransition(state.lastTurnEvent, event.type)
+    event.turn_id !== next.currentTurnId
+    || event.turn_generation !== next.currentTurnGeneration
+    || event.request_id !== next.currentRequestId
+    || event.media_generation !== next.currentMediaGeneration
+    || next.currentTurnTerminal
+    || !validTurnTransition(next.lastTurnEvent, event.type)
   ) return drop(state)
 
-  let phase: TurnPhase = state.phase
+  let phase: TurnPhase = next.phase
   if (event.type === 'stt.final' || event.type === 'turn.thinking') phase = 'thinking'
-  if (event.type === 'llm.visible' && state.phase !== 'speaking') phase = 'thinking'
+  if (event.type === 'llm.visible' && next.phase !== 'speaking') phase = 'thinking'
   if (event.type === 'turn.speaking') phase = 'speaking'
   if (event.terminal) phase = 'idle'
   const transcript = event.type === 'stt.final' && typeof event.payload.transcript === 'string'
-    ? event.payload.transcript : state.transcript
+    ? event.payload.transcript : next.transcript
   const response = event.type === 'llm.visible' && typeof event.payload.response === 'string'
-    ? event.payload.response : state.response
+    ? event.payload.response : next.response
   const outcome: TurnOutcome | null = event.type === 'turn.completed'
     ? 'completed'
     : event.type === 'turn.interrupted'
@@ -798,7 +819,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
         : null
   const visibleMetric = metric(event.payload, 'endpoint_to_first_visible_ms')
   const pcmMetric = metric(event.payload, 'endpoint_to_first_accepted_pcm_ms')
-  const history = updateHistory(state.history, event.turn_id, (item) => ({
+  const history = updateHistory(next.history, event.turn_id, (item) => ({
     ...item,
     user: transcript,
     assistant: response,
@@ -838,16 +859,16 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
   }))
   const error = event.type === 'turn.failed'
     ? `Ошибка ответа: ${failureCode(event.payload, 'stage', 'controller')}/${failureCode(event.payload, 'code', 'unknown_failure')}`
-    : state.error
+    : next.error
   const availability = event.type === 'turn.completed'
-    ? hasLateControlDegradation(state) ? 'degraded' : 'available'
+    ? hasLateControlDegradation(next) ? 'degraded' : 'available'
     : event.type === 'turn.interrupted'
       ? 'interrupted'
       : event.type === 'turn.failed'
         ? visibleState(event.payload, 'unavailable')
-        : state.availability
+        : next.availability
   return {
-    ...state,
+    ...next,
     lastSequence: event.sequence,
     availability,
     phase,
@@ -856,11 +877,11 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     history,
     error,
     failureStage: event.type === 'turn.failed'
-      ? failureCode(event.payload, 'stage', 'controller') : state.failureStage,
+      ? failureCode(event.payload, 'stage', 'controller') : next.failureStage,
     failureCode: event.type === 'turn.failed'
-      ? failureCode(event.payload, 'code', 'unknown_failure') : state.failureCode,
-    retryCount: event.type === 'turn.failed' ? count(event.payload, 'retry_count') ?? 0 : state.retryCount,
-    retryLimit: event.type === 'turn.failed' ? count(event.payload, 'retry_limit') ?? 0 : state.retryLimit,
+      ? failureCode(event.payload, 'code', 'unknown_failure') : next.failureCode,
+    retryCount: event.type === 'turn.failed' ? count(event.payload, 'retry_count') ?? 0 : next.retryCount,
+    retryLimit: event.type === 'turn.failed' ? count(event.payload, 'retry_limit') ?? 0 : next.retryLimit,
     currentTurnTerminal: event.terminal,
     lastTurnEvent: event.type,
   }

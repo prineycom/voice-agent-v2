@@ -15,6 +15,40 @@
     "stream_epoch": {"type": "integer", "minimum": 1, "maximum": 1000000000},
     "stage": {"type": "string", "minLength": 1, "maxLength": 64},
     "event": {"type": "string", "minLength": 1, "maxLength": 64},
-    "fields": {"type": "object", "maxProperties": 64}
+    "fields": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "oneOf": [
+          {"enum": ["provider_time_to_first_token_ms", "server_pcm_queue_max_blocks", "text_salvageable", "tts_time_to_first_audio_ms", "endpoint_to_first_accepted_pcm_ms"]},
+          {"type": "string", "pattern": "^(?![\\s\\S]*(?:[Aa][Uu][Dd][Ii][Oo]|[Cc][Oo][Nn][Tt][Ee][Nn][Tt]|[Pp][Cc][Mm]|[Pp][Rr][Oo][Mm][Pp][Tt]|[Rr][Ee][Ss][Pp][Oo][Nn][Ss][Ee]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Ee][Xx][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Tt][Rr][Aa][Nn][Ss][Cc][Rr][Ii][Pp][Tt]))[\\s\\S]{1,64}$"}
+        ]
+      },
+      "patternProperties": {
+        "^dependency_class$": {
+          "oneOf": [
+            {"enum": ["hard", "soft"]},
+            {"type": "boolean"},
+            {"type": "number"},
+            {"type": "null"}
+          ]
+        },
+        "^(?:backend|capture_kind|component|contract_version|decision|event_type|failed_event_type|failure_class|failure_code|failure_matrix_id|failure_stage|model_identity|outcome|provider_identity|provider_mode|request_id|resource_phase|slowest_stage|speaker|stage|user_state|worker_id)$": {
+          "oneOf": [
+            {"type": "string", "maxLength": 512, "pattern": "^[^\\r\\n]*$"},
+            {"type": "boolean"},
+            {"type": "number"},
+            {"type": "null"}
+          ]
+        }
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "boolean"},
+          {"type": "number"},
+          {"type": "null"}
+        ]
+      }
+    }
   }
 }

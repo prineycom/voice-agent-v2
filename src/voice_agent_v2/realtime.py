@@ -303,7 +303,7 @@ class ControlEventGate:
                 or media_generation != 0
             ):
                 return self._drop()
-        elif event_type == "turn.listening":
+        elif event_type == "turn.listening" or self._initial_publication_failure(event):
             if (
                 self.current_turn_id == turn_id
                 or not self.current_turn_terminal
@@ -316,7 +316,7 @@ class ControlEventGate:
             self.current_turn_generation = turn_generation
             self.current_request_id = request_id
             self.current_media_generation = media_generation
-            self.current_turn_terminal = False
+            self.current_turn_terminal = terminal
             self.last_turn_event = event_type
         elif (
             turn_id != self.current_turn_id
@@ -340,6 +340,27 @@ class ControlEventGate:
             self.last_turn_event = event_type
         self.last_sequence = sequence
         return True
+
+    @staticmethod
+    def _initial_publication_failure(event: dict[str, object]) -> bool:
+        payload = event.get("payload")
+        return (
+            event.get("type") == "turn.failed"
+            and event.get("terminal") is True
+            and isinstance(payload, dict)
+            and payload.get("outcome") == "failed"
+            and payload.get("stage") == "publication"
+            and isinstance(payload.get("code"), str)
+            and 1 <= len(payload["code"]) <= 64
+            and all(
+                character in "abcdefghijklmnopqrstuvwxyz0123456789_"
+                for character in payload["code"]
+            )
+            and payload.get("dependency_class") == "hard"
+            and payload.get("failure_matrix_id") == "livekit_unavailable"
+            and payload.get("admit_turn") is False
+            and payload.get("user_state") == "retrying"
+        )
 
     def _drop(self) -> bool:
         self.drop_count += 1
@@ -686,7 +707,13 @@ class RealtimeSession:
                     current.uncancel()
         if cancellation_requested:
             if self._active is context and not context.terminal:
-                await self._interrupt_locked("announcement_cancelled")
+                cleanup, drain_error, _publication_id = await self._interrupt_locked(
+                    "announcement_cancelled"
+                )
+                if drain_error is not None:
+                    await self._degrade_locked("publication", drain_error)
+                elif cleanup is not None:
+                    self._watch_cleanup(cleanup)
             raise asyncio.CancelledError
 
     async def _announce_context_locked(self, context: TurnContext) -> None:

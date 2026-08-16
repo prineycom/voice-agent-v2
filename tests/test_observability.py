@@ -30,7 +30,7 @@ from voice_agent_v2.observability import (
     reconstruct_timelines,
     validate_observation,
 )
-from voice_agent_v2.schema import validate as validate_schema
+from voice_agent_v2.schema import SchemaViolation, validate as validate_schema
 from voice_agent_v2.slice6_config import Slice6ConfigurationError, Slice6Settings
 
 
@@ -75,6 +75,24 @@ class ObservationContractTests(unittest.TestCase):
             validate_schema(fixture, schema)
             if name == "observation":
                 self.assertEqual(validate_observation(fixture), fixture)
+
+    def test_observation_schema_rejects_content_keys_and_non_scalar_fields(self) -> None:
+        fixture = json.loads(
+            (ROOT / "contracts" / "fixtures" / "observation.v1.json").read_text()
+        )
+        schema = json.loads(
+            (ROOT / "contracts" / "observation.v1.schema.json").read_text()
+        )
+        invalid_fields = (
+            {"transcript": "private"},
+            {"Raw_Audio": 1},
+            {"safe_count": {"nested": "private"}},
+            {"safe_count": [1, 2, 3]},
+            {"safe_label": "arbitrary private value"},
+        )
+        for fields in invalid_fields:
+            with self.subTest(fields=fields), self.assertRaises(SchemaViolation):
+                validate_schema({**fixture, "fields": fields}, schema)
 
     def test_default_trace_rejects_every_content_category_but_keeps_counts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
