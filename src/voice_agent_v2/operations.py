@@ -10,9 +10,9 @@ from dataclasses import dataclass
 import fcntl
 import glob
 import hashlib
-import hmac
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 
 OPERATIONS_SCHEMA = "voice-agent.operations.v1"
-RELEASE_SCHEMA = "voice-agent.operational-release.v1"
+RELEASE_SCHEMA = "voice-agent.operational-release.v2"
 DEFAULT_MANIFEST_RELATIVE = Path("config/operations-v1.json")
 DEFAULT_STATE_ROOT = Path("~/.local/share/voice-agent-v2").expanduser()
 CONFIGURATION_EXIT_STATUS = 2
@@ -122,7 +122,6 @@ class ValidationReport:
     cache_bytes: dict[str, int]
     disk_available_bytes: int
     configuration_fingerprint: str
-    configuration_revision: str
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -429,13 +428,9 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
     public_values = {
         name: value for name, value in values.items() if name not in SECRET_CONFIGURATION_NAMES
     }
-    configuration_revision = hmac.new(
-        api_secret.encode("utf-8"), _canonical_json(dict(values)), hashlib.sha256,
-    ).hexdigest()
     return {
         "public_values": public_values,
         "public_fingerprint": _sha256_bytes(_canonical_json(public_values)),
-        "configuration_revision": configuration_revision,
         "tailnet_hostname": app.hostname,
         "tailnet_node_ip": node_ip,
         "diagnostic_capture_ttl_seconds": ttl,
@@ -656,12 +651,16 @@ def verify_tailnet(configuration: Mapping[str, object]) -> None:
 def validate_host(
     *, source_root: Path, config_path: Path, state_root: Path = DEFAULT_STATE_ROOT,
     verify_tailnet_state: bool = True, verify_artifact_state: bool = True,
+    configuration_values: Mapping[str, str] | None = None,
 ) -> ValidationReport:
     manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
     verify_tracked_manifest_alignment(
         source_root=source_root, operations_manifest=manifest,
     )
-    values = parse_server_configuration(config_path)
+    values = (
+        parse_server_configuration(config_path)
+        if configuration_values is None else dict(configuration_values)
+    )
     configuration = validate_server_configuration(values)
     artifact_count = 0
     if verify_artifact_state:
@@ -684,7 +683,6 @@ def validate_host(
         cache_bytes=caches,
         disk_available_bytes=available,
         configuration_fingerprint=str(configuration["public_fingerprint"]),
-        configuration_revision=str(configuration["configuration_revision"]),
     )
 
 
@@ -880,8 +878,6 @@ class ReleaseStore:
                     current_release.get("configuration_locator_sha256") == locator_digest,
                     current_release.get("configuration_fingerprint")
                     == host_report.configuration_fingerprint,
-                    current_release.get("configuration_revision")
-                    == host_report.configuration_revision,
                 )):
                     return {
                         "schema_version": "voice-agent.deployment-result.v1",
@@ -971,7 +967,7 @@ class ReleaseStore:
                     commit=commit,
                     tree=tree,
                     manifest=manifest_digest,
-                    configuration=host_report.configuration_revision,
+                    configuration=host_report.configuration_fingerprint,
                     configuration_locator=locator_digest,
                     release_tree=tree_digest,
                 )
@@ -986,7 +982,6 @@ class ReleaseStore:
                     "configuration_path": str(config_path),
                     "configuration_locator_sha256": locator_digest,
                     "configuration_fingerprint": host_report.configuration_fingerprint,
-                    "configuration_revision": host_report.configuration_revision,
                     "provider_mode": "local",
                     "external_provider_supervised": False,
                     "automatic_fallback": False,
@@ -1058,9 +1053,9 @@ class ReleaseStore:
             }
 
 
-def validate_release(
+def _validate_release_snapshot(
     release_root: Path, *, state_root: Path, verify_host_state: bool,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, str]]:
     release_root = release_root.resolve()
     releases_root = (state_root.expanduser().resolve() / "releases").resolve()
     if release_root.parent != releases_root or not RELEASE_ID.fullmatch(release_root.name):
@@ -1084,7 +1079,7 @@ def validate_release(
     required = {
         "schema_version", "release_id", "build_id", "source_tree", "operations_schema",
         "operations_manifest_sha256", "configuration_path", "configuration_locator_sha256",
-        "configuration_fingerprint", "configuration_revision", "provider_mode",
+        "configuration_fingerprint", "provider_mode",
         "external_provider_supervised", "automatic_fallback", "release_tree_sha256",
     }
     _require_exact_keys(
@@ -1103,8 +1098,6 @@ def validate_release(
         and SHA256.fullmatch(str(document["configuration_locator_sha256"]))
         and isinstance(document.get("configuration_fingerprint"), str)
         and SHA256.fullmatch(str(document["configuration_fingerprint"]))
-        and isinstance(document.get("configuration_revision"), str)
-        and SHA256.fullmatch(str(document["configuration_revision"]))
         and isinstance(document.get("release_tree_sha256"), str)
         and SHA256.fullmatch(str(document["release_tree_sha256"]))
         and document.get("operations_schema") == OPERATIONS_SCHEMA
@@ -1117,7 +1110,7 @@ def validate_release(
         commit=document["build_id"],
         tree=document["source_tree"],
         manifest=document["operations_manifest_sha256"],
-        configuration=document["configuration_revision"],
+        configuration=document["configuration_fingerprint"],
         configuration_locator=document["configuration_locator_sha256"],
         release_tree=document["release_tree_sha256"],
     )
@@ -1134,10 +1127,7 @@ def validate_release(
         raise OperationalError("release_incompatible", "release configuration locator changed")
     values = parse_server_configuration(config_path)
     configuration = validate_server_configuration(values)
-    if not (
-        configuration["public_fingerprint"] == document.get("configuration_fingerprint")
-        and configuration["configuration_revision"] == document.get("configuration_revision")
-    ):
+    if configuration["public_fingerprint"] != document.get("configuration_fingerprint"):
         raise OperationalError("release_incompatible", "prior configuration is no longer compatible")
     web_dist = release_root / "web" / "dist"
     if not (web_dist / "index.html").is_file():
@@ -1150,8 +1140,20 @@ def validate_release(
         raise OperationalError("release_incompatible", "client build identity is missing")
     if verify_host_state:
         validate_host(
-            source_root=release_root, config_path=config_path, state_root=state_root,
+            source_root=release_root,
+            config_path=config_path,
+            state_root=state_root,
+            configuration_values=values,
         )
+    return document, values
+
+
+def validate_release(
+    release_root: Path, *, state_root: Path, verify_host_state: bool,
+) -> dict[str, object]:
+    document, _values = _validate_release_snapshot(
+        release_root, state_root=state_root, verify_host_state=verify_host_state,
+    )
     return document
 
 
@@ -1177,8 +1179,9 @@ def execute_release(state_root: Path = DEFAULT_STATE_ROOT) -> None:
     release_root = store.current()
     if release_root is None:
         raise OperationalError("deployment_unavailable", "no active operational release exists")
-    document = validate_release(release_root, state_root=store.state_root, verify_host_state=True)
-    values = parse_server_configuration(Path(str(document["configuration_path"])))
+    document, values = _validate_release_snapshot(
+        release_root, state_root=store.state_root, verify_host_state=True,
+    )
     environment = {
         name: value for name, value in os.environ.items()
         if not name.startswith("LITELLM_") and name not in ALLOWED_CONFIGURATION_NAMES
@@ -1199,6 +1202,19 @@ def execute_release(state_root: Path = DEFAULT_STATE_ROOT) -> None:
     os.execve(str(python), [str(python), "-B", str(script)], environment)
 
 
+def _finite_measurement(
+    value: object, *, minimum: float = 0.0, maximum: float | None = None,
+) -> bool:
+    if type(value) not in {int, float}:
+        return False
+    numeric = float(value)
+    return (
+        math.isfinite(numeric)
+        and numeric >= minimum
+        and (maximum is None or numeric <= maximum)
+    )
+
+
 def evaluate_sustained_run(
     manifest: Mapping[str, object], *, turns: list[Mapping[str, object]],
     avatar: Mapping[str, object],
@@ -1209,17 +1225,34 @@ def evaluate_sustained_run(
     minimum_turns = thresholds.get("minimum_turns")
     if not isinstance(minimum_turns, int) or len(turns) < minimum_turns:
         raise OperationalError("sustained_sample_too_small", "sustained run has too few turns")
+    if any(
+        not isinstance(turn, Mapping)
+        or turn.get("outcome") not in {"completed", "failed", "interrupted"}
+        or not _finite_measurement(turn.get("total_turn_ms"))
+        or not _finite_measurement(turn.get("process_rss_mib"))
+        or not _finite_measurement(turn.get("gpu_vram_used_mib"))
+        or (
+            turn.get("cancellation_latency_ms") is not None
+            and not _finite_measurement(turn.get("cancellation_latency_ms"))
+        )
+        for turn in turns
+    ) or not (
+        _finite_measurement(avatar.get("healthy_frame_ratio"), maximum=1.0)
+        and _finite_measurement(avatar.get("fps"))
+    ):
+        raise OperationalError(
+            "sustained_report_invalid",
+            "sustained measurements must be finite non-negative bounded scalars",
+        )
     completed = sum(turn.get("outcome") == "completed" for turn in turns)
     success_ratio = completed / len(turns)
-    totals = [float(turn["total_turn_ms"]) for turn in turns if isinstance(turn.get("total_turn_ms"), (int, float))]
+    totals = [float(turn["total_turn_ms"]) for turn in turns]
     cancellations = [
         float(turn["cancellation_latency_ms"])
-        for turn in turns if isinstance(turn.get("cancellation_latency_ms"), (int, float))
+        for turn in turns if turn.get("cancellation_latency_ms") is not None
     ]
-    rss = [float(turn["process_rss_mib"]) for turn in turns if isinstance(turn.get("process_rss_mib"), (int, float))]
-    vram = [float(turn["gpu_vram_used_mib"]) for turn in turns if isinstance(turn.get("gpu_vram_used_mib"), (int, float))]
-    if len(totals) != len(turns) or len(rss) != len(turns) or len(vram) != len(turns):
-        raise OperationalError("sustained_report_invalid", "sustained turn/resource observations are incomplete")
+    rss = [float(turn["process_rss_mib"]) for turn in turns]
+    vram = [float(turn["gpu_vram_used_mib"]) for turn in turns]
 
     def p95(values: list[float]) -> float | None:
         if not values:

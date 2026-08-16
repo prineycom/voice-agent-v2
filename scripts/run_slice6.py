@@ -23,6 +23,7 @@ from voice_agent_v2.slice6_config import (
     Slice6ConfigurationError,
     Slice6Settings,
     livekit_server_config,
+    supervised_process_identity,
 )
 
 LIVEKIT_VERSION = "1.13.5"
@@ -228,7 +229,10 @@ def systemd_notify_ready() -> None:
         notifier.close()
 
 
-def gateway_operational_ready(timeout: float = 0.2) -> bool:
+def gateway_operational_ready(
+    timeout: float = 0.2, *, expected_build_id: str | None = None,
+    expected_release_id: str | None = None,
+) -> bool:
     connection = http.client.HTTPConnection("127.0.0.1", GATEWAY_PORT, timeout=timeout)
     try:
         connection.request("GET", "/api/status", headers={"Connection": "close"})
@@ -244,11 +248,69 @@ def gateway_operational_ready(timeout: float = 0.2) -> bool:
             and document.get("provider_mode") == "local"
             and document.get("external_provider_supervised") is False
             and document.get("automatic_fallback") is False
+            and (
+                expected_build_id is None
+                or document.get("build_id") == expected_build_id
+            )
+            and (
+                expected_release_id is None
+                or document.get("release_id") == expected_release_id
+            )
         )
     except (OSError, TimeoutError, http.client.HTTPException, UnicodeError, json.JSONDecodeError):
         return False
     finally:
         connection.close()
+
+
+def require_runtime_ports_free(proc_root: Path = Path("/proc")) -> None:
+    occupied: set[int] = set()
+    for name, listening_state in (
+        ("tcp", "0A"), ("tcp6", "0A"), ("udp", None), ("udp6", None),
+    ):
+        try:
+            lines = (proc_root / "net" / name).read_text(encoding="ascii").splitlines()
+        except OSError as error:
+            raise ServiceProcessFailure("runtime port custody is unavailable") from error
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 4 or (
+                listening_state is not None and fields[3] != listening_state
+            ):
+                continue
+            try:
+                occupied.add(int(fields[1].rsplit(":", 1)[1], 16))
+            except (IndexError, ValueError) as error:
+                raise ServiceProcessFailure("runtime port custody is invalid") from error
+    for port in (LLAMA_PORT, SIGNAL_PORT, GATEWAY_PORT, RTC_UDP_PORT):
+        if port in occupied:
+            raise ServiceProcessFailure(f"required runtime port is already owned: {port}")
+
+
+def require_supervised_children_alive(
+    supervisor: ProcessSupervisor, *, phase: str,
+) -> None:
+    for process in supervisor.processes:
+        if process.poll() is not None:
+            raise ServiceProcessFailure(
+                f"supervised component exited {phase}: {supervisor.role(process)}"
+            )
+
+
+def publish_systemd_readiness(
+    supervisor: ProcessSupervisor, *, build_id: str, release_id: str,
+) -> None:
+    require_supervised_children_alive(supervisor, phase="before readiness")
+    if not gateway_operational_ready(
+        timeout=1.0,
+        expected_build_id=build_id,
+        expected_release_id=release_id,
+    ):
+        raise ServiceProcessFailure(
+            "gateway did not expose exact operational readiness after route startup"
+        )
+    require_supervised_children_alive(supervisor, phase="before readiness")
+    systemd_notify_ready()
 
 
 def wait_for_port(process: subprocess.Popen, port: int, name: str, timeout: float = 30) -> None:
@@ -491,6 +553,7 @@ def main() -> int:
         raise RuntimeError("Slice 6 web build is missing; run ./setup-slice6")
     verify_local_lfm_artifacts()
     silero_metadata = verify_silero_runtime()
+    require_runtime_ports_free()
 
     gateway_environment = dict(os.environ)
     gateway_environment["PYTHONPATH"] = str(ROOT / "src")
@@ -534,6 +597,12 @@ def main() -> int:
         )
         wait_for_port(livekit, SIGNAL_PORT, "LiveKit")
 
+        gateway_environment["VOICE_AGENT_SUPERVISED_LFM_PROCESS"] = (
+            supervised_process_identity(local_lfm.pid)
+        )
+        gateway_environment["VOICE_AGENT_SUPERVISED_LIVEKIT_PROCESS"] = (
+            supervised_process_identity(livekit.pid)
+        )
         gateway = supervisor.start(
             [
                 str(python), "-B", "-m", "uvicorn", "voice_agent_v2.slice6_gateway:app",
@@ -555,11 +624,11 @@ def main() -> int:
                 (signal_https_port, f"http://127.0.0.1:{SIGNAL_PORT}"),
             ),
         )
-        if not gateway_operational_ready(timeout=1.0):
-            raise ServiceProcessFailure(
-                "gateway did not expose exact operational readiness after route startup"
-            )
-        systemd_notify_ready()
+        publish_systemd_readiness(
+            supervisor,
+            build_id=settings.build_id,
+            release_id=settings.release_id,
+        )
         print("Voice Agent v2 Slice 6 local-LFM development app started")
         print(f"loopback: http://127.0.0.1:{GATEWAY_PORT}")
         print(f"tailnet: {app_public_url}")
@@ -591,7 +660,10 @@ def main() -> int:
                     raise ServiceProcessFailure(
                         f"supervised component exited unexpectedly: {supervisor.role(process)}"
                     )
-            if gateway_operational_ready():
+            if gateway_operational_ready(
+                expected_build_id=settings.build_id,
+                expected_release_id=settings.release_id,
+            ):
                 operational_unready_since = None
             elif operational_unready_since is None:
                 operational_unready_since = time.monotonic()

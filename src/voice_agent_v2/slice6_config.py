@@ -17,6 +17,7 @@ TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 LOOPBACK_APP_ORIGIN = "http://127.0.0.1:8000"
 BUILD_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{40})$")
 RELEASE_ID_PATTERN = re.compile(r"^(?:development|[0-9a-f]{24})$")
+PROCESS_IDENTITY_PATTERN = re.compile(r"^[1-9][0-9]*:[1-9][0-9]*$")
 
 
 class Slice6ConfigurationError(ValueError):
@@ -51,6 +52,39 @@ def livekit_server_config(node_ip: str) -> str:
 
 def app_origin_allowed(origin: str | None, app_public_url: str) -> bool:
     return origin in {LOOPBACK_APP_ORIGIN, app_public_url}
+
+
+def _process_stat(pid: str) -> tuple[str, str]:
+    content = (Path("/proc") / pid / "stat").read_text(encoding="utf-8")
+    closing = content.rfind(")")
+    if closing < 0:
+        raise ValueError("process stat is malformed")
+    fields = content[closing + 2:].split()
+    if len(fields) <= 19:
+        raise ValueError("process stat is incomplete")
+    return fields[0], fields[19]
+
+
+def supervised_process_identity(pid: int) -> str:
+    try:
+        state, start_time = _process_stat(str(pid))
+    except (OSError, ValueError) as error:
+        raise Slice6ConfigurationError("supervised process identity is unavailable") from error
+    identity = f"{pid}:{start_time}"
+    if state == "Z" or not PROCESS_IDENTITY_PATTERN.fullmatch(identity):
+        raise Slice6ConfigurationError("supervised process identity is invalid")
+    return identity
+
+
+def supervised_process_alive(identity: str) -> bool:
+    if not PROCESS_IDENTITY_PATTERN.fullmatch(identity):
+        return False
+    pid, expected_start_time = identity.split(":", 1)
+    try:
+        state, start_time = _process_stat(pid)
+    except (OSError, ValueError):
+        return False
+    return state != "Z" and start_time == expected_start_time
 
 
 def _required(environment: dict[str, str], name: str) -> str:
@@ -101,6 +135,8 @@ class Slice6Settings:
     diagnostic_capture_ttl_seconds: int = 15 * 60
     build_id: str = "development"
     release_id: str = "development"
+    supervised_livekit_process: str | None = None
+    supervised_lfm_process: str | None = None
 
     @classmethod
     def from_environment(
@@ -188,6 +224,13 @@ class Slice6Settings:
         release_id = values.get("VOICE_AGENT_RELEASE_ID", "development")
         if not BUILD_ID_PATTERN.fullmatch(build_id) or not RELEASE_ID_PATTERN.fullmatch(release_id):
             raise Slice6ConfigurationError("operational build/release identity is invalid")
+        livekit_process = values.get("VOICE_AGENT_SUPERVISED_LIVEKIT_PROCESS")
+        lfm_process = values.get("VOICE_AGENT_SUPERVISED_LFM_PROCESS")
+        if any(
+            value is not None and not PROCESS_IDENTITY_PATTERN.fullmatch(value)
+            for value in (livekit_process, lfm_process)
+        ) or (livekit_process is None) != (lfm_process is None):
+            raise Slice6ConfigurationError("supervised process identity is invalid")
         return cls(
             livekit_api_key=api_key,
             livekit_api_secret=api_secret,
@@ -199,4 +242,6 @@ class Slice6Settings:
             diagnostic_capture_ttl_seconds=diagnostic_capture_ttl_seconds,
             build_id=build_id,
             release_id=release_id,
+            supervised_livekit_process=livekit_process,
+            supervised_lfm_process=lfm_process,
         )

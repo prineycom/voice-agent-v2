@@ -24,6 +24,7 @@ from voice_agent_v2.operations import (
     _run_git,
     _sha256_bytes,
     evaluate_sustained_run,
+    execute_release,
     load_operations_manifest,
     parse_server_configuration,
     release_tree_digest,
@@ -177,7 +178,7 @@ class ServiceApplicationTests(unittest.TestCase):
 
 
 class ConfigurationAndArtifactTests(unittest.TestCase):
-    def test_config_is_mode_guarded_and_secret_rotation_changes_private_revision(self) -> None:
+    def test_config_is_mode_guarded_without_persistable_secret_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "runtime.env"
             first = configuration_values("a" * 16)
@@ -187,10 +188,8 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
             write_configuration(path, second)
             second_report = validate_server_configuration(parse_server_configuration(path))
             self.assertEqual(first_report["public_fingerprint"], second_report["public_fingerprint"])
-            self.assertNotEqual(
-                first_report["configuration_revision"],
-                second_report["configuration_revision"],
-            )
+            self.assertNotIn("configuration_revision", first_report)
+            self.assertNotIn("configuration_revision", second_report)
             serialized = json.dumps(first_report)
             self.assertNotIn(first["LIVEKIT_API_SECRET"], serialized)
             self.assertNotIn(second["LIVEKIT_API_SECRET"], json.dumps(second_report))
@@ -372,9 +371,8 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             target = state / "releases" / release_id
             target.mkdir(parents=True)
             (state / "current").symlink_to(f"releases/{release_id}")
-            revision = "d" * 64
             report = ValidationReport(
-                None, None, "local", 1, {}, 10**12, fingerprint, revision,
+                None, None, "local", 1, {}, 10**12, fingerprint,
             )
             document = {
                 "build_id": commit,
@@ -384,7 +382,6 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                 "configuration_path": str(config.resolve()),
                 "configuration_locator_sha256": locator_digest,
                 "configuration_fingerprint": fingerprint,
-                "configuration_revision": revision,
             }
             git_values = iter(["", commit, tree])
             with (
@@ -451,7 +448,7 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             write_configuration(config, configuration_values())
             state = root / "state"
             report = ValidationReport(
-                None, None, "local", 1, {}, 10**12, "c" * 64, "d" * 64,
+                None, None, "local", 1, {}, 10**12, "c" * 64,
             )
             raced = False
 
@@ -483,12 +480,60 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                     source_root=source, config_path=config,
                 )
             release = (state / "current").resolve()
+            release_document = json.loads(
+                (release / "release.json").read_text(encoding="utf-8")
+            )
             built_asset = next((release / "web" / "dist" / "assets").glob("*.js"))
+            self.assertEqual(
+                release_document["schema_version"],
+                "voice-agent.operational-release.v2",
+            )
+            self.assertNotIn("configuration_revision", release_document)
+            self.assertNotIn(
+                configuration_values()["LIVEKIT_API_SECRET"],
+                json.dumps(release_document),
+            )
             self.assertTrue(raced)
             self.assertEqual(result["build_id"], captured_commit)
             self.assertIn(captured_commit, built_asset.read_text(encoding="utf-8"))
             self.assertIn("committed", built_asset.read_text(encoding="utf-8"))
             self.assertNotIn("raced", built_asset.read_text(encoding="utf-8"))
+
+    def test_execute_uses_the_exact_configuration_snapshot_that_was_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            release = state / "releases" / ("7" * 24)
+            release.mkdir(parents=True)
+            (state / "current").symlink_to(f"releases/{release.name}")
+            values = configuration_values("snapshot-secret-value")
+            document = {"build_id": "a" * 40, "release_id": release.name}
+            captured: dict[str, object] = {}
+
+            def execute(path: str, arguments: list[str], environment: dict[str, str]) -> None:
+                captured.update(path=path, arguments=arguments, environment=environment)
+                raise RuntimeError("exec boundary reached")
+
+            with (
+                patch(
+                    "voice_agent_v2.operations._validate_release_snapshot",
+                    return_value=(document, values),
+                ),
+                patch(
+                    "voice_agent_v2.operations.parse_server_configuration",
+                    side_effect=AssertionError("configuration must not be reread"),
+                ),
+                patch(
+                    "voice_agent_v2.operations._prepare_mutable_runtime_directory",
+                    side_effect=lambda path: path,
+                ),
+                patch("voice_agent_v2.operations.os.chdir"),
+                patch("voice_agent_v2.operations.os.execve", side_effect=execute),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exec boundary reached"):
+                    execute_release(state)
+            environment = captured["environment"]
+            self.assertIsInstance(environment, dict)
+            self.assertEqual(environment["LIVEKIT_API_SECRET"], "snapshot-secret-value")
 
     def test_rollback_rejects_incompatible_previous_without_moving_current(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -594,6 +639,36 @@ class LifecycleAndSustainedTests(unittest.TestCase):
             evaluate_sustained_run(
                 manifest, turns=turns, avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
             )
+
+    def test_sustained_acceptance_rejects_nonfinite_boolean_and_negative_values(self) -> None:
+        manifest = load_operations_manifest(ROOT / DEFAULT_MANIFEST_RELATIVE)
+        baseline = [{
+            "outcome": "completed",
+            "total_turn_ms": 1000,
+            "cancellation_latency_ms": None,
+            "process_rss_mib": 1000,
+            "gpu_vram_used_mib": 3000,
+        } for _index in range(20)]
+        for field, value in (
+            ("total_turn_ms", True),
+            ("process_rss_mib", -1),
+            ("gpu_vram_used_mib", float("inf")),
+            ("cancellation_latency_ms", float("nan")),
+        ):
+            turns = [dict(turn) for turn in baseline]
+            turns[0][field] = value
+            with self.assertRaisesRegex(OperationalError, "finite non-negative"):
+                evaluate_sustained_run(
+                    manifest,
+                    turns=turns,
+                    avatar={"healthy_frame_ratio": 0.999, "fps": 60.0},
+                )
+        for avatar in (
+            {"healthy_frame_ratio": 1.1, "fps": 60.0},
+            {"healthy_frame_ratio": 0.999, "fps": float("inf")},
+        ):
+            with self.assertRaisesRegex(OperationalError, "finite non-negative"):
+                evaluate_sustained_run(manifest, turns=baseline, avatar=avatar)
 
     def test_settings_reject_forged_operational_build_identity(self) -> None:
         values = configuration_values()

@@ -77,6 +77,34 @@ class SystemdReadinessTests(unittest.TestCase):
                 FakeProcess(returncode=1), run_slice6.SIGNAL_PORT, "LiveKit", timeout=0.1,
             )
 
+    def test_final_ready_boundary_repolls_owned_children_after_exact_status(self) -> None:
+        class ExitsAfterStatus(FakeProcess):
+            polls = 0
+
+            def poll(self) -> int | None:
+                self.polls += 1
+                return None if self.polls == 1 else 1
+
+        supervisor = run_slice6.ProcessSupervisor()
+        child = ExitsAfterStatus()
+        supervisor.processes.append(child)
+        with (
+            patch.object(run_slice6, "gateway_operational_ready", return_value=True) as ready,
+            patch.object(run_slice6, "systemd_notify_ready") as notify,
+        ):
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "exited before readiness",
+            ):
+                run_slice6.publish_systemd_readiness(
+                    supervisor, build_id="a" * 40, release_id="b" * 24,
+                )
+        ready.assert_called_once_with(
+            timeout=1.0,
+            expected_build_id="a" * 40,
+            expected_release_id="b" * 24,
+        )
+        notify.assert_not_called()
+
     def test_exact_ready_notification_reaches_systemd_socket(self) -> None:
         class Notifier:
             address: str | None = None
@@ -107,6 +135,35 @@ class SystemdReadinessTests(unittest.TestCase):
             b"READY=1\nSTATUS=Voice Agent exact release ready\n",
         )
         self.assertTrue(notifier.closed)
+
+
+class ParentProcessIdentityTests(unittest.TestCase):
+    def test_linux_process_identity_rejects_stale_generation(self) -> None:
+        identity = run_slice6.supervised_process_identity(os.getpid())
+        from voice_agent_v2.slice6_config import supervised_process_alive
+
+        self.assertTrue(supervised_process_alive(identity))
+        pid, start_time = identity.split(":", 1)
+        self.assertFalse(supervised_process_alive(f"{pid}:{int(start_time) + 1}"))
+
+
+class RuntimePortCustodyTests(unittest.TestCase):
+    def test_preexisting_runtime_listener_fails_before_child_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            net = proc / "net"
+            net.mkdir()
+            header = "slot local remote state\n"
+            (net / "tcp").write_text(
+                header + "0: 0100007F:1F40 00000000:0000 0A\n",
+                encoding="ascii",
+            )
+            for name in ("tcp6", "udp", "udp6"):
+                (net / name).write_text(header, encoding="ascii")
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "already owned: 8000",
+            ):
+                run_slice6.require_runtime_ports_free(proc)
 
 
 class Slice6WrapperEnvironmentTests(unittest.TestCase):

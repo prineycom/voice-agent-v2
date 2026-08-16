@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,44 @@ class Slice9RuntimeTests(unittest.TestCase):
                 await registry.create()
 
         asyncio.run(scenario())
+
+    def test_parent_owned_process_loss_is_immediately_unready(self) -> None:
+        from voice_agent_v2 import livekit_runtime
+        from voice_agent_v2.observability import ComponentHealth
+
+        registry = object.__new__(livekit_runtime.SessionRegistry)
+        registry.settings = SimpleNamespace(
+            build_id="a" * 40,
+            release_id="b" * 24,
+            supervised_livekit_process="123:456",
+            supervised_lfm_process="789:1011",
+        )
+        registry._accepting = True
+        registry.runner = SimpleNamespace(readiness_components=lambda: (
+            ComponentHealth(
+                "stt", "alive", "ready", True, "whisper", "voice-agent.stt.v1",
+            ),
+            ComponentHealth(
+                "selected_llm", "alive", "ready", True,
+                "selected-local-lfm", "voice-agent.llm-provider.v1",
+            ),
+            ComponentHealth(
+                "tts", "alive", "ready", True, "silero", "voice-agent.tts.v2",
+            ),
+        ))
+        with patch.object(
+            livekit_runtime, "supervised_process_alive", side_effect=(False, False),
+        ):
+            health = registry.operational_health()
+        components = {row["component"]: row for row in health["components"]}
+        self.assertEqual(health["overall_readiness"], "unready")
+        self.assertEqual(components["livekit"]["liveness"], "dead")
+        self.assertEqual(components["selected_llm"]["liveness"], "dead")
+
+        registry.settings.supervised_livekit_process = None
+        registry.settings.supervised_lfm_process = None
+        missing_identity_health = registry.operational_health()
+        self.assertEqual(missing_identity_health["overall_readiness"], "unready")
 
     def test_public_status_reports_build_health_client_and_no_external_supervision(self) -> None:
         from voice_agent_v2.slice6_gateway import status as public_gateway_status

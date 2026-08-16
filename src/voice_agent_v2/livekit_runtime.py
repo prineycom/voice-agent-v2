@@ -39,7 +39,7 @@ from .realtime import (
     EventSink,
     RealtimeSession,
 )
-from .slice6_config import Slice6Settings
+from .slice6_config import Slice6Settings, supervised_process_alive
 from .tracer import CancellationToken, TraceResult
 
 AUDIO_FRAME_MS = 20
@@ -1421,19 +1421,52 @@ class SessionRegistry:
         return self._accepting
 
     def operational_health(self) -> dict[str, object]:
-        ready = self._accepting
+        accepting = self._accepting
+        development = (
+            self.settings.build_id == "development"
+            and self.settings.release_id == "development"
+        )
+
+        def parent_process_alive(identity: str | None) -> bool:
+            return development if identity is None else supervised_process_alive(identity)
+
+        livekit_alive = parent_process_alive(
+            self.settings.supervised_livekit_process
+        )
+        lfm_alive = parent_process_alive(self.settings.supervised_lfm_process)
+        runtime_components: list[ComponentHealth] = []
+        for component in self.runner.readiness_components():
+            if component.component == "selected_llm" and not lfm_alive:
+                component = ComponentHealth(
+                    component.component,
+                    "dead",
+                    "unready",
+                    component.compatible,
+                    component.identity,
+                    component.contract_version,
+                    "local_lfm_unavailable",
+                    component.retry_count,
+                    component.retry_limit,
+                )
+            runtime_components.append(component)
         components = (
             ComponentHealth(
-                "livekit", "alive", "ready" if ready else "unready", True,
-                "livekit-server-v1.13.5", "voice-agent.realtime-control.v2",
-                None if ready else "service_draining",
+                "livekit",
+                "alive" if livekit_alive else "dead",
+                "ready" if accepting and livekit_alive else "unready",
+                True,
+                "livekit-server-v1.13.5",
+                "voice-agent.realtime-control.v2",
+                None if accepting and livekit_alive
+                else "service_draining" if not accepting
+                else "livekit_unavailable",
             ),
             ComponentHealth(
-                "controller", "alive", "ready" if ready else "unready", True,
+                "controller", "alive", "ready" if accepting else "unready", True,
                 "voice-agent-v2-controller", "voice-agent.realtime-control.v2",
-                None if ready else "service_draining",
+                None if accepting else "service_draining",
             ),
-            *self.runner.readiness_components(),
+            *runtime_components,
         )
         return HealthReport(tuple(components)).as_dict()
 

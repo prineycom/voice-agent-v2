@@ -26,6 +26,8 @@ class BackendReadinessTests(unittest.TestCase):
             "provider_mode": "local",
             "external_provider_supervised": False,
             "automatic_fallback": False,
+            "build_id": "a" * 40,
+            "release_id": "b" * 24,
             "health": {"overall_readiness": "ready"},
         }
 
@@ -46,6 +48,14 @@ class BackendReadinessTests(unittest.TestCase):
         try:
             with patch.object(run_slice6, "GATEWAY_PORT", server.server_address[1]):
                 self.assertTrue(run_slice6.gateway_operational_ready())
+                self.assertTrue(run_slice6.gateway_operational_ready(
+                    expected_build_id="a" * 40,
+                    expected_release_id="b" * 24,
+                ))
+                self.assertFalse(run_slice6.gateway_operational_ready(
+                    expected_build_id="c" * 40,
+                    expected_release_id="b" * 24,
+                ))
                 report["health"] = {"overall_readiness": "unready"}
                 self.assertFalse(run_slice6.gateway_operational_ready())
                 report["health"] = {"overall_readiness": "ready"}
