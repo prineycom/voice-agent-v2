@@ -241,6 +241,24 @@ class ServiceApplicationTests(unittest.TestCase):
             300 + 75,
         )
 
+    def test_supported_activation_resets_exactly_one_recovery_allowance(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+            calls.append(command)
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(operations_cli, "_sudo", side_effect=sudo):
+            operations_cli._start_service_with_recovery_allowance("start")
+            operations_cli._start_service_with_recovery_allowance("restart")
+
+        self.assertEqual(calls, [
+            ("systemctl", "reset-failed", operations_cli.SERVICE_NAME),
+            ("systemctl", "start", operations_cli.SERVICE_NAME),
+            ("systemctl", "reset-failed", operations_cli.SERVICE_NAME),
+            ("systemctl", "restart", operations_cli.SERVICE_NAME),
+        ])
+
     def _fixture(self, root: Path) -> tuple[Path, Path, SimpleNamespace]:
         state = root / "state"
         release = state / "releases" / ("a" * 24)
@@ -338,7 +356,13 @@ class ServiceApplicationTests(unittest.TestCase):
                 patch.object(operations_cli, "_print") as output,
             ):
                 operations_cli.command_install_service(arguments)
-            self.assertIn(("systemctl", "restart", operations_cli.SERVICE_NAME), calls)
+            restart = calls.index(
+                ("systemctl", "restart", operations_cli.SERVICE_NAME)
+            )
+            self.assertEqual(
+                calls[restart - 1],
+                ("systemctl", "reset-failed", operations_cli.SERVICE_NAME),
+            )
             wait.assert_called_once_with(release.name)
             self.assertTrue(output.call_args.args[0]["changed"])
             self.assertTrue(output.call_args.args[0]["ready"])
@@ -370,7 +394,13 @@ class ServiceApplicationTests(unittest.TestCase):
             validate.assert_called_once_with(
                 release, state_root=state.resolve(), verify_host_state=True,
             )
-            self.assertIn(("systemctl", "restart", operations_cli.SERVICE_NAME), calls)
+            restart = calls.index(
+                ("systemctl", "restart", operations_cli.SERVICE_NAME)
+            )
+            self.assertEqual(
+                calls[restart - 1],
+                ("systemctl", "reset-failed", operations_cli.SERVICE_NAME),
+            )
             wait.assert_called_once_with(release.name)
             result = output.call_args.args[0]
             self.assertTrue(result["restart_requested"])
@@ -598,10 +628,15 @@ class ServiceApplicationTests(unittest.TestCase):
                 patch.object(operations_cli, "_print"),
             ):
                 operations_cli.command_rollback(SimpleNamespace(state_root=state))
-            self.assertLess(
-                calls.index(("systemctl", "daemon-reload")),
-                calls.index(("systemctl", "restart", operations_cli.SERVICE_NAME)),
+            reload = calls.index(("systemctl", "daemon-reload"))
+            reset = calls.index(
+                ("systemctl", "reset-failed", operations_cli.SERVICE_NAME)
             )
+            restart = calls.index(
+                ("systemctl", "restart", operations_cli.SERVICE_NAME)
+            )
+            self.assertLess(reload, reset)
+            self.assertEqual(reset + 1, restart)
 
     def test_installed_service_rollback_rejects_a_different_prior_unit_before_swap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

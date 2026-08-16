@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+import http.client
 import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import threading
 import time
 from typing import Awaitable, Callable
+from urllib.parse import urlsplit
 
 from livekit import api, rtc
 
@@ -48,6 +51,46 @@ AUDIO_QUEUE_MS = 100
 BROWSER_CONTROL_QUEUE_SIZE = 32
 MAX_SESSION_OBSERVATIONS = 128
 TRACE_ROOT = Path.home() / ".cache/voice-agent-v2/slice-6/diagnostics"
+OPERATIONAL_PROBE_TIMEOUT_SECONDS = 0.1
+OPERATIONAL_PROBE_BODY_LIMIT_BYTES = 4_096
+LOCAL_LFM_HOST = "127.0.0.1"
+LOCAL_LFM_PORT = 18_080
+
+
+def livekit_endpoint_ready(url: str, timeout: float = OPERATIONAL_PROBE_TIMEOUT_SECONDS) -> bool:
+    endpoint = urlsplit(url)
+    port = endpoint.port or (443 if endpoint.scheme == "wss" else 80)
+    try:
+        with socket.create_connection((str(endpoint.hostname), port), timeout=timeout):
+            return True
+    except (OSError, TimeoutError, ValueError):
+        return False
+
+
+def local_lfm_endpoint_health(
+    host: str = LOCAL_LFM_HOST,
+    port: int = LOCAL_LFM_PORT,
+    timeout: float = OPERATIONAL_PROBE_TIMEOUT_SECONDS,
+) -> str:
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        connection.request("GET", "/health", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(OPERATIONAL_PROBE_BODY_LIMIT_BYTES + 1)
+        if response.status != 200 or len(body) > OPERATIONAL_PROBE_BODY_LIMIT_BYTES:
+            return "unready"
+        document = json.loads(body)
+        return (
+            "ready"
+            if isinstance(document, dict) and document.get("status") == "ok"
+            else "unready"
+        )
+    except (OSError, TimeoutError, http.client.HTTPException):
+        return "unavailable"
+    except (UnicodeError, json.JSONDecodeError):
+        return "unready"
+    finally:
+        connection.close()
 
 
 class SessionCapacityError(RuntimeError):
@@ -1434,17 +1477,29 @@ class SessionRegistry:
             self.settings.supervised_livekit_process
         )
         lfm_alive = parent_process_alive(self.settings.supervised_lfm_process)
+        livekit_ready = livekit_alive and livekit_endpoint_ready(
+            self.settings.livekit_internal_url
+        )
+        lfm_endpoint_health = (
+            local_lfm_endpoint_health() if lfm_alive else "unavailable"
+        )
         runtime_components: list[ComponentHealth] = []
         for component in self.runner.readiness_components():
-            if component.component == "selected_llm" and not lfm_alive:
+            if component.component == "selected_llm" and (
+                not lfm_alive or lfm_endpoint_health != "ready"
+            ):
                 component = ComponentHealth(
                     component.component,
-                    "dead",
+                    "alive" if lfm_alive else "dead",
                     "unready",
                     component.compatible,
                     component.identity,
                     component.contract_version,
-                    "local_lfm_unavailable",
+                    (
+                        "local_lfm_health_failed"
+                        if lfm_alive and lfm_endpoint_health == "unready"
+                        else "local_lfm_unavailable"
+                    ),
                     component.retry_count,
                     component.retry_limit,
                 )
@@ -1453,11 +1508,11 @@ class SessionRegistry:
             ComponentHealth(
                 "livekit",
                 "alive" if livekit_alive else "dead",
-                "ready" if accepting and livekit_alive else "unready",
+                "ready" if accepting and livekit_ready else "unready",
                 True,
                 "livekit-server-v1.13.5",
                 "voice-agent.realtime-control.v2",
-                None if accepting and livekit_alive
+                None if accepting and livekit_ready
                 else "service_draining" if not accepting
                 else "livekit_unavailable",
             ),

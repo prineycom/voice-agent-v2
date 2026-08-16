@@ -223,6 +223,13 @@ def _validate_effective_systemd_service() -> None:
         )
 
 
+def _start_service_with_recovery_allowance(action: str) -> None:
+    if action not in {"start", "restart"}:
+        raise ValueError("unsupported systemd activation action")
+    _sudo("systemctl", "reset-failed", SERVICE_NAME)
+    _sudo("systemctl", action, SERVICE_NAME)
+
+
 def _systemctl_show() -> dict[str, object]:
     try:
         result = subprocess.run(
@@ -459,11 +466,11 @@ def _install_service_locked(
         changed = True
     service_restarted = False
     if arguments.restart or (active and (unit_changed or release_changed)):
-        _sudo("systemctl", "restart", SERVICE_NAME)
+        _start_service_with_recovery_allowance("restart")
         changed = True
         service_restarted = True
     elif not active:
-        _sudo("systemctl", "start", SERVICE_NAME)
+        _start_service_with_recovery_allowance("start")
         changed = True
     active = _sudo(
         "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
@@ -505,7 +512,7 @@ def command_rollback(arguments: argparse.Namespace) -> None:
         result = store.rollback(required_system_unit=unit_boundary)
         if service_loaded:
             _sudo("systemctl", "daemon-reload")
-            _sudo("systemctl", "restart", SERVICE_NAME)
+            _start_service_with_recovery_allowance("restart")
             active = _sudo(
                 "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
             ).returncode == 0
