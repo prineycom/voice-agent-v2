@@ -215,6 +215,85 @@ class UnannouncedEndpointCandidateTests(unittest.IsolatedAsyncioTestCase):
             for stage, event, _fields in observations
         ))
 
+    async def test_announcement_send_race_terminalizes_published_turn(self) -> None:
+        holder: dict[str, asyncio.Task[str]] = {}
+
+        class CancelCallerAfterListening(MemoryEvents):
+            async def send(self, event: dict[str, object]) -> None:
+                await super().send(event)
+                if event["type"] == "turn.listening":
+                    holder["caller"].cancel()
+
+        events = CancelCallerAfterListening()
+        session = RealtimeSession(
+            session_id="session-announcement-send-race",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+        await session.start_utterance(announce=False)
+        caller = asyncio.create_task(session.finish_utterance(b"\0\0" * 320))
+        holder["caller"] = caller
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.interrupted"],
+        )
+        self.assertEqual(session.turn_counts["admitted"], 1)
+        self.assertEqual(session.turn_counts["interrupted"], 1)
+        self.assertEqual(session.turn_counts["failed"], 0)
+
+    async def test_cancelled_terminal_send_records_transport_failure(self) -> None:
+        class BlockingInterruptEvents(MemoryEvents):
+            def __init__(self) -> None:
+                super().__init__()
+                self.interrupt_started = asyncio.Event()
+
+            async def send(self, event: dict[str, object]) -> None:
+                if event["type"] == "turn.interrupted":
+                    self.interrupt_started.set()
+                    await asyncio.Event().wait()
+                await super().send(event)
+
+        events = BlockingInterruptEvents()
+        observations: list[tuple[str, str, dict[str, object]]] = []
+        session = RealtimeSession(
+            session_id="session-cancelled-terminal-send",
+            runner=StreamingRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+            trace_observer=lambda stage, event, fields: observations.append(
+                (stage, event, dict(fields))
+            ),
+        )
+        await session.start_utterance()
+        caller = asyncio.create_task(session.interrupt())
+        await asyncio.wait_for(events.interrupt_started.wait(), 0.5)
+
+        caller.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        self.assertEqual(
+            [event["type"] for event in events.events],
+            ["turn.listening", "turn.media-ready"],
+        )
+        self.assertEqual(session.turn_counts["interrupted"], 0)
+        self.assertEqual(session.turn_counts["failed"], 1)
+        self.assertTrue(session.closed)
+        publish_failure = next(
+            fields
+            for stage, event, fields in observations
+            if stage == "control" and event == "publish_failed"
+        )
+        self.assertEqual(publish_failure["event_type"], "turn.failed")
+        self.assertEqual(publish_failure["failed_event_type"], "turn.interrupted")
+        self.assertEqual(publish_failure["failure_class"], "CancelledError")
+        self.assertTrue(publish_failure["terminal"])
+
     async def test_media_sink_cancellation_after_listening_terminalizes_turn(self) -> None:
         class CancelMediaEvents(MemoryEvents):
             async def send(self, event: dict[str, object]) -> None:

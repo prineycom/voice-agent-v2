@@ -707,7 +707,8 @@ class RealtimeSession:
                         await announcement
                     except asyncio.CancelledError:
                         pass
-                    raise
+                    if not context.public_event_published:
+                        raise
                 cancellation_requested = True
                 current = asyncio.current_task()
                 if current is not None:
@@ -2239,6 +2240,50 @@ class RealtimeSession:
             observation_fields["failure_code"] = payload["code"]
         return observation_fields
 
+    def _record_control_publish_failure(
+        self,
+        event: dict[str, object],
+        turn_id: str,
+        event_type: str,
+        error: BaseException,
+    ) -> None:
+        failure = {
+            "outcome": "failed",
+            "stage": "transport",
+            "code": "control_publish_failed",
+            **failure_payload("transport", "control_publish_failed"),
+        }
+        failed_event_type = event_type
+        failed_terminal = False
+        context = self._active
+        if (
+            turn_id != SESSION_TURN_ID
+            and context is not None
+            and context.turn_id == turn_id
+        ):
+            if not context.transport_failed:
+                if event_type == "turn.completed" and self.turn_counts["completed"] > 0:
+                    self.turn_counts["completed"] -= 1
+                if event_type == "turn.interrupted" and self.turn_counts["interrupted"] > 0:
+                    self.turn_counts["interrupted"] -= 1
+                if event_type != "turn.failed":
+                    self.turn_counts["failed"] += 1
+                context.transport_failed = True
+            context.terminal = True
+            self._add_metrics(context, failure)
+            failed_event_type = "turn.failed"
+            failed_terminal = True
+        observation_fields = self._control_observation_fields(
+            event, failed_event_type, failure, failed_terminal
+        )
+        observation_fields["failed_event_type"] = event_type
+        observation_fields["failure_class"] = type(error).__name__
+        self._trace(
+            "control", "publish_failed", turn_id=turn_id, **observation_fields
+        )
+        self._closed = True
+        self._report_failure("transport", "control_publish_failed")
+
     async def _emit(
         self,
         turn_id: str,
@@ -2297,43 +2342,21 @@ class RealtimeSession:
             )
             if cancellation_after_success:
                 raise asyncio.CancelledError
+        except asyncio.CancelledError as error:
+            if terminal and not cancellation_after_success:
+                context = self._active
+                if (
+                    turn_id != SESSION_TURN_ID
+                    and context is not None
+                    and context.turn_id == turn_id
+                    and context.public_event_published
+                ):
+                    self._record_control_publish_failure(
+                        event, turn_id, event_type, error
+                    )
+            raise
         except Exception as error:
-            failure = {
-                "outcome": "failed",
-                "stage": "transport",
-                "code": "control_publish_failed",
-                **failure_payload("transport", "control_publish_failed"),
-            }
-            failed_event_type = event_type
-            failed_terminal = False
-            context = self._active
-            if (
-                turn_id != SESSION_TURN_ID
-                and context is not None
-                and context.turn_id == turn_id
-            ):
-                if not context.transport_failed:
-                    if event_type == "turn.completed" and self.turn_counts["completed"] > 0:
-                        self.turn_counts["completed"] -= 1
-                    if event_type == "turn.interrupted" and self.turn_counts["interrupted"] > 0:
-                        self.turn_counts["interrupted"] -= 1
-                    if event_type != "turn.failed":
-                        self.turn_counts["failed"] += 1
-                    context.transport_failed = True
-                context.terminal = True
-                self._add_metrics(context, failure)
-                failed_event_type = "turn.failed"
-                failed_terminal = True
-            observation_fields = self._control_observation_fields(
-                event, failed_event_type, failure, failed_terminal
-            )
-            observation_fields["failed_event_type"] = event_type
-            observation_fields["failure_class"] = type(error).__name__
-            self._trace(
-                "control", "publish_failed", turn_id=turn_id, **observation_fields
-            )
-            self._closed = True
-            self._report_failure("transport", "control_publish_failed")
+            self._record_control_publish_failure(event, turn_id, event_type, error)
             raise
 
 
