@@ -20,7 +20,7 @@ The JSON Schema files are checked by `./verify` using the dependency-free valida
 
 ## Fixture policy
 
-- `fixtures/*.v1.json` remain immutable historical producer/consumer examples; the corresponding `.v2.json` files are the active TTS/event/control examples.
+- Published versioned fixtures remain immutable. V1 media/inference fixtures are historical; the active Slice 8 observation/readiness fixtures are also V1, while active TTS/event/control examples are V2.
 - `fixtures/traces/*.jsonl` are canonical normalized public traces for success, injected hard failures, and cancellation.
 - `fixtures/pcm-hashes.json` declares the raw generated PCM identities and format. PCM bytes are regenerated, not stored as recordings.
 - Changing a contract, fixture, or tracer without updating the others makes `./verify` fail.
