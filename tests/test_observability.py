@@ -439,7 +439,7 @@ class CaptureAndResourceTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             root = Path(directory) / "captures"
-            guardians: list[tuple[Path, str, float, float]] = []
+            guardians: list[tuple[Path, str, float, float, Path]] = []
             captures = [
                 DiagnosticContentCapture(
                     root,
@@ -472,13 +472,15 @@ class CaptureAndResourceTests(unittest.TestCase):
                     runtime_root=Path(directory),
                 )
             self.assertFalse(expire_capture(
-                *guardians[0],
+                *guardians[0][:4],
                 uptime_now=lambda: 0.0,
                 sleep=lambda _delay: self.fail("deleted capture guardian must exit"),
-                runtime_root=Path(directory),
+                runtime_root=guardians[0][4],
             ))
             DiagnosticContentCapture._release_guardian_lease(
-                guardians[0][0].parent, guardians[0][1]
+                guardians[0][0].parent,
+                guardians[0][1],
+                runtime_root=guardians[0][4],
             )
             replacement = DiagnosticContentCapture(
                 root,
@@ -504,7 +506,7 @@ class CaptureAndResourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
             clock = [1000.0]
             uptime = [500.0]
-            guardians: list[tuple[Path, str, float, float]] = []
+            guardians: list[tuple[Path, str, float, float, Path]] = []
             capture = DiagnosticContentCapture(
                 Path(directory), "session-expiry", opt_in=True,
                 ttl_seconds=60, now=lambda: clock[0],
@@ -513,7 +515,8 @@ class CaptureAndResourceTests(unittest.TestCase):
             )
             capture.capture("prompt", "synthetic")
             self.assertEqual(guardians[0][0], capture.path)
-            self.assertEqual(guardians[0][2:], (1060.0, 560.0))
+            self.assertEqual(guardians[0][2:4], (1060.0, 560.0))
+            self.assertEqual(guardians[0][4], Path(directory).resolve())
             clock[0] = 900.0
             uptime[0] = 559.0
             delays: list[float] = []
@@ -523,17 +526,40 @@ class CaptureAndResourceTests(unittest.TestCase):
                 uptime[0] += min(delay, 0.4)
 
             self.assertTrue(expire_capture(
-                *guardians[0], uptime_now=lambda: uptime[0], sleep=sleep_early,
-                runtime_root=Path(directory),
+                *guardians[0][:4], uptime_now=lambda: uptime[0], sleep=sleep_early,
+                runtime_root=guardians[0][4],
             ))
             self.assertGreaterEqual(len(delays), 2)
             self.assertFalse(capture.path.exists())
             self.assertFalse(expire_capture(
-                *guardians[0],
+                *guardians[0][:4],
                 uptime_now=lambda: 500.0,
                 sleep=lambda _delay: self.fail("deleted capture guardian must exit"),
-                runtime_root=Path(directory),
+                runtime_root=guardians[0][4],
             ))
+
+    def test_guardian_boundaries_reject_persistent_roots(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, patch(
+            "voice_agent_v2.diagnostics.subprocess.Popen"
+        ) as spawn:
+            root = Path(directory)
+            nonce = "a" * 32
+            lease = root / f".capture-guardian-{nonce}.lease"
+            lease.write_bytes(b"unmanaged\n")
+            with self.assertRaisesRegex(ValueError, "lifetime-scoped"):
+                _spawn_expiry_guardian(
+                    root / "capture-session", nonce, 1060.0, 560.0, root
+                )
+            spawn.assert_not_called()
+            DiagnosticContentCapture._release_guardian_lease(
+                root, nonce, runtime_root=root
+            )
+            self.assertEqual(lease.read_bytes(), b"unmanaged\n")
+            absent_root = root / "absent"
+            DiagnosticContentCapture._release_guardian_lease(
+                absent_root, nonce, runtime_root=root
+            )
+            self.assertFalse(absent_root.exists())
 
     def test_expiry_guardian_receives_only_minimal_environment(self) -> None:
         class FinishedProcess:
@@ -546,18 +572,21 @@ class CaptureAndResourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, patch.dict(
             os.environ, {"LIVEKIT_API_SECRET": "private-secret"}
         ), patch(
+            "voice_agent_v2.diagnostics.require_lifetime_runtime_root",
+            side_effect=lambda path: path.expanduser().resolve(),
+        ), patch(
             "voice_agent_v2.diagnostics.subprocess.Popen",
             return_value=FinishedProcess(),
         ) as spawn:
-            root = Path(directory)
-            (root / f".capture-guardian-{'a' * 32}.lease").touch(mode=0o600)
-            _spawn_expiry_guardian(
-                root / "capture-session",
-                "a" * 32,
-                1060.0,
-                560.0,
+            root = Path(directory) / "captures"
+            capture = DiagnosticContentCapture(
+                root,
+                "session-minimal-env",
+                opt_in=True,
+                ttl_seconds=60,
+                runtime_root=Path(directory),
             )
-            lease = root / f".capture-guardian-{'a' * 32}.lease"
+            lease = root / f".capture-guardian-{capture._owner_nonce}.lease"
             deadline = time.monotonic() + 0.5
             while lease.exists() and time.monotonic() < deadline:
                 time.sleep(0.001)

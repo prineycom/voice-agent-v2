@@ -77,14 +77,30 @@ def _spawn_expiry_guardian(
     owner_nonce: str,
     expires_unix_seconds: float,
     expires_uptime_seconds: float,
+    runtime_root: Path,
 ) -> None:
-    lease = path.parent / f".capture-guardian-{owner_nonce}.lease"
+    if not _valid_guardian_nonce(owner_nonce):
+        raise ValueError("invalid diagnostic capture guardian identity")
+    verified_runtime_root = require_lifetime_runtime_root(runtime_root)
+    resolved_path, document = DiagnosticContentCapture._owned_manifest(
+        path, runtime_root=verified_runtime_root
+    )
+    if (
+        document.get("owner_nonce") != owner_nonce
+        or document.get("expires_unix_seconds") != expires_unix_seconds
+    ):
+        raise ValueError("diagnostic capture guardian does not own this path")
+    lease = resolved_path.parent / f".capture-guardian-{owner_nonce}.lease"
     lease_descriptor = os.open(
         lease, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
         lease_status = os.fstat(lease_descriptor)
-        if not stat.S_ISREG(lease_status.st_mode) or lease_status.st_uid != os.getuid():
+        if (
+            not stat.S_ISREG(lease_status.st_mode)
+            or lease_status.st_uid != os.getuid()
+            or lease_status.st_mode & 0o777 != 0o600
+        ):
             raise ValueError("diagnostic capture guardian lease is not owned")
         fcntl.flock(lease_descriptor, fcntl.LOCK_EX)
         os.ftruncate(lease_descriptor, 0)
@@ -94,7 +110,7 @@ def _spawn_expiry_guardian(
                 sys.executable,
                 str(Path(__file__).with_name("diagnostic_expiry.py")),
                 "--path",
-                str(path),
+                str(resolved_path),
                 "--owner-nonce",
                 owner_nonce,
                 "--expires-unix-seconds",
@@ -115,7 +131,9 @@ def _spawn_expiry_guardian(
 
     def reap() -> None:
         process.wait()
-        DiagnosticContentCapture._release_guardian_lease(path.parent, owner_nonce)
+        DiagnosticContentCapture._release_guardian_lease(
+            resolved_path.parent, owner_nonce, runtime_root=verified_runtime_root
+        )
 
     threading.Thread(
         target=reap,
@@ -343,6 +361,35 @@ def _inside_directory(path: Path, parent: Path) -> bool:
     return True
 
 
+def _valid_guardian_nonce(owner_nonce: str) -> bool:
+    return (
+        isinstance(owner_nonce, str)
+        and len(owner_nonce) == 32
+        and all(character in "0123456789abcdef" for character in owner_nonce)
+    )
+
+
+def _verified_guardian_root(root: Path, runtime_root: Path) -> Path:
+    expanded = root.expanduser()
+    if expanded.is_symlink():
+        raise ValueError("diagnostic capture guardian root is not owned")
+    resolved = expanded.resolve()
+    verified_runtime_root = require_lifetime_runtime_root(runtime_root)
+    try:
+        root_status = resolved.stat()
+    except OSError as error:
+        raise ValueError("diagnostic capture guardian root is unavailable") from error
+    if (
+        not _inside_directory(resolved, verified_runtime_root)
+        or _inside_git_worktree(resolved)
+        or not stat.S_ISDIR(root_status.st_mode)
+        or root_status.st_uid != os.getuid()
+        or root_status.st_mode & 0o777 != 0o700
+    ):
+        raise ValueError("diagnostic capture guardian root is not owned")
+    return resolved
+
+
 class DiagnosticContentCapture:
     """Explicit opt-in, short-lived content capture outside every Git worktree."""
 
@@ -354,7 +401,7 @@ class DiagnosticContentCapture:
         opt_in: bool,
         ttl_seconds: int = 15 * 60,
         now: Callable[[], float] = time.time,
-        guardian_factory: Callable[[Path, str, float, float], None] = _spawn_expiry_guardian,
+        guardian_factory: Callable[[Path, str, float, float, Path], None] = _spawn_expiry_guardian,
         runtime_root: Path | None = None,
         uptime_now: Callable[[], float] = _uptime_seconds,
     ) -> None:
@@ -425,6 +472,7 @@ class DiagnosticContentCapture:
                     self._owner_nonce,
                     self._expires,
                     self._expires_uptime,
+                    self._runtime_root,
                 )
             except BaseException:
                 self._guardian_lease_path(resolved, self._owner_nonce).unlink(
@@ -555,10 +603,17 @@ class DiagnosticContentCapture:
         os.close(descriptor)
 
     @staticmethod
-    def _release_guardian_lease(root: Path, owner_nonce: str) -> None:
+    def _release_guardian_lease(
+        root: Path, owner_nonce: str, *, runtime_root: Path
+    ) -> None:
         try:
-            with _capture_root_lock(root):
-                path = DiagnosticContentCapture._guardian_lease_path(root, owner_nonce)
+            if not _valid_guardian_nonce(owner_nonce):
+                return
+            verified_root = _verified_guardian_root(root, runtime_root)
+            with _capture_root_lock(verified_root):
+                path = DiagnosticContentCapture._guardian_lease_path(
+                    verified_root, owner_nonce
+                )
                 try:
                     status = path.lstat()
                 except FileNotFoundError:
@@ -567,6 +622,7 @@ class DiagnosticContentCapture:
                     path.is_symlink()
                     or not stat.S_ISREG(status.st_mode)
                     or status.st_uid != os.getuid()
+                    or status.st_mode & 0o777 != 0o600
                 ):
                     return
                 path.unlink()
