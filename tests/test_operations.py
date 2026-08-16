@@ -117,6 +117,53 @@ class OperationsManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(OperationalError, "unknown fields"):
                 load_operations_manifest(path)
 
+    def test_manifest_rejects_deployment_and_nested_policy_drift(self) -> None:
+        manifest = json.loads(
+            (ROOT / DEFAULT_MANIFEST_RELATIVE).read_text(encoding="utf-8")
+        )
+        mutations = (
+            (
+                "service-name",
+                lambda value: value["deployment"].update(service_name="other.service"),
+                "operations_manifest_incompatible",
+            ),
+            (
+                "state-root",
+                lambda value: value["deployment"].update(state_root="~/.local/share/other"),
+                "operations_manifest_incompatible",
+            ),
+            (
+                "deployment-field",
+                lambda value: value["deployment"].update(optional=True),
+                "operations_manifest_invalid",
+            ),
+            (
+                "lifecycle-field",
+                lambda value: value["lifecycle"].update(optional=True),
+                "operations_manifest_invalid",
+            ),
+            (
+                "restart-field",
+                lambda value: value["lifecycle"]["restart_policy"].update(optional=True),
+                "operations_manifest_invalid",
+            ),
+            (
+                "disk-field",
+                lambda value: value["disk"].update(optional=True),
+                "operations_manifest_invalid",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "operations.json"
+            for label, mutate, expected_code in mutations:
+                with self.subTest(contract=label):
+                    changed = json.loads(json.dumps(manifest))
+                    mutate(changed)
+                    path.write_text(json.dumps(changed), encoding="utf-8")
+                    with self.assertRaises(OperationalError) as caught:
+                        load_operations_manifest(path)
+                    self.assertEqual(caught.exception.code, expected_code)
+
     def test_manifest_rejects_drift_in_every_component_supervision_entry(self) -> None:
         manifest = json.loads(
             (ROOT / DEFAULT_MANIFEST_RELATIVE).read_text(encoding="utf-8")

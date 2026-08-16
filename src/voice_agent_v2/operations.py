@@ -43,6 +43,36 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_PROVIDER_IDENTITY = (
     "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M"
 )
+EXPECTED_DEPLOYMENT = {
+    "service_name": "voice-agent-v2.service",
+    "state_root": "~/.local/share/voice-agent-v2",
+    "provider_mode": "local",
+    "provider_identity": EXPECTED_PROVIDER_IDENTITY,
+    "automatic_fallback": False,
+    "wake_enabled": False,
+    "auth_boundary": "loopback",
+}
+EXPECTED_RESTART_POLICY = {
+    "mode": "on-failure",
+    "restart_seconds": 5,
+    "start_limit_interval_seconds": "infinity",
+    "start_limit_burst": 2,
+    "automatic_recoveries_per_failure_window": 1,
+    "configuration_exit_status": CONFIGURATION_EXIT_STATUS,
+}
+EXPECTED_LIFECYCLE = {
+    "start_order": [
+        "configuration", "artifacts", "local-llm", "livekit",
+        "gateway-controller-stt-tts-provider",
+    ],
+    "stop_order": [
+        "gateway-controller-stt-tts-provider", "livekit", "local-llm",
+    ],
+    "startup_hard_seconds": 300,
+    "graceful_drain_seconds": 54,
+    "hard_stop_seconds": 75,
+    "restart_policy": EXPECTED_RESTART_POLICY,
+}
 EXPECTED_COMPONENTS = {
     "livekit": {
         "name": "livekit", "location": "host",
@@ -378,38 +408,28 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
         raise OperationalError("operations_manifest_invalid", "deployment lifecycle is invalid")
     if not isinstance(components, list) or not components or not isinstance(disk, dict):
         raise OperationalError("operations_manifest_invalid", "component or disk policy is invalid")
-    if not (
-        deployment.get("provider_mode") == "local"
-        and deployment.get("provider_identity") == EXPECTED_PROVIDER_IDENTITY
-        and deployment.get("automatic_fallback") is False
-        and deployment.get("wake_enabled") is False
-        and deployment.get("auth_boundary") == "loopback"
-    ):
-        raise OperationalError("operations_manifest_incompatible", "fixed provider/security policy changed")
-    start_order = lifecycle.get("start_order")
-    stop_order = lifecycle.get("stop_order")
-    expected_start = [
-        "configuration", "artifacts", "local-llm", "livekit",
-        "gateway-controller-stt-tts-provider",
-    ]
-    expected_stop = [
-        "gateway-controller-stt-tts-provider", "livekit", "local-llm",
-    ]
     restart = lifecycle.get("restart_policy")
-    if start_order != expected_start or stop_order != expected_stop or not isinstance(restart, dict):
-        raise OperationalError("operations_manifest_incompatible", "service ordering is incompatible")
-    if not (
-        restart.get("mode") == "on-failure"
-        and restart.get("restart_seconds") == 5
-        and restart.get("start_limit_interval_seconds") == "infinity"
-        and restart.get("start_limit_burst") == 2
-        and restart.get("automatic_recoveries_per_failure_window") == 1
-        and restart.get("configuration_exit_status") == CONFIGURATION_EXIT_STATUS
-        and lifecycle.get("startup_hard_seconds") == 300
-        and lifecycle.get("graceful_drain_seconds") == 54
-        and lifecycle.get("hard_stop_seconds") == 75
-    ):
-        raise OperationalError("operations_manifest_incompatible", "restart/drain policy is incompatible")
+    if not isinstance(restart, dict):
+        raise OperationalError("operations_manifest_invalid", "restart policy is invalid")
+    _require_exact_keys(deployment, set(EXPECTED_DEPLOYMENT), label="deployment")
+    _require_exact_keys(lifecycle, set(EXPECTED_LIFECYCLE), label="lifecycle")
+    _require_exact_keys(restart, set(EXPECTED_RESTART_POLICY), label="restart policy")
+    _require_exact_keys(
+        disk,
+        {
+            "minimum_free_bytes", "cache_roots", "release_maximum_count",
+            "release_maximum_bytes", "cleanup_policy",
+        },
+        label="disk policy",
+    )
+    if deployment != EXPECTED_DEPLOYMENT:
+        raise OperationalError(
+            "operations_manifest_incompatible", "fixed deployment policy changed",
+        )
+    if lifecycle != EXPECTED_LIFECYCLE:
+        raise OperationalError(
+            "operations_manifest_incompatible", "service lifecycle policy changed",
+        )
     by_name: dict[str, dict[str, object]] = {}
     for component in components:
         if not isinstance(component, dict) or not isinstance(component.get("name"), str):
