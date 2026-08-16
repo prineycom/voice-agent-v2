@@ -190,6 +190,31 @@ class OperationsManifestTests(unittest.TestCase):
 
 
 class ServiceApplicationTests(unittest.TestCase):
+    def test_systemd_start_and_restart_allow_the_full_bounded_job(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def run(*_arguments: object, **keywords: object) -> subprocess.CompletedProcess[str]:
+            calls.append(keywords)
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(operations_cli.subprocess, "run", side_effect=run):
+            operations_cli._sudo("systemctl", "start", operations_cli.SERVICE_NAME)
+            operations_cli._sudo("systemctl", "restart", operations_cli.SERVICE_NAME)
+            operations_cli._sudo("systemctl", "daemon-reload")
+
+        self.assertEqual(
+            [call["timeout"] for call in calls],
+            [
+                operations_cli.SYSTEMD_JOB_TIMEOUT_SECONDS,
+                operations_cli.SYSTEMD_JOB_TIMEOUT_SECONDS,
+                operations_cli.SYSTEM_COMMAND_TIMEOUT_SECONDS,
+            ],
+        )
+        self.assertGreater(
+            operations_cli.SYSTEMD_JOB_TIMEOUT_SECONDS,
+            300 + 75,
+        )
+
     def _fixture(self, root: Path) -> tuple[Path, Path, SimpleNamespace]:
         state = root / "state"
         release = state / "releases" / ("a" * 24)
@@ -728,6 +753,49 @@ class ConfigurationAndArtifactTests(unittest.TestCase):
 
 
 class ReleaseAndRollbackTests(unittest.TestCase):
+    def test_deploy_cli_rejects_a_selected_private_config_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "runtime.env"
+            link = root / "runtime-link.env"
+            state = root / "state"
+            write_configuration(config, configuration_values())
+            link.symlink_to(config)
+
+            def git(_source: Path, *arguments: str) -> str:
+                if arguments == ("status", "--porcelain=v1", "--untracked-files=all"):
+                    return ""
+                if arguments == ("rev-parse", "HEAD"):
+                    return "a" * 40
+                if arguments == ("rev-parse", f"{'a' * 40}^{{tree}}"):
+                    return "b" * 40
+                raise AssertionError(f"unexpected git call: {arguments}")
+
+            def validate_selected_config(**keywords: object) -> ValidationReport:
+                parse_server_configuration(Path(str(keywords["config_path"])))
+                raise AssertionError("deploy followed the selected configuration symlink")
+
+            stderr = StringIO()
+            with (
+                patch.object(
+                    sys, "argv", [
+                        "voice-agent-ops", "deploy", "--config", str(link),
+                        "--state-root", str(state),
+                    ],
+                ),
+                patch("voice_agent_v2.operations._run_git", side_effect=git),
+                patch(
+                    "voice_agent_v2.operations.validate_host",
+                    side_effect=validate_selected_config,
+                ),
+                redirect_stderr(stderr),
+            ):
+                status = operations_cli.main()
+
+            self.assertEqual(status, 2)
+            self.assertIn("configuration_unavailable", stderr.getvalue())
+            self.assertFalse((state / "current").exists())
+
     def test_deploy_rejects_a_selected_private_config_tracked_by_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1160,6 +1228,29 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             self.assertFalse((state / "link-transaction.json").exists())
             self.assertEqual((state / "current").resolve(), previous.resolve())
             self.assertEqual((state / "previous").resolve(), current.resolve())
+
+    def test_recovered_activation_removes_a_stale_previous_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            releases = state / "releases"
+            current = releases / ("b" * 24)
+            stale = releases / ("c" * 24)
+            current.mkdir(parents=True)
+            stale.mkdir()
+            (state / "current").symlink_to(f"releases/{current.name}")
+            (state / "previous").symlink_to(f"releases/{stale.name}")
+            operations._atomic_json(state / "link-transaction.json", {
+                "schema_version": "voice-agent.release-links.v1",
+                "current": f"releases/{current.name}",
+                "previous": None,
+            })
+
+            with ReleaseStore(state).locked():
+                pass
+
+            self.assertEqual((state / "current").resolve(), current.resolve())
+            self.assertFalse((state / "previous").exists())
+            self.assertFalse((state / "link-transaction.json").exists())
 
     def test_verified_rollback_swaps_only_current_and_previous(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

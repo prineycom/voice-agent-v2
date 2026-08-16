@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-10
-- **Amended:** 2026-08-14 (Design Gate V)
+- **Amended:** 2026-08-16 (Slice 9 production composition)
 - **Decision owner:** Voice Agent v2 project architecture
 
 ## Context
@@ -44,7 +44,7 @@ Live2D and 3D are optional later avatar modules, not active MVP renderer paths. 
 
 ### Costs and risks
 
-- The stable module boundary and explicit fallback semantics add a small adapter/capability surface even though the MVP ships one selected renderer plus its static fallback.
+- The stable module boundary retains explicit reporting for any future configured fallback, while the active ordinary client ships only the selected MVP-eye module and exposes its failure as visual degradation without an alternate representation.
 - External tracking and audio-derived pulsing require the fixed precedence, staleness, and accessibility rules to remain compatible.
 - Live2D/3D modules receive no implied compatibility until they pass their own later slice.
 
@@ -60,4 +60,4 @@ Live2D and 3D are optional later avatar modules, not active MVP renderer paths. 
 
 The pinned legacy reference is [`prineycom/voice-agent@93c5c397`](https://github.com/prineycom/voice-agent/tree/93c5c39786ff790d7ae436772d2cf37a2eeb32c6). Legacy [ADR-0010](https://github.com/prineycom/voice-agent/blob/93c5c39786ff790d7ae436772d2cf37a2eeb32c6/docs/adr/0010-live2d-pixi-cubism-core.md) and [ADR-0017](https://github.com/prineycom/voice-agent/blob/93c5c39786ff790d7ae436772d2cf37a2eeb32c6/docs/adr/0017-3d-face-arkit-pipeline.md) are reference evidence for possible later modules, not active V2 choices. Legacy [ADR-0012](https://github.com/prineycom/voice-agent/blob/93c5c39786ff790d7ae436772d2cf37a2eeb32c6/docs/adr/0012-audio2face-hybrid-facial-animation.md) and [ADR-0016](https://github.com/prineycom/voice-agent/blob/93c5c39786ff790d7ae436772d2cf37a2eeb32c6/docs/adr/0016-a2f-emotion-supply.md) remain historical A2F/A2E experiments outside V2.
 
-The boundary constraints are authoritative in [`../architecture.md`](../architecture.md); the required Grill/design gate and implementation order are authoritative in [`../roadmap.md`](../roadmap.md).
+The boundary constraints are authoritative in [`../architecture.md`](../architecture.md); the required Grill/design gate and implementation order are authoritative in [`../roadmap.md`](../roadmap.md). ADR-0013 supersedes this ADR's earlier MVP static-fallback composition: the generic host boundary can still report a configured fallback, but the active ordinary client configures none.

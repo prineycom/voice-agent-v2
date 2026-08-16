@@ -29,6 +29,8 @@ from .operations import (
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_NAME = "voice-agent-v2.service"
 SYSTEM_UNIT_PATH = Path("/etc/systemd/system") / SERVICE_NAME
+SYSTEMD_JOB_TIMEOUT_SECONDS = 390
+SYSTEM_COMMAND_TIMEOUT_SECONDS = 30
 SYSTEMD_UNIT_CONTRACT = {
     "Unit": {
         "Description": ["Voice Agent v2 loopback-local single-host stack"],
@@ -99,9 +101,7 @@ def _state_root(value: str) -> Path:
 
 def _configuration(value: str) -> Path:
     path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = (Path.cwd() / path).resolve()
-    return path
+    return Path(os.path.abspath(path))
 
 
 def _print(value: object) -> None:
@@ -109,10 +109,17 @@ def _print(value: object) -> None:
 
 
 def _sudo(*arguments: str, allowed: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess[str]:
+    timeout = (
+        SYSTEMD_JOB_TIMEOUT_SECONDS
+        if len(arguments) >= 2
+        and arguments[0] == "systemctl"
+        and arguments[1] in {"start", "restart"}
+        else SYSTEM_COMMAND_TIMEOUT_SECONDS
+    )
     try:
         result = subprocess.run(
             ["sudo", "-n", *arguments], capture_output=True, text=True,
-            timeout=210, check=False,
+            timeout=timeout, check=False,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
         )
     except (OSError, subprocess.TimeoutExpired) as error:

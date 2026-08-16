@@ -736,6 +736,28 @@ def _atomic_symlink(path: Path, target: str) -> None:
     _fsync_directory(path.parent)
 
 
+def _remove_symlink(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise OperationalError(
+            "release_state_invalid", "release link is unavailable",
+        ) from error
+    if not stat.S_ISLNK(metadata.st_mode):
+        raise OperationalError(
+            "release_state_invalid", f"{path.name} is not a release link",
+        )
+    try:
+        path.unlink()
+        _fsync_directory(path.parent)
+    except OSError as error:
+        raise OperationalError(
+            "release_state_invalid", "release link could not be removed",
+        ) from error
+
+
 def _run_git(source_root: Path, *arguments: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(source_root), *arguments], capture_output=True, text=True,
@@ -841,31 +863,37 @@ class ReleaseStore:
             raise OperationalError(
                 "release_state_invalid", "release link transaction is incompatible",
             )
-        updates: list[tuple[Path, str]] = []
+        updates: list[tuple[Path, str | None]] = []
         for name, link in (
             ("previous", self.previous_link),
             ("current", self.current_link),
         ):
             target = transaction.get(name)
-            if target is None:
-                continue
-            if not isinstance(target, str):
+            if target is None and name == "current":
                 raise OperationalError(
                     "release_state_invalid", "release link transaction is invalid",
                 )
-            target_path = (self.state_root / target).resolve()
-            if (
-                target != f"releases/{target_path.name}"
-                or target_path.parent != self.releases.resolve()
-                or not RELEASE_ID.fullmatch(target_path.name)
-                or not target_path.is_dir()
-            ):
-                raise OperationalError(
-                    "release_state_invalid", "release link transaction target is invalid",
-                )
+            if target is not None:
+                if not isinstance(target, str):
+                    raise OperationalError(
+                        "release_state_invalid", "release link transaction is invalid",
+                    )
+                target_path = (self.state_root / target).resolve()
+                if (
+                    target != f"releases/{target_path.name}"
+                    or target_path.parent != self.releases.resolve()
+                    or not RELEASE_ID.fullmatch(target_path.name)
+                    or not target_path.is_dir()
+                ):
+                    raise OperationalError(
+                        "release_state_invalid", "release link transaction target is invalid",
+                    )
             updates.append((link, target))
         for link, target in updates:
-            _atomic_symlink(link, target)
+            if target is None:
+                _remove_symlink(link)
+            else:
+                _atomic_symlink(link, target)
         self.transaction_path.unlink()
         _fsync_directory(self.state_root)
 
@@ -908,7 +936,7 @@ class ReleaseStore:
 
     def deploy(self, *, source_root: Path, config_path: Path) -> dict[str, object]:
         source_root = source_root.resolve()
-        config_path = config_path.resolve()
+        config_path = Path(os.path.abspath(config_path.expanduser()))
         if self.state_root.is_relative_to(source_root):
             raise OperationalError("release_state_invalid", "release state must remain outside source")
         status = _run_git(source_root, "status", "--porcelain=v1", "--untracked-files=all")
