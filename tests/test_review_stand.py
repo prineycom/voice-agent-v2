@@ -30,7 +30,15 @@ class ReviewStandStatusTests(unittest.TestCase):
             git.write_text("#!/bin/sh\nprintf '%s\\n' \"$EXPECTED_BUILD\"\n", encoding="utf-8")
             git.chmod(0o755)
             curl = fake_bin / "curl"
-            curl.write_text("#!/bin/sh\nprintf '%s\\n' \"$STATUS_DOCUMENT\"\n", encoding="utf-8")
+            curl.write_text(
+                "#!/bin/sh\n"
+                "case \" $* \" in\n"
+                "  *\" --connect-timeout 0.25 --max-time 0.25 \"*) ;;\n"
+                "  *) exit 64 ;;\n"
+                "esac\n"
+                "printf '%s\\n' \"$STATUS_DOCUMENT\"\n",
+                encoding="utf-8",
+            )
             curl.chmod(0o755)
             process = subprocess.Popen([str(runner)])
             (root / "tmp/review-stand.pid").write_text(

@@ -59,12 +59,27 @@ LOCAL_LFM_PORT = 18_080
 
 def livekit_endpoint_ready(url: str, timeout: float = OPERATIONAL_PROBE_TIMEOUT_SECONDS) -> bool:
     endpoint = urlsplit(url)
-    port = endpoint.port or (443 if endpoint.scheme == "wss" else 80)
-    try:
-        with socket.create_connection((str(endpoint.hostname), port), timeout=timeout):
-            return True
-    except (OSError, TimeoutError, ValueError):
+    if endpoint.scheme not in {"ws", "wss"} or endpoint.hostname is None:
         return False
+    try:
+        port = endpoint.port or (443 if endpoint.scheme == "wss" else 80)
+    except ValueError:
+        return False
+    connection_type = (
+        http.client.HTTPSConnection
+        if endpoint.scheme == "wss"
+        else http.client.HTTPConnection
+    )
+    connection = connection_type(endpoint.hostname, port, timeout=timeout)
+    try:
+        connection.request("GET", "/", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(OPERATIONAL_PROBE_BODY_LIMIT_BYTES + 1)
+        return 100 <= response.status <= 599 and len(body) <= OPERATIONAL_PROBE_BODY_LIMIT_BYTES
+    except (OSError, TimeoutError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 def local_lfm_endpoint_health(

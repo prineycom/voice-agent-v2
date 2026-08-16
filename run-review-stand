@@ -6,6 +6,7 @@ PID_FILE="$ROOT/tmp/review-stand.pid"
 LOG_FILE="$ROOT/tmp/review-stand.log"
 LOOPBACK_URL='http://127.0.0.1:8000/'
 LOOPBACK_STATUS='http://127.0.0.1:8000/api/status'
+CURL_TIMEOUT='0.25'
 
 running() {
   [ -f "$PID_FILE" ] || return 1
@@ -17,7 +18,7 @@ running() {
 
 operational_ready() {
   EXPECTED_BUILD=$1
-  STATUS_DOCUMENT=$(curl --fail --silent --show-error "$LOOPBACK_STATUS") || return 1
+  STATUS_DOCUMENT=$(curl --connect-timeout "$CURL_TIMEOUT" --max-time "$CURL_TIMEOUT" --fail --silent --show-error "$LOOPBACK_STATUS") || return 1
   printf '%s\n' "$STATUS_DOCUMENT" | python3 -c '
 import json
 import sys
@@ -76,7 +77,7 @@ start() {
       rm -f "$PID_FILE"
       exit 1
     fi
-    if curl --fail --silent --show-error "$LOOPBACK_URL" >/dev/null \
+    if curl --connect-timeout "$CURL_TIMEOUT" --max-time "$CURL_TIMEOUT" --fail --silent --show-error "$LOOPBACK_URL" >/dev/null \
       && operational_ready "$BUILD"; then
       echo "Live review stand started"
       echo "commit: $BUILD"

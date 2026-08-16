@@ -368,6 +368,58 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertTrue(output.call_args.args[0]["ready"])
             self.assertTrue(output.call_args.args[0]["service_restarted"])
 
+    def test_failed_effective_policy_validation_restores_the_prior_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, _release, arguments = self._fixture(root)
+            installed = root / "installed.service"
+            installed.write_text("prior unit\n", encoding="utf-8")
+            calls: list[tuple[str, ...]] = []
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(
+                    returncode=1 if command[:2] == ("cmp", "-s") else 0,
+                )
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(operations_cli, "validate_release", return_value={}),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(
+                    operations_cli, "_validate_effective_systemd_service",
+                    side_effect=OperationalError(
+                        "systemd_unit_incompatible", "effective policy rejected",
+                    ),
+                ),
+                self.assertRaisesRegex(OperationalError, "effective policy rejected"),
+            ):
+                operations_cli.command_install_service(arguments)
+
+            installs = [
+                index for index, command in enumerate(calls)
+                if command and command[0] == "install"
+            ]
+            reloads = [
+                index for index, command in enumerate(calls)
+                if command == ("systemctl", "daemon-reload")
+            ]
+            self.assertEqual(len(installs), 2)
+            self.assertEqual(len(reloads), 2)
+            self.assertLess(installs[0], reloads[0])
+            self.assertLess(reloads[0], installs[1])
+            self.assertLess(installs[1], reloads[1])
+            self.assertEqual(calls[installs[1]][-1], str(installed))
+            self.assertFalse(any(
+                command[:2] in {
+                    ("systemctl", "enable"),
+                    ("systemctl", "start"),
+                    ("systemctl", "restart"),
+                }
+                for command in calls
+            ))
+
     def test_explicit_restart_revalidates_and_restarts_the_unchanged_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state, release, arguments = self._fixture(Path(temporary))

@@ -5,7 +5,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import socket
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -175,6 +177,36 @@ class Slice9RuntimeTests(unittest.TestCase):
         self.assertEqual(
             livekit_runtime.local_lfm_endpoint_health(host, port), "unavailable",
         )
+
+    def test_livekit_probe_rejects_a_listener_that_never_answers(self) -> None:
+        from voice_agent_v2 import livekit_runtime
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        host, port = listener.getsockname()
+        release_connection = threading.Event()
+
+        def accept_without_response() -> None:
+            connection, _address = listener.accept()
+            with connection:
+                release_connection.wait(1.0)
+
+        thread = threading.Thread(target=accept_without_response, daemon=True)
+        thread.start()
+        started = time.monotonic()
+        try:
+            self.assertFalse(
+                livekit_runtime.livekit_endpoint_ready(
+                    f"ws://{host}:{port}", timeout=0.05,
+                )
+            )
+            self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            release_connection.set()
+            listener.close()
+            thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive())
 
     def test_public_status_reports_build_health_client_and_no_external_supervision(self) -> None:
         from voice_agent_v2.slice6_gateway import status as public_gateway_status

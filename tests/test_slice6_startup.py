@@ -44,6 +44,20 @@ class SystemdReadinessTests(unittest.TestCase):
                 FakeProcess(returncode=1), run_slice6.SIGNAL_PORT, "LiveKit", timeout=0.1,
             )
 
+    def test_process_identity_loss_after_readiness_is_recoverable(self) -> None:
+        process = FakeProcess()
+        process.pid = 12345
+        with (
+            patch.object(
+                run_slice6, "supervised_process_identity",
+                side_effect=Slice6ConfigurationError("process disappeared"),
+            ),
+            self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "identity was lost",
+            ),
+        ):
+            run_slice6.supervised_child_identity(process, "LiveKit")
+
     def test_startup_wait_stops_immediately_when_shutdown_is_requested(self) -> None:
         process = FakeProcess()
         with patch.object(

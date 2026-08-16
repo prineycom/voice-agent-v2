@@ -392,6 +392,17 @@ def require_supervised_children_alive(
             )
 
 
+def supervised_child_identity(process: subprocess.Popen, name: str) -> str:
+    if process.poll() is not None:
+        raise ServiceProcessFailure(f"{name} exited before process identity publication")
+    try:
+        return supervised_process_identity(process.pid)
+    except Slice6ConfigurationError as error:
+        raise ServiceProcessFailure(
+            f"{name} process identity was lost during startup"
+        ) from error
+
+
 def publish_systemd_readiness(
     supervisor: ProcessSupervisor,
     *,
@@ -539,10 +550,10 @@ def main() -> int:
             return 0
 
         gateway_environment["VOICE_AGENT_SUPERVISED_LFM_PROCESS"] = (
-            supervised_process_identity(local_lfm.pid)
+            supervised_child_identity(local_lfm, "local LFM")
         )
         gateway_environment["VOICE_AGENT_SUPERVISED_LIVEKIT_PROCESS"] = (
-            supervised_process_identity(livekit.pid)
+            supervised_child_identity(livekit, "LiveKit")
         )
         service_main_process = systemd_service_main_process(dict(os.environ))
         if service_main_process is not None:

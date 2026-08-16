@@ -449,9 +449,30 @@ def _install_service_locked(
     identical = exists and _sudo("cmp", "-s", str(unit), str(SYSTEM_UNIT_PATH), allowed=(0, 1)).returncode == 0
     changed = not identical
     if changed:
-        _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(unit), str(SYSTEM_UNIT_PATH))
-    _sudo("systemctl", "daemon-reload")
-    _validate_effective_systemd_service()
+        with tempfile.TemporaryDirectory(prefix="voice-agent-unit-backup-") as temporary:
+            backup = Path(temporary) / SERVICE_NAME
+            if exists:
+                _sudo("cp", "--preserve=mode,ownership,timestamps", str(SYSTEM_UNIT_PATH), str(backup))
+            try:
+                _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(unit), str(SYSTEM_UNIT_PATH))
+                _sudo("systemctl", "daemon-reload")
+                _validate_effective_systemd_service()
+            except BaseException:
+                try:
+                    if exists:
+                        _sudo("install", "-o", "root", "-g", "root", "-m", "0644", str(backup), str(SYSTEM_UNIT_PATH))
+                    else:
+                        _sudo("rm", "-f", str(SYSTEM_UNIT_PATH))
+                    _sudo("systemctl", "daemon-reload")
+                except BaseException as restore_error:
+                    raise OperationalError(
+                        "systemd_install_failed",
+                        "systemd unit installation failed and prior state could not be restored",
+                    ) from restore_error
+                raise
+    else:
+        _sudo("systemctl", "daemon-reload")
+        _validate_effective_systemd_service()
     unit_changed = changed
     enabled = _sudo(
         "systemctl", "is-enabled", SERVICE_NAME, allowed=(0, 1, 3, 4),
