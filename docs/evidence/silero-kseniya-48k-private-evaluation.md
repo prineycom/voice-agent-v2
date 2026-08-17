@@ -58,7 +58,7 @@ Commands:
 
 ```sh
 ./verify
-./verify-slice6
+./verify-extended
 ```
 
 Passing behavior includes:
@@ -124,7 +124,7 @@ This is local startup, identity, residency, and cleanup evidence only. It does n
 
 Keep captures outside Git and do not paste secrets or conversation content into a PR.
 
-1. Record the previous branch/commit. On the clean committed acceptance head run the focused `./verify-slice7` and existing fast `./verify-slice6`; fill ignored `.env.slice6` with loopback defaults; start only `./run-review-stand start` after confirming no other stack occupies its local ports. Confirm the launcher reports that exact commit and loopback URL. Do not change firewalld, external exposure, or unrelated services.
+1. Record the previous branch/commit. On the clean committed acceptance head run `./verify` and the required canonical-host exact-cache commands from [`../testing.md`](../testing.md); fill ignored `.env.slice6` with loopback defaults; start only `./run-review-stand start` after confirming no other stack occupies its local ports. Confirm the launcher reports that exact commit and loopback URL. Do not change firewalld, external exposure, or unrelated services.
 2. Open `https://priney-arch.darter-smoot.ts.net:8447/`. Before selecting **CONNECT**, confirm `DISCONNECTED`, `MIC DISCONNECTED`, empty history, and no capability, microphone-permission, or LiveKit work. Select **CONNECT** and confirm the same-origin capability/public LiveKit path plus visible `MIC PERMISSION`, `MIC PUBLISHING`, and `MIC LIVE`/`MIC LISTENING` transitions. Also exercise `MIC MUTED` and verify the exact Silero/Kseniya/native48/private-noncommercial/CC badge; any microphone failure must show `MIC ERROR`.
 3. Speak a normal Russian request. Confirm a useful visible original-LFM response and audible Kseniya speech; automation does not establish either physical fact.
 4. Exercise numbers, a `14.08.2026` date, `09:30`, `PDF`/`SSD`, `ё`, and an answer long enough for multiple sentence/clause segments. Confirm natural/intelligible pronunciation and joins. Join target is ≤120 ms; repeated >200-ms gaps or broken intonation fails. Confirm visible/history text did not change and contains no injected `+`.

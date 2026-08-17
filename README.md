@@ -10,21 +10,33 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
-## Root verification
+## Verification tiers
 
-Run this single command from the repository root:
+Provision pinned PR dependencies without running tests or builds, then use the one canonical PR command:
 
 ```sh
+./setup-test-runtime
 ./verify
 ```
 
-It uses only POSIX `sh` and the Python 3.11+ standard library, creates isolated empty temporary cache/home directories, denies socket creation with a Python audit policy, exercises success/failure/cancellation behavior, and compares two normalized traces and generated PCM artifacts byte-for-byte. Default runs remove their temporary artifacts. To preserve the verified trace and playable raw PCM files in a new directory, run:
+`./verify` has a hard 90-second monotonic deadline, explicit Python/local-socket/web/browser phases, zero tolerated skips, process-group plus detached-child cleanup, the full Vitest surface once, one typecheck, one build per entry mode, and a short production Firefox smoke over an actual task-owned local LiveKit. The smoke rejects ReviewStand at the production URL and invalid capability data, requires current-generation PCM/correlation, and fails on owned leaks. CI and repository-local no-mistakes run this same command.
+
+Long browser lifecycle scenarios are separate:
 
 ```sh
+./verify-extended
+```
+
+Canonical-host exact-cache commands are `./verify-local-lfm`, `./verify-silero-kseniya`, `./verify-real-stt`, and `./verify-canonical-host`. Frozen benchmark/evidence integrity is `./verify-evidence`; it is not an active runtime gate. Every extended command has a hard outer timeout. See [`docs/testing.md`](docs/testing.md) for phase ownership, timeouts, transition traceability, and the unchanged physical Acceptance tier.
+
+The narrow immutable-release check remains available without the test runtime:
+
+```sh
+./verify --tracer-only
 ./verify --output-directory ./slice-1-artifacts
 ```
 
-The command reports each preserved path. Both PCM files use signed 16-bit little-endian mono samples at 16 kHz; `output.pcm` contains the deterministic audible tone. The destination must not already exist, preventing accidental replacement of prior evidence. The toolchain is a Slice 1 reproducibility choice only; it does not select the future production application or inference framework.
+The destination must not already exist. The preserved deterministic tracer PCM is signed 16-bit little-endian mono at 16 kHz; it is reproducibility evidence, not physical microphone or speaker acceptance.
 
 ## Slice 6 Silero/Kseniya development application
 
@@ -33,6 +45,7 @@ One-time setup acquires pinned LiveKit/browser tooling and verifies local model 
 ```sh
 ./setup-slice6
 ./setup-silero-kseniya
+(cd web && npm run build)
 cp .env.slice6.example .env.slice6
 ```
 
@@ -42,15 +55,9 @@ Generate a dedicated LiveKit key pair and fill every blank in ignored `.env.slic
 "${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
 ```
 
-The active app accepts no `LITELLM_*` or TTS-selection configuration. Run the model-free/full browser boundary and the two separate exact-cache checks:
+The active app accepts no `LITELLM_*` or TTS-selection configuration. `./verify` owns the model-free browser/runtime boundary. `./verify-local-lfm` and `./verify-silero-kseniya` are separate exact-cache canonical-host checks.
 
-```sh
-./verify-slice6
-./verify-local-lfm
-./verify-silero-kseniya
-```
-
-`./verify-silero-kseniya` loads exactly two resident CPU workers from the pinned read-only model cache, proves native 48-kHz totals, obsolete/current overlap with stale discard, full two-worker RSS/CPU, VAD/Whisper coexistence, and explicit controlled recovery. It writes content-free task evidence only under `~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship/`. It does not claim audibility, voice quality, physical barge-in, or the complete browser stack. `./verify-real-streaming` remains a historical Qwen compatibility harness and is not part of the active branch checks.
+`./verify-silero-kseniya` loads exactly two resident CPU workers from the pinned read-only model cache, proves native 48-kHz totals, obsolete/current overlap with stale discard, full two-worker RSS/CPU, VAD/Whisper coexistence, and explicit controlled recovery. It writes content-free task evidence only under `~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship/`. It does not claim audibility, voice quality, physical barge-in, or the complete browser stack. The historical Qwen/LiteLLM executable harnesses are retired; their dated evidence remains under the explicit `./verify-evidence` tier.
 
 Start the foreground development stack with:
 
@@ -62,13 +69,7 @@ Startup clears unrelated inherited `LITELLM_BASE_URL`/`LITELLM_TOKEN_FILE` befor
 
 ### Slice 7 avatar/UI verification and review stand
 
-Run the intentionally focused browser boundary:
-
-```sh
-./verify-slice7
-```
-
-It covers host/module compatibility and fallback, deterministic replay/bounds, UI state mapping, decoded-playout envelope normalization, microphone mute/reconnect semantics, both reduced-motion levels, the production build, and the separate review-fixture build. The browser evidence and explicit physical/full-stack gaps are recorded in [`docs/evidence/slice-7-ui-avatar.md`](docs/evidence/slice-7-ui-avatar.md).
+The full avatar/UI Vitest surface and production/review entry isolation run once in `./verify`; mute/reconnect browser lifecycle runs in `./verify-extended`. The browser evidence and explicit physical/full-stack gaps are recorded in [`docs/evidence/slice-7-ui-avatar.md`](docs/evidence/slice-7-ui-avatar.md).
 
 A clean committed head can be deployed for physical acceptance through the existing safe local runtime. The stable stand builds the ordinary production entry and starts local LFM, loopback LiveKit, gateway/controller, and STT/TTS. It configures no external exposure, proxy, firewall, or private-network route:
 
@@ -83,13 +84,7 @@ The launcher prints the exact compiled commit and stable loopback URL. The first
 
 ### Slice 8 failure/observability verification
 
-Run the focused bounded gate:
-
-```sh
-./verify-slice8
-```
-
-It executes all application architecture failure rows and their documented consequences, liveness-versus-compatible-readiness checks, a metadata-only correlated timeline and preregistered percentile report, default privacy rejection, opt-in capture plus the public deletion command when the lifetime runtime is available (otherwise persistent-root fail-closed behavior), one disposable real-process recovery bound, a safe 16-MiB/100-ms pressure sample, and focused System/Timeline/avatar-render/browser state tests. It does not stop shared services, manipulate external exposure, or exhaust RAM/VRAM.
+`./verify` executes every current failure/readiness/privacy owner, including public capture deletion and real disposable process-loss recovery. Detached guardian longevity belongs to `./verify-extended`. Neither tier stops shared services, manipulates external exposure, exhausts RAM/VRAM, or claims physical coverage.
 
 Default metadata diagnostics contain no conversation/media content, secrets, exception messages, or content-bearing identifiers. Explicit content capture is off by default. To enable it, add the exact settings documented in [`.env.slice6.example`](.env.slice6.example) to ignored server configuration. Development capture remains outside Git beneath the exact non-lingering `/run/user/<uid>` runtime tmpfs; the system service instead requires its systemd-owned `/run/voice-agent-v2` runtime directory so boot never depends on a user login. Read selected manifest status fields or delete a capture without enumerating its content. Deletion succeeds only while the capture still passes the lifetime-runtime, ownership, privacy-mode, manifest, and path guards:
 
@@ -102,12 +97,10 @@ Default metadata diagnostics contain no conversation/media content, secrets, exc
 
 ### Slice 9 single-host operations
 
-Run the CI-safe deterministic operational gate and, on the canonical host, the read-only exact-cache plus disposable transient-systemd preflight:
+The CI-safe deterministic operational owners run in `./verify`. On the canonical host, run the read-only exact-cache plus disposable transient-systemd preflight through its bounded wrapper:
 
 ```sh
-./verify-slice9
-"${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/runtime/venv/bin/python" \
-  ./scripts/verify_slice9_host.py
+./verify-canonical-host --config <mode-0600-sanitized-copy-outside-git>
 ```
 
 The second command starts no product service, uses no `sudo`, prints no secret, and touches only a uniquely named disposable user service. It creates a new private mode-`0700` deployment-state root under `/var/tmp`—not the smaller `XDG_RUNTIME_DIR` tmpfs to which the persistent 8-GiB bound does not apply—and deletes it on exit. It verifies exact selected artifacts/runtimes, ignored local configuration structure/mode, free-disk and active-cache bounds, then proves one completed restart and an actionable failed state. It does not inspect external exposure, reboot, or claim physical behavior. `--config <path>` may select a different mode-`0600` private file outside Git for a transitional read-only check.
@@ -205,6 +198,7 @@ See the authoritative inspection and migration boundary in [`docs/architecture.m
 | --- | --- |
 | [`CONTEXT.md`](CONTEXT.md) | Stable project vocabulary. |
 | [`docs/architecture.md`](docs/architecture.md) | Authoritative system boundaries, contracts, lifecycle, operations, provider/privacy rules, and resource policy. |
+| [`docs/testing.md`](docs/testing.md) | Canonical PR, extended/canonical-host, evidence-integrity, and physical verification tiers. |
 | [`docs/roadmap.md`](docs/roadmap.md) | Dependency-ordered implementation slices and their evidence gates. |
 | [`docs/adr/`](docs/adr/) | Accepted decisions that are costly or confusing to reverse. |
 

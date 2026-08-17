@@ -6,13 +6,8 @@ import types
 import unittest
 from unittest.mock import patch
 
-from tests.test_checkpoint_ab import (
-    CheckpointBLiveKitTests,
-    CheckpointBWarmupTests,
-    MemoryAudio,
-    MemoryEvents,
-    load_runtime,
-)
+from tests.support import realtime_fakes
+from tests.support.realtime_fakes import MemoryAudio, MemoryEvents, load_runtime
 from tests.test_silero_tts import FakeSTT, FakeVisibleLLM, ProcessCoordinator
 from voice_agent_v2.silero_tts import (
     SileroKseniyaTTS,
@@ -496,12 +491,8 @@ class TurnCorrelationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(runner.tts.released_turns)), 32)
 
 
-class PersistentLiveKitTrackTests(CheckpointBLiveKitTests):
+class PersistentLiveKitTrackTests(realtime_fakes.CheckpointBLiveKitTests):
     """Checkpoint B persistent publication behavior."""
-
-
-class ResidentQwenWarmupTests(CheckpointBWarmupTests):
-    """Checkpoint B discard-only resident Qwen warm-up behavior."""
 
 
 class CloseRetryTests(unittest.IsolatedAsyncioTestCase):

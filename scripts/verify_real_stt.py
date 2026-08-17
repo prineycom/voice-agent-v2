@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Automated public-corpus acceptance for Slice 3; physical microphone waits for Slice 5."""
+"""Canonical-host real STT verification with the pinned public corpus."""
 
 from __future__ import annotations
 
@@ -60,13 +60,13 @@ def main() -> int:
     }
     output = CACHE / "evidence" / "slice3-public-turn.json"
     output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    print("Slice 3 automated public-corpus acceptance")
+    print("Real STT canonical-host public-corpus verification")
     print(f"stt_identity: {stt.identity}")
     print(f"public_sample: {sample['id']}")
     print(f"transcript: {transcript}")
     print("terminal: turn.completed")
     print("temporary_audio_retained: false")
-    print("physical_microphone_acceptance: pending_until_slice5")
+    print("physical_microphone_acceptance: not_claimed_by_this_command")
     print("RESULT: PASS")
     return 0
 

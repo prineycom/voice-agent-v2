@@ -6,8 +6,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from importlib.metadata import version
-import hashlib
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -42,25 +42,13 @@ from voice_agent_v2.livekit_runtime import (
 from voice_agent_v2.local_lfm import LLAMA_ENDPOINT, MODEL_ALIAS, PROVIDER_IDENTITY
 from voice_agent_v2.silero_tts import (
     MANIFEST_PATH as SILERO_MANIFEST,
-    MODEL_PATH as SILERO_MODEL,
     MODEL_IDENTITY as SILERO_IDENTITY,
     MODEL_SHA256 as SILERO_SHA256,
     MODEL_SIZE as SILERO_SIZE,
     SileroKseniyaTTS,
 )
-from voice_agent_v2.local_vad import (
-    DEFAULT_MODEL_PATH as VAD_MODEL,
-    SILERO_MODEL_SHA256,
-    SILERO_MODEL_SIZE,
-)
+from voice_agent_v2.local_vad import SILERO_MODEL_SIZE
 from voice_agent_v2.slice6_config import Slice6Settings
-
-LFM_CACHE = Path("/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4")
-LFM_MODEL = LFM_CACHE / "model" / "LFM2.5-2.6B-Q4_K_M.gguf"
-LLAMA_SERVER = LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
-MODEL_SHA256 = "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14"
-BINARY_SHA256 = "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11"
-MODEL_SIZE = 1_674_454_848
 
 EXPECTED = {
     "livekit": "1.1.14",
@@ -267,31 +255,21 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
         raise AssertionError("cleanup failure admitted a replacement session")
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def verify_vad_contract() -> bool:
-    if not VAD_MODEL.is_file():
+    model = Path(
+        os.environ.get(
+            "VOICE_AGENT_SLICE6_CACHE",
+            str(Path.home() / ".cache/voice-agent-v2/slice-6"),
+        )
+    ) / "models/silero-vad-v6.onnx"
+    if not model.is_file():
         return False
-    if VAD_MODEL.stat().st_size != SILERO_MODEL_SIZE:
+    if model.stat().st_size != SILERO_MODEL_SIZE:
         raise AssertionError("pinned Silero VAD artifact size differs")
-    if sha256_file(VAD_MODEL) != SILERO_MODEL_SHA256:
-        raise AssertionError("pinned Silero VAD artifact identity differs")
     return True
 
 
-def verify_local_lfm_contract(settings: Slice6Settings) -> bool:
-    artifact_present = LFM_MODEL.is_file() and LLAMA_SERVER.is_file()
-    if artifact_present:
-        if LFM_MODEL.stat().st_size != MODEL_SIZE or sha256_file(LFM_MODEL) != MODEL_SHA256:
-            raise AssertionError("pinned local LFM artifact identity differs")
-        if sha256_file(LLAMA_SERVER) != BINARY_SHA256:
-            raise AssertionError("pinned llama.cpp binary identity differs")
+def verify_local_lfm_contract(settings: Slice6Settings) -> None:
     manifest = json.loads((ROOT / "config" / "local-lfm-v1.json").read_text())
     if not (
         manifest["provider_mode"] == "local"
@@ -311,10 +289,9 @@ def verify_local_lfm_contract(settings: Slice6Settings) -> bool:
         raise AssertionError("Slice 6 runner is not wired to the fixed local LFM provider")
     if not isinstance(runner.tts, SileroKseniyaTTS):
         raise AssertionError("Slice 6 composition root is not fixed directly to Silero/Kseniya")
-    return artifact_present
 
 
-def verify_silero_tts_contract() -> bool:
+def verify_silero_tts_contract() -> None:
     manifest = json.loads(SILERO_MANIFEST.read_text())
     if not (
         manifest["backend"] == "silero"
@@ -342,11 +319,6 @@ def verify_silero_tts_contract() -> bool:
         or adapter.capabilities["cooperative_cancel"] is not False
     ):
         raise AssertionError("composition-root Silero adapter contract differs")
-    if not SILERO_MODEL.is_file():
-        return False
-    if SILERO_MODEL.stat().st_size != SILERO_SIZE or sha256_file(SILERO_MODEL) != SILERO_SHA256:
-        raise AssertionError("pinned Silero/Kseniya artifact identity differs")
-    return True
 
 
 def main() -> int:
@@ -387,23 +359,22 @@ def main() -> int:
     if any((grants.room_admin, grants.room_create, grants.room_list, grants.room_record)):
         raise AssertionError("browser capability contains a management grant")
     vad_present = verify_vad_contract()
-    artifact_present = verify_local_lfm_contract(settings)
-    silero_present = verify_silero_tts_contract()
+    verify_local_lfm_contract(settings)
+    verify_silero_tts_contract()
     asyncio.run(verify_room_lifecycle_bounds(settings))
     print("Slice 6 installed-runtime contract: PASS")
     print("SDK pins: " + ", ".join(f"{name}={value}" for name, value in observed.items()))
     print("capability: one room, microphone publish, agent subscribe/data; no management grants")
     print("room lifecycle: startup cancellation drains; incomplete cleanup retains capacity")
-    print("local VAD: pinned Silero v6 CPU artifact hashes=" + ("verified" if vad_present else "not-present"))
+    print("local VAD: pinned Silero v6 CPU artifact shape=" + ("verified" if vad_present else "not-present"))
     print(
-        "Silero TTS: v2 manifest/composition fixed to kseniya/native48/two workers; exact cache hash="
-        + ("verified" if silero_present else "not-present (real integration check skipped)")
-        + "; CC-BY-NC-SA-4.0 private noncommercial evaluation only; no fallback"
+        "Silero TTS: v2 manifest/composition fixed to kseniya/native48/two workers; "
+        "exact-cache identity belongs to ./verify-silero-kseniya; "
+        "CC-BY-NC-SA-4.0 private noncommercial evaluation only; no fallback"
     )
     print(
-        "local LFM: manifest/provider wiring verified; exact cache hashes="
-        + ("verified" if artifact_present else "not-present (real integration check skipped)")
-        + "; loopback endpoint, 2 x 32768-token slots, no fallback"
+        "local LFM: manifest/provider wiring verified; exact-cache identity belongs to "
+        "./verify-local-lfm; loopback endpoint, 2 x 32768-token slots, no fallback"
     )
     print("network: no sockets opened; no model inference, microphone, or physical browser used")
     return 0

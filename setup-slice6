@@ -1,95 +1,16 @@
 #!/bin/sh
 set -eu
-
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
-VENV=$CACHE/runtime/venv
-TOOLING=$CACHE/tooling
-VERSION=1.13.5
-ARCHIVE=livekit_1.13.5_linux_amd64.tar.gz
-ARCHIVE_SHA256=c020fac437b7cc9b776eef1ad5ea8af77be9acfa07602eca20a3a44930dfbc70
-URL=https://github.com/livekit/livekit/releases/download/v1.13.5/$ARCHIVE
-BINARY=$TOOLING/livekit-server-v$VERSION
 LFM_CACHE=/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4
 LLAMA=$LFM_CACHE/runtime/llama-b10357-cuda13-build/bin/llama-server
 MODEL=$LFM_CACHE/model/LFM2.5-2.6B-Q4_K_M.gguf
 LLAMA_SHA256=08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11
 MODEL_SHA256=79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14
 MODEL_SIZE=1674454848
-VAD_DIR=$CACHE/models
-VAD_MODEL=$VAD_DIR/silero-vad-v6.onnx
-VAD_URL=https://raw.githubusercontent.com/SYSTRAN/faster-whisper/v1.2.1/faster_whisper/assets/silero_vad_v6.onnx
-VAD_SHA256=4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2
-VAD_SIZE=1245151
-VAD_SPEECH_FIXTURE=$CACHE/test-data/real-russian-speech.wav
 
-[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
-  echo "setup-slice6 supports only the measured Linux x86_64 host" >&2
-  exit 2
-}
-python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || {
-  echo "Python 3.11 or newer is required" >&2
-  exit 2
-}
-command -v curl >/dev/null && command -v sha256sum >/dev/null \
-  && command -v node >/dev/null && command -v npm >/dev/null || {
-  echo "curl, sha256sum, Node.js, and npm are required" >&2
-  exit 2
-}
-node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 20 && minor >= 19) || (major === 22 && minor >= 12) || major > 22 ? 0 : 1)' || {
-  echo "Node.js 20.19+, 22.12+, or newer is required by the pinned Vite runtime" >&2
-  exit 2
-}
-
-mkdir -p "$CACHE/runtime" "$TOOLING" "$VAD_DIR"
-if [ ! -x "$BINARY" ]; then
-  TEMP=$(mktemp -d "$CACHE/setup.XXXXXX")
-  trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-  curl --fail --location --proto '=https' --tlsv1.2 "$URL" --output "$TEMP/$ARCHIVE"
-  printf '%s  %s\n' "$ARCHIVE_SHA256" "$TEMP/$ARCHIVE" | sha256sum --check --status || {
-    echo "pinned LiveKit archive checksum mismatch" >&2
-    exit 2
-  }
-  tar -xzf "$TEMP/$ARCHIVE" -C "$TEMP" livekit-server
-  install -m 0755 "$TEMP/livekit-server" "$BINARY"
-  rm -rf "$TEMP"
-  trap - EXIT HUP INT TERM
-fi
-"$BINARY" --version | grep -F "$VERSION" >/dev/null || {
-  echo "cached LiveKit binary is not pinned v$VERSION" >&2
-  exit 2
-}
-
-if [ ! -f "$VAD_MODEL" ]; then
-  TEMP=$(mktemp -d "$CACHE/vad-setup.XXXXXX")
-  trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-  curl --fail --location --proto '=https' --tlsv1.2 "$VAD_URL" --output "$TEMP/silero-vad-v6.onnx"
-  printf '%s  %s\n' "$VAD_SHA256" "$TEMP/silero-vad-v6.onnx" | sha256sum --check --status || {
-    echo "pinned Silero VAD checksum mismatch" >&2
-    exit 2
-  }
-  [ "$(stat -c '%s' "$TEMP/silero-vad-v6.onnx")" = "$VAD_SIZE" ] || {
-    echo "pinned Silero VAD size mismatch" >&2
-    exit 2
-  }
-  install -m 0644 "$TEMP/silero-vad-v6.onnx" "$VAD_MODEL"
-  rm -rf "$TEMP"
-  trap - EXIT HUP INT TERM
-fi
-printf '%s  %s\n' "$VAD_SHA256" "$VAD_MODEL" | sha256sum --check --status || {
-  echo "cached Silero VAD checksum mismatch" >&2
-  exit 2
-}
-[ "$(stat -c '%s' "$VAD_MODEL")" = "$VAD_SIZE" ] || {
-  echo "cached Silero VAD size mismatch" >&2
-  exit 2
-}
-python3 "$ROOT/scripts/acquire_vad_speech_fixture.py" "$VAD_SPEECH_FIXTURE"
-
-# TTS setup is verify-only: the exact existing cache is accepted or reported
-# absent, and no Silero artifact is downloaded, copied, or substituted.
+"$ROOT/setup-test-runtime"
 "$ROOT/setup-silero-kseniya" --allow-absent
-
 if [ -x "$LLAMA" ] && [ -f "$MODEL" ]; then
   printf '%s  %s\n' "$LLAMA_SHA256" "$LLAMA" | sha256sum --check --status || {
     echo "pinned llama.cpp server checksum mismatch" >&2
@@ -99,24 +20,13 @@ if [ -x "$LLAMA" ] && [ -f "$MODEL" ]; then
     echo "pinned local LFM model checksum mismatch" >&2
     exit 2
   }
-  [ "$(stat -c '%s' "$MODEL")" = "$MODEL_SIZE" ] || {
+  [ "$(stat -c %s "$MODEL")" = "$MODEL_SIZE" ] || {
     echo "pinned local LFM model size mismatch" >&2
     exit 2
   }
   echo "Pinned local LFM cache verified: $LFM_CACHE"
 else
-  echo "Pinned local LFM cache absent; deterministic setup will not download an alternate model/runtime."
-  echo "The host app and ./verify-local-lfm remain unavailable until the exact Issue #15 cache is present."
+  echo "Pinned local LFM cache absent; no alternate model/runtime was downloaded."
 fi
-
-if [ ! -x "$VENV/bin/python" ]; then
-  python3 -m venv "$VENV"
-fi
-"$VENV/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements-slice6.lock"
-(
-  cd "$ROOT/web"
-  npm ci --ignore-scripts
-  npm run build
-)
-
-echo "Slice 6 tooling ready outside Git: $CACHE"
+echo "Slice 6 dependencies ready outside Git: $CACHE"
+echo "Run ./verify for checks; production/review builds are never implicit setup work."

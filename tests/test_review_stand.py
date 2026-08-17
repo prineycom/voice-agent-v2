@@ -22,7 +22,13 @@ class ReviewStandStatusTests(unittest.TestCase):
             (root / "tmp").mkdir()
             runner = root / "scripts/run_slice6.py"
             runner.parent.mkdir()
-            runner.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+            runner.write_text(
+                "#!/bin/sh\n"
+                "trap 'kill \"$child\" 2>/dev/null || :; wait \"$child\" 2>/dev/null || :; exit 0' TERM INT\n"
+                "sleep 30 & child=$!\n"
+                "wait \"$child\"\n",
+                encoding="utf-8",
+            )
             runner.chmod(0o755)
             fake_bin = root / "bin"
             fake_bin.mkdir()

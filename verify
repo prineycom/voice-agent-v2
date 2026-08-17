@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 umask 077
+CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.cache"}
 if [ -n "${VOICE_AGENT_MUTABLE_STATE_ROOT:-}" ]; then
   MUTABLE_ROOT=$VOICE_AGENT_MUTABLE_STATE_ROOT
 elif [ -n "${XDG_RUNTIME_DIR:-}" ]; then
@@ -13,19 +14,30 @@ case "$MUTABLE_ROOT" in
   /*) ;;
   *) echo "voice-agent mutable state root must be absolute" >&2; exit 2 ;;
 esac
-[ ! -L "$MUTABLE_ROOT" ] || { echo "voice-agent mutable state root must not be a symlink" >&2; exit 2; }
+[ ! -L "$MUTABLE_ROOT" ] || {
+  echo "voice-agent mutable state root must not be a symlink" >&2
+  exit 2
+}
 mkdir -p "$MUTABLE_ROOT"
-[ "$(stat -c %u "$MUTABLE_ROOT")" = "$(id -u)" ] && [ "$(stat -c %a "$MUTABLE_ROOT")" = 700 ] || {
+[ "$(stat -c %u "$MUTABLE_ROOT")" = "$(id -u)" ] \
+  && [ "$(stat -c %a "$MUTABLE_ROOT")" = 700 ] || {
   echo "voice-agent mutable state root must be private and user-owned" >&2
   exit 2
 }
 mkdir -p "$MUTABLE_ROOT/verify"
 RUN_ROOT=$(mktemp -d "$MUTABLE_ROOT/verify/run.XXXXXX")
-trap 'rm -rf "$RUN_ROOT"' EXIT HUP INT TERM
-mkdir -p "$RUN_ROOT/home" "$RUN_ROOT/cache" "$RUN_ROOT/temp" "$RUN_ROOT/pycache"
-HOME="$RUN_ROOT/home" \
-XDG_CACHE_HOME="$RUN_ROOT/cache" \
-TMPDIR="$RUN_ROOT/temp" \
-PYTHONPYCACHEPREFIX="$RUN_ROOT/pycache" \
+cleanup() {
+  rm -rf "$RUN_ROOT"
+}
+trap cleanup EXIT HUP INT TERM
+mkdir -p "$RUN_ROOT/home" "$RUN_ROOT/temp" "$RUN_ROOT/pycache"
+BUDGET=90
+for argument in "$@"; do
+  [ "$argument" != "--extended" ] || BUDGET=600
+done
+VOICE_AGENT_VERIFY_RUN_ROOT="$RUN_ROOT" \
+VOICE_AGENT_TEST_CACHE_HOME="$CACHE_HOME" \
+VOICE_AGENT_BUILD_ID="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf unknown)" \
 LC_ALL=C.UTF-8 \
-python3 -I -B "$ROOT/scripts/verify.py" "$@"
+timeout --signal=TERM --kill-after=10s "${BUDGET}s" \
+  python3 -I -B "$ROOT/scripts/verify.py" "$@"

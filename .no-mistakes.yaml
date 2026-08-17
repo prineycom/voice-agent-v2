@@ -1,2 +1,3 @@
-# Behavioral CI is required for executable slices; see .github/workflows/behavioral.yml.
-{}
+# `commands.test` is the repository key accepted by installed no-mistakes v1.48.0.
+commands:
+  test: "./verify"

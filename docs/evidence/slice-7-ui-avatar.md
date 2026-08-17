@@ -7,7 +7,8 @@
 Run from the repository root:
 
 ```sh
-./verify-slice7
+./verify           # full Vitest surface and both isolated entry builds once
+./verify-extended  # long mute/reconnect/diagnostics browser lifecycle
 ```
 
 The focused command covers:

@@ -12,7 +12,7 @@ This report preserves the pre-ADR-0009 Slice 6/Issue #15 checkpoint and distingu
 | Boundary | Pinned implementation | Evidence |
 | --- | --- | --- |
 | Local media server | official LiveKit Server `1.13.5`; release archive SHA-256 `c020fac437b7cc9b776eef1ad5ea8af77be9acfa07602eca20a3a44930dfbc70` | Cached binary reports `livekit-server version 1.13.5`; current generated restricted config started successfully. |
-| Server RTC/capability | official Python `livekit==1.1.14`, `livekit-api==1.2.0` | `scripts/verify_slice6_runtime.py` verifies installed versions and decodes the generated JWT without opening a socket. |
+| Server RTC/capability | official Python `livekit==1.1.14`, `livekit-api==1.2.0` | `scripts/verify_runtime_contract.py`, owned by `./verify`, verifies installed versions and decodes the generated JWT without opening a socket. |
 | Application glue | `fastapi==0.141.1`, `uvicorn==0.52.1` | Loopback-only gateway smoke returned exactly `{"available":true,"session_limit":1}` with no-store, CSP, microphone Permissions-Policy, and no provider endpoint. |
 | Browser | React `19.2.8`, TypeScript `7.0.2`, Vite `8.2.1`, official `livekit-client` `2.21.0` | Locked npm install, typecheck, then-current Vitest suite, and production build passed at the recorded checkpoint. |
 | Inference at this checkpoint | Existing `RealTurnController`, Whisper large-v3-turbo, fixed local official LFM2.5 Q4_K_M on llama.cpp, Qwen3 CustomVoice/`ryan` | Historical pre-ADR-0009 composition; the active branch replaces only this TTS leg as documented in the current evidence report. |
@@ -48,7 +48,8 @@ The deterministic interruption payload declares `drain_bound_ms=250`; the measur
 Command:
 
 ```sh
-./verify-slice6
+./verify
+./verify-extended
 ```
 
 Result: **PASS** after `./setup-slice6`:
@@ -81,7 +82,7 @@ The historical LiveKit JSON startup observation reported version `1.13.5` and UD
 
 The tracked [`config/local-lfm-v1.json`](../../config/local-lfm-v1.json) freezes the official model/runtime identity, loopback endpoint, two-slot/65,536-token shape, full GPU offload, flash attention/Jinja/reasoning parser, bounded Russian voice prompt and sampling/visible-output contract. `./setup-slice6` and `./run-slice6` verify the exact 1,674,454,848-byte model SHA-256 `79fdf003…bfee14` and llama.cpp binary SHA-256 `08625d7c…ac11`; they never acquire an alternate model.
 
-Focused real `./verify-local-lfm` and `./verify-real-streaming` runs on 2026-08-12 passed. The streaming check used the exact LFM endpoint plus resident Qwen and observed first PCM at about 11.07 s before total completion at about 13.16 s (17 chunks, no content logged); this proves real component overlap, not speaker audibility.
+Focused real `./verify-local-lfm` and the now-retired `./verify-real-streaming` run on 2026-08-12 passed. That historical streaming check used the exact LFM endpoint plus resident Qwen and observed first PCM at about 11.07 s before total completion at about 13.16 s (17 chunks, no content logged); it remains dated evidence, not supported current tooling or speaker audibility.
 
 The provider check recorded:
 

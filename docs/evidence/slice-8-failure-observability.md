@@ -26,7 +26,7 @@ A controlled five-component server report with an alive selected-LLM process but
 
 ## Complete controlled fault matrix
 
-Run `./verify-slice8`. Every row invokes the executable failure mapper and asserts its public consequence, retry/admission bound, and unchanged provider/privacy/auth/wake/avatar-selection facts. Existing controller/adapter/avatar/browser suites exercise the corresponding turn, cancellation, malformed-input, render-failure, disconnect, and duplicate-event behavior.
+Run `./verify`. Its explicit current-behavior manifest invokes every executable failure-map owner once and asserts the public consequence, retry/admission bound, and unchanged provider/privacy/auth/wake/avatar-selection facts. Existing controller/adapter/avatar/browser owners exercise the corresponding turn, cancellation, malformed-input, render-failure, disconnect, and duplicate-event behavior; detached guardian longevity is in `./verify-extended`.
 
 The authoritative dispositions and admission/retry consequences are in [`architecture.md` §7.1](../architecture.md#71-executable-user-state-mapping); this evidence records only how every owned matrix row was exercised.
 
@@ -103,15 +103,13 @@ The safe real resource case allocates exactly 16 MiB, applies about 100 ms bound
 ## Validation commands
 
 ```sh
-./verify-slice8
 ./verify
+./verify-extended
 ./verify-local-lfm
 ./verify-silero-kseniya
-./verify-slice7
-./verify-slice6
 ```
 
-`./verify-slice8` is the focused safe gate. The remaining commands are cumulative regression/exact-cache gates required by repository memory; their current run results belong in the Slice 8 do report and PR checks.
+`./verify` is the one PR gate. The extended command owns detached/long lifecycle cases, while the exact-cache commands remain canonical-host evidence; none are cumulative PR reruns. See [`../testing.md`](../testing.md).
 
 ## Exact validation gaps
 

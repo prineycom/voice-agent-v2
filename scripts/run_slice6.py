@@ -532,7 +532,7 @@ def main() -> int:
     if not binary.is_file() or not os.access(binary, os.X_OK) or not python.is_file():
         raise RuntimeError("Slice 6 tooling is missing; run ./setup-slice6")
     if not settings.web_dist.is_dir():
-        raise RuntimeError("Slice 6 web build is missing; run ./setup-slice6")
+        raise RuntimeError("Slice 6 web build is missing; run (cd web && npm run build)")
     verify_local_lfm_artifacts()
     silero_metadata = verify_silero_runtime()
     require_runtime_ports_free()

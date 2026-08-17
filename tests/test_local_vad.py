@@ -131,8 +131,8 @@ class SileroSpeechEndpointTests(unittest.TestCase):
             str(cache / "voice-agent-v2/slice-6/test-data/real-russian-speech.wav"),
         ))
         model = cache / "voice-agent-v2/slice-6/models/silero-vad-v6.onnx"
-        self.assertTrue(fixture.is_file(), "setup-slice6 must acquire the pinned public speech fixture")
-        self.assertTrue(model.is_file(), "setup-slice6 must acquire the pinned Silero model")
+        self.assertTrue(fixture.is_file(), "setup-test-runtime must acquire the pinned public speech fixture")
+        self.assertTrue(model.is_file(), "setup-test-runtime must acquire the pinned Silero model")
         endpoint = SileroSpeechEndpoint(SileroOnnxModel(model))
         signals = []
         with wave.open(str(fixture), "rb") as source:

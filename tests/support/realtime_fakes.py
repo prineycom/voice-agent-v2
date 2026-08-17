@@ -12,11 +12,9 @@ from voice_agent_v2.contracts import (
     EventEnvelope,
     LLM_VERSION,
     STT_VERSION,
-    valid_correlation_id,
 )
 from voice_agent_v2.v2_audio import OUTPUT_DELIVERY_BLOCK_BYTES, TTS_OUTPUT_AUDIO_FORMAT
 from voice_agent_v2.v2_contracts import TTS_V2_VERSION
-from voice_agent_v2.local_tts import Qwen3TTS
 from voice_agent_v2.real_turn import RealTurnController
 import voice_agent_v2.realtime as realtime_module
 from voice_agent_v2.realtime import RealtimeSession
@@ -658,53 +656,6 @@ def load_runtime():
     sys.modules["livekit.rtc"] = rtc
     sys.modules.pop("voice_agent_v2.livekit_runtime", None)
     return importlib.import_module("voice_agent_v2.livekit_runtime")
-
-
-class CheckpointBWarmupTests(unittest.TestCase):
-    def test_real_public_synthesis_warmup_is_discarded_and_keeps_process(self) -> None:
-        class FakeResidentQwen(Qwen3TTS):
-            def __init__(self) -> None:
-                self.pid = 4242
-                self.requests: list[tuple[str, str]] = []
-
-            @property
-            def process_id(self) -> int | None:
-                return self.pid
-
-            def start(self, cancellation=None) -> dict:
-                del cancellation
-                return {"speaker": "ryan"}
-
-            def stream_synthesize(self, **arguments):
-                session_id = arguments["session_id"]
-                turn_id = arguments["turn_id"]
-                if not valid_correlation_id(session_id) or not valid_correlation_id(turn_id):
-                    raise AssertionError("warm-up bypassed the public correlation contract")
-                self.requests.append((session_id, turn_id))
-                yield b"\0\0" * 320
-                yield b"\1\0" * 320
-
-        tts = FakeResidentQwen()
-        metadata = tts.warmup()
-        later = tuple(tts.stream_synthesize(
-            session_id="session-test",
-            turn_id="turn-test",
-            text="Ответ.",
-            audio_format=tts.output_format,
-        ))
-
-        self.assertEqual(metadata, {
-            "process_id": 4242,
-            "chunk_count": 2,
-            "output_bytes": 1280,
-            "discarded": True,
-        })
-        self.assertEqual(tts.process_id, 4242)
-        self.assertEqual(tts.requests, [
-            ("warmup-session", "warmup-turn"),
-            ("session-test", "turn-test"),
-        ])
-        self.assertEqual(len(later), 2)
 
 
 class CheckpointBLiveKitTests(unittest.IsolatedAsyncioTestCase):

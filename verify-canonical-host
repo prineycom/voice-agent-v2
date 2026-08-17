@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PYTHON=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6/runtime/venv/bin/python
+[ -x "$PYTHON" ] || { echo 'test runtime is missing; run ./setup-test-runtime' >&2; exit 2; }
+PYTHONPATH="$ROOT/src:$ROOT" exec python3 -I -B "$ROOT/scripts/run_bounded.py" --timeout 600 -- \
+  "$PYTHON" -B "$ROOT/scripts/verify_slice9_host.py" "$@"

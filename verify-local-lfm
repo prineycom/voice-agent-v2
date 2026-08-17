@@ -1,5 +1,5 @@
 #!/bin/sh
 set -eu
-
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-exec python3 -B "$ROOT/scripts/verify_local_lfm.py" "$@"
+PYTHONPATH="$ROOT/src:$ROOT" exec python3 -I -B "$ROOT/scripts/run_bounded.py" --timeout 600 -- \
+  python3 -B "$ROOT/scripts/verify_local_lfm.py" "$@"

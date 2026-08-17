@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -453,6 +455,39 @@ class CaptureAndResourceTests(unittest.TestCase):
             self.assertTrue(DiagnosticContentCapture.delete_path(
                 capture.path, runtime_root=Path(directory)
             ))
+            self.assertFalse(capture.path.exists())
+
+    @patch(
+        "voice_agent_v2.diagnostics.require_lifetime_runtime_root",
+        side_effect=lambda path: path.expanduser().resolve(),
+    )
+    def test_public_capture_delete_command_removes_private_content(
+        self, _runtime_root
+    ) -> None:
+        from scripts import manage_diagnostics
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            capture = DiagnosticContentCapture(
+                Path(directory) / "private",
+                "session-public-delete",
+                opt_in=True,
+                ttl_seconds=60,
+                guardian_factory=lambda *_arguments: None,
+                runtime_root=Path(directory),
+            )
+            capture.capture("transcript", "synthetic private diagnostic")
+            output = io.StringIO()
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    ["manage-diagnostics", "delete", str(capture.path)],
+                ),
+                patch.dict(os.environ, {"XDG_RUNTIME_DIR": directory}),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(manage_diagnostics.main(), 0)
+            self.assertEqual(json.loads(output.getvalue())["deleted"], True)
             self.assertFalse(capture.path.exists())
 
     @patch(

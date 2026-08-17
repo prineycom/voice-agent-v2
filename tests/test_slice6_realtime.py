@@ -9,9 +9,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tests.test_checkpoint_ab import (
+from tests.support import realtime_fakes
+from tests.support.realtime_fakes import (
     CapacityAudio,
-    CheckpointARealtimeTests,
     MemoryAudio,
     MemoryEvents,
     StreamingRunner,
@@ -1719,7 +1719,7 @@ class CooperativeCleanupBarrierTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
 
 
-class RealtimeCheckpointTests(CheckpointARealtimeTests):
+class RealtimeCheckpointTests(realtime_fakes.CheckpointARealtimeTests):
     """Checkpoint A behavior is the realtime regression contract."""
 
 
