@@ -16,7 +16,7 @@ from .slice6_config import Slice6Settings, app_origin_allowed
 async def lifespan(app: FastAPI):
     settings = Slice6Settings.from_environment()
     if not settings.web_dist.is_dir() or not (settings.web_dist / "index.html").is_file():
-        raise RuntimeError("Slice 6 web build is missing; run ./setup-slice6")
+        raise RuntimeError("Slice 6 web build is missing; run (cd web && npm run build)")
     registry = SessionRegistry(settings)
     try:
         await registry.start()

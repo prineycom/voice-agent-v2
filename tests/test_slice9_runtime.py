@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import os
 from pathlib import Path
 import socket
 import threading
@@ -16,13 +15,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@unittest.skipUnless(
-    os.environ.get("VOICE_AGENT_VERIFY_SLICE6_RUNTIME") == "1",
-    "requires the pinned Slice 6 runtime",
-)
 class Slice9RuntimeTests(unittest.TestCase):
     def test_registry_closes_admission_before_shutdown_drain(self) -> None:
-        from tests.test_checkpoint_ab import load_runtime
+        from tests.support.realtime_fakes import load_runtime
 
         runtime = load_runtime()
 

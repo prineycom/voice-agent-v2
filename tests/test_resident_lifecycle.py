@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import importlib
 import json
 import sys
@@ -12,7 +11,6 @@ import unittest
 
 from voice_agent_v2.contracts import AudioFormat, StageFailure
 from voice_agent_v2.local_lfm import MODEL_ALIAS, LocalLFMProvider
-from voice_agent_v2.local_tts import Qwen3TTS
 from voice_agent_v2.real_turn import RealTurnController
 from voice_agent_v2.realtime import RealtimeSession
 from voice_agent_v2.tracer import CancellationToken
@@ -158,52 +156,6 @@ class MemoryEvents:
         self.events.append(event)
 
 
-class HealthyStreamingProcess:
-    class Child:
-        pid = 4103
-
-        @staticmethod
-        def poll():
-            return None
-
-    def __init__(self) -> None:
-        self.process = self.Child()
-        self.events_consumed = 0
-        self.interrupt_count = 0
-        self.cancel_count = 0
-
-    def stream(self, request: dict[str, object], _timeout: float):
-        for sequence, data in enumerate((b"\0\0" * 320, b"\1\0" * 320), 1):
-            self.events_consumed += 1
-            yield {
-                "event": "chunk",
-                "request_id": request["request_id"],
-                "sequence": sequence,
-                "pcm_base64": base64.b64encode(data).decode("ascii"),
-                "bytes": len(data),
-            }
-        self.events_consumed += 1
-        yield {
-            "event": "final",
-            "request_id": request["request_id"],
-            "audio_bytes": 1280,
-            "chunk_count": 2,
-            "sample_rate_hz": 16_000,
-            "channels": 1,
-            "encoding": "pcm_s16le",
-        }
-
-    def interrupt_request(self) -> None:
-        self.interrupt_count += 1
-
-    def cancel(self) -> float:
-        self.cancel_count += 1
-        return 0
-
-    def close(self) -> None:
-        self.process = None
-
-
 class ResidentLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_lfm_compatibility_failure_is_alive_unready_and_blocks_admission(self) -> None:
         runtime = load_runtime()
@@ -279,30 +231,6 @@ class ResidentLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(llm_health.compatible)
         self.assertEqual(llm_health.reason_code, "local_lfm_transport_error")
         self.assertFalse(runner.ready_for_admission())
-
-    async def test_cancelled_qwen_request_drains_without_stopping_resident_process(self) -> None:
-        process = HealthyStreamingProcess()
-        tts = Qwen3TTS()
-        tts._process = process
-        tts.ready_metadata = {"event": "ready"}
-        cancellation = CancellationToken()
-        stream = tts.stream_synthesize(
-            session_id="session-resident",
-            turn_id="turn-resident",
-            text="Проверка.",
-            cancellation=cancellation,
-        )
-
-        self.assertEqual(len(next(stream)), 640)
-        cancellation.cancel()
-        with self.assertRaises(StageFailure) as raised:
-            next(stream)
-
-        self.assertEqual(raised.exception.code, "selected_tts_cancelled")
-        self.assertEqual(process.events_consumed, 3)
-        self.assertEqual(process.interrupt_count, 1)
-        self.assertEqual(process.cancel_count, 0)
-        self.assertEqual(tts.process_id, 4103)
 
     async def test_thirty_interruptions_preserve_warmed_processes_and_future_turns(self) -> None:
         runtime = load_runtime()

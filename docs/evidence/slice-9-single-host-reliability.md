@@ -110,7 +110,7 @@ gateway admission + turn/resident-worker drain → LiveKit → local LLM
 
 The hard startup boundary is 300 seconds for exact release/artifact hashing, two bounded runtime probes, and the runner's sequential 80-second readiness allowance. The gateway drain is bounded at 54 seconds, followed by eight seconds each for LiveKit and local LLM; that 70-second graceful total plus one reserved forced-reap second per role gives a 73-second ordered maximum below systemd's 75-second hard `KillMode=mixed` boundary. Service-owned diagnostic guardians remove their captures and exit when the authoritative main PID generation ends, while development guardians retain independent TTL. The unit uses `Type=notify`; the main process emits readiness only after the five-component report passes and every local listener belongs to its expected process tree, while install/reconciliation and rollback also match the public release ID. Fresh bounded operational-health probes cover both the LiveKit listener and local-LFM `/health`, including a living process that no longer serves correctly. Runtime exit `1` may complete one restart after five seconds; `StartLimitBurst=2` across an infinite interval stops the next attempt. Supported install/reconciliation and rollback activations reset the failed/start-rate state immediately before their one manual start, leaving exactly one subsequent automatic recovery rather than consuming a lifetime counter. Compatibility exit `2` is `RestartPreventExitStatus` and never retries. This service recovery is not an inference request retry.
 
-The current `./verify-slice9` starts and gracefully stops three disposable application-owned processes in the exact declared order, with zero orphans and zero hard kills. On the real canonical stack:
+The canonical `./verify` startup owner starts and gracefully stops three disposable application-owned processes in the exact declared order, with zero orphans and zero hard kills. On the real canonical stack:
 
 - local LFM loss produced runtime exit `1`, full reverse cleanup, and no surviving project process;
 - LiveKit loss produced the same bounded failed state and cleanup;
@@ -143,15 +143,13 @@ This proves threshold evaluation, sample-count enforcement, and bounded scalar/r
 ## Validation commands
 
 ```sh
-./verify-slice9
-./scripts/verify_slice9_host.py --config <mode-0600-sanitized-copy-outside-git>
 ./verify
 ./verify --tracer-only
-./verify-slice8
-./verify-slice7
-./verify-slice6
+./verify-extended
+./verify-canonical-host --config <mode-0600-sanitized-copy-outside-git>
 ./verify-local-lfm
 ./verify-silero-kseniya
+./verify-real-stt
 ```
 
 The host script performs read-only selected-artifact/local-config/cache checks plus one disposable user-systemd service; it does not inspect external exposure or install the product unit. Its deployment-state preflight uses a newly created private mode-`0700` directory under `/var/tmp`, the filesystem that would hold persistent deployment state, rather than `XDG_RUNTIME_DIR` tmpfs; the directory is removed on exit. This preserves the fixed 8-GiB free-space bound instead of weakening it to fit a smaller runtime tmpfs. Exact cumulative results are also recorded in the Slice 9 do report.

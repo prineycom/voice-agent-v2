@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -410,6 +411,95 @@ class SupervisorLifecycleTests(unittest.TestCase):
             ),
             [role for role, *_budget in stopped].index("livekit"),
         )
+
+    def test_real_process_loss_allows_one_recovery_then_stays_unready(self) -> None:
+        processes: list[subprocess.Popen[str]] = []
+
+        def start() -> subprocess.Popen[str]:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    "import time; print('ready',flush=True); time.sleep(30)",
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            assert process.stdout is not None
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            process.stdout.close()
+            processes.append(process)
+            return process
+
+        recoveries = 0
+        try:
+            process = start()
+            process.terminate()
+            process.wait(timeout=1)
+            self.assertIsNotNone(process.returncode)
+            if recoveries < 1:
+                process = start()
+                recoveries += 1
+            process.terminate()
+            process.wait(timeout=1)
+            self.assertEqual(recoveries, 1)
+            self.assertTrue(all(item.poll() is not None for item in processes))
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=1)
+
+    def test_three_real_processes_stop_in_declared_order_without_survivors(self) -> None:
+        supervisor = run_slice6.ProcessSupervisor()
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "shutdown.log"
+            roles = (
+                "local-llm",
+                "livekit",
+                "gateway-controller-stt-tts-provider",
+            )
+            processes: list[subprocess.Popen[str]] = []
+            try:
+                for role in roles:
+                    process = supervisor.start(
+                        [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import pathlib,signal,sys,time; "
+                                "path=pathlib.Path(sys.argv[1]); role=sys.argv[2]; "
+                                "signal.signal(signal.SIGTERM,lambda *_: "
+                                "(path.open('a').write(role+'\\n'),sys.exit(0))); "
+                                "print('ready',flush=True); time.sleep(30)"
+                            ),
+                            str(log),
+                            role,
+                        ],
+                        role=role,
+                        stdout=subprocess.PIPE,
+                        text=True,
+                    )
+                    assert process.stdout is not None
+                    self.assertEqual(process.stdout.readline().strip(), "ready")
+                    process.stdout.close()
+                    processes.append(process)
+                groups = [process.pid for process in processes]
+
+                supervisor.close(run_slice6.SHUTDOWN_ORDER)
+
+                self.assertTrue(all(process.poll() is not None for process in processes))
+                self.assertEqual(
+                    log.read_text(encoding="utf-8").splitlines(),
+                    list(run_slice6.SHUTDOWN_ORDER),
+                )
+                self.assertTrue(
+                    all(not run_slice6._process_group_exists(group) for group in groups)
+                )
+            finally:
+                supervisor.close(run_slice6.SHUTDOWN_ORDER)
 
     def test_close_kills_descendants_after_the_role_parent_exits(self) -> None:
         supervisor = run_slice6.ProcessSupervisor()

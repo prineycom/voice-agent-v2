@@ -1,0 +1,135 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice-agent-v2/slice-6
+VENV=$CACHE/runtime/venv
+TOOLING=$CACHE/tooling
+MODELS=$CACHE/models
+VERSION=1.13.5
+ARCHIVE=livekit_1.13.5_linux_amd64.tar.gz
+ARCHIVE_SHA256=c020fac437b7cc9b776eef1ad5ea8af77be9acfa07602eca20a3a44930dfbc70
+LIVEKIT_URL=https://github.com/livekit/livekit/releases/download/v1.13.5/$ARCHIVE
+LIVEKIT=$TOOLING/livekit-server-v$VERSION
+GECKODRIVER_VERSION=0.37.1
+GECKODRIVER_ARCHIVE=geckodriver-v0.37.1-linux64.tar.gz
+GECKODRIVER_URL=https://github.com/mozilla/geckodriver/releases/download/v0.37.1/$GECKODRIVER_ARCHIVE
+GECKODRIVER_SHA256=e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e
+GECKODRIVER=$TOOLING/geckodriver-v$GECKODRIVER_VERSION
+VAD=$MODELS/silero-vad-v6.onnx
+VAD_URL=https://raw.githubusercontent.com/SYSTRAN/faster-whisper/v1.2.1/faster_whisper/assets/silero_vad_v6.onnx
+VAD_SHA256=4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2
+VAD_SIZE=1245151
+SPEECH_FIXTURE=$CACHE/test-data/real-russian-speech.wav
+
+download() {
+  # One bounded transfer may retry transient 429/5xx/connect failures without
+  # letting curl's per-attempt timer escape the setup owner.
+  timeout --signal=TERM --kill-after=5s 75s \
+    curl --fail --location --proto '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 45 \
+      --retry 2 --retry-delay 2 --retry-all-errors --retry-max-time 70 \
+      "$1" --output "$2"
+}
+
+[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
+  echo "setup-test-runtime supports Linux x86_64" >&2
+  exit 2
+}
+command -v curl >/dev/null && command -v timeout >/dev/null \
+  && command -v sha256sum >/dev/null && command -v node >/dev/null \
+  && command -v npm >/dev/null || {
+  echo "curl, timeout, sha256sum, Node.js, and npm are required" >&2
+  exit 2
+}
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || {
+  echo "Python 3.11 or newer is required" >&2
+  exit 2
+}
+node -e 'const [major,minor]=process.versions.node.split(".").map(Number); process.exit((major===20&&minor>=19)||(major===22&&minor>=12)||major>22?0:1)' || {
+  echo "Node.js 20.19+, 22.12+, or newer is required" >&2
+  exit 2
+}
+
+mkdir -p "$CACHE/runtime" "$TOOLING" "$MODELS"
+if [ ! -x "$LIVEKIT" ]; then
+  TEMP=$(mktemp -d "$CACHE/livekit-setup.XXXXXX")
+  trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+  download "$LIVEKIT_URL" "$TEMP/$ARCHIVE"
+  printf '%s  %s\n' "$ARCHIVE_SHA256" "$TEMP/$ARCHIVE" | sha256sum --check --status || {
+    echo "pinned LiveKit archive checksum mismatch" >&2
+    exit 2
+  }
+  tar -xzf "$TEMP/$ARCHIVE" -C "$TEMP" livekit-server
+  install -m 0755 "$TEMP/livekit-server" "$LIVEKIT"
+  rm -rf "$TEMP"
+  trap - EXIT HUP INT TERM
+fi
+"$LIVEKIT" --version | grep -F "$VERSION" >/dev/null || {
+  echo "cached LiveKit binary is not pinned v$VERSION" >&2
+  exit 2
+}
+
+if [ ! -x "$GECKODRIVER" ]; then
+  TEMP=$(mktemp -d "$CACHE/geckodriver-setup.XXXXXX")
+  trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+  download "$GECKODRIVER_URL" "$TEMP/$GECKODRIVER_ARCHIVE"
+  printf '%s  %s\n' "$GECKODRIVER_SHA256" "$TEMP/$GECKODRIVER_ARCHIVE" | sha256sum --check --status || {
+    echo "pinned geckodriver archive checksum mismatch" >&2
+    exit 2
+  }
+  tar -xzf "$TEMP/$GECKODRIVER_ARCHIVE" -C "$TEMP" geckodriver
+  install -m 0755 "$TEMP/geckodriver" "$GECKODRIVER"
+  rm -rf "$TEMP"
+  trap - EXIT HUP INT TERM
+fi
+"$GECKODRIVER" --version | grep -F "geckodriver $GECKODRIVER_VERSION" >/dev/null || {
+  echo "cached geckodriver is not pinned v$GECKODRIVER_VERSION" >&2
+  exit 2
+}
+
+if [ ! -f "$VAD" ]; then
+  TEMP=$(mktemp -d "$CACHE/vad-setup.XXXXXX")
+  trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+  download "$VAD_URL" "$TEMP/silero-vad-v6.onnx"
+  printf '%s  %s\n' "$VAD_SHA256" "$TEMP/silero-vad-v6.onnx" | sha256sum --check --status || {
+    echo "pinned Silero VAD checksum mismatch" >&2
+    exit 2
+  }
+  [ "$(stat -c %s "$TEMP/silero-vad-v6.onnx")" = "$VAD_SIZE" ] || {
+    echo "pinned Silero VAD size mismatch" >&2
+    exit 2
+  }
+  install -m 0644 "$TEMP/silero-vad-v6.onnx" "$VAD"
+  rm -rf "$TEMP"
+  trap - EXIT HUP INT TERM
+fi
+printf '%s  %s\n' "$VAD_SHA256" "$VAD" | sha256sum --check --status || {
+  echo "cached Silero VAD checksum mismatch" >&2
+  exit 2
+}
+[ "$(stat -c %s "$VAD")" = "$VAD_SIZE" ] || {
+  echo "cached Silero VAD size mismatch" >&2
+  exit 2
+}
+# The acquisition script gives each of its two HTTPS requests a 60-second timeout;
+# this outer deadline also bounds parsing, checksum, and replacement.
+timeout --signal=TERM --kill-after=5s 130s \
+  python3 "$ROOT/scripts/acquire_vad_speech_fixture.py" "$SPEECH_FIXTURE"
+
+if [ ! -x "$VENV/bin/python" ]; then
+  python3 -m venv "$VENV"
+fi
+PIP_DISABLE_PIP_VERSION_CHECK=1 timeout --signal=TERM --kill-after=5s 90s \
+  "$VENV/bin/python" -m pip install --timeout 15 --retries 2 \
+  -r "$ROOT/requirements-slice6.lock"
+(
+  cd "$ROOT/web"
+  npm_config_fetch_timeout=60000 \
+  npm_config_fetch_retry_mintimeout=1000 \
+  npm_config_fetch_retry_maxtimeout=5000 \
+    timeout --signal=TERM --kill-after=5s 90s npm ci --ignore-scripts
+)
+
+echo "PR test dependencies ready outside Git: $CACHE"
+echo "No tests, typecheck, or build were run; ./verify owns those phases."

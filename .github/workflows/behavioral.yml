@@ -7,25 +7,36 @@ permissions:
   contents: read
 
 jobs:
-  slice-1-tracer:
+  pr-verification:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 3
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
+        timeout-minutes: 1
         with:
           fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
+        timeout-minutes: 1
         with:
           python-version: "3.12"
       - name: Set up Node
         uses: actions/setup-node@v4
+        timeout-minutes: 1
         with:
           node-version: "22"
-      - name: Acquire pinned Slice 6 test tooling outside Git
-        run: ./setup-slice6
-      - name: Run Slice 8 failure, readiness, privacy, and safe resource boundaries
-        run: ./verify-slice8
-      - name: Run deterministic controller and browser boundaries
-        run: ./verify-slice6
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Restore pinned test-runtime cache
+        uses: actions/cache@v4
+        timeout-minutes: 1
+        with:
+          path: ~/.cache/voice-agent-v2/slice-6
+          key: pr-test-runtime-${{ runner.os }}-py312-node22-${{ hashFiles('requirements-slice6.lock', 'web/package-lock.json', 'setup-test-runtime') }}
+      - name: Install bounded test dependencies without running checks or builds
+        timeout-minutes: 2
+        run: ./setup-test-runtime
+      - name: Run the one canonical PR gate
+        timeout-minutes: 2
+        run: ./verify
