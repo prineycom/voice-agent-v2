@@ -19,7 +19,7 @@ Provision pinned PR dependencies without running tests or builds, then use the o
 ./verify
 ```
 
-`./verify` has a hard 90-second monotonic deadline, explicit Python/local-socket/web/browser phases, zero tolerated skips, process-group plus detached-child cleanup, the full Vitest surface once, one typecheck, one build per entry mode, and a short production Firefox smoke over an actual task-owned local LiveKit. The smoke rejects ReviewStand at the production URL and invalid capability data, requires current-generation PCM/correlation, and fails on owned leaks. CI and repository-local no-mistakes run this same command.
+`./verify` has a hard 90-second monotonic deadline, explicit Python/local-socket/web/browser phases, zero tolerated skips, process-group plus detached-child cleanup, the full Vitest surface once, one typecheck, one build per entry mode, and a short production Firefox smoke over an actual task-owned local LiveKit. The smoke rejects ReviewStand at the production URL and invalid capability data, requires current-generation PCM/correlation, and fails on owned leaks. GitHub CI runs this same bounded command at the exact pull-request head.
 
 Long browser lifecycle scenarios are separate:
 
@@ -28,6 +28,8 @@ Long browser lifecycle scenarios are separate:
 ```
 
 Canonical-host exact-cache commands are `./verify-local-lfm`, `./verify-silero-kseniya`, `./verify-real-stt`, and `./verify-canonical-host`. Frozen benchmark/evidence integrity is `./verify-evidence`; it is not an active runtime gate. Every extended command has a hard outer timeout. See [`docs/testing.md`](docs/testing.md) for phase ownership, timeouts, transition traceability, and the unchanged physical Acceptance tier.
+
+The direct pull-request path is intentionally simple: run `./verify` locally once, push the feature branch, open or update its pull request, and let GitHub CI run the same command at the exact head. Do not add a parallel repository-owned review/fix pipeline or rerun cumulative slice gates.
 
 The narrow immutable-release check remains available without the test runtime:
 

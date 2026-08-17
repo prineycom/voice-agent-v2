@@ -29,6 +29,10 @@ Every phase is a separate process group. The owner sends `TERM`, waits at most 1
 
 `./verify --tracer-only` remains the narrow immutable-release recovery check. It does not run the PR suite and requires only Python 3.11+.
 
+### Direct pull-request path
+
+Run `./verify` locally once, push the feature branch, then open or update the pull request. GitHub CI runs the same bounded command at the exact branch head. No second repository-local review/fix pipeline or cumulative slice gate participates in shipping.
+
 ## Hosted extended tier
 
 ```sh
