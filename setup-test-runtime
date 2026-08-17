@@ -22,6 +22,16 @@ VAD_SHA256=4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2
 VAD_SIZE=1245151
 SPEECH_FIXTURE=$CACHE/test-data/real-russian-speech.wav
 
+download() {
+  # One bounded transfer may retry transient 429/5xx/connect failures without
+  # letting curl's per-attempt timer escape the setup owner.
+  timeout --signal=TERM --kill-after=5s 75s \
+    curl --fail --location --proto '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 45 \
+      --retry 2 --retry-delay 2 --retry-all-errors --retry-max-time 70 \
+      "$1" --output "$2"
+}
+
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {
   echo "setup-test-runtime supports Linux x86_64" >&2
   exit 2
@@ -45,9 +55,7 @@ mkdir -p "$CACHE/runtime" "$TOOLING" "$MODELS"
 if [ ! -x "$LIVEKIT" ]; then
   TEMP=$(mktemp -d "$CACHE/livekit-setup.XXXXXX")
   trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-  curl --fail --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 10 --max-time 60 \
-    "$LIVEKIT_URL" --output "$TEMP/$ARCHIVE"
+  download "$LIVEKIT_URL" "$TEMP/$ARCHIVE"
   printf '%s  %s\n' "$ARCHIVE_SHA256" "$TEMP/$ARCHIVE" | sha256sum --check --status || {
     echo "pinned LiveKit archive checksum mismatch" >&2
     exit 2
@@ -65,9 +73,7 @@ fi
 if [ ! -x "$GECKODRIVER" ]; then
   TEMP=$(mktemp -d "$CACHE/geckodriver-setup.XXXXXX")
   trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-  curl --fail --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 10 --max-time 60 \
-    "$GECKODRIVER_URL" --output "$TEMP/$GECKODRIVER_ARCHIVE"
+  download "$GECKODRIVER_URL" "$TEMP/$GECKODRIVER_ARCHIVE"
   printf '%s  %s\n' "$GECKODRIVER_SHA256" "$TEMP/$GECKODRIVER_ARCHIVE" | sha256sum --check --status || {
     echo "pinned geckodriver archive checksum mismatch" >&2
     exit 2
@@ -85,9 +91,7 @@ fi
 if [ ! -f "$VAD" ]; then
   TEMP=$(mktemp -d "$CACHE/vad-setup.XXXXXX")
   trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-  curl --fail --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 10 --max-time 60 \
-    "$VAD_URL" --output "$TEMP/silero-vad-v6.onnx"
+  download "$VAD_URL" "$TEMP/silero-vad-v6.onnx"
   printf '%s  %s\n' "$VAD_SHA256" "$TEMP/silero-vad-v6.onnx" | sha256sum --check --status || {
     echo "pinned Silero VAD checksum mismatch" >&2
     exit 2
