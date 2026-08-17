@@ -25,7 +25,7 @@ Then run the only PR command:
 5. TypeScript typecheck once, then one production and one review-fixture Vite build without repeated typecheck;
 6. a short production-entry Firefox smoke through an actual task-owned local LiveKit.
 
-Every phase is a separate process group. The owner sends `TERM`, waits at most 10 seconds, then sends `KILL`; detached children are found by a per-run environment nonce. A leaked process, TCP listener, or private artifact makes the gate fail even if final cleanup succeeds. Python skips also fail. The browser smoke is bounded to 15 seconds including cleanup and injects regressions for ReviewStand at the production URL, an invalid capability, missing current-generation PCM, and stale request/media correlation.
+Every phase is a separate process group. The owner sends `TERM`, waits at most 10 seconds, then sends `KILL`; detached children are found by a per-run environment nonce. A leaked process, TCP listener, or private artifact makes the gate fail even if final cleanup succeeds. Python skips also fail. Once its task-owned LiveKit and real Firefox are ready, the functional browser smoke is bounded to 15 seconds and injects regressions for ReviewStand at the production URL, an invalid capability, missing current-generation PCM, and stale request/media correlation. Cold Firefox/GeckoDriver provisioning remains inside the canonical 90-second deadline rather than weakening the behavior budget; browser cleanup has its own 10-second maximum and leak assertion.
 
 `./verify --tracer-only` remains the narrow immutable-release recovery check. It does not run the PR suite and requires only Python 3.11+.
 

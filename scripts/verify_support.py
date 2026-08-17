@@ -20,6 +20,21 @@ class VerificationDeadline(VerificationFailure):
     """The monotonic command deadline expired."""
 
 
+def assert_browser_smoke_budgets(
+    functional_seconds: float, cleanup_seconds: float
+) -> None:
+    """Keep the product probe short without charging cold tool provisioning to it."""
+    if functional_seconds > 15:
+        raise AssertionError(
+            "short Firefox/LiveKit functional smoke exceeded 15 seconds: "
+            f"{functional_seconds:.3f}s"
+        )
+    if cleanup_seconds > 10:
+        raise AssertionError(
+            f"Firefox/LiveKit owned cleanup exceeded 10 seconds: {cleanup_seconds:.3f}s"
+        )
+
+
 @dataclass(frozen=True)
 class LeakReport:
     pids: tuple[int, ...]

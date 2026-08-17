@@ -11,12 +11,20 @@ import uuid
 from scripts.verify_support import (
     PhaseOwner,
     VerificationDeadline,
+    assert_browser_smoke_budgets,
     inspect_owned,
     owned_pids,
 )
 
 
 class VerificationOwnershipTests(unittest.TestCase):
+    def test_browser_functional_and_cleanup_budgets_exclude_cold_tool_startup(self) -> None:
+        assert_browser_smoke_budgets(15.0, 10.0)
+        with self.assertRaisesRegex(AssertionError, "functional smoke exceeded 15 seconds"):
+            assert_browser_smoke_budgets(15.001, 1.0)
+        with self.assertRaisesRegex(AssertionError, "owned cleanup exceeded 10 seconds"):
+            assert_browser_smoke_budgets(1.0, 10.001)
+
     def test_timeout_reaps_process_group_and_detached_owned_child(self) -> None:
         nonce = f"test-{uuid.uuid4().hex}"
         owner = PhaseOwner(nonce, grace_seconds=0.1)
