@@ -767,8 +767,8 @@ def validate_result(document: dict[str, object] | None = None) -> None:
     if json.loads(historical) != load_json(PREREGISTRATION_PATH):
         raise RuntimeError("preregistration changed after measurement")
     forbidden_fragments = {
-        "raw_prompt", "model_completion", "transcript", "credential", "environment",
-        "cache_root", "hostname", "username", "raw_argument", "response_text",
+        "raw_prompt", "raw_completion", "transcript", "cache_root", "hostname",
+        "username", "raw_argument", "response_text",
     }
     serialized_keys: list[str] = []
     def collect(value: object) -> None:

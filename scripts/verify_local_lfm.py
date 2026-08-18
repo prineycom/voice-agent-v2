@@ -210,7 +210,7 @@ def main() -> int:
             parser.error("--keep-running cannot be combined with --tool-proposals-only")
         from scripts.verify_tool_proposals import main as verify_tool_proposals
 
-        return verify_tool_proposals()
+        return verify_tool_proposals([])
     process, output = start_server()
     keep = False
     try:

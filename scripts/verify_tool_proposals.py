@@ -53,10 +53,10 @@ def content_free_summary(result: dict[str, object]) -> None:
         )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--validate-only", action="store_true")
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     validate_preregistration()
     if arguments.validate_only:
         if RESULT_PATH.exists():
