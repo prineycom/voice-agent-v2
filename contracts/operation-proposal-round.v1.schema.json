@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/operation-proposal-round.v1.schema.json",
+  "title": "Voice Agent operation proposal round v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "proposals"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.operation-proposal-round.v1"},
+    "proposals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {"$ref": "operation-proposal.v1.schema.json"}
+    }
+  }
+}
