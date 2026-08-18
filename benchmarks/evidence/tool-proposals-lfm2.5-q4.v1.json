@@ -1,0 +1,157 @@
+{
+  "corpus_file_sha256": "2b0977ffdd942a276792630240ba8468d8d7da22eb0ac6ab10ecfdf22907acc0",
+  "decision": {
+    "decision": "model_operation_proposals_unavailable",
+    "ordinary_conversation_only": true,
+    "passing_model_mechanism_count": 0,
+    "production_capability_count": 0,
+    "selected_model_mechanism": null
+  },
+  "execution": {
+    "elapsed_milliseconds": 0,
+    "failure_class": "benchmark_cli_admission_failure",
+    "fixture_count": 240,
+    "matrix_complete": false,
+    "matrix_deadline_seconds": 570,
+    "maximum_concurrency": 2,
+    "outer_timeout_seconds": 600,
+    "run_order_count": 5
+  },
+  "identity": {
+    "artifact_and_runtime_verified": false,
+    "automatic_fallback": false,
+    "context_tokens_per_slot": 32768,
+    "credentials_required": false,
+    "model_sha256": "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14",
+    "parallel_slots": 2,
+    "provider_identity": "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M",
+    "provider_mode": "local",
+    "response_model_alias": "lfm2.5-2.6b-q4-k-m",
+    "runtime_binary_sha256": "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11",
+    "runtime_commit": "689e227db485c6b33d061555e74034c93a867649"
+  },
+  "mechanisms": [
+    {
+      "attempted_fixture_evaluations": 0,
+      "exact_selection_count": 0,
+      "expected_fixture_evaluations": 1200,
+      "failure_classes": {
+        "false_positive_ambiguous": 0,
+        "false_positive_injection": 0,
+        "false_positive_no_operation": 0,
+        "http_status": 0,
+        "invalid_envelope": 0,
+        "not_attempted": 1200,
+        "positive_selection_miss": 0,
+        "provider_identity_mismatch": 0,
+        "provider_identity_missing": 0,
+        "request_timeout": 0,
+        "request_transport": 0
+      },
+      "false_positive_count": 0,
+      "identity_match_count": 0,
+      "identity_mismatch_count": 0,
+      "identity_missing_count": 0,
+      "identity_not_applicable_count": 0,
+      "invalid_envelope_count": 0,
+      "mechanism": "llama_cpp_openai_single_tool_call",
+      "passed": false,
+      "positive_fixture_evaluations": 0,
+      "proposal_count": 0,
+      "proposal_counts_by_class": {
+        "ambiguous": 0,
+        "injection": 0,
+        "no_operation": 0,
+        "positive": 0
+      },
+      "selection_miss_count": 0,
+      "timeout_count": 0,
+      "valid_envelope_count": 0
+    },
+    {
+      "attempted_fixture_evaluations": 0,
+      "exact_selection_count": 0,
+      "expected_fixture_evaluations": 1200,
+      "failure_classes": {
+        "false_positive_ambiguous": 0,
+        "false_positive_injection": 0,
+        "false_positive_no_operation": 0,
+        "http_status": 0,
+        "invalid_envelope": 0,
+        "not_attempted": 1200,
+        "positive_selection_miss": 0,
+        "provider_identity_mismatch": 0,
+        "provider_identity_missing": 0,
+        "request_timeout": 0,
+        "request_transport": 0
+      },
+      "false_positive_count": 0,
+      "identity_match_count": 0,
+      "identity_mismatch_count": 0,
+      "identity_missing_count": 0,
+      "identity_not_applicable_count": 0,
+      "invalid_envelope_count": 0,
+      "mechanism": "closed_json_choice",
+      "passed": false,
+      "positive_fixture_evaluations": 0,
+      "proposal_count": 0,
+      "proposal_counts_by_class": {
+        "ambiguous": 0,
+        "injection": 0,
+        "no_operation": 0,
+        "positive": 0
+      },
+      "selection_miss_count": 0,
+      "timeout_count": 0,
+      "valid_envelope_count": 0
+    },
+    {
+      "attempted_fixture_evaluations": 0,
+      "exact_selection_count": 0,
+      "expected_fixture_evaluations": 1200,
+      "failure_classes": {
+        "false_positive_ambiguous": 0,
+        "false_positive_injection": 0,
+        "false_positive_no_operation": 0,
+        "http_status": 0,
+        "invalid_envelope": 0,
+        "not_attempted": 1200,
+        "positive_selection_miss": 0,
+        "provider_identity_mismatch": 0,
+        "provider_identity_missing": 0,
+        "request_timeout": 0,
+        "request_transport": 0
+      },
+      "false_positive_count": 0,
+      "identity_match_count": 0,
+      "identity_mismatch_count": 0,
+      "identity_missing_count": 0,
+      "identity_not_applicable_count": 0,
+      "invalid_envelope_count": 0,
+      "mechanism": "deterministic_russian_command_grammar",
+      "passed": false,
+      "positive_fixture_evaluations": 0,
+      "proposal_count": 0,
+      "proposal_counts_by_class": {
+        "ambiguous": 0,
+        "injection": 0,
+        "no_operation": 0,
+        "positive": 0
+      },
+      "selection_miss_count": 0,
+      "timeout_count": 0,
+      "valid_envelope_count": 0
+    }
+  ],
+  "orders_file_sha256": "b264da7229a290aefe8fbdf25ebeaa76221f7f886bb5b5fdb72194f722cbf4fa",
+  "preregistration_commit": "49af77a7c1b5c8b7ca839348f1a99dc207e39fa4",
+  "privacy": {
+    "credential_or_environment_evidence_count": 0,
+    "model_completion_retained_count": 0,
+    "private_fixture_count": 0,
+    "prompt_completion_or_argument_evidence_count": 0,
+    "public_synthetic_fixture_count": 240
+  },
+  "result_schema_sha256": "c3b754d5846ac40ea6527d9ccbca4168fdd792b680ce72e0806886f5dc40a97a",
+  "schema_version": "voice-agent.tool-proposal-benchmark-result.v1"
+}

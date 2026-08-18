@@ -82,3 +82,15 @@ Planning is read-only and safe before approval:
 ```
 
 The local v1 acquisition/measurement sequence stopped at its fail-closed component gate, as preserved in [`selection/README.md`](selection/README.md). Later public-synthetic cloud, Qwen, repeat, and fixed-stack overlap measurements are owned by `results/fixed-stack-delivery.v1.json`; the cumulative delivery exception is owned by [ADR-0005](../docs/adr/0005-operator-fixed-slices-2-5-model-stack.md). Root `./verify` continues to own Slice 1 verification rather than the Slices 2–5 acceptance state.
+
+## E2.1 operation-proposal measurement
+
+E2.1 is independently owned by:
+
+- `fixtures/tool-proposals-russian.v1.json`: 240 CC0 public-synthetic Russian fixtures in exact 80 positive / 80 ordinary / 40 ambiguous / 40 injection classes;
+- `config/tool-proposals-orders.v1.json`: five materialized fixed permutations;
+- `config/tool-proposals-preregistration.v1.json`: exact candidate formats, ADR-0008 identity, hashes, thresholds, two-slot/600-second bounds, result contract, and no-tuning selection rule;
+- `tool_proposals/`: benchmark-only parsers, scoring, pure test handlers, ancestry/hash/privacy validation, and no production import path;
+- `evidence/tool-proposals-lfm2.5-q4.v1.json`: counts-only machine outcome.
+
+The preregistration is commit-pinned at `49af77a7c1b5c8b7ca839348f1a99dc207e39fa4`. Its one authorized `./verify-local-lfm --tool-proposals-only` invocation failed before artifact/runtime or fixture admission because the nested CLI received and rejected the outer selector. Consequently every mechanism records `attempted=0`, `not_attempted=1200`, `passed=false`; exact identity was not verified, the matrix is incomplete, and the decision is `model_operation_proposals_unavailable`. No completion or private content was retained, no retry/model/provider substitution is permitted, and zero is not presented as a measured safety/accuracy score.
