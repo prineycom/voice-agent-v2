@@ -97,6 +97,18 @@ Default metadata diagnostics contain no conversation/media content, secrets, exc
 
 [`docs/architecture.md` §8.2](docs/architecture.md#82-data-handling) owns the capture limits, expiry, and privacy contract. The complete exercised matrix, example redacted report, privacy evidence, and exact nonclaims are in [`docs/evidence/slice-8-failure-observability.md`](docs/evidence/slice-8-failure-observability.md).
 
+### Minimal private agent profile
+
+The E1.1 operator path creates and inspects an inert owner-only profile without changing the voice runtime or granting a capability:
+
+```sh
+./voice-agent-ops agent-config init
+./voice-agent-ops agent-config validate
+./voice-agent-ops agent-config status
+```
+
+Use `agent-config validate --path <mode-0600-candidate>` to validate another current-user-owned regular file without activation, and add `--json` to any of the three subcommands for the closed machine-readable result. Production resolves `~/.voice-agent/` from the effective user account rather than ambient `HOME`. The generated `config.yaml` is non-secret; empty `SOUL.md` plus `skills/`, `sessions/`, and `memory/` are reserved and inert. The immutable production capability registry is empty, so status always reports zero effective capabilities. Commands reject unsafe ownership, modes, links, path types, YAML, and schema data without printing source content, paths, environment, credentials, or raw exceptions.
+
 ### Slice 9 single-host operations
 
 The CI-safe deterministic operational owners run in `./verify`. On the canonical host, run the read-only exact-cache plus disposable transient-systemd preflight through its bounded wrapper:

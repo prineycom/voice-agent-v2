@@ -1,5 +1,16 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+if [ "${1:-}" = "agent-config" ] && [ -z "${PYTHON:-}" ]; then
+  EFFECTIVE_HOME=$(python3 -I -c 'import os,pwd; print(pwd.getpwuid(os.geteuid()).pw_dir)') || {
+    echo "voice-agent-ops failed: config_runtime_unavailable" >&2
+    exit 2
+  }
+  PYTHON="$EFFECTIVE_HOME/.cache/voice-agent-v2/slice-6/runtime/venv/bin/python"
+  [ -x "$PYTHON" ] || {
+    echo "voice-agent-ops failed: config_runtime_unavailable" >&2
+    exit 2
+  }
+fi
 PYTHON=${PYTHON:-python3}
 PYTHONPATH="$ROOT/src" exec "$PYTHON" -B -m voice_agent_v2.operations_cli "$@"

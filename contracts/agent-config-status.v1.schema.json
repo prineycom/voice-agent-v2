@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-config-status.v1.schema.json",
+  "title": "Content-free agent profile status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile_schema_version", "profile_id", "semantic_revision", "effective_capability_count"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.agent-config-status.v1"},
+    "profile_schema_version": {"const": "voice-agent.config.v1"},
+    "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "semantic_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "effective_capability_count": {"const": 0}
+  }
+}

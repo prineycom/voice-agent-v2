@@ -199,7 +199,9 @@
         "livekit": "1.1.14",
         "livekit-api": "1.2.0",
         "onnxruntime": "1.28.0",
-        "numpy": "2.5.2"
+        "numpy": "2.5.2",
+        "pydantic": "2.13.4",
+        "PyYAML": "6.0.3"
       }
     },
     {

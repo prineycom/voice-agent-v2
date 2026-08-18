@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-config.v1.schema.json",
+  "title": "Minimal private agent profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile_id", "access"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.config.v1"},
+    "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilities"],
+      "properties": {
+        "capabilities": {
+          "type": "object",
+          "maxProperties": 0,
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}
