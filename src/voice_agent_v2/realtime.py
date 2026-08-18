@@ -692,6 +692,16 @@ class RealtimeSession:
                     if drain_error is not None:
                         await self._degrade_locked("publication", drain_error)
                         raise RuntimeError("audio publication could not be reset safely")
+                # A separately requested interruption may already have marked the
+                # prior context terminal. Its operation/model rollback still owns
+                # admission: no replacement listening turn is published until the
+                # existing cleanup barrier has completed.
+                barrier_error = await self._await_cleanup_barrier(
+                    CANCELLATION_CLEANUP_BOUND_MS
+                )
+                if barrier_error is not None:
+                    await self._degrade_locked("controller", barrier_error)
+                    raise RuntimeError("inference cancellation did not drain safely")
                 return await self._admit_listening_locked(announce=announce)
 
     async def _admit_listening_locked(self, *, announce: bool = True) -> str:

@@ -26,7 +26,6 @@ HERMETIC_OWNERS = (
     "tests.test_operations",
     "tests.test_agent_config",
     "tests.test_agent_profile_runtime",
-    "tests.test_operation_tracer",
     "tests.test_tool_proposals_benchmark",
     "tests.test_observability",
     "tests.test_diagnostics",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from typing import Callable
@@ -402,6 +403,16 @@ class RealTurnController:
                     "on_sentence": synthesize_visible_piece,
                     "cancellation": token,
                 }
+                response_parameters = inspect.signature(
+                    self.llm.respond_with_handoff
+                ).parameters
+                for name, value in (
+                    ("stream_epoch", stream_epoch),
+                    ("turn_generation", turn_generation),
+                    ("request_id", request_id),
+                ):
+                    if name in response_parameters:
+                        arguments[name] = value
                 if getattr(self.llm, "supports_visible_handoff", False):
                     arguments["on_visible_sentence"] = publish_visible_text
                 else:
