@@ -54,6 +54,14 @@ Each command has its own 600-second monotonic outer timeout and process cleanup 
 
 These commands require their exact cache, GPU/runtime, corpus, or user-systemd boundary. Missing hardware/artifacts are an unavailable/failing tier, never synthetic green coverage. `verify-canonical-host` starts only its disposable user service; it does not install the product unit or reboot.
 
+E2.1 adds the one-shot proposal-measurement mode:
+
+```sh
+./verify-local-lfm --tool-proposals-only
+```
+
+It owns the exact preregistered 240-fixture × five-order × three-mechanism matrix, at most two requests, no fallback, a 570-second inner evidence reserve, and the existing 600-second outer cleanup deadline. Evidence is counts and stable failure classes only. Its single authorized run did not enter the matrix because the committed nested CLI rejected the already-consumed selector; the recorded tier is unavailable/incomplete with `model_operation_proposals_unavailable`, not green evidence. The command must not be retried or replaced by another provider/model run for this preregistration.
+
 ## Historical evidence-integrity tier
 
 ```sh
@@ -93,6 +101,7 @@ The operator procedure remains in [`evidence/silero-kseniya-48k-private-evaluati
 | Config/release symlink or pointer race is accepted | operations release/configuration owners |
 | Agent profile parser ambiguity, unsafe custody, content-bearing CLI output, or non-empty production capability registry | `tests.test_agent_config` in the hermetic behavior manifest |
 | Agent profile startup reloads live, repairs input, leaks content, admits authority, or degrades the bounded voice path | `tests.test_agent_profile_runtime` in the hermetic behavior manifest |
+| Proposal corpus/order/schema drift, unsafe envelope parsing, mutable thresholds, test capability leakage, or evidence relabelling | `tests.test_tool_proposals_benchmark` in the hermetic behavior manifest; exact-model outcome remains a separate canonical-host fact |
 | Corrupt/incompatible prior release moves pointers | operations rollback owners |
 | Gateway dies while adapter descendant survives | real adapter parent-death and startup descendant cleanup owners |
 | Alive nonresponsive LiveKit/LFM remains ready | bounded local-socket Slice 9 and backend-readiness owners |

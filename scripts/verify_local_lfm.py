@@ -203,7 +203,14 @@ def one_response(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep-running", action="store_true")
+    parser.add_argument("--tool-proposals-only", action="store_true")
     args = parser.parse_args()
+    if args.tool_proposals_only:
+        if args.keep_running:
+            parser.error("--keep-running cannot be combined with --tool-proposals-only")
+        from scripts.verify_tool_proposals import main as verify_tool_proposals
+
+        return verify_tool_proposals([])
     process, output = start_server()
     keep = False
     try:

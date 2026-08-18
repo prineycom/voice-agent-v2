@@ -35,6 +35,7 @@
 - **External exposure** — Optional operator-owned private-network or reverse-proxy access to the loopback-local application; the application never creates, validates, monitors, or removes it.
 - **Tracer** — The smallest end-to-end path that crosses the intended boundaries with deterministic substitutes and produces inspectable evidence.
 - **Output media generation** — A monotonically increasing session-local identity that binds one current turn/request to the persistent agent audio publication; the browser may attach only the matching generation.
+- **Operation proposal** — A closed, versioned model or deterministic-parser suggestion that carries no authority and cannot execute anything until a separate later admission boundary accepts it. E2.1 measures proposal mechanisms only; the production capability registry remains empty.
 - **TTS segment** — A bounded plain-text synthesis unit derived from original visible LLM text without changing that visible/history text.
 - **TTS v2 adapter** — A model-neutral, request-correlated local synthesis boundary with explicit capabilities, audio format, lifecycle, ordered result chunks, invalidation, and one terminal outcome. The current composition contains only Silero/Kseniya.
 - **Turn correlation ID** — An opaque identifier used to associate all media, events, inference work, and observations belonging to one voice turn.

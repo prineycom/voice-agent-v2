@@ -1,0 +1,80 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "fixtures": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "enum": [
+              "positive",
+              "no_operation",
+              "ambiguous",
+              "injection"
+            ],
+            "type": "string"
+          },
+          "expected": {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": {
+                "type": "object"
+              },
+              "capability_id": {
+                "pattern": "^test\\.public[-a-z.]+\\.v1$",
+                "type": "string"
+              },
+              "schema_version": {
+                "enum": [
+                  "assistant.final.v1",
+                  "voice-agent.operation-proposal.v1"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "pattern": "^(pos|nop|amb|inj)-[0-9]{3}$",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "class",
+          "text",
+          "expected"
+        ],
+        "type": "object"
+      },
+      "maxItems": 240,
+      "minItems": 240,
+      "type": "array"
+    },
+    "license": {
+      "const": "CC0-1.0"
+    },
+    "origin": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "voice-agent.tool-proposal-corpus.v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "origin",
+    "license",
+    "fixtures"
+  ],
+  "type": "object"
+}

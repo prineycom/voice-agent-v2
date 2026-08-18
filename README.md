@@ -57,7 +57,7 @@ Generate a dedicated LiveKit key pair and fill every blank in ignored `.env.slic
 "${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
 ```
 
-The active app accepts no `LITELLM_*` or TTS-selection configuration. `./verify` owns the model-free browser/runtime boundary. `./verify-local-lfm` and `./verify-silero-kseniya` are separate exact-cache canonical-host checks.
+The active app accepts no `LITELLM_*` or TTS-selection configuration. `./verify` owns the model-free browser/runtime boundary. `./verify-local-lfm` and `./verify-silero-kseniya` are separate exact-cache canonical-host checks. E2.1's one-shot `./verify-local-lfm --tool-proposals-only` attempt is already consumed for its frozen preregistration and recorded unavailable; do not rerun it. Its machine decision is `model_operation_proposals_unavailable`, so ordinary conversation remains the only active LFM behavior and the production capability registry remains empty.
 
 `./verify-silero-kseniya` loads exactly two resident CPU workers from the pinned read-only model cache, proves native 48-kHz totals, obsolete/current overlap with stale discard, full two-worker RSS/CPU, VAD/Whisper coexistence, and explicit controlled recovery. It writes content-free task evidence only under `~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship/`. It does not claim audibility, voice quality, physical barge-in, or the complete browser stack. The historical Qwen/LiteLLM executable harnesses are retired; their dated evidence remains under the explicit `./verify-evidence` tier.
 

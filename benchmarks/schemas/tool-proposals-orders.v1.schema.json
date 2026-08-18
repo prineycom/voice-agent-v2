@@ -1,0 +1,52 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "orders": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "algorithm": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "fixture_ids": {
+            "items": {
+              "pattern": "^(pos|nop|amb|inj)-[0-9]{3}$",
+              "type": "string"
+            },
+            "maxItems": 240,
+            "minItems": 240,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "order_id": {
+            "pattern": "^order-[1-5]$",
+            "type": "string"
+          },
+          "seed": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "order_id",
+          "seed",
+          "algorithm",
+          "fixture_ids"
+        ],
+        "type": "object"
+      },
+      "maxItems": 5,
+      "minItems": 5,
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "voice-agent.tool-proposal-orders.v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "orders"
+  ],
+  "type": "object"
+}
