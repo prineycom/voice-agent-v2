@@ -149,6 +149,13 @@ def main() -> int:
             return 0
 
         owner.run(
+            "bounded synthetic operation matrix",
+            [str(python), "-B", str(ROOT / "scripts/verify_operation_tracer.py")],
+            cwd=ROOT,
+            environment=environment,
+            deadline=deadline,
+        )
+        owner.run(
             "hermetic current Python behaviors",
             [str(python), "-B", str(ROOT / "scripts/run_behavior_tests.py"), "hermetic"],
             cwd=ROOT,

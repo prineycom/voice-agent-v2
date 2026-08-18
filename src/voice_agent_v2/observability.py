@@ -73,6 +73,10 @@ _SAFE_STRING_FIELD_KEYS = frozenset({
     "stage",
     "user_state",
     "worker_id",
+    "capability_id",
+    "effective_policy_revision",
+    "transition",
+    "reason_code",
 })
 
 
