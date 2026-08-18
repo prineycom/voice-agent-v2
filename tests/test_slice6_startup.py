@@ -107,6 +107,37 @@ class SystemdReadinessTests(unittest.TestCase):
         custody.assert_called_once_with(supervisor)
         notify.assert_not_called()
 
+    def test_ready_boundary_requires_operational_readiness_without_udp_observation(self) -> None:
+        supervisor = run_slice6.ProcessSupervisor()
+        with (
+            patch.object(run_slice6, "require_runtime_listener_custody") as custody,
+            patch.object(run_slice6, "gateway_operational_ready", return_value=True) as ready,
+            patch.object(run_slice6, "systemd_notify_ready") as notify,
+        ):
+            run_slice6.publish_systemd_readiness(
+                supervisor, build_id="a" * 40, release_id="b" * 24,
+            )
+        self.assertEqual(custody.call_count, 2)
+        ready.assert_called_once_with(
+            timeout=1.0,
+            expected_build_id="a" * 40,
+            expected_release_id="b" * 24,
+        )
+        notify.assert_called_once_with()
+
+        with (
+            patch.object(run_slice6, "require_runtime_listener_custody"),
+            patch.object(run_slice6, "gateway_operational_ready", return_value=False),
+            patch.object(run_slice6, "systemd_notify_ready") as blocked_notify,
+            self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "did not expose exact operational readiness",
+            ),
+        ):
+            run_slice6.publish_systemd_readiness(
+                supervisor, build_id="a" * 40, release_id="b" * 24,
+            )
+        blocked_notify.assert_not_called()
+
     def test_operational_probe_allows_gateway_component_probe_budget(self) -> None:
         document = json.dumps({
             "accepting": True,

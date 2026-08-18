@@ -52,7 +52,6 @@ OPERATIONAL_UNREADY_GRACE_SECONDS = 2.0
 RUNTIME_LISTENER_REQUIREMENTS = (
     ("local-llm", "tcp", LLAMA_PORT),
     ("livekit", "tcp", SIGNAL_PORT),
-    ("livekit", "udp", RTC_UDP_PORT),
     ("gateway-controller-stt-tts-provider", "tcp", GATEWAY_PORT),
 )
 
@@ -296,7 +295,7 @@ def require_runtime_ports_free(proc_root: Path = Path("/proc")) -> None:
                 occupied.add(int(fields[1].rsplit(":", 1)[1], 16))
             except (IndexError, ValueError) as error:
                 raise ServiceProcessFailure("runtime port custody is invalid") from error
-    for port in (LLAMA_PORT, SIGNAL_PORT, GATEWAY_PORT, RTC_UDP_PORT):
+    for port in (LLAMA_PORT, SIGNAL_PORT, GATEWAY_PORT):
         if port in occupied:
             raise ServiceProcessFailure(f"required runtime port is already owned: {port}")
 
@@ -327,6 +326,26 @@ def _listener_inodes(
     return inodes
 
 
+def _process_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
+    try:
+        descriptors = tuple((proc_root / str(pid) / "fd").iterdir())
+    except OSError as error:
+        raise ServiceProcessFailure("supervised listener owner is unavailable") from error
+    inodes: set[str] = set()
+    for descriptor in descriptors:
+        try:
+            target = os.readlink(descriptor)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ServiceProcessFailure("supervised listener custody is unavailable") from error
+        if target.startswith("socket:[") and target.endswith("]"):
+            inode = target[8:-1]
+            if inode.isdigit() and inode != "0":
+                inodes.add(inode)
+    return inodes
+
+
 def _process_tree_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
     pending = [pid]
     observed: set[int] = set()
@@ -336,29 +355,17 @@ def _process_tree_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
         if current in observed:
             continue
         observed.add(current)
-        process_root = proc_root / str(current)
         try:
             children = (
-                process_root / "task" / str(current) / "children"
+                proc_root / str(current) / "task" / str(current) / "children"
             ).read_text(encoding="ascii").split()
-            descriptors = tuple((process_root / "fd").iterdir())
         except OSError as error:
             raise ServiceProcessFailure("supervised listener owner is unavailable") from error
         for child in children:
             if not child.isdigit() or int(child) <= 0:
                 raise ServiceProcessFailure("supervised listener owner is invalid")
             pending.append(int(child))
-        for descriptor in descriptors:
-            try:
-                target = os.readlink(descriptor)
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                raise ServiceProcessFailure("supervised listener custody is unavailable") from error
-            if target.startswith("socket:[") and target.endswith("]"):
-                inode = target[8:-1]
-                if inode.isdigit() and inode != "0":
-                    inodes.add(inode)
+        inodes.update(_process_socket_inodes(current, proc_root=proc_root))
     return inodes
 
 

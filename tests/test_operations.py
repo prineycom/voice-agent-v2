@@ -284,11 +284,18 @@ class OperationsManifestTests(unittest.TestCase):
         self.assertEqual(service["TimeoutStopSec"], ["75s"])
         self.assertEqual(service["KillMode"], ["mixed"])
         self.assertEqual(service["User"], ["priney"])
+        service_home = "/home/priney"
+        self.assertEqual(
+            service["WorkingDirectory"],
+            [f"{service_home}/.local/share/voice-agent-v2/current"],
+        )
         self.assertEqual(
             service["ExecStart"],
-            ["%h/.local/share/voice-agent-v2/current/voice-agent-ops run"],
+            [f"{service_home}/.local/share/voice-agent-v2/current/voice-agent-ops run"],
         )
-        self.assertEqual(service["ReadWritePaths"], ["%h/.cache/voice-agent-v2"])
+        self.assertEqual(
+            service["ReadWritePaths"], [f"{service_home}/.cache/voice-agent-v2"],
+        )
         self.assertEqual(service["RuntimeDirectory"], ["voice-agent-v2"])
         self.assertEqual(service["RuntimeDirectoryMode"], ["0700"])
         self.assertEqual(service["RuntimeDirectoryPreserve"], ["no"])
@@ -296,7 +303,7 @@ class OperationsManifestTests(unittest.TestCase):
             assignment.split("=", 1) for assignment in service["Environment"]
         )
         self.assertEqual(environment, {
-            "HOME": "%h",
+            "HOME": service_home,
             "XDG_RUNTIME_DIR": "/run/voice-agent-v2",
             "PYTHONUNBUFFERED": "1",
             "PYTHONPYCACHEPREFIX": "/run/voice-agent-v2/pycache",
@@ -308,14 +315,14 @@ class OperationsManifestTests(unittest.TestCase):
         mutations = {
             "ProtectSystem=strict": "ProtectSystem=full",
             "ProtectHome=read-only": "ProtectHome=no",
-            "ReadWritePaths=%h/.cache/voice-agent-v2": "ReadWritePaths=%h",
+            "ReadWritePaths=/home/priney/.cache/voice-agent-v2": "ReadWritePaths=/home/priney",
             "NoNewPrivileges=yes": "NoNewPrivileges=no",
             "PrivateTmp=yes": "PrivateTmp=no",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK": (
                 "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET"
             ),
-            "WorkingDirectory=%h/.local/share/voice-agent-v2/current": "WorkingDirectory=%h",
-            "Environment=HOME=%h": "Environment=HOME=/tmp",
+            "WorkingDirectory=/home/priney/.local/share/voice-agent-v2/current": "WorkingDirectory=/home/priney",
+            "Environment=HOME=/home/priney": "Environment=HOME=/tmp",
         }
         with tempfile.TemporaryDirectory() as temporary:
             original = source.read_text(encoding="utf-8")

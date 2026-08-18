@@ -10,15 +10,15 @@ Type=notify
 NotifyAccess=main
 User=priney
 Group=priney
-WorkingDirectory=%h/.local/share/voice-agent-v2/current
-Environment=HOME=%h
+WorkingDirectory=/home/priney/.local/share/voice-agent-v2/current
+Environment=HOME=/home/priney
 Environment=XDG_RUNTIME_DIR=/run/voice-agent-v2
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache
 RuntimeDirectory=voice-agent-v2
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=no
-ExecStart=%h/.local/share/voice-agent-v2/current/voice-agent-ops run
+ExecStart=/home/priney/.local/share/voice-agent-v2/current/voice-agent-ops run
 Restart=on-failure
 RestartSec=5s
 RestartPreventExitStatus=2
@@ -32,7 +32,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.cache/voice-agent-v2
+ReadWritePaths=/home/priney/.cache/voice-agent-v2
 ProtectClock=yes
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
