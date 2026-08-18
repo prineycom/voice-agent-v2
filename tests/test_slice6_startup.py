@@ -237,6 +237,7 @@ class RuntimePortCustodyTests(unittest.TestCase):
             (process / "task/123").mkdir(parents=True)
             (process / "task/123/children").write_text("", encoding="ascii")
             (process / "fd").mkdir()
+            (process / "stat").write_text("123 (fixture) S 1 123\n", encoding="ascii")
             descriptor = process / "fd/3"
             descriptor.symlink_to("socket:[555]")
             owned = FakeProcess()
@@ -259,6 +260,38 @@ class RuntimePortCustodyTests(unittest.TestCase):
                     proc_root=proc,
                     requirements=(("fixture", "tcp", 8000),),
                 )
+
+    def test_final_listener_custody_accepts_a_reparented_process_group_member(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            net = proc / "net"
+            net.mkdir()
+            header = "slot local remote state queues timers retrnsmt uid timeout inode\n"
+            for name in ("tcp", "tcp6", "udp6"):
+                (net / name).write_text(header, encoding="ascii")
+            (net / "udp").write_text(
+                header + "0: 0100007F:1ECA 00000000:0000 07 0 0 0 1000 0 666\n",
+                encoding="ascii",
+            )
+            process = proc / "123"
+            (process / "task/123").mkdir(parents=True)
+            (process / "task/123/children").write_text("", encoding="ascii")
+            (process / "fd").mkdir()
+            (process / "stat").write_text("123 (livekit) S 1 123\n", encoding="ascii")
+            reparented = proc / "124"
+            (reparented / "fd").mkdir(parents=True)
+            (reparented / "fd/3").symlink_to("socket:[666]")
+            (reparented / "stat").write_text("124 (livekit-worker) S 1 123\n", encoding="ascii")
+            owned = FakeProcess()
+            owned.pid = 123
+            supervisor = run_slice6.ProcessSupervisor()
+            supervisor.processes.append(owned)
+            supervisor._roles[id(owned)] = "fixture"
+            run_slice6.require_runtime_listener_custody(
+                supervisor,
+                proc_root=proc,
+                requirements=(("fixture", "udp", 7882),),
+            )
 
     def test_preexisting_runtime_listener_fails_before_child_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

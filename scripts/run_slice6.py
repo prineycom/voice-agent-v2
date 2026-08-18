@@ -327,6 +327,26 @@ def _listener_inodes(
     return inodes
 
 
+def _process_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
+    try:
+        descriptors = tuple((proc_root / str(pid) / "fd").iterdir())
+    except OSError as error:
+        raise ServiceProcessFailure("supervised listener owner is unavailable") from error
+    inodes: set[str] = set()
+    for descriptor in descriptors:
+        try:
+            target = os.readlink(descriptor)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ServiceProcessFailure("supervised listener custody is unavailable") from error
+        if target.startswith("socket:[") and target.endswith("]"):
+            inode = target[8:-1]
+            if inode.isdigit() and inode != "0":
+                inodes.add(inode)
+    return inodes
+
+
 def _process_tree_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
     pending = [pid]
     observed: set[int] = set()
@@ -336,29 +356,51 @@ def _process_tree_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
         if current in observed:
             continue
         observed.add(current)
-        process_root = proc_root / str(current)
         try:
             children = (
-                process_root / "task" / str(current) / "children"
+                proc_root / str(current) / "task" / str(current) / "children"
             ).read_text(encoding="ascii").split()
-            descriptors = tuple((process_root / "fd").iterdir())
         except OSError as error:
             raise ServiceProcessFailure("supervised listener owner is unavailable") from error
         for child in children:
             if not child.isdigit() or int(child) <= 0:
                 raise ServiceProcessFailure("supervised listener owner is invalid")
             pending.append(int(child))
-        for descriptor in descriptors:
-            try:
-                target = os.readlink(descriptor)
-            except FileNotFoundError:
+        inodes.update(_process_socket_inodes(current, proc_root=proc_root))
+    return inodes
+
+
+def _process_group_id(pid: int, *, proc_root: Path) -> int:
+    try:
+        _before, separator, remainder = (
+            proc_root / str(pid) / "stat"
+        ).read_text(encoding="ascii").rpartition(")")
+    except OSError as error:
+        raise ServiceProcessFailure("supervised listener owner is unavailable") from error
+    fields = remainder.split()
+    if not separator or len(fields) < 3 or not fields[2].isdigit() or int(fields[2]) <= 0:
+        raise ServiceProcessFailure("supervised listener owner is invalid")
+    return int(fields[2])
+
+
+def _process_group_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
+    process_group = _process_group_id(pid, proc_root=proc_root)
+    inodes: set[str] = set()
+    try:
+        candidates = tuple(proc_root.iterdir())
+    except OSError as error:
+        raise ServiceProcessFailure("supervised listener custody is unavailable") from error
+    for candidate in candidates:
+        if not candidate.name.isdigit() or int(candidate.name) <= 0:
+            continue
+        try:
+            if _process_group_id(int(candidate.name), proc_root=proc_root) != process_group:
                 continue
-            except OSError as error:
-                raise ServiceProcessFailure("supervised listener custody is unavailable") from error
-            if target.startswith("socket:[") and target.endswith("]"):
-                inode = target[8:-1]
-                if inode.isdigit() and inode != "0":
-                    inodes.add(inode)
+        except ServiceProcessFailure:
+            if candidate.name == str(pid):
+                raise
+            continue
+        inodes.update(_process_socket_inodes(int(candidate.name), proc_root=proc_root))
     return inodes
 
 
@@ -372,6 +414,7 @@ def require_runtime_listener_custody(
         role: [process for process in supervisor.processes if supervisor.role(process) == role]
         for role, _protocol, _port in requirements
     }
+    process_ids: dict[str, int] = {}
     owned_by_role: dict[str, set[str]] = {}
     for role, processes in processes_by_role.items():
         if len(processes) != 1:
@@ -380,9 +423,14 @@ def require_runtime_listener_custody(
         pid = getattr(process, "pid", None)
         if type(pid) is not int or pid <= 0 or process.poll() is not None:
             raise ServiceProcessFailure(f"supervised listener owner is unavailable: {role}")
+        process_ids[role] = pid
         owned_by_role[role] = _process_tree_socket_inodes(pid, proc_root=proc_root)
     for role, protocol, port in requirements:
         listeners = _listener_inodes(protocol, port, proc_root=proc_root)
+        if listeners and not listeners.issubset(owned_by_role[role]):
+            owned_by_role[role].update(
+                _process_group_socket_inodes(process_ids[role], proc_root=proc_root)
+            )
         if not listeners or not listeners.issubset(owned_by_role[role]):
             raise ServiceProcessFailure(
                 f"runtime listener is not owned by the supervised component: {protocol}/{port}"
