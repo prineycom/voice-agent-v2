@@ -48,9 +48,9 @@ SYSTEMD_UNIT_CONTRACT = {
         "NotifyAccess": ["main"],
         "User": ["priney"],
         "Group": ["priney"],
-        "WorkingDirectory": ["%h/.local/share/voice-agent-v2/current"],
+        "WorkingDirectory": ["/home/priney/.local/share/voice-agent-v2/current"],
         "Environment": [
-            "HOME=%h",
+            "HOME=/home/priney",
             "XDG_RUNTIME_DIR=/run/voice-agent-v2",
             "PYTHONUNBUFFERED=1",
             "PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache",
@@ -59,7 +59,7 @@ SYSTEMD_UNIT_CONTRACT = {
         "RuntimeDirectoryMode": ["0700"],
         "RuntimeDirectoryPreserve": ["no"],
         "ExecStart": [
-            "%h/.local/share/voice-agent-v2/current/voice-agent-ops run"
+            "/home/priney/.local/share/voice-agent-v2/current/voice-agent-ops run"
         ],
         "Restart": ["on-failure"],
         "RestartSec": ["5s"],
@@ -74,7 +74,7 @@ SYSTEMD_UNIT_CONTRACT = {
         "PrivateTmp": ["yes"],
         "ProtectSystem": ["strict"],
         "ProtectHome": ["read-only"],
-        "ReadWritePaths": ["%h/.cache/voice-agent-v2"],
+        "ReadWritePaths": ["/home/priney/.cache/voice-agent-v2"],
         "ProtectClock": ["yes"],
         "ProtectControlGroups": ["yes"],
         "ProtectKernelLogs": ["yes"],
