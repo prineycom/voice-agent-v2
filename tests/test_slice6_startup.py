@@ -91,6 +91,7 @@ class SystemdReadinessTests(unittest.TestCase):
         with (
             patch.object(run_slice6, "gateway_operational_ready", return_value=True) as ready,
             patch.object(run_slice6, "require_runtime_listener_custody") as custody,
+            patch.object(run_slice6, "require_livekit_udp_listener") as udp_listener,
             patch.object(run_slice6, "systemd_notify_ready") as notify,
         ):
             with self.assertRaisesRegex(
@@ -105,7 +106,42 @@ class SystemdReadinessTests(unittest.TestCase):
             expected_release_id="b" * 24,
         )
         custody.assert_called_once_with(supervisor)
+        udp_listener.assert_called_once_with()
         notify.assert_not_called()
+
+    def test_ready_boundary_requires_udp_presence_and_operational_readiness(self) -> None:
+        supervisor = run_slice6.ProcessSupervisor()
+        with (
+            patch.object(run_slice6, "require_runtime_listener_custody") as custody,
+            patch.object(run_slice6, "require_livekit_udp_listener") as udp_listener,
+            patch.object(run_slice6, "gateway_operational_ready", return_value=True) as ready,
+            patch.object(run_slice6, "systemd_notify_ready") as notify,
+        ):
+            run_slice6.publish_systemd_readiness(
+                supervisor, build_id="a" * 40, release_id="b" * 24,
+            )
+        self.assertEqual(custody.call_count, 2)
+        self.assertEqual(udp_listener.call_count, 2)
+        ready.assert_called_once_with(
+            timeout=1.0,
+            expected_build_id="a" * 40,
+            expected_release_id="b" * 24,
+        )
+        notify.assert_called_once_with()
+
+        with (
+            patch.object(run_slice6, "require_runtime_listener_custody"),
+            patch.object(run_slice6, "require_livekit_udp_listener"),
+            patch.object(run_slice6, "gateway_operational_ready", return_value=False),
+            patch.object(run_slice6, "systemd_notify_ready") as blocked_notify,
+            self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "did not expose exact operational readiness",
+            ),
+        ):
+            run_slice6.publish_systemd_readiness(
+                supervisor, build_id="a" * 40, release_id="b" * 24,
+            )
+        blocked_notify.assert_not_called()
 
     def test_operational_probe_allows_gateway_component_probe_budget(self) -> None:
         document = json.dumps({
@@ -237,7 +273,6 @@ class RuntimePortCustodyTests(unittest.TestCase):
             (process / "task/123").mkdir(parents=True)
             (process / "task/123/children").write_text("", encoding="ascii")
             (process / "fd").mkdir()
-            (process / "stat").write_text("123 (fixture) S 1 123\n", encoding="ascii")
             descriptor = process / "fd/3"
             descriptor.symlink_to("socket:[555]")
             owned = FakeProcess()
@@ -261,7 +296,7 @@ class RuntimePortCustodyTests(unittest.TestCase):
                     requirements=(("fixture", "tcp", 8000),),
                 )
 
-    def test_final_listener_custody_accepts_a_reparented_process_group_member(self) -> None:
+    def test_livekit_udp_listener_requires_presence_not_process_origin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             proc = Path(temporary)
             net = proc / "net"
@@ -273,25 +308,12 @@ class RuntimePortCustodyTests(unittest.TestCase):
                 header + "0: 0100007F:1ECA 00000000:0000 07 0 0 0 1000 0 666\n",
                 encoding="ascii",
             )
-            process = proc / "123"
-            (process / "task/123").mkdir(parents=True)
-            (process / "task/123/children").write_text("", encoding="ascii")
-            (process / "fd").mkdir()
-            (process / "stat").write_text("123 (livekit) S 1 123\n", encoding="ascii")
-            reparented = proc / "124"
-            (reparented / "fd").mkdir(parents=True)
-            (reparented / "fd/3").symlink_to("socket:[666]")
-            (reparented / "stat").write_text("124 (livekit-worker) S 1 123\n", encoding="ascii")
-            owned = FakeProcess()
-            owned.pid = 123
-            supervisor = run_slice6.ProcessSupervisor()
-            supervisor.processes.append(owned)
-            supervisor._roles[id(owned)] = "fixture"
-            run_slice6.require_runtime_listener_custody(
-                supervisor,
-                proc_root=proc,
-                requirements=(("fixture", "udp", 7882),),
-            )
+            run_slice6.require_livekit_udp_listener(proc)
+            (net / "udp").write_text(header, encoding="ascii")
+            with self.assertRaisesRegex(
+                run_slice6.ServiceProcessFailure, "UDP listener did not appear",
+            ):
+                run_slice6.require_livekit_udp_listener(proc)
 
     def test_preexisting_runtime_listener_fails_before_child_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

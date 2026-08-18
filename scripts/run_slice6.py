@@ -52,7 +52,6 @@ OPERATIONAL_UNREADY_GRACE_SECONDS = 2.0
 RUNTIME_LISTENER_REQUIREMENTS = (
     ("local-llm", "tcp", LLAMA_PORT),
     ("livekit", "tcp", SIGNAL_PORT),
-    ("livekit", "udp", RTC_UDP_PORT),
     ("gateway-controller-stt-tts-provider", "tcp", GATEWAY_PORT),
 )
 
@@ -327,6 +326,11 @@ def _listener_inodes(
     return inodes
 
 
+def require_livekit_udp_listener(proc_root: Path = Path("/proc")) -> None:
+    if not _listener_inodes("udp", RTC_UDP_PORT, proc_root=proc_root):
+        raise ServiceProcessFailure("LiveKit UDP listener did not appear")
+
+
 def _process_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
     try:
         descriptors = tuple((proc_root / str(pid) / "fd").iterdir())
@@ -370,40 +374,6 @@ def _process_tree_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
     return inodes
 
 
-def _process_group_id(pid: int, *, proc_root: Path) -> int:
-    try:
-        _before, separator, remainder = (
-            proc_root / str(pid) / "stat"
-        ).read_text(encoding="ascii").rpartition(")")
-    except OSError as error:
-        raise ServiceProcessFailure("supervised listener owner is unavailable") from error
-    fields = remainder.split()
-    if not separator or len(fields) < 3 or not fields[2].isdigit() or int(fields[2]) <= 0:
-        raise ServiceProcessFailure("supervised listener owner is invalid")
-    return int(fields[2])
-
-
-def _process_group_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
-    process_group = _process_group_id(pid, proc_root=proc_root)
-    inodes: set[str] = set()
-    try:
-        candidates = tuple(proc_root.iterdir())
-    except OSError as error:
-        raise ServiceProcessFailure("supervised listener custody is unavailable") from error
-    for candidate in candidates:
-        if not candidate.name.isdigit() or int(candidate.name) <= 0:
-            continue
-        try:
-            if _process_group_id(int(candidate.name), proc_root=proc_root) != process_group:
-                continue
-        except ServiceProcessFailure:
-            if candidate.name == str(pid):
-                raise
-            continue
-        inodes.update(_process_socket_inodes(int(candidate.name), proc_root=proc_root))
-    return inodes
-
-
 def require_runtime_listener_custody(
     supervisor: ProcessSupervisor,
     *,
@@ -414,7 +384,6 @@ def require_runtime_listener_custody(
         role: [process for process in supervisor.processes if supervisor.role(process) == role]
         for role, _protocol, _port in requirements
     }
-    process_ids: dict[str, int] = {}
     owned_by_role: dict[str, set[str]] = {}
     for role, processes in processes_by_role.items():
         if len(processes) != 1:
@@ -423,14 +392,9 @@ def require_runtime_listener_custody(
         pid = getattr(process, "pid", None)
         if type(pid) is not int or pid <= 0 or process.poll() is not None:
             raise ServiceProcessFailure(f"supervised listener owner is unavailable: {role}")
-        process_ids[role] = pid
         owned_by_role[role] = _process_tree_socket_inodes(pid, proc_root=proc_root)
     for role, protocol, port in requirements:
         listeners = _listener_inodes(protocol, port, proc_root=proc_root)
-        if listeners and not listeners.issubset(owned_by_role[role]):
-            owned_by_role[role].update(
-                _process_group_socket_inodes(process_ids[role], proc_root=proc_root)
-            )
         if not listeners or not listeners.issubset(owned_by_role[role]):
             raise ServiceProcessFailure(
                 f"runtime listener is not owned by the supervised component: {protocol}/{port}"
@@ -469,6 +433,7 @@ def publish_systemd_readiness(
         raise ServiceStopRequested
     require_supervised_children_alive(supervisor, phase="before readiness")
     require_runtime_listener_custody(supervisor)
+    require_livekit_udp_listener()
     if not gateway_operational_ready(
         timeout=1.0,
         expected_build_id=build_id,
@@ -479,6 +444,7 @@ def publish_systemd_readiness(
         )
     require_supervised_children_alive(supervisor, phase="before readiness")
     require_runtime_listener_custody(supervisor)
+    require_livekit_udp_listener()
     if stop_requested is not None and stop_requested():
         raise ServiceStopRequested
     systemd_notify_ready()
