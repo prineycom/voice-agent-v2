@@ -216,10 +216,14 @@ class Slice9RuntimeTests(unittest.TestCase):
         health = json.loads(
             (ROOT / "contracts/fixtures/health-readiness.v1.json").read_text()
         )
+        agent_profile = json.loads(
+            (ROOT / "contracts/fixtures/public-operational-status.v1.json").read_text()
+        )["agent_profile"]
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
             registry=SimpleNamespace(
                 accepting=True,
                 active_count=0,
+                agent_profile=SimpleNamespace(status_document=lambda: agent_profile),
                 operational_health=lambda: health,
             ),
             settings=SimpleNamespace(build_id="a" * 40, release_id="b" * 24),
@@ -229,6 +233,7 @@ class Slice9RuntimeTests(unittest.TestCase):
         self.assertEqual(report["build_id"], "a" * 40)
         self.assertEqual(report["release_id"], "b" * 24)
         self.assertEqual(report["health"], health)
+        self.assertEqual(report["agent_profile"], agent_profile)
         self.assertEqual(report["selected_avatar_module"], "mvp-eye-svg-v1")
         self.assertFalse(report["external_provider_supervised"])
         self.assertFalse(report["automatic_fallback"])

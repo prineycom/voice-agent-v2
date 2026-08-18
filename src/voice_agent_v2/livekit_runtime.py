@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from livekit import api, rtc
 
+from .agent_profile_runtime import AgentProfileRuntime
 from .v2_audio import (
     INPUT_AUDIO_FORMAT,
     OUTPUT_DELIVERY_BLOCK_BYTES,
@@ -1443,8 +1444,11 @@ class LiveKitRoomController:
 
 
 class SessionRegistry:
-    def __init__(self, settings: Slice6Settings) -> None:
+    def __init__(
+        self, settings: Slice6Settings, *, agent_profile: AgentProfileRuntime
+    ) -> None:
         self.settings = settings
+        self.agent_profile = agent_profile
         self.runner = LiveTurnRunner(settings)
         runtime_id = f"runtime-{os.getpid()}-{time.monotonic_ns():x}"
         self.trace = PrivacySafeTrace(

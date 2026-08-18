@@ -1,9 +1,11 @@
 # Domain glossary
 
 - **Agent response** — The assistant content produced for one voice turn, including response text and synthesized speech.
-- **Agent profile** — The operator-owned, non-secret `~/.voice-agent/` source tree. In E1.1 its config, SOUL, skills, sessions, and memory paths are inert and are not part of voice-runtime readiness or authority.
-- **Capability registry** — The immutable release-owned set of capability IDs that configuration may request. The E1.1 production registry is empty, so effective agent capability count is always zero.
+- **Agent profile** — The operator-owned, non-secret `~/.voice-agent/` source tree. The runtime reads its typed config once at process startup; SOUL, skills, sessions, and memory remain inert, and profile failure never changes local voice readiness.
+- **Startup profile snapshot** — The immutable, restart-pinned in-process result containing profile identity, semantic config revision, effective-policy revision, and deny-all agent authority.
+- **Capability registry** — The immutable release-owned set of capability IDs that configuration may request. The production registry is empty, so effective agent capability count is always zero.
 - **Semantic revision** — A deterministic digest of canonical validated agent configuration; comments and mapping-key order do not change it.
+- **Effective-policy revision** — A deterministic digest of the release-evaluated agent authority. In E1.2 it identifies the single empty deny-all policy.
 - **Avatar control contract** — The versioned `voice-agent.avatar-control.v1` renderer-neutral input validated by the avatar host: lifecycle, decoded-playout speech envelope, optional bounded tracking target, cancellation, idle seed, and reduced-motion preference. It contains no renderer or LLM frame data.
 - **Avatar host** — The renderer-agnostic component that loads one avatar module and routes validated inputs, lifecycle, cancellation, and failure state to it.
 - **Avatar module** — A replaceable visual implementation behind the avatar host boundary, such as the MVP eye or a later custom, Live2D, or 3D renderer.

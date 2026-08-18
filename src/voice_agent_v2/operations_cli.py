@@ -431,6 +431,7 @@ def command_status(arguments: argparse.Namespace) -> None:
             "build_id": public_status.get("build_id") if public_status else None,
             "overall_readiness": health.get("overall_readiness") if isinstance(health, dict) else None,
             "accepting": public_status.get("accepting") if public_status else False,
+            "agent_profile": public_status.get("agent_profile") if public_status else None,
         }
     else:
         service = {
@@ -449,6 +450,7 @@ def command_status(arguments: argparse.Namespace) -> None:
             "build_id": None,
             "overall_readiness": "not-applicable",
             "accepting": False,
+            "agent_profile": None,
         }
     _print({
         "schema_version": "voice-agent.operational-status.v1",

@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .agent_profile_runtime import AgentProfileRuntime
 from .livekit_runtime import SessionCapacityError, SessionRegistry
 from .slice6_config import Slice6Settings, app_origin_allowed
 
@@ -17,11 +18,13 @@ async def lifespan(app: FastAPI):
     settings = Slice6Settings.from_environment()
     if not settings.web_dist.is_dir() or not (settings.web_dist / "index.html").is_file():
         raise RuntimeError("Slice 6 web build is missing; run (cd web && npm run build)")
-    registry = SessionRegistry(settings)
+    agent_profile = AgentProfileRuntime.startup()
+    registry = SessionRegistry(settings, agent_profile=agent_profile)
     try:
         await registry.start()
         app.state.settings = settings
         app.state.registry = registry
+        app.state.agent_profile = agent_profile
         yield
     finally:
         await registry.close()
@@ -53,10 +56,11 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-@app.get("/api/status")
-async def status(request: Request) -> dict[str, object]:
-    registry: SessionRegistry = request.app.state.registry
-    settings: Slice6Settings = request.app.state.settings
+def public_status_document(
+    registry: SessionRegistry, settings: Slice6Settings
+) -> dict[str, object]:
+    """Compose voice readiness independently from the soft agent plane."""
+
     health = registry.operational_health()
     return {
         "schema_version": "voice-agent.public-operational-status.v1",
@@ -73,8 +77,16 @@ async def status(request: Request) -> dict[str, object]:
         "automatic_fallback": False,
         "avatar_host_contract": "voice-agent.avatar-host.v1",
         "selected_avatar_module": "mvp-eye-svg-v1",
+        "agent_profile": registry.agent_profile.status_document(),
         "health": health,
     }
+
+
+@app.get("/api/status")
+async def status(request: Request) -> dict[str, object]:
+    registry: SessionRegistry = request.app.state.registry
+    settings: Slice6Settings = request.app.state.settings
+    return public_status_document(registry, settings)
 
 
 @app.post("/api/session")
