@@ -1,0 +1,422 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "corpus_file_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "decision": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "enum": [
+            "llama_cpp_openai_single_tool_call",
+            "closed_json_choice",
+            "model_operation_proposals_unavailable"
+          ],
+          "type": "string"
+        },
+        "ordinary_conversation_only": {
+          "type": "boolean"
+        },
+        "passing_model_mechanism_count": {
+          "maximum": 2,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "production_capability_count": {
+          "const": 0
+        },
+        "selected_model_mechanism": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "decision",
+        "selected_model_mechanism",
+        "passing_model_mechanism_count",
+        "ordinary_conversation_only",
+        "production_capability_count"
+      ],
+      "type": "object"
+    },
+    "execution": {
+      "additionalProperties": false,
+      "properties": {
+        "elapsed_milliseconds": {
+          "maximum": 600000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failure_class": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fixture_count": {
+          "const": 240
+        },
+        "matrix_complete": {
+          "type": "boolean"
+        },
+        "matrix_deadline_seconds": {
+          "const": 570
+        },
+        "maximum_concurrency": {
+          "const": 2
+        },
+        "outer_timeout_seconds": {
+          "const": 600
+        },
+        "run_order_count": {
+          "const": 5
+        }
+      },
+      "required": [
+        "outer_timeout_seconds",
+        "matrix_deadline_seconds",
+        "maximum_concurrency",
+        "run_order_count",
+        "fixture_count",
+        "matrix_complete",
+        "elapsed_milliseconds",
+        "failure_class"
+      ],
+      "type": "object"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_and_runtime_verified": {
+          "type": "boolean"
+        },
+        "automatic_fallback": {
+          "const": false
+        },
+        "context_tokens_per_slot": {
+          "const": 32768
+        },
+        "credentials_required": {
+          "const": false
+        },
+        "model_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "parallel_slots": {
+          "const": 2
+        },
+        "provider_identity": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "provider_mode": {
+          "const": "local"
+        },
+        "response_model_alias": {
+          "const": "lfm2.5-2.6b-q4-k-m"
+        },
+        "runtime_binary_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "runtime_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_mode",
+        "provider_identity",
+        "model_sha256",
+        "runtime_commit",
+        "runtime_binary_sha256",
+        "response_model_alias",
+        "artifact_and_runtime_verified",
+        "parallel_slots",
+        "context_tokens_per_slot",
+        "automatic_fallback",
+        "credentials_required"
+      ],
+      "type": "object"
+    },
+    "mechanisms": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_fixture_evaluations": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exact_selection_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_fixture_evaluations": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failure_classes": {
+            "additionalProperties": false,
+            "properties": {
+              "false_positive_ambiguous": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "false_positive_injection": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "false_positive_no_operation": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "http_status": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "invalid_envelope": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "not_attempted": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "positive_selection_miss": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "provider_identity_mismatch": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "provider_identity_missing": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "request_timeout": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "request_transport": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invalid_envelope",
+              "false_positive_no_operation",
+              "false_positive_ambiguous",
+              "false_positive_injection",
+              "positive_selection_miss",
+              "request_timeout",
+              "request_transport",
+              "http_status",
+              "provider_identity_mismatch",
+              "provider_identity_missing",
+              "not_attempted"
+            ],
+            "type": "object"
+          },
+          "false_positive_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "identity_match_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "identity_mismatch_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "identity_missing_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "identity_not_applicable_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "invalid_envelope_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mechanism": {
+            "enum": [
+              "llama_cpp_openai_single_tool_call",
+              "closed_json_choice",
+              "deterministic_russian_command_grammar"
+            ],
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "positive_fixture_evaluations": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "proposal_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "proposal_counts_by_class": {
+            "additionalProperties": false,
+            "properties": {
+              "ambiguous": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "injection": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "no_operation": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "positive": {
+                "maximum": 1200,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "positive",
+              "no_operation",
+              "ambiguous",
+              "injection"
+            ],
+            "type": "object"
+          },
+          "selection_miss_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "valid_envelope_count": {
+            "maximum": 1200,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mechanism",
+          "expected_fixture_evaluations",
+          "attempted_fixture_evaluations",
+          "valid_envelope_count",
+          "invalid_envelope_count",
+          "proposal_count",
+          "proposal_counts_by_class",
+          "false_positive_count",
+          "positive_fixture_evaluations",
+          "exact_selection_count",
+          "selection_miss_count",
+          "timeout_count",
+          "identity_match_count",
+          "identity_mismatch_count",
+          "identity_missing_count",
+          "identity_not_applicable_count",
+          "failure_classes",
+          "passed"
+        ],
+        "type": "object"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "orders_file_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "preregistration_commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "privacy": {
+      "additionalProperties": false,
+      "properties": {
+        "credential_or_environment_evidence_count": {
+          "const": 0
+        },
+        "model_completion_retained_count": {
+          "const": 0
+        },
+        "private_fixture_count": {
+          "const": 0
+        },
+        "prompt_completion_or_argument_evidence_count": {
+          "const": 0
+        },
+        "public_synthetic_fixture_count": {
+          "const": 240
+        }
+      },
+      "required": [
+        "public_synthetic_fixture_count",
+        "private_fixture_count",
+        "model_completion_retained_count",
+        "prompt_completion_or_argument_evidence_count",
+        "credential_or_environment_evidence_count"
+      ],
+      "type": "object"
+    },
+    "result_schema_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "voice-agent.tool-proposal-benchmark-result.v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "preregistration_commit",
+    "corpus_file_sha256",
+    "orders_file_sha256",
+    "result_schema_sha256",
+    "identity",
+    "execution",
+    "mechanisms",
+    "decision",
+    "privacy"
+  ],
+  "type": "object"
+}

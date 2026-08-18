@@ -1,0 +1,247 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_formats": {
+      "type": "object"
+    },
+    "execution": {
+      "additionalProperties": false,
+      "properties": {
+        "matrix_deadline_seconds": {
+          "const": 570
+        },
+        "maximum_concurrency": {
+          "const": 2
+        },
+        "mechanism_order": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "outer_timeout_seconds": {
+          "const": 600
+        },
+        "provider_fallback": {
+          "const": false
+        },
+        "request_timeout_seconds": {
+          "const": 10
+        }
+      },
+      "required": [
+        "outer_timeout_seconds",
+        "matrix_deadline_seconds",
+        "maximum_concurrency",
+        "request_timeout_seconds",
+        "provider_fallback",
+        "mechanism_order"
+      ],
+      "type": "object"
+    },
+    "frozen_hashes": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_formats_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "corpus_file_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "corpus_fixture_set_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "orders_file_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "result_schema_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "corpus_file_sha256",
+        "corpus_fixture_set_sha256",
+        "orders_file_sha256",
+        "candidate_formats_sha256",
+        "result_schema_sha256"
+      ],
+      "type": "object"
+    },
+    "identity": {
+      "type": "object"
+    },
+    "integrity": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_results_viewed": {
+          "const": false
+        },
+        "frozen_fields_must_not_change_after_results": {
+          "const": true
+        },
+        "results_require_ancestor_commit": {
+          "const": true
+        }
+      },
+      "required": [
+        "candidate_results_viewed",
+        "results_require_ancestor_commit",
+        "frozen_fields_must_not_change_after_results"
+      ],
+      "type": "object"
+    },
+    "issue": {
+      "const": "https://github.com/prineycom/voice-agent-v2/issues/30"
+    },
+    "result_contract": {
+      "additionalProperties": false,
+      "properties": {
+        "content_retention": {
+          "const": "counts-and-stable-failure-classes-only"
+        },
+        "schema_file": {
+          "const": "benchmarks/schemas/tool-proposals-result.v1.schema.json"
+        },
+        "schema_version": {
+          "const": "voice-agent.tool-proposal-benchmark-result.v1"
+        }
+      },
+      "required": [
+        "schema_version",
+        "schema_file",
+        "content_retention"
+      ],
+      "type": "object"
+    },
+    "run_orders": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "const": 5
+        },
+        "file": {
+          "const": "benchmarks/config/tool-proposals-orders.v1.json"
+        },
+        "fixture_count_per_order": {
+          "const": 240
+        }
+      },
+      "required": [
+        "file",
+        "count",
+        "fixture_count_per_order"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "voice-agent.tool-proposal-preregistration.v1"
+    },
+    "scope": {
+      "additionalProperties": false,
+      "properties": {
+        "fallback_provider_count": {
+          "const": 0
+        },
+        "operation_dispatch_count": {
+          "const": 0
+        },
+        "private_fixture_count": {
+          "const": 0
+        },
+        "production_capability_registry_must_remain_empty": {
+          "const": true
+        },
+        "test_capabilities_are_benchmark_only": {
+          "const": true
+        }
+      },
+      "required": [
+        "production_capability_registry_must_remain_empty",
+        "test_capabilities_are_benchmark_only",
+        "operation_dispatch_count",
+        "private_fixture_count",
+        "fallback_provider_count"
+      ],
+      "type": "object"
+    },
+    "selection_rule": {
+      "additionalProperties": false,
+      "properties": {
+        "failed_thresholds_are_not_tunable": {
+          "const": true
+        },
+        "model_priority": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "no_passing_model_decision": {
+          "const": "model_operation_proposals_unavailable"
+        }
+      },
+      "required": [
+        "model_priority",
+        "no_passing_model_decision",
+        "failed_thresholds_are_not_tunable"
+      ],
+      "type": "object"
+    },
+    "thresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "false_positive_max_by_nonpositive_class": {
+          "const": 0
+        },
+        "identity_match_percent": {
+          "const": 100
+        },
+        "matrix_must_complete": {
+          "const": true
+        },
+        "positive_exact_selection_min_percent": {
+          "const": 98
+        },
+        "timeout_count_max": {
+          "const": 0
+        },
+        "valid_closed_envelope_percent": {
+          "const": 100
+        }
+      },
+      "required": [
+        "valid_closed_envelope_percent",
+        "false_positive_max_by_nonpositive_class",
+        "positive_exact_selection_min_percent",
+        "identity_match_percent",
+        "timeout_count_max",
+        "matrix_must_complete"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "issue",
+    "integrity",
+    "frozen_hashes",
+    "candidate_formats",
+    "run_orders",
+    "identity",
+    "thresholds",
+    "execution",
+    "result_contract",
+    "selection_rule",
+    "scope"
+  ],
+  "type": "object"
+}
