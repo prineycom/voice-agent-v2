@@ -149,7 +149,7 @@ def main() -> int:
             return 0
 
         owner.run(
-            "bounded synthetic operation matrix",
+            "bounded operation custody/failure matrix",
             [str(python), "-B", str(ROOT / "scripts/verify_operation_tracer.py")],
             cwd=ROOT,
             environment=environment,

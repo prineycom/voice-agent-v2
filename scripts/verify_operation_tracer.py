@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded E2.2 synthetic-operation matrix; owned by the canonical gate."""
+"""Bounded E2.3 custody/failure matrix; owned once by the canonical gate."""
 
 from __future__ import annotations
 
@@ -34,7 +34,10 @@ def main() -> int:
     elapsed = time.monotonic() - started
     if not result.wasSuccessful() or result.skipped or elapsed >= 8.0:
         return 1
-    print(f"synthetic_operation_matrix: PASS cases={result.testsRun} network=denied elapsed_ms={int(elapsed * 1000)}")
+    print(
+        "operation_custody_matrix: PASS "
+        f"cases={result.testsRun} network=denied elapsed_ms={int(elapsed * 1000)}"
+    )
     return 0
 
 

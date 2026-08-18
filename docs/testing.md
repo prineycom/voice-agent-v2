@@ -18,12 +18,13 @@ Then run the only PR command:
 
 `./verify` owns a 90-second monotonic deadline and runs these phases in order:
 
-1. the explicit current Python behavior manifest under IP-network denial, including the disposable-root strict agent-profile parser/custody/CLI matrix and restart-only startup/degraded-voice regression matrix;
-2. the bounded local-socket readiness/VAD phase;
-3. the installed SDK, capability, and active-composition contract;
-4. the complete Vitest surface once;
-5. TypeScript typecheck once, then one production and one review-fixture Vite build without repeated typecheck;
-6. a short production-entry Firefox smoke through an actual task-owned local LiveKit.
+1. the sole E2 operation custody/failure matrix under IP-network denial, with its own 8-second bound;
+2. the explicit current Python behavior manifest under IP-network denial, including the disposable-root strict agent-profile parser/custody/CLI matrix and restart-only startup/degraded-voice regression matrix (the E2 matrix is not selected again);
+3. the bounded local-socket readiness/VAD phase;
+4. the installed SDK, capability, and active-composition contract;
+5. the complete Vitest surface once;
+6. TypeScript typecheck once, then one production and one review-fixture Vite build without repeated typecheck;
+7. a short production-entry Firefox smoke through an actual task-owned local LiveKit.
 
 Every phase is a separate process group. The owner sends `TERM`, waits at most 10 seconds, then sends `KILL`; detached children are found by a per-run environment nonce. A leaked process, TCP listener, or private artifact makes the gate fail even if final cleanup succeeds. Python skips also fail. Once its task-owned LiveKit and real Firefox are ready, the functional browser smoke is bounded to 15 seconds and injects regressions for ReviewStand at the production URL, an invalid capability, missing current-generation PCM, and stale request/media correlation. Cold Firefox/GeckoDriver provisioning remains inside the canonical 90-second deadline rather than weakening the behavior budget; browser cleanup has its own 10-second maximum and leak assertion.
 
@@ -96,7 +97,7 @@ The operator procedure remains in [`evidence/silero-kseniya-48k-private-evaluati
 | Wrong LFM/TTS identity or fallback | local-LFM, Silero, capability, reducer, configuration, and operations owners in `./verify`; exact identities in canonical-host commands |
 | One Silero worker incorrectly reports ready | `tests.test_slice6_livekit_runtime.TTSHealthSnapshotTests` and `tests.test_silero_tts.SileroPoolTests` |
 | Stale request/media generation publishes PCM or terminal | realtime/LiveKit owners plus injected browser stale generation |
-| Cancellation publishes two terminals or skips cleanup | realtime cancellation and cooperative-cleanup owners |
+| Cancellation publishes two terminals, skips cleanup, or leaks operation data into a replacement turn | the sole bounded E2 operation custody/failure matrix plus realtime cancellation and cooperative-cleanup owners |
 | Transcript/audio/secret reaches diagnostics | observability, diagnostics, run-voice-turn, and browser diagnostics owners |
 | Config/release symlink or pointer race is accepted | operations release/configuration owners |
 | Agent profile parser ambiguity, unsafe custody, content-bearing CLI output, or non-empty production capability registry | `tests.test_agent_config` in the hermetic behavior manifest |
