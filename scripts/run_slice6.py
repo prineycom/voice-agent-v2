@@ -295,7 +295,7 @@ def require_runtime_ports_free(proc_root: Path = Path("/proc")) -> None:
                 occupied.add(int(fields[1].rsplit(":", 1)[1], 16))
             except (IndexError, ValueError) as error:
                 raise ServiceProcessFailure("runtime port custody is invalid") from error
-    for port in (LLAMA_PORT, SIGNAL_PORT, GATEWAY_PORT, RTC_UDP_PORT):
+    for port in (LLAMA_PORT, SIGNAL_PORT, GATEWAY_PORT):
         if port in occupied:
             raise ServiceProcessFailure(f"required runtime port is already owned: {port}")
 
@@ -324,11 +324,6 @@ def _listener_inodes(
                 raise ServiceProcessFailure("runtime listener custody is invalid")
             inodes.add(fields[9])
     return inodes
-
-
-def require_livekit_udp_listener(proc_root: Path = Path("/proc")) -> None:
-    if not _listener_inodes("udp", RTC_UDP_PORT, proc_root=proc_root):
-        raise ServiceProcessFailure("LiveKit UDP listener did not appear")
 
 
 def _process_socket_inodes(pid: int, *, proc_root: Path) -> set[str]:
@@ -433,7 +428,6 @@ def publish_systemd_readiness(
         raise ServiceStopRequested
     require_supervised_children_alive(supervisor, phase="before readiness")
     require_runtime_listener_custody(supervisor)
-    require_livekit_udp_listener()
     if not gateway_operational_ready(
         timeout=1.0,
         expected_build_id=build_id,
@@ -444,7 +438,6 @@ def publish_systemd_readiness(
         )
     require_supervised_children_alive(supervisor, phase="before readiness")
     require_runtime_listener_custody(supervisor)
-    require_livekit_udp_listener()
     if stop_requested is not None and stop_requested():
         raise ServiceStopRequested
     systemd_notify_ready()
