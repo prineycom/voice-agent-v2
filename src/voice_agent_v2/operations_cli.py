@@ -12,14 +12,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import TYPE_CHECKING
 
-from .agent_config import (
-    AgentConfigError,
-    AgentConfigService,
-    AgentUserContext,
-    ERROR_SCHEMA as AGENT_CONFIG_ERROR_SCHEMA,
-    RESULT_SCHEMA as AGENT_CONFIG_RESULT_SCHEMA,
-)
 from .operations import (
     CONFIGURATION_EXIT_STATUS,
     DEFAULT_MANIFEST_RELATIVE,
@@ -32,6 +26,10 @@ from .operations import (
     validate_host,
     validate_release,
 )
+
+
+if TYPE_CHECKING:
+    from .agent_config import AgentConfigService, AgentUserContext
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -299,7 +297,11 @@ def _systemctl_show() -> dict[str, object]:
     }
 
 
-def _agent_service(arguments: argparse.Namespace) -> AgentConfigService:
+def _agent_service(arguments: argparse.Namespace) -> "AgentConfigService":
+    # Keep the pinned YAML/model dependencies isolated from legacy operations
+    # commands that intentionally execute under dependency-free system Python.
+    from .agent_config import AgentConfigService
+
     context = getattr(arguments, "_agent_context", None)
     return AgentConfigService(context=context)
 
@@ -326,10 +328,12 @@ def command_agent_config_init(arguments: argparse.Namespace) -> None:
 
 
 def command_agent_config_validate(arguments: argparse.Namespace) -> None:
+    from .agent_config import RESULT_SCHEMA
+
     snapshot = _agent_service(arguments).validate(arguments.path)
     status = snapshot.status_document()
     document = {
-        "schema_version": AGENT_CONFIG_RESULT_SCHEMA,
+        "schema_version": RESULT_SCHEMA,
         "operation": "validate",
         "status": "valid",
         **{key: value for key, value in status.items() if key != "schema_version"},
@@ -804,29 +808,41 @@ def parser() -> argparse.ArgumentParser:
 def main(
     argv: list[str] | None = None,
     *,
-    agent_context: AgentUserContext | None = None,
+    agent_context: "AgentUserContext | None" = None,
 ) -> int:
     arguments = parser().parse_args(argv)
     if agent_context is not None:
         setattr(arguments, "_agent_context", agent_context)
     try:
         arguments.function(arguments)
-    except AgentConfigError as error:
-        if getattr(arguments, "json", False):
-            print(json.dumps({
-                "schema_version": AGENT_CONFIG_ERROR_SCHEMA,
-                "status": "error",
-                "code": error.code,
-            }, ensure_ascii=True, sort_keys=True), file=sys.stderr)
-        else:
-            print(f"voice-agent-ops failed: {error.code}", file=sys.stderr)
-        return CONFIGURATION_EXIT_STATUS
     except OperationalError as error:
         print(f"voice-agent-ops failed: {error.code}: {error}", file=sys.stderr)
         return CONFIGURATION_EXIT_STATUS
     except KeyboardInterrupt:
         print("voice-agent-ops failed: interrupted", file=sys.stderr)
         return 130
+    except Exception as error:
+        if arguments.command != "agent-config":
+            raise
+        # Agent-profile failures are normalized at the public boundary; an
+        # unexpected parser/runtime exception must not reveal source or host data.
+        try:
+            from .agent_config import AgentConfigError, ERROR_SCHEMA
+        except ImportError:
+            code = "config_runtime_unavailable"
+            error_schema = "voice-agent.agent-config-error.v1"
+        else:
+            code = error.code if isinstance(error, AgentConfigError) else "config_operation_failed"
+            error_schema = ERROR_SCHEMA
+        if getattr(arguments, "json", False):
+            print(json.dumps({
+                "schema_version": error_schema,
+                "status": "error",
+                "code": code,
+            }, ensure_ascii=True, sort_keys=True), file=sys.stderr)
+        else:
+            print(f"voice-agent-ops failed: {code}", file=sys.stderr)
+        return CONFIGURATION_EXIT_STATUS
     return 0
 
 
