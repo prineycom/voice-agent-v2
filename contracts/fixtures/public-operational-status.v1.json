@@ -10,6 +10,17 @@
   "automatic_fallback": false,
   "avatar_host_contract": "voice-agent.avatar-host.v1",
   "selected_avatar_module": "mvp-eye-svg-v1",
+  "agent_profile": {
+    "schema_version": "voice-agent.agent-profile-runtime-status.v1",
+    "status": "active",
+    "reason_code": "agent_profile_active",
+    "profile_id": "default",
+    "config_revision": "93f2250d3258b3d05c4920f34c0c2fc263cd9db95049373d1df62b3ee1f5ade0",
+    "effective_policy_revision": "64ab57afabb5daed58429bd1392bf7659992f12f56e9060ed5640360c22dc991",
+    "effective_authority": "deny_all",
+    "effective_capability_count": 0,
+    "agent_capabilities_admitted": false
+  },
   "health": {
     "schema_version": "voice-agent.health-readiness.v1",
     "overall_readiness": "ready",

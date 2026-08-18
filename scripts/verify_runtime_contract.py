@@ -33,6 +33,10 @@ sys.addaudithook(deny_network)
 
 from livekit import api
 
+from voice_agent_v2.agent_profile_runtime import (
+    AgentProfileRuntime,
+    RuntimeAgentProfileSnapshot,
+)
 from voice_agent_v2.livekit_runtime import (
     LiveKitRoomController,
     LiveTurnRunner,
@@ -49,6 +53,12 @@ from voice_agent_v2.silero_tts import (
 )
 from voice_agent_v2.local_vad import SILERO_MODEL_SIZE
 from voice_agent_v2.slice6_config import Slice6Settings
+
+DISPOSABLE_AGENT_PROFILE = AgentProfileRuntime(
+    snapshot=RuntimeAgentProfileSnapshot(profile_id=None, config_revision=None),
+    status="degraded",
+    reason_code="config_missing",
+)
 
 EXPECTED = {
     "livekit": "1.1.14",
@@ -175,7 +185,9 @@ def controller_stub(
 
 async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     bounded = replace(settings, browser_join_timeout_seconds=0.01)
-    registry = SessionRegistry(bounded)
+    registry = SessionRegistry(
+        bounded, agent_profile=DISPOSABLE_AGENT_PROFILE
+    )
     controller = controller_stub(bounded, "session-unclaimed")
     controller.on_closed = registry.remove
     registry._controllers[controller.session_id] = controller
@@ -203,7 +215,9 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
 
     startup_controller.arm_browser_join_timeout = refuse_join_timer
 
-    cancelled_registry = SessionRegistry(settings)
+    cancelled_registry = SessionRegistry(
+        settings, agent_profile=DISPOSABLE_AGENT_PROFILE
+    )
     cancelled_registry._accepting = True
     cancelled_registry.operational_health = lambda: {"overall_readiness": "ready"}
     with patch(
@@ -237,7 +251,9 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
         session=FailingSession(),
     )
     failed_controller._browser_ready = True
-    failed_registry = SessionRegistry(settings)
+    failed_registry = SessionRegistry(
+        settings, agent_profile=DISPOSABLE_AGENT_PROFILE
+    )
     failed_registry._accepting = True
     failed_controller.on_closed = failed_registry.remove
     failed_registry._controllers[failed_controller.session_id] = failed_controller
