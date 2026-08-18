@@ -24,6 +24,7 @@ HERMETIC_OWNERS = (
     "tests.test_slice6_livekit_runtime",
     "tests.test_slice6_startup",
     "tests.test_operations",
+    "tests.test_agent_config",
     "tests.test_observability",
     "tests.test_diagnostics",
     "tests.test_run_voice_turn",

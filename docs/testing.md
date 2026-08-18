@@ -18,7 +18,7 @@ Then run the only PR command:
 
 `./verify` owns a 90-second monotonic deadline and runs these phases in order:
 
-1. the explicit current Python behavior manifest under IP-network denial;
+1. the explicit current Python behavior manifest under IP-network denial, including the disposable-root strict agent-profile parser/custody/CLI matrix;
 2. the bounded local-socket readiness/VAD phase;
 3. the installed SDK, capability, and active-composition contract;
 4. the complete Vitest surface once;
@@ -91,6 +91,7 @@ The operator procedure remains in [`evidence/silero-kseniya-48k-private-evaluati
 | Cancellation publishes two terminals or skips cleanup | realtime cancellation and cooperative-cleanup owners |
 | Transcript/audio/secret reaches diagnostics | observability, diagnostics, run-voice-turn, and browser diagnostics owners |
 | Config/release symlink or pointer race is accepted | operations release/configuration owners |
+| Agent profile parser ambiguity, unsafe custody, content-bearing CLI output, or non-empty production capability registry | `tests.test_agent_config` in the hermetic behavior manifest |
 | Corrupt/incompatible prior release moves pointers | operations rollback owners |
 | Gateway dies while adapter descendant survives | real adapter parent-death and startup descendant cleanup owners |
 | Alive nonresponsive LiveKit/LFM remains ready | bounded local-socket Slice 9 and backend-readiness owners |

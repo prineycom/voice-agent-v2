@@ -13,6 +13,13 @@ import sys
 import tempfile
 import time
 
+from .agent_config import (
+    AgentConfigError,
+    AgentConfigService,
+    AgentUserContext,
+    ERROR_SCHEMA as AGENT_CONFIG_ERROR_SCHEMA,
+    RESULT_SCHEMA as AGENT_CONFIG_RESULT_SCHEMA,
+)
 from .operations import (
     CONFIGURATION_EXIT_STATUS,
     DEFAULT_MANIFEST_RELATIVE,
@@ -121,6 +128,12 @@ def _state_root(value: str) -> Path:
 def _configuration(value: str) -> Path:
     path = Path(value).expanduser()
     return Path(os.path.abspath(path))
+
+
+def _agent_candidate(value: str) -> Path:
+    # Lexical absolute conversion is intentional: resolving here would follow a
+    # symlink before the agent-profile custody boundary can reject it.
+    return Path(os.path.abspath(value))
 
 
 def _is_canonical_state_root(path: Path) -> bool:
@@ -284,6 +297,55 @@ def _systemctl_show() -> dict[str, object]:
         "restart_count": restart_count,
         "main_exit_status": main_exit_status,
     }
+
+
+def _agent_service(arguments: argparse.Namespace) -> AgentConfigService:
+    context = getattr(arguments, "_agent_context", None)
+    return AgentConfigService(context=context)
+
+
+def _print_agent_human(document: dict[str, object]) -> None:
+    operation = document.get("operation")
+    if operation == "init":
+        print(f"agent profile: {document['status']}")
+    elif operation == "validate":
+        print("agent profile: valid")
+    print(f"schema: {document['profile_schema_version']}")
+    print(f"profile: {document['profile_id']}")
+    print(f"semantic revision: {document['semantic_revision']}")
+    print(f"effective capabilities: {document['effective_capability_count']}")
+
+
+def command_agent_config_init(arguments: argparse.Namespace) -> None:
+    result = _agent_service(arguments).init()
+    document = result.document()
+    if arguments.json:
+        _print(document)
+    else:
+        _print_agent_human(document)
+
+
+def command_agent_config_validate(arguments: argparse.Namespace) -> None:
+    snapshot = _agent_service(arguments).validate(arguments.path)
+    status = snapshot.status_document()
+    document = {
+        "schema_version": AGENT_CONFIG_RESULT_SCHEMA,
+        "operation": "validate",
+        "status": "valid",
+        **{key: value for key, value in status.items() if key != "schema_version"},
+    }
+    if arguments.json:
+        _print(document)
+    else:
+        _print_agent_human(document)
+
+
+def command_agent_config_status(arguments: argparse.Namespace) -> None:
+    document = _agent_service(arguments).status().status_document()
+    if arguments.json:
+        _print(document)
+    else:
+        _print_agent_human(document)
 
 
 def command_validate(arguments: argparse.Namespace) -> None:
@@ -714,16 +776,51 @@ def parser() -> argparse.ArgumentParser:
     sustained.add_argument("--evidence", type=_configuration, required=True)
     sustained.set_defaults(function=command_sustained_report)
 
+    agent_config = subcommands.add_parser(
+        "agent-config",
+        help="initialize, strictly validate, or inspect the inert private agent profile",
+    )
+    agent_commands = agent_config.add_subparsers(dest="agent_config_command", required=True)
+
+    agent_init = agent_commands.add_parser("init", help="create the minimal private agent profile")
+    agent_init.add_argument("--json", action="store_true", help="emit stable machine-readable output")
+    agent_init.set_defaults(function=command_agent_config_init)
+
+    agent_validate = agent_commands.add_parser("validate", help="strictly validate without activation")
+    agent_validate.add_argument("--path", type=_agent_candidate)
+    agent_validate.add_argument("--json", action="store_true", help="emit stable machine-readable output")
+    agent_validate.set_defaults(function=command_agent_config_validate)
+
+    agent_status = agent_commands.add_parser("status", help="report identity, revision, and zero authority")
+    agent_status.add_argument("--json", action="store_true", help="emit stable machine-readable output")
+    agent_status.set_defaults(function=command_agent_config_status)
+
     run = subcommands.add_parser("run", help=argparse.SUPPRESS)
     run.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
     run.set_defaults(function=lambda arguments: execute_release(arguments.state_root))
     return result
 
 
-def main() -> int:
-    arguments = parser().parse_args()
+def main(
+    argv: list[str] | None = None,
+    *,
+    agent_context: AgentUserContext | None = None,
+) -> int:
+    arguments = parser().parse_args(argv)
+    if agent_context is not None:
+        setattr(arguments, "_agent_context", agent_context)
     try:
         arguments.function(arguments)
+    except AgentConfigError as error:
+        if getattr(arguments, "json", False):
+            print(json.dumps({
+                "schema_version": AGENT_CONFIG_ERROR_SCHEMA,
+                "status": "error",
+                "code": error.code,
+            }, ensure_ascii=True, sort_keys=True), file=sys.stderr)
+        else:
+            print(f"voice-agent-ops failed: {error.code}", file=sys.stderr)
+        return CONFIGURATION_EXIT_STATUS
     except OperationalError as error:
         print(f"voice-agent-ops failed: {error.code}: {error}", file=sys.stderr)
         return CONFIGURATION_EXIT_STATUS

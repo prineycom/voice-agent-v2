@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-config-error.v1.schema.json",
+  "title": "Content-free agent profile error v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "code"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.agent-config-error.v1"},
+    "status": {"const": "error"},
+    "code": {"type": "string", "pattern": "^config_[a-z0-9_]{1,48}$"}
+  }
+}

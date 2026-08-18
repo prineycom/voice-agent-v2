@@ -55,6 +55,8 @@ EXPECTED = {
     "livekit-api": "1.2.0",
     "fastapi": "0.141.1",
     "uvicorn": "0.52.1",
+    "pydantic": "2.13.4",
+    "PyYAML": "6.0.3",
 }
 
 
