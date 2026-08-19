@@ -42,21 +42,21 @@
         "network": {
           "type": "object", "additionalProperties": false,
           "required": ["enabled", "publish_ports"],
-          "properties": {"enabled": {"const": true}, "publish_ports": {"const": []}}
+          "properties": {"enabled": {"type": "boolean"}, "publish_ports": {"const": []}}
         },
         "credentials": {
           "type": "object", "additionalProperties": false,
           "required": ["creation_environment_names", "creation_file_names", "exec_environment_names", "exec_file_names"],
           "properties": {
-            "creation_environment_names": {"const": []},
-            "creation_file_names": {"const": []},
-            "exec_environment_names": {"const": []},
-            "exec_file_names": {"const": []}
+            "creation_environment_names": {"$ref": "#/$defs/credentialNames"},
+            "creation_file_names": {"$ref": "#/$defs/credentialNames"},
+            "exec_environment_names": {"$ref": "#/$defs/credentialNames"},
+            "exec_file_names": {"$ref": "#/$defs/credentialNames"}
           }
         },
         "resources": {
           "type": "object", "additionalProperties": false,
-          "required": ["cpus", "memory_mib", "pids", "shm_mib", "rootfs_target_mib", "workspace_target_mib", "cache_target_mib", "host_free_reserve_mib", "watchdog_interval_seconds", "maximum_output_bytes"],
+          "required": ["cpus", "memory_mib", "pids", "shm_mib", "rootfs_target_mib", "workspace_target_mib", "cache_target_mib", "host_free_reserve_mib", "watchdog_interval_seconds", "maximum_output_bytes", "maximum_stream_bytes", "stream_timeout_seconds"],
           "properties": {
             "cpus": {"type": "integer", "minimum": 1, "maximum": 4},
             "memory_mib": {"type": "integer", "minimum": 512, "maximum": 8192},
@@ -67,10 +67,18 @@
             "cache_target_mib": {"type": "integer", "minimum": 512, "maximum": 32768},
             "host_free_reserve_mib": {"type": "integer", "minimum": 8192},
             "watchdog_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 10},
-            "maximum_output_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576}
+            "maximum_output_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+            "maximum_stream_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+            "stream_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
           }
         }
       }
+    }
+  },
+  "$defs": {
+    "credentialNames": {
+      "type": "array", "maxItems": 16, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^(?!VOICE_AGENT_)[A-Z_][A-Z0-9_]{0,63}$"}
     }
   }
 }

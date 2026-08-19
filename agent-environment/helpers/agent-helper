@@ -25,8 +25,10 @@ import tempfile
 import threading
 
 LEDGER = Path(os.environ.get("VOICE_AGENT_LEDGER", "/var/lib/voice-agent/exec-ledger"))
+STREAM_LEDGER = Path(os.environ.get("VOICE_AGENT_STREAM_LEDGER", "/var/lib/voice-agent/stream-ledger"))
 MAX_LEDGER = 4096
 MAX_INPUT = 256 * 1024
+MAX_STREAM_BYTES = 1024 * 1024
 # The Docker exec JSON envelope base64-encodes stdout, so this deliberately
 # stays below the controller's 256-KiB wire-output limit.
 MAX_OUTPUT = 128 * 1024
@@ -34,6 +36,8 @@ MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_SEARCH_MATCHES = 256
 CALL_ID = re.compile(r"^[a-f0-9]{32}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
+CREDENTIAL_NAME = re.compile(r"^(?!VOICE_AGENT_)[A-Z_][A-Z0-9_]{0,63}$")
+STREAM_ROOTS = {"workspace": Path("/workspace"), "cache": Path("/cache")}
 
 
 @dataclass(slots=True)
@@ -331,8 +335,8 @@ def _file_patch(data: dict[str, object], cwd: str) -> dict[str, object]:
 
 def _tool_environment() -> dict[str, str]:
     # Deliberately do not inherit host/controller Git, SSH, GPG, Docker, or
-    # credential state. A repository-local config remains ordinary user data.
-    return {
+    # credential state. Only controller-fixed declared names cross this seam.
+    result = {
         "HOME": "/workspace",
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
@@ -342,6 +346,15 @@ def _tool_environment() -> dict[str, str]:
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "/bin/false",
     }
+    for declaration in (
+        "VOICE_AGENT_CREATE_ENV_NAMES", "VOICE_AGENT_CREATE_FILE_NAMES",
+        "VOICE_AGENT_EXEC_ENV_NAMES", "VOICE_AGENT_EXEC_FILE_NAMES",
+    ):
+        raw = os.environ.get(declaration, "")
+        for name in raw.split(",") if raw else ():
+            if CREDENTIAL_NAME.fullmatch(name) and name in os.environ:
+                result[name] = os.environ[name]
+    return result
 
 
 def _drain(stream, result: Captured) -> None:
@@ -414,6 +427,186 @@ def _execute_code(data: dict[str, object], cwd: str, call: Path) -> dict[str, ob
                    details={"kind": "execute_code", "output_complete": complete})
 
 
+def _creation_file_material() -> list[tuple[str, bytes]]:
+    try:
+        count = int(os.environ.get("VOICE_AGENT_CREATE_FILE_COUNT", "0"))
+    except ValueError as error:
+        raise ValueError("credential_creation_invalid") from error
+    if not 0 <= count <= 16:
+        raise ValueError("credential_creation_invalid")
+    result: list[tuple[str, bytes]] = []
+    for index in range(count):
+        name = os.environ.get(f"VOICE_AGENT_CREATE_FILE_NAME_{index}", "")
+        encoded = os.environ.get(f"VOICE_AGENT_CREATE_FILE_B64_{index}", "")
+        if not CREDENTIAL_NAME.fullmatch(name):
+            raise ValueError("credential_creation_invalid")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise ValueError("credential_creation_invalid") from error
+        if len(content) > 64 * 1024:
+            raise ValueError("credential_creation_invalid")
+        result.append((name, content))
+    if len({name for name, _content in result}) != len(result):
+        raise ValueError("credential_creation_invalid")
+    return result
+
+
+def initialize_creation_files() -> None:
+    for name, content in _creation_file_material():
+        _atomic_replace(Path("/var/lib/voice-agent/credentials") / name, content)
+
+
+def creation_files_ready() -> bool:
+    try:
+        for name, content in _creation_file_material():
+            target = Path("/var/lib/voice-agent/credentials") / name
+            metadata = _regular(target)
+            if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size != len(content) or _sha256_path(target) != hashlib.sha256(content).hexdigest():
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _credential_path(scope: str, name: str, call_id: str | None) -> Path:
+    if not CREDENTIAL_NAME.fullmatch(name):
+        raise ValueError("credential_name_invalid")
+    if scope == "creation" and call_id is None:
+        return Path("/var/lib/voice-agent/credentials") / name
+    if scope == "exec" and call_id is not None and CALL_ID.fullmatch(call_id):
+        return Path("/run/voice-agent-credentials") / call_id / name
+    raise ValueError("credential_scope_invalid")
+
+
+def credential_file_put(arguments: argparse.Namespace) -> int:
+    try:
+        expected_bytes = int(arguments.expected_bytes)
+        if expected_bytes < 0 or expected_bytes > 64 * 1024 or not SHA256.fullmatch(arguments.expected_sha256):
+            raise ValueError("credential_bounds_invalid")
+        content = sys.stdin.buffer.read(expected_bytes + 1)
+        if len(content) != expected_bytes or hashlib.sha256(content).hexdigest() != arguments.expected_sha256:
+            raise ValueError("credential_bytes_mismatch")
+        target = _credential_path(arguments.scope, arguments.name, arguments.call_id)
+        _atomic_replace(target, content)
+        emit({"status": "stored", "bytes": len(content), "mode": "0600"})
+        return 0
+    except (OSError, ValueError):
+        print("credential_injection_failed", file=sys.stderr)
+        return 2
+
+
+def credential_file_clean(call_id: str) -> int:
+    if not CALL_ID.fullmatch(call_id):
+        return 2
+    root = Path("/run/voice-agent-credentials") / call_id
+    try:
+        shutil.rmtree(root)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return 3
+    return 0
+
+
+def _stream_path(root_name: str, relative: str, *, create_parent: bool) -> Path:
+    root = STREAM_ROOTS.get(root_name)
+    candidate_relative = Path(relative)
+    if (
+        root is None or not relative or "\0" in relative or candidate_relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in candidate_relative.parts)
+    ):
+        raise ValueError("stream_path_invalid")
+    target = root / candidate_relative
+    if create_parent:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    resolved_parent = target.parent.resolve(strict=True)
+    try:
+        resolved_parent.relative_to(root)
+    except ValueError as error:
+        raise ValueError("stream_path_invalid") from error
+    if target.is_symlink():
+        raise ValueError("stream_path_invalid")
+    return resolved_parent / target.name
+
+
+def stream_in(arguments: argparse.Namespace) -> int:
+    if not CALL_ID.fullmatch(arguments.transfer_id):
+        return 2
+    STREAM_LEDGER.mkdir(mode=0o700, parents=True, exist_ok=True)
+    existing = sorted((item for item in STREAM_LEDGER.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime_ns)
+    if len(existing) >= MAX_LEDGER:
+        completed = [item for item in existing if (item / "receipt.json").is_file()]
+        for old in completed[:len(existing) - MAX_LEDGER + 1]:
+            shutil.rmtree(old)
+        if sum(1 for item in STREAM_LEDGER.iterdir() if item.is_dir()) >= MAX_LEDGER:
+            return 3
+    claim = STREAM_LEDGER / arguments.transfer_id
+    try:
+        claim.mkdir(mode=0o700)
+    except FileExistsError:
+        try:
+            emit(json.loads((claim / "receipt.json").read_text(encoding="utf-8")))
+            return 0
+        except (OSError, ValueError, TypeError):
+            return 3
+    try:
+        expected_bytes = int(arguments.expected_bytes)
+        if expected_bytes < 0 or expected_bytes > MAX_STREAM_BYTES or not SHA256.fullmatch(arguments.expected_sha256):
+            raise ValueError("stream_bounds_invalid")
+        content = sys.stdin.buffer.read(expected_bytes + 1)
+        if len(content) != expected_bytes or hashlib.sha256(content).hexdigest() != arguments.expected_sha256:
+            raise ValueError("stream_bytes_mismatch")
+        target = _stream_path(arguments.root, arguments.path, create_parent=True)
+        details = _atomic_replace(target, content)
+        document = {
+            "status": "stored", "transfer_id": arguments.transfer_id,
+            "path": f"/{arguments.root}/{arguments.path}", **details,
+        }
+        atomic_json(claim / "receipt.json", document)
+        emit(document)
+        claims = sorted((item for item in STREAM_LEDGER.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime_ns)
+        removable = [item for item in claims if (item / "receipt.json").is_file() and item != claim]
+        for old in removable[:max(0, len(claims) - MAX_LEDGER)]:
+            shutil.rmtree(old)
+        return 0
+    except (OSError, ValueError):
+        return 2
+
+
+def _stream_content(arguments: argparse.Namespace) -> tuple[Path, bytes]:
+    target = _stream_path(arguments.root, arguments.path, create_parent=False)
+    metadata = _regular(target)
+    if metadata.st_size > MAX_STREAM_BYTES:
+        raise ValueError("stream_out_of_bounds")
+    content = target.read_bytes()
+    return target, content
+
+
+def stream_stat(arguments: argparse.Namespace) -> int:
+    try:
+        _target, content = _stream_content(arguments)
+        emit({"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+        return 0
+    except (OSError, ValueError):
+        return 2
+
+
+def stream_out(arguments: argparse.Namespace) -> int:
+    try:
+        expected_bytes = int(arguments.expected_bytes)
+        if expected_bytes < 0 or expected_bytes > MAX_STREAM_BYTES or not SHA256.fullmatch(arguments.expected_sha256):
+            raise ValueError("stream_bounds_invalid")
+        _target, content = _stream_content(arguments)
+        if len(content) != expected_bytes or hashlib.sha256(content).hexdigest() != arguments.expected_sha256:
+            raise ValueError("stream_bytes_mismatch")
+        sys.stdout.buffer.write(content)
+        sys.stdout.buffer.flush()
+        return 0
+    except (OSError, ValueError):
+        return 2
+
+
 def execute(tool: str, data: dict[str, object], cwd: str, call: Path) -> dict[str, object]:
     current = safe_cwd(cwd)
     if tool == "shell-exec":
@@ -479,7 +672,15 @@ def claim_execute(arguments: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "init-container":
+        try:
+            initialize_creation_files()
+        except (OSError, ValueError):
+            return 2
+        os.execve("/bin/sleep", ["sleep", "infinity"], {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
     if len(sys.argv) >= 2 and sys.argv[1] == "readiness":
+        if not creation_files_ready():
+            return 2
         emit({"ready": True, "schema": 1})
         return 0
     if len(sys.argv) >= 2 and sys.argv[1] == "cancel-call":
@@ -491,11 +692,47 @@ def main() -> int:
             pass
         return 0
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("claim-execute",))
-    parser.add_argument("--call-id", required=True)
-    parser.add_argument("--tool", required=True)
-    parser.add_argument("--cwd", required=True)
-    return claim_execute(parser.parse_args())
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    claim = subparsers.add_parser("claim-execute")
+    claim.add_argument("--call-id", required=True)
+    claim.add_argument("--tool", required=True)
+    claim.add_argument("--cwd", required=True)
+    put = subparsers.add_parser("credential-file-put")
+    put.add_argument("--scope", choices=("creation", "exec"), required=True)
+    put.add_argument("--call-id")
+    put.add_argument("--name", required=True)
+    put.add_argument("--expected-bytes", required=True)
+    put.add_argument("--expected-sha256", required=True)
+    clean = subparsers.add_parser("credential-file-clean")
+    clean.add_argument("--call-id", required=True)
+    inbound = subparsers.add_parser("stream-in")
+    inbound.add_argument("--transfer-id", required=True)
+    inbound.add_argument("--root", choices=tuple(STREAM_ROOTS), required=True)
+    inbound.add_argument("--path", required=True)
+    inbound.add_argument("--expected-bytes", required=True)
+    inbound.add_argument("--expected-sha256", required=True)
+    stat_parser = subparsers.add_parser("stream-stat")
+    stat_parser.add_argument("--root", choices=tuple(STREAM_ROOTS), required=True)
+    stat_parser.add_argument("--path", required=True)
+    outbound = subparsers.add_parser("stream-out")
+    outbound.add_argument("--root", choices=tuple(STREAM_ROOTS), required=True)
+    outbound.add_argument("--path", required=True)
+    outbound.add_argument("--expected-bytes", required=True)
+    outbound.add_argument("--expected-sha256", required=True)
+    arguments = parser.parse_args()
+    if arguments.command == "claim-execute":
+        return claim_execute(arguments)
+    if arguments.command == "credential-file-put":
+        return credential_file_put(arguments)
+    if arguments.command == "credential-file-clean":
+        return credential_file_clean(arguments.call_id)
+    if arguments.command == "stream-in":
+        return stream_in(arguments)
+    if arguments.command == "stream-stat":
+        return stream_stat(arguments)
+    if arguments.command == "stream-out":
+        return stream_out(arguments)
+    return 2
 
 
 if __name__ == "__main__":

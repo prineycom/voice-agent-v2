@@ -43,3 +43,5 @@ agent_environment:
     host_free_reserve_mib: 8192
     watchdog_interval_seconds: 2
     maximum_output_bytes: 262144
+    maximum_stream_bytes: 262144
+    stream_timeout_seconds: 120

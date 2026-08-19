@@ -3,12 +3,28 @@
   "$id": "https://voice-agent-v2.local/contracts/agent-environment-status.v2.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "state", "config_revision_prefix", "spec_prefix", "generation", "reason_code", "rootfs_and_files_persist", "rootfs_persists_until_exact_container_destruction", "workspace_persists_after_reset_rebuild_remove_by_default", "cache_persists_after_reset_rebuild_remove_by_default", "tmpfs_persists_across_container_stop", "processes_survive_controller_events_only_while_container_running", "processes_survive_container_stop", "shell_local_state_persists_across_exec", "logical_cwd_persists_across_exec_and_controller_restart"],
+  "required": ["schema_version", "state", "config_revision_prefix", "spec_prefix", "generation", "reason_code", "network_egress_enabled", "published_ports", "credential_configuration_count", "credential_exposure", "credential_authority_warning", "credential_values_or_fingerprints_exposed", "remote_effects_rolled_back_by_cancellation", "automatic_network_or_stream_retry", "rootfs_and_files_persist", "rootfs_persists_until_exact_container_destruction", "workspace_persists_after_reset_rebuild_remove_by_default", "cache_persists_after_reset_rebuild_remove_by_default", "tmpfs_persists_across_container_stop", "processes_survive_controller_events_only_while_container_running", "processes_survive_container_stop", "shell_local_state_persists_across_exec", "logical_cwd_persists_across_exec_and_controller_restart"],
   "properties": {
     "schema_version": {"const": "voice-agent.agent-environment-status.v2"},
     "state": {"enum": ["absent", "creating", "running", "stopped", "exited", "starting", "restarting", "stale_spec", "unhealthy", "resource_stopped", "retiring", "retired", "unavailable", "environment_identity_conflict"]},
     "config_revision_prefix": {"type": "string"}, "spec_prefix": {"type": "string"}, "generation": {"type": "integer"}, "reason_code": {},
     "installation_prefix": {}, "container_id_prefix": {}, "mismatch_fields": {"type": "array"}, "bounds": {"type": "object"},
+    "network_egress_enabled": {"type": "boolean"}, "published_ports": {"const": []},
+    "credential_configuration_count": {"const": 1},
+    "credential_exposure": {
+      "type": "array", "maxItems": 64,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["name", "mode"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^(?!VOICE_AGENT_)[A-Z_][A-Z0-9_]{0,63}$"},
+          "mode": {"enum": ["create_environment", "create_file", "exec_environment", "exec_file"]}
+        }
+      }
+    },
+    "credential_authority_warning": {"type": "string", "minLength": 1},
+    "credential_values_or_fingerprints_exposed": {"const": false},
+    "remote_effects_rolled_back_by_cancellation": {"const": false},
+    "automatic_network_or_stream_retry": {"const": false},
     "rootfs_and_files_persist": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
     "rootfs_persists_until_exact_container_destruction": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
     "workspace_persists_after_reset_rebuild_remove_by_default": {"const": true},

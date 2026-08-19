@@ -5,6 +5,8 @@
 - **AgentRun** — One versioned natural-request decision loop owned by the full realtime identity and cancellation token. It uses only the exact pinned local LFM, bounded decisions/time/output, controller-owned call IDs, and one final answer.
 - **AgentEnvironment** — The installation's sole lazily created persistent Docker container, writable rootfs, managed `/workspace` and `/cache`, credential configuration, and logical cwd record. Retained generations are recovery material, never selectable environments.
 - **Call receipt** — The bounded container-rootfs record for one opaque controller-owned call ID. An existing claim reconciles its prior outcome; ambiguous acceptance is never automatically redispatched.
+- **Credential configuration** — The installation's sole fixed declaration of exposed names and create/per-exec environment/file modes. Public configuration never contains values or sources; private state owns them, and neither the model nor a task selects another profile.
+- **Transfer acknowledgement** — Exact target, byte-count, and SHA-256 confirmation required before a controller delivery is called `sent`. Missing or ambiguous acknowledgement is `unknown` and never authorizes automatic repeat.
 - **Environment registry** — Atomic private installation state containing stable installation identity, pinned Docker endpoint fingerprint, selected exact container ID, generation, spec, and retained exact IDs.
 - **Historical V1 configuration** — The landed E1.1/E1.2 deny-all input and status evidence. Its former identity never maps to AgentEnvironment ownership or selection.
 - **Semantic revision** — A deterministic digest of canonical validated agent configuration; comments and mapping-key order do not change it.

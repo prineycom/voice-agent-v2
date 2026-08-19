@@ -57,6 +57,16 @@ The logical cwd record survives calls/controller restart only after successful o
 
 `./verify` uses fake Docker and disposable container-shaped roots only. Linux Engine, Docker Desktop/macOS, package repository/network behavior, exact-model natural tasks, daemon/Desktop/reboot, and physical acceptance are independent evidence. See [`evidence/e3-1-persistent-ordinary-files.md`](evidence/e3-1-persistent-ordinary-files.md).
 
+## Agent evolution E3.2 — Network, one credential configuration, streams, and remote Git
+
+> **Implemented contract:** E3.2 changes no environment identity or lifecycle rule. It adds one normal network/transfer path to the existing exact container.
+
+Docker bridge egress enables ordinary DNS/TLS/HTTP(S), `curl`, SDK/package clients, bounded download/upload/multipart work, and remote Git without a published host port. Network-disabled configuration uses `none`. One strict public credential object contains fixed names/modes only; private mode-`0600` installation state owns values. Preferred per-exec env/file values rotate on the next call without rebuild, while create-time values are snapshot-pinned and keyed into private spec compatibility. Ambient host env/home, `.env`, `.netrc`, Docker/Git auth/helpers, SSH/GPG agents, keyrings, browser data, and sockets remain absent.
+
+Inbound/outbound helpers move binary data only over Docker-exec stdin/stdout, enforce configured byte/time limits, validate SHA-256, and never interpret container paths on the host. Target delivery is attempted once and is `sent` only after exact acknowledgement; ambiguity is `unknown`. Redaction changes only display/log/support/final-human copies, never raw model/tool/file/network/Git/transport bytes. Status exposes names/modes and the broad authority warning, not sources, values, or fingerprints. There is no credential profile/selector, domain/payload binding, DLP, proxy guarantee, remote rollback, extra mount/service, Telegram/Web-research/background-job UX, or live credential/provider spend.
+
+`./verify` uses synthetic values and fake Docker/network/transport transcripts. Linux Engine and Docker Desktop/macOS network/rotation/tmpfs/remote-Git facts, exact-model/live-network tasks, reboot, voice, and physical evidence remain independently pending. See [`evidence/e3-2-network-credentials-streams-remote-git.md`](evidence/e3-2-network-credentials-streams-remote-git.md).
+
 ## Slice 1 — Deterministic zero-secret voice-turn tracer
 
 ### User-visible outcome
