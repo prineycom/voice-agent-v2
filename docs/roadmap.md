@@ -74,8 +74,8 @@ Production signing-key provisioning, publication or downloads; install/update/ro
 ### Remaining installation order
 
 1. **I2 fresh Linux install — implemented deterministically:** private XDG roots/default configuration, exact asset proof, user systemd/linger, one start and five-component readiness; physical publication/host evidence remains I8.
-2. **I3 transactional update/rollback — next:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection.
-3. **I4 legacy adoption:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success.
+2. **I3 transactional update/rollback — implemented deterministically:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection; real-host evidence remains I8.
+3. **I4 legacy adoption — next:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success.
 4. **I5 AgentEnvironment/config preservation:** move durable environment state out of cache classification and prove same ID/rootfs/workspace across application update; stale spec degrades agent tools only.
 5. **I6 assets/cache/offline:** resumable exact downloads, signed content-addressed assets, cached metadata policy and genuine-space-only refusal.
 6. **I7 rollback/uninstall/support bundle:** complete user surfaces, exact destructive confirmation and privacy scanner.
@@ -105,6 +105,32 @@ Production signing-key provisioning or release publication; arbitrary roots; cur
 ### Acceptance and evidence
 
 The launcher phase in `./verify` uses generated signing keys, bounded in-memory artifact entries, disposable XDG roots and deterministic host/service/readiness fixtures. It covers pristine success, permissions/defaults, exact unit/readiness, optional degradation, unsupported host, missing linger privilege, signature/archive/incomplete/space failure, durable-phase interruption/retry, identical reconciliation, partial/foreign/symlinked preservation and secret-free output/records. [`fresh-linux-install.md`](evidence/fresh-linux-install.md) records exact deterministic evidence and nonclaims. Physical platform acceptance remains I8.
+
+## Installation evolution I3 — Transactional canonical update and automatic restoration
+
+> **Implemented contract:** `voice-agent update` owns canonical installations created by I2 only. Legacy import and live-stand repair remain I4.
+
+### User-visible outcome
+
+One command recovers an interrupted transaction, checks the signed stable channel, stages and validates before outage, switches exactly once, and returns success only for the exact candidate's five-component admission/readiness and loopback listener custody. Candidate failure automatically restores the exact prior healthy release/configuration/unit and proves it before returning `update_failed_safe`; a second failure returns `update_failed_needs_repair` and retains recovery material.
+
+### Included scope
+
+- Kernel-released exclusive `flock`, one mode-`0600` content-free durable update journal, and recovery before pointer/channel interpretation.
+- Exact prior selected/running/healthy custody through stable release records and signed inventories, including a canonical selected/running split without historical application-manifest parsing.
+- Signed monotonic/non-expired stable selection, safe pre-GC, exact transaction partial/stage, genuine post-GC space gate and no fixed release-count refusal.
+- Ordered digest-bound reversible/snapshotted configuration/data migration descriptors, staged copy, preimage CAS and pre-quiesce decision refusal.
+- Bounded quiesce/generation-gone proof, atomic config/current/rollback, unit reload only on byte change, one start, exact candidate readiness, automatic exact restoration and double-failure truth.
+- Active + one verified rollback + incomplete-reference reachability GC; no user/config/model/AgentEnvironment/mount/Docker/arbitrary-cache deletion surface.
+- Honest already-current, cached/offline/latest-unknown, metadata-unavailable, concurrent updater and selected/running recovery behavior in stable status/doctor truth.
+
+### Excluded scope
+
+Legacy selected-new/running-old/no-previous import; live stand repair; launcher self-replacement; production signing/publication/download service; real systemd/network/models/Docker/Telegram; AgentEnvironment state migration; general asset/cache/offline hardening; explicit rollback/uninstall/support bundle; macOS; reboot and physical acceptance.
+
+### Acceptance and evidence
+
+The launcher phase of `./verify` injects isolated XDG roots plus deterministic signed artifact, service, listener, clock, failure, disk and network owners. It covers success, candidate/prior double-failure truth, every observed durable write/action interruption with retry convergence, safe/destructive migration variants, online/offline/current metadata, concurrent lock, channel rollback/expiry, genuine space shortage, service/readiness identity mismatch, exact partial/GC boundaries and preservation sentinels. [`transactional-canonical-update.md`](evidence/transactional-canonical-update.md) records evidence and nonclaims.
 
 ## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
 

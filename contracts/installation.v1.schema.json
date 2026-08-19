@@ -12,7 +12,7 @@
     "launcher_protocol": {"const": 1},
     "release_id": {"type": "string"},
     "healthy_release": {"type": "string"},
-    "rollback_release": {"type": "null"},
+    "rollback_release": {"oneOf": [{"type": "string"}, {"type": "null"}]},
     "version": {"type": "string"},
     "build_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

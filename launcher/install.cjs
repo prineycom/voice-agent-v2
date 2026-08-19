@@ -120,7 +120,8 @@ agent_environment:
       private: path.join(config, 'private'), downloads: path.join(cache, 'downloads'), models: path.join(cache, 'models', 'sha256'), runtimes: path.join(cache, 'runtimes', 'sha256'),
       logs: path.join(state, 'logs'), diagnostics: path.join(state, 'diagnostics'), serviceRuntime: path.join(runtime, 'service'),
       unit: path.join(value.configHome, 'systemd', 'user', SERVICE_UNIT), journal: path.join(data, 'transactions', 'install.json'),
-      installRecord: path.join(data, 'install.json'), current: path.join(data, 'current'),
+      updateJournal: path.join(data, 'transactions', 'update.json'), updateLock: path.join(runtime, 'update.lock'),
+      installRecord: path.join(data, 'install.json'), current: path.join(data, 'current'), rollback: path.join(data, 'rollback'),
     };
   }
 
@@ -606,6 +607,20 @@ agent_environment:
       }
     }
     async stop({ unit }) { spawnSync('systemctl', ['--user', 'stop', unit], { timeout: 10000, env: { PATH: '/usr/bin:/bin' } }); }
+    async quiesce({ unit, deadline_ms = 75000 }) {
+      const result = spawnSync('systemctl', ['--user', 'stop', unit], { encoding: 'utf8', timeout: deadline_ms + 10000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } });
+      if (result.status !== 0) error('service_stop_failed', 'the user service did not stop within its graceful deadline');
+    }
+    async probeStopped() {
+      const snapshot = await this.probeOwner.inspectCanonical({ uid: process.geteuid() });
+      return { process_generation_gone: snapshot.service_active !== true, listener_gone: !(snapshot.listener && snapshot.listener.host === '127.0.0.1' && snapshot.listener.port === 8000) };
+    }
+    async startExactlyOnce({ unit }) {
+      const reset = spawnSync('systemctl', ['--user', 'reset-failed', unit], { encoding: 'utf8', timeout: 10000, env: { PATH: '/usr/bin:/bin' } });
+      if (reset.status !== 0) error('service_reset_failed', 'the user service start limit could not be reset');
+      const result = spawnSync('systemctl', ['--user', 'start', unit], { encoding: 'utf8', timeout: STARTUP_DEADLINE_MS + 15000, env: { PATH: '/usr/bin:/bin' } });
+      if (result.status !== 0) error('service_start_failed', 'the exact user service candidate could not be started once');
+    }
     async disable({ unit }) { spawnSync('systemctl', ['--user', 'disable', unit], { timeout: 10000, env: { PATH: '/usr/bin:/bin' } }); }
     async probe({ release_id, build_id }) {
       return this.probeOwner.inspectCanonical({ uid: process.geteuid(), release: { release_id, build_id } });
@@ -620,7 +635,9 @@ agent_environment:
 
   return {
     AGENT_CONFIG, FREE_SPACE_RESERVE, MINIMUM_VRAM, REQUIRED_COMPONENTS, SERVICE_UNIT, STARTUP_DEADLINE_MS,
-    UNIT_CONTRACT, UNIT_CONTRACT_SHA256, artifactPreflight, defaultDependencies, installContractSchemaNames,
-    installVoiceAgent, layoutFor, renderUnit, validateReadiness,
+    UNIT_CONTRACT, UNIT_CONTRACT_SHA256, artifactPreflight, atomicWrite, defaultDependencies,
+    ensurePrivateDirectory, extractVerifiedArchive, installContractSchemaNames, installDirectories,
+    installVoiceAgent, inspectManagedPath, layoutFor, readPrivateJson, renderUnit, syncDirectory,
+    validateReadiness, verifyExtractedTree, writeJson,
   };
 };

@@ -111,6 +111,7 @@ def main() -> int:
                 str(ROOT / "launcher/test/run"),
                 str(ROOT / "launcher/test/launcher.test.cjs"),
                 str(ROOT / "launcher/test/install.test.cjs"),
+                str(ROOT / "launcher/test/update.test.cjs"),
             ],
             cwd=ROOT,
             environment=environment,

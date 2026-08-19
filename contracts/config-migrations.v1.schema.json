@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/config-migrations.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "migrations"],
+  "properties": {
+    "schema": {"const": "voice-agent.config-migrations.v1"},
+    "migrations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "from", "to", "scope", "operation", "reversible", "destructive", "product_choice", "sha256"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+          "from": {"type": "integer", "minimum": 1},
+          "to": {"type": "integer", "minimum": 2},
+          "scope": {"enum": ["config", "data"]},
+          "operation": {"enum": ["schema-version", "noop"]},
+          "reversible": {"type": "boolean"},
+          "destructive": {"type": "boolean"},
+          "product_choice": {"type": "boolean"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  }
+}

@@ -251,13 +251,13 @@ test('Node 26 SEA packaging is deterministic and executable without another host
 test('all launcher schemas, protocol, public keys, and signed fixtures are bounded public material', () => {
   for (const name of [
     'release-channel.v1.schema.json', 'platform-artifact-manifest.v1.schema.json', 'release-record.v1.schema.json',
-    'install-transaction.v1.schema.json', 'installation.v1.schema.json',
+    'install-transaction.v1.schema.json', 'update-transaction.v1.schema.json', 'config-migrations.v1.schema.json', 'installation.v1.schema.json',
     'launcher-status.v1.schema.json', 'launcher-doctor.v1.schema.json', 'legacy-discovery.v1.schema.json',
   ]) JSON.parse(fs.readFileSync(path.join(ROOT, 'contracts', name), 'utf8'));
   const protocol = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'launcher-protocol-v1.json'), 'utf8'));
   assert.equal(protocol.protocol, 1);
   assert.deepEqual(protocol.read_only_commands, ['status', 'doctor']);
-  assert.deepEqual(protocol.mutation_commands, ['install']);
+  assert.deepEqual(protocol.mutation_commands, ['install', 'update']);
   const releaseRecord = launcher.validateReleaseRecord({
     schema: 'voice-agent.release-record.v1', release_id: '1.2.3-abcdef012345', version: '1.2.3',
     build_id: 'a'.repeat(40), platform: 'linux-x86_64-nvidia', channel: 'stable', channel_sequence: 7,

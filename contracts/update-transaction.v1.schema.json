@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/update-transaction.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "requested_channel", "phase", "prior_selected", "prior_running", "prior_healthy", "candidate", "config_snapshot", "service", "receipts", "failure_code", "started_at", "updated_at"],
+  "properties": {
+    "schema": {"const": "voice-agent.update-transaction.v1"},
+    "id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "requested_channel": {"const": "stable"},
+    "phase": {"enum": ["recovering", "checking", "staging", "verified", "migrations_prepared", "prior_custody", "quiescing", "activating", "starting", "ready", "committing", "healthy", "cleanup", "rolling_back", "restoring", "starting_prior", "prior_ready", "failed_safe", "failed_needs_repair"]},
+    "prior_selected": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},
+    "prior_running": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},
+    "prior_healthy": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},
+    "candidate": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},
+    "config_snapshot": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "service": {
+      "type": "object", "additionalProperties": false,
+      "required": ["was_active", "was_enabled", "unit_sha256"],
+      "properties": {
+        "was_active": {"type": "boolean"},
+        "was_enabled": {"type": "boolean"},
+        "unit_sha256": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]}
+      }
+    },
+    "receipts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_verified", "candidate_ready", "channel_checked", "migration_prepared", "pointer_activated", "pre_gc_complete", "prior_custody", "prior_ready", "prior_restored", "release_staged", "service_started", "service_stopped", "terminal", "unit_reloaded"],
+      "properties": {
+        "artifact_verified": {"type": "boolean"}, "candidate_ready": {"type": "boolean"}, "channel_checked": {"type": "boolean"},
+        "migration_prepared": {"type": "boolean"}, "pointer_activated": {"type": "boolean"}, "pre_gc_complete": {"type": "boolean"},
+        "prior_custody": {"type": "boolean"}, "prior_ready": {"type": "boolean"}, "prior_restored": {"type": "boolean"},
+        "release_staged": {"type": "boolean"}, "service_started": {"type": "boolean"}, "service_stopped": {"type": "boolean"},
+        "terminal": {"type": "boolean"}, "unit_reloaded": {"type": "boolean"}
+      }
+    },
+    "failure_code": {"oneOf": [{"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}, {"type": "null"}]},
+    "started_at": {"type": "string"},
+    "updated_at": {"type": "string"}
+  }
+}
