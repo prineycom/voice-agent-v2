@@ -38,7 +38,7 @@
 | --- | --- | --- |
 | focused `unittest` research/AgentRun/config | pass | 7 tests |
 | hermetic current behavior manifest | pass | 375 tests, zero skips |
-| `./verify` | pending final delivery run | full output will be saved under `artifacts/issue-40-verify.log` |
+| `./verify` | pass | full output saved in `artifacts/issue-40-verify.log`; 375 hermetic tests, zero skips, complete browser/runtime gate green |
 
 ## Unresolved uncertainty
 

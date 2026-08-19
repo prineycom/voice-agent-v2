@@ -335,7 +335,7 @@ def bind_citations(answer: str, requests: tuple[CitationRequest, ...], receipts:
     result = []
     for request in requests:
         details = receipts.get(request.receipt_id)
-        if details is None or details.get("kind") not in {"web_fetch", "web_search"} or details.get("network_error") is not None and not details.get("cache_used"):
+        if details is None or details.get("kind") != "web_fetch" or details.get("network_error") is not None and not details.get("cache_used"):
             raise StageFailure("llm_provider", "research_citation_invalid")
         if any(span not in answer for span in request.spans):
             raise StageFailure("llm_provider", "research_citation_span_invalid")

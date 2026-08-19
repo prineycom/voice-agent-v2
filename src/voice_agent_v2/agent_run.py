@@ -318,7 +318,7 @@ class AgentRun:
                             "receipt_id": receipt.call_id, "outcome": receipt.status,
                             **safe_details,
                         })
-                        if receipt.status == "completed" and details.get("kind") in {"web_fetch", "web_search"}:
+                        if receipt.status == "completed" and details.get("kind") == "web_fetch":
                             successful_research[receipt.call_id] = details
                 def bounded_result(data: bytes, stream: str) -> dict[str, object]:
                     visible = data[:1024]
