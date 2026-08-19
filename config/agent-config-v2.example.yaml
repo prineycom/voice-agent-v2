@@ -16,6 +16,7 @@ agent:
     - web.search
     - web.fetch
     - web.extract
+    - report.artifact
     - report.deliver
 agent_environment:
   image:
@@ -37,7 +38,7 @@ agent_environment:
   credentials:
     creation_environment_names: []
     creation_file_names: []
-    # Add TELEGRAM_BOT_TOKEN here only when E4.2 delivery is configured;
+    # Add TELEGRAM_BOT_TOKEN here only when E4.2/E4.3 delivery is configured;
     # its bytes remain solely in private/credentials.json.
     exec_environment_names: []
     exec_file_names: []

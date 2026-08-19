@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/telegram-delivery-status.v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "reason_code", "target", "artifact_count", "revision_count", "delivery_count", "unknown_delivery_count", "credential_name", "credential_value_exposed", "endpoint_model_selectable", "target_model_selectable", "automatic_resend", "prompt_injection_prevented", "display_redaction_scope", "open_sandbox_authority_accepted", "containment_claim"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.telegram-delivery-status.v2"},
+    "state": {"enum": ["ready", "unavailable"]},
+    "reason_code": {"oneOf": [{"type": "string", "maxLength": 64}, {"type": "null"}]},
+    "target": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["chat_id", "user_id", "message_thread_id", "chat_type"], "properties": {"chat_id": {"type": "integer", "minimum": 1}, "user_id": {"type": "integer", "minimum": 1}, "message_thread_id": {"type": "null"}, "chat_type": {"const": "private"}}}]},
+    "artifact_count": {"type": "integer", "minimum": 0},
+    "revision_count": {"type": "integer", "minimum": 0},
+    "delivery_count": {"type": "integer", "minimum": 0},
+    "unknown_delivery_count": {"type": "integer", "minimum": 0},
+    "credential_name": {"const": "TELEGRAM_BOT_TOKEN"},
+    "credential_value_exposed": {"const": false},
+    "endpoint_model_selectable": {"const": false},
+    "target_model_selectable": {"const": false},
+    "automatic_resend": {"const": false},
+    "prompt_injection_prevented": {"const": false},
+    "display_redaction_scope": {"const": "display_only"},
+    "open_sandbox_authority_accepted": {"const": true},
+    "containment_claim": {"const": "correctly_configured_unescaped_container_unmounted_host_boundary_only"}
+  }
+}

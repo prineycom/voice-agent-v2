@@ -9,10 +9,11 @@ import unittest
 
 from voice_agent_v2.agent_environment import AgentEnvironment, DockerResult
 from voice_agent_v2.agent_environment_config import DEFAULT_DOCUMENT, parse_agent_config_v2
+from voice_agent_v2.contracts import StageFailure
 from voice_agent_v2.agent_report_delivery import (
     DELIVERY_CONFIG_SCHEMA, MAX_TEXT_CHUNK_BYTES, DeliveryCitation,
-    ReportDeliveryController, ReportDeliveryRequest, TelegramAcknowledgement,
-    TelegramTarget,
+    ReportArtifactRequest, ReportDeliveryController, ReportDeliveryError,
+    ReportDeliveryRequest, TelegramAcknowledgement, TelegramTarget,
 )
 from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
@@ -42,15 +43,43 @@ class DeliveryDocker(ResearchDocker):
         super().__init__()
         self.files: dict[str, bytes] = {}
         self.stream_events: list[tuple[str, str]] = []
+        self.before_atomic_update = None
 
     @staticmethod
     def _argument(arguments: tuple[str, ...], name: str) -> str:
         return arguments[arguments.index(name) + 1]
 
+    @staticmethod
+    def _file_receipt(status: str, stderr: bytes = b"", details: dict[str, object] | None = None) -> DockerResult:
+        document = {
+            "status": status, "exit_code": 0 if status == "completed" else 2,
+            "stdout_base64": "", "stderr_base64": base64.b64encode(stderr).decode(),
+            "stdout_bytes": 0, "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+            "stdout_truncated": False, "stderr_bytes": len(stderr),
+            "stderr_sha256": hashlib.sha256(stderr).hexdigest(), "stderr_truncated": False,
+            "cwd": "/workspace", "replayed": False, "details": details or {},
+        }
+        return DockerResult(0, json.dumps(document).encode(), accepted=True)
+
     def run(self, arguments: tuple[str, ...], *, stdin: bytes = b"", timeout: float = 15) -> DockerResult:
         if arguments[:2] == ("container", "exec") and "/usr/local/lib/voice-agent/agent-helper" in arguments:
             helper = arguments.index("/usr/local/lib/voice-agent/agent-helper")
             command = arguments[helper + 1]
+            if command == "claim-execute" and self._argument(arguments, "--tool") == "file-write":
+                request = json.loads(stdin)
+                path = str(request["path"])
+                if self.before_atomic_update is not None:
+                    callback, self.before_atomic_update = self.before_atomic_update, None
+                    callback(self)
+                current = self.files.get(path)
+                if current is None or hashlib.sha256(current).hexdigest() != request["expected_current_sha256"]:
+                    return self._file_receipt("failed", b"expected_current_sha256_mismatch")
+                content = base64.b64decode(request["data_base64"])
+                self.files[path] = content
+                return self._file_receipt("completed", details={
+                    "kind": "file_write", "atomic": True, "bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(), "mode": "0600",
+                })
             if command == "stream-in":
                 root = self._argument(arguments, "--root")
                 relative = self._argument(arguments, "--path")
@@ -220,12 +249,12 @@ class ReportDeliverySliceTests(unittest.TestCase):
             self.assertIn(REPORT, document.request_body)
             self.assertEqual(fixture.environment.redact_display(REPORT), REPORT.replace(TOKEN, b"[REDACTED]"))
             root = Path(__file__).resolve().parents[1]
-            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v3.schema.json").read_text()))
-            validate_schema(delivery, json.loads((root / "contracts/telegram-delivery.v1.schema.json").read_text()))
+            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v4.schema.json").read_text()))
+            validate_schema(delivery, json.loads((root / "contracts/telegram-delivery.v2.schema.json").read_text()))
             ledger = json.loads(fixture.controller.ledger_path.read_text())
             validate_schema(
                 ledger["artifacts"][delivery["artifact_id"]],
-                json.loads((root / "contracts/saved-report.v1.schema.json").read_text()),
+                json.loads((root / "contracts/saved-report.v2.schema.json").read_text()),
             )
         finally:
             fixture.close()
@@ -362,6 +391,194 @@ class ReportDeliverySliceTests(unittest.TestCase):
                 finally:
                     fixture.close()
 
+    def test_later_ru_summary_resolves_trusted_path_with_zero_network_or_host_read(self) -> None:
+        fixture = Fixture()
+        try:
+            saved = fixture.controller.save_and_deliver(request(mode="document"))
+            research_count = len(fixture.docker.research_requests)
+            restarted = ReportDeliveryController(fixture.environment, transport=fixture.transport)
+
+            class Model:
+                provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
+                def __init__(self): self.step = 0
+                def decide(self, raw, _cancellation):
+                    self.step += 1
+                    if self.step == 1:
+                        return {"kind":"operation", "tool":"report.artifact", "arguments":{
+                            "action":"local_summary", "relative_path":"reports/e4-2.md",
+                        }}
+                    history = json.loads(raw)["history"][-1]
+                    self.test.assertIn(b"Synthetic report", base64.b64decode(history["result"]["receipt"]["stdout"]["data_base64"]))
+                    details = history["result"]["receipt"]["details"]
+                    return {"kind":"final", "answer":f"Найден отчёт revision {details['revision']} hash {details['sha256']}."}
+                def cancel(self): return None
+
+            model = Model(); model.test = self
+            result = AgentRun(fixture.environment, model=model, delivery=restarted).run(
+                transcript="Найди прошлый отчёт и кратко перескажи локально, без Интернета.",
+                identity=AgentRealtimeIdentity("session-e43-later", 1, "turn-e43-summary", "request-e43-summary", 1),
+            )
+            operation = result.artifact_operations[0]
+            self.assertEqual((operation["outcome"], operation["revision"]), ("resolved", 1))
+            self.assertEqual(operation["artifact_id"], saved["artifact_id"])
+            self.assertEqual(operation["external_call_count"], 0)
+            self.assertFalse(operation["host_path_read"])
+            self.assertEqual(len(fixture.docker.research_requests), research_count)
+            self.assertNotIn(str(Path(fixture.temp.name)), json.dumps(result.document()))
+        finally:
+            fixture.close()
+
+    def test_atomic_local_update_links_revision_and_resends_current_unredacted_bytes(self) -> None:
+        fixture = Fixture()
+        updated = b"# Updated report\n\nCurrent exact token " + TOKEN + b".\n"
+        try:
+            saved = fixture.controller.save_and_deliver(request(mode="document"))
+            prior_calls = len(fixture.transport.operations)
+
+            class Model:
+                provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
+                def __init__(self): self.step = 0
+                def decide(self, _raw, _cancellation):
+                    self.step += 1
+                    if self.step == 1:
+                        return {"kind":"operation", "tool":"report.artifact", "arguments":{
+                            "action":"local_update", "artifact_id":saved["artifact_id"],
+                            "expected_revision":1, "expected_sha256":saved["artifact_sha256"],
+                            "report_base64":base64.b64encode(updated).decode(), "mode":"document",
+                            "summary":"Updated locally.",
+                        }}
+                    if self.step == 2:
+                        return {"kind":"operation", "tool":"report.deliver", "arguments":{
+                            "action":"resend", "artifact_id":saved["artifact_id"],
+                        }}
+                    return {"kind":"final", "answer":"Updated revision 2 and resent current bytes."}
+                def cancel(self): return None
+
+            result = AgentRun(fixture.environment, model=Model(), delivery=fixture.controller).run(
+                transcript="Update the saved report locally and resend its current bytes without research.",
+                identity=AgentRealtimeIdentity("session-e43-update", 1, "turn-e43-update", "request-e43-update", 1),
+            )
+            operation, resent = result.artifact_operations[0], result.deliveries[0]
+            self.assertEqual((operation["outcome"], operation["revision"], operation["atomic_replacement"]), ("updated", 2, True))
+            self.assertEqual(operation["prior_receipt_id"], saved["artifact_receipt_id"])
+            self.assertEqual(resent["artifact_receipt_id"], operation["artifact_receipt_id"])
+            self.assertEqual((resent["artifact_revision"], resent["artifact_byte_count"], resent["artifact_sha256"]), (2, len(updated), hashlib.sha256(updated).hexdigest()))
+            self.assertEqual(fixture.docker.files["/workspace/reports/e4-2.md"], updated)
+            self.assertEqual(len(fixture.docker.research_requests), 0)
+            resent_operation = fixture.transport.operations[prior_calls]
+            self.assertIn(updated, resent_operation.request_body)
+            self.assertIn(TOKEN, resent_operation.request_body)
+            self.assertNotEqual(fixture.environment.redact_display(updated), updated)
+            root = Path(__file__).resolve().parents[1]
+            validate_schema(operation, json.loads((root / "contracts/report-artifact-operation.v1.schema.json").read_text()))
+            validate_schema(resent, json.loads((root / "contracts/telegram-delivery.v2.schema.json").read_text()))
+            ledger = json.loads(fixture.controller.ledger_path.read_text())
+            validate_schema(ledger["revisions"][operation["artifact_receipt_id"]], json.loads((root / "contracts/report-artifact-revision.v1.schema.json").read_text()))
+        finally:
+            fixture.close()
+
+    def test_concurrent_writer_conflict_is_visible_and_unexpected_bytes_are_not_overwritten(self) -> None:
+        fixture = Fixture()
+        concurrent = b"background writer won\n"
+        try:
+            saved = fixture.controller.save_and_deliver(request(mode="document"))
+            fixture.docker.before_atomic_update = lambda docker: docker.files.__setitem__(
+                "/workspace/reports/e4-2.md", concurrent,
+            )
+            operation, raw = fixture.controller.manage_artifact(ReportArtifactRequest.parse({
+                "action":"local_update", "artifact_id":saved["artifact_id"],
+                "expected_revision":1, "expected_sha256":saved["artifact_sha256"],
+                "report_text":"unexpected overwrite", "mode":"document", "summary":"local",
+            }), successful_research={})
+            self.assertEqual(raw, b"")
+            self.assertEqual((operation["outcome"], operation["conflict"], operation["atomic_replacement"]), ("conflict", True, False))
+            self.assertEqual(operation["reason_code"], "artifact_changed_concurrently")
+            self.assertEqual(fixture.docker.files["/workspace/reports/e4-2.md"], concurrent)
+            ledger = json.loads(fixture.controller.ledger_path.read_text())
+            self.assertEqual(ledger["artifacts"][saved["artifact_id"]]["revision"], 1)
+        finally:
+            fixture.close()
+
+    def test_explicit_refresh_uses_new_fetch_receipt_then_updates_only_once(self) -> None:
+        fixture = Fixture()
+        refreshed = b"# Refreshed\n\nLaunch 2027 selected claim.\n"
+        try:
+            saved = fixture.controller.save_and_deliver(request(mode="document"))
+
+            class Model:
+                provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
+                def __init__(self): self.step = 0; self.fetch = None
+                def decide(self, raw, _cancellation):
+                    self.step += 1
+                    if self.step == 1:
+                        return {"kind":"operation", "tool":"web.fetch", "arguments":{
+                            "url":"https://source-a.synthetic.test/refresh", "save_path":"/workspace/research/e43-refresh.html",
+                        }}
+                    if self.step == 2:
+                        self.fetch = json.loads(raw)["history"][-1]["operation"]["call_id"]
+                        return {"kind":"operation", "tool":"report.artifact", "arguments":{
+                            "action":"bounded_refresh", "artifact_id":saved["artifact_id"],
+                            "expected_revision":1, "expected_sha256":saved["artifact_sha256"],
+                            "report_base64":base64.b64encode(refreshed).decode(), "mode":"document",
+                            "summary":"Selected launch claim refreshed.", "citation_receipt_ids":[self.fetch],
+                        }}
+                    return {"kind":"final", "answer":"The refreshed source supports the selected launch claim.", "citations":[{
+                        "receipt_id":self.fetch, "claims":["selected launch claim"], "spans":["selected launch claim"],
+                    }]}
+                def cancel(self): return None
+
+            result = AgentRun(fixture.environment, model=Model(), delivery=fixture.controller).run(
+                transcript="Refresh only the selected launch claim, update citations, but do not resend.",
+                identity=AgentRealtimeIdentity("session-e43-refresh", 1, "turn-e43-refresh", "request-e43-refresh", 1),
+            )
+            operation = result.artifact_operations[0]
+            self.assertEqual((operation["action"], operation["outcome"], operation["external_call_count"]), ("bounded_refresh", "updated", 1))
+            self.assertEqual(operation["research_receipt_ids"], [result.research_receipts[0]["receipt_id"]])
+            self.assertEqual(len(fixture.docker.research_requests), 1)
+            self.assertEqual(fixture.transport.operations[-1].document_sha256, hashlib.sha256(REPORT).hexdigest())
+        finally:
+            fixture.close()
+
+    def test_artifact_admission_rejects_selection_lifecycle_and_host_authority(self) -> None:
+        for arguments in (
+            {"action":"local_summary", "artifact_id":"a" * 32, "environment":"other"},
+            {"action":"local_summary", "artifact_id":"a" * 32, "container_id":"b" * 64},
+            {"action":"local_summary", "relative_path":"/home/pasha/sentinel"},
+            {"action":"local_update", "artifact_id":"a" * 32, "expected_revision":1, "expected_sha256":"0" * 64, "report_text":"x", "mode":"document", "summary":"x", "runtime":"host"},
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(ReportDeliveryError):
+                ReportArtifactRequest.parse(arguments)
+        self.assertNotIn("environment.lifecycle", __import__("voice_agent_v2.agent_run", fromlist=["AGENT_TOOLS"]).AGENT_TOOLS)
+
+    def test_artifact_failure_emits_one_terminal_failure_and_next_voice_run_is_clean(self) -> None:
+        fixture = Fixture()
+        class FailureModel:
+            provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
+            def decide(self, _raw, _cancellation):
+                return {"kind":"operation", "tool":"report.artifact", "arguments":{
+                    "action":"local_summary", "artifact_id":"f" * 32,
+                }}
+            def cancel(self): return None
+        class HealthyModel:
+            provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
+            def decide(self, _raw, _cancellation): return {"kind":"final", "answer":"Обычный голосовой ответ здоров."}
+            def cancel(self): return None
+        try:
+            with self.assertRaises(StageFailure) as failure:
+                AgentRun(fixture.environment, model=FailureModel(), delivery=fixture.controller).run(
+                    transcript="Find a missing report.",
+                    identity=AgentRealtimeIdentity("session-e43-fail", 1, "turn-e43-fail", "request-e43-fail", 1),
+                )
+            self.assertEqual(failure.exception.code, "saved_artifact_unknown")
+            following = AgentRun(fixture.environment, model=HealthyModel(), delivery=fixture.controller).run(
+                transcript="Скажи обычную короткую фразу.",
+                identity=AgentRealtimeIdentity("session-e43-next", 2, "turn-e43-next", "request-e43-next", 1),
+            )
+            self.assertEqual((following.terminal, following.operations, following.answer), ("completed", 0, "Обычный голосовой ответ здоров."))
+            self.assertEqual((following.artifact_operations, following.deliveries), ((), ()))
+        finally:
+            fixture.close()
+
     def test_status_is_content_minimal_and_contract_valid(self) -> None:
         fixture = Fixture(transport=FakeTelegram(["unknown"]))
         try:
@@ -377,7 +594,10 @@ class ReportDeliverySliceTests(unittest.TestCase):
             self.assertNotIn(TOKEN.decode(), rendered)
             self.assertNotIn(REPORT.decode("utf-8", "ignore"), rendered)
             root = Path(__file__).resolve().parents[1]
-            validate_schema(status, json.loads((root / "contracts/telegram-delivery-status.v1.schema.json").read_text()))
+            self.assertFalse(status["prompt_injection_prevented"])
+            self.assertTrue(status["open_sandbox_authority_accepted"])
+            self.assertEqual(status["display_redaction_scope"], "display_only")
+            validate_schema(status, json.loads((root / "contracts/telegram-delivery-status.v2.schema.json").read_text()))
         finally:
             fixture.close()
 

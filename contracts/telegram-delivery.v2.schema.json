@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/telegram-delivery.v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "delivery_id", "artifact_id", "artifact_revision", "artifact_receipt_id", "container_path", "artifact_byte_count", "artifact_sha256", "media_type", "citation_receipt_ids", "target", "mode", "outcome", "acknowledgement_state", "acknowledged_operation_count", "operation_count", "duration_ms", "reason_code", "automatic_resend", "remote_effects_retracted", "research_rerun", "operations"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.telegram-delivery.v2"},
+    "delivery_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "artifact_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "artifact_revision": {"type": "integer", "minimum": 1},
+    "artifact_receipt_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "container_path": {"type": "string", "pattern": "^/workspace/reports/"},
+    "artifact_byte_count": {"type": "integer", "minimum": 1, "maximum": 262144},
+    "artifact_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "media_type": {"type": "string", "minLength": 1, "maxLength": 127},
+    "citation_receipt_ids": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-f0-9]{32}$"}},
+    "target": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["chat_id", "user_id", "message_thread_id", "chat_type"], "properties": {"chat_id": {"type": "integer", "minimum": 1}, "user_id": {"type": "integer", "minimum": 1}, "message_thread_id": {"type": "null"}, "chat_type": {"const": "private"}}}]},
+    "mode": {"oneOf": [{"enum": ["text", "document", "both"]}, {"type": "null"}]},
+    "outcome": {"enum": ["sent", "failed", "delivery_outcome_unknown"]},
+    "acknowledgement_state": {"enum": ["acknowledged", "failed", "unknown"]},
+    "acknowledged_operation_count": {"type": "integer", "minimum": 0, "maximum": 5},
+    "operation_count": {"type": "integer", "minimum": 0, "maximum": 5},
+    "duration_ms": {"type": "integer", "minimum": 0, "maximum": 600000},
+    "reason_code": {"oneOf": [{"type": "string", "maxLength": 64}, {"type": "null"}]},
+    "automatic_resend": {"const": false},
+    "remote_effects_retracted": {"const": false},
+    "research_rerun": {"const": false},
+    "operations": {"type": "array", "maxItems": 5, "items": {"type": "object", "additionalProperties": false, "required": ["kind", "payload_byte_count", "payload_sha256", "network_byte_count", "network_sha256", "document_byte_count", "document_sha256", "acknowledged", "remote_receipt"], "properties": {"kind": {"enum": ["text", "document"]}, "payload_byte_count": {"type": "integer", "minimum": 1}, "payload_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "network_byte_count": {"type": "integer", "minimum": 1}, "network_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "document_byte_count": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}, "document_sha256": {"oneOf": [{"type": "string", "pattern": "^[a-f0-9]{64}$"}, {"type": "null"}]}, "acknowledged": {"type": "boolean"}, "remote_receipt": {"oneOf": [{"type": "string", "maxLength": 64}, {"type": "null"}]}}}}
+  }
+}
