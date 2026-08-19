@@ -19,7 +19,7 @@ Then run the only PR command:
 `./verify` owns a 90-second monotonic deadline and runs these phases in order:
 
 1. the sole historical E2.2/E2.3 operation custody/failure matrix under IP-network denial, with its own 8-second bound;
-2. the explicit current Python behavior manifest under IP-network denial, including strict V2/no-selector and V1 one-way-upgrade tests plus a deterministic fake-Docker transcript for locking, lazy single creation, exact reuse/start, persistence truth, stale/duplicate/uncertain failure, exec-only routing, at-most-once receipts, resources, and exact lifecycle reinspection (the historical matrix is not selected again);
+2. the explicit current Python behavior manifest under IP-network denial, including strict V2/no-selector and V1 one-way-upgrade tests plus deterministic fake-Docker/disposable-root evidence for locking, lazy single creation, exact reuse/start, ordinary binary/range/hash/atomic-file semantics, logical-cwd persistence/fallback, precise persistence truth, stale/duplicate/uncertain failure, exec-only routing, at-most-once receipts, resources, and exact lifecycle reinspection (the historical matrix is not selected again);
 3. the bounded local-socket readiness/VAD phase;
 4. the installed SDK, capability, and active-composition contract;
 5. the complete Vitest surface once;
@@ -42,13 +42,13 @@ Run `./verify` locally once, push the feature branch, then open or update the pu
 
 This command has a 600-second outer deadline and owns the longer mute/unmute, reconnect, diagnostics-download, production/review isolation, detached guardian, and repeated interruption scenarios. It uses deterministic inference over actual Firefox and local LiveKit; it does not claim hardware acceptance.
 
-## E2.4 platform and production-evidence tiers
+## E2.4/E3.1 platform and production-evidence tiers
 
 These are separate authorized evidence activities, not part of the deterministic PR and not interchangeable:
 
-- **Linux Docker Engine:** exact client/server/context, rootless-or-rootful authority, native digest, cgroups/effective limits, storage, mounts/namespaces/security, lock/duplicate behavior, lazy create and same-ID reuse, controller death, explicit stop→same-ID start with process loss, daemon restart, stale spec, exec ambiguity, reserve pressure, and explicit fixture cleanup.
-- **Docker Desktop/macOS:** native Desktop/VMM/server/digest/VM resources, shared-root semantics, lazy reuse and controller-event process survival, Desktop quit/start with same files/ID and lost processes, unavailable/no-fallback behavior, upgrade/VMM revalidation, disk-image reserve, and explicit fixture cleanup. Linux results prove none of these Mac facts.
-- **Exact model/network:** natural RU/EN multi-step tasks against the exact pinned model and separately authorized synthetic network endpoints. This is not an E2.1 rerun and does not enter live credentials or Telegram scope.
+- **Linux Docker Engine:** exact client/server/context, rootless-or-rootful authority, native digest, cgroups/effective limits, storage, mounts/namespaces/security, lock/duplicate behavior, lazy create and same-ID reuse, ordinary binary/archive/local-Git/package workflow and hashes, controller death, explicit stop→same-ID start with process/tmpfs loss, daemon restart, stale spec, exec ambiguity, reserve pressure, and explicit fixture cleanup.
+- **Docker Desktop/macOS:** native Desktop/VMM/server/digest/VM resources, shared-root semantics, ordinary binary/archive/local-Git/package workflow, lazy reuse and controller-event process survival, Desktop quit/start with same files/ID and lost processes, unavailable/no-fallback behavior, upgrade/VMM revalidation, disk-image reserve, and explicit fixture cleanup. Linux results prove none of these Mac facts.
+- **Exact model/network:** natural RU/EN multi-step ordinary-file/package/archive/local-Git tasks against the exact pinned model; separately authorized synthetic network endpoints belong to a later network slice. This is not an E2.1 rerun and does not enter live credentials or Telegram scope.
 - **Physical/reboot:** host reboot, real microphone/audible Kseniya, rapid barge-in, full-stack soak and physical resource truth. Synthetic Docker/model/browser evidence cannot close it.
 
 Runtime code never installs or configures Docker, daemon access, rootless/cgroup prerequisites, Desktop resources/file sharing, images, or backups to make a tier pass.

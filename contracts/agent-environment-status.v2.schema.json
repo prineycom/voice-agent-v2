@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-environment-status.v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "config_revision_prefix", "spec_prefix", "generation", "reason_code", "rootfs_and_files_persist", "rootfs_persists_until_exact_container_destruction", "workspace_persists_after_reset_rebuild_remove_by_default", "cache_persists_after_reset_rebuild_remove_by_default", "tmpfs_persists_across_container_stop", "processes_survive_controller_events_only_while_container_running", "processes_survive_container_stop", "shell_local_state_persists_across_exec", "logical_cwd_persists_across_exec_and_controller_restart"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.agent-environment-status.v2"},
+    "state": {"enum": ["absent", "creating", "running", "stopped", "exited", "starting", "restarting", "stale_spec", "unhealthy", "resource_stopped", "retiring", "retired", "unavailable", "environment_identity_conflict"]},
+    "config_revision_prefix": {"type": "string"}, "spec_prefix": {"type": "string"}, "generation": {"type": "integer"}, "reason_code": {},
+    "installation_prefix": {}, "container_id_prefix": {}, "mismatch_fields": {"type": "array"}, "bounds": {"type": "object"},
+    "rootfs_and_files_persist": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
+    "rootfs_persists_until_exact_container_destruction": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
+    "workspace_persists_after_reset_rebuild_remove_by_default": {"const": true},
+    "cache_persists_after_reset_rebuild_remove_by_default": {"const": true},
+    "tmpfs_persists_across_container_stop": {"const": false},
+    "processes_survive_controller_events_only_while_container_running": {"const": true},
+    "processes_survive_container_stop": {"const": false},
+    "shell_local_state_persists_across_exec": {"const": false},
+    "logical_cwd_persists_across_exec_and_controller_restart": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
+    "workspace_and_cache_preserved_by_default": {"const": true}
+  }
+}

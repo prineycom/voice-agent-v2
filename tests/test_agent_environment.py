@@ -161,10 +161,13 @@ class FakeDocker:
                     output = self.markers.get(command[4:], "missing").encode()
                 else:
                     output = command.encode()
+                observed_cwd = command[4:] if command.startswith("cwd ") else "/workspace"
+                if observed_cwd == "/deleted":
+                    observed_cwd = "/workspace"
                 document = {
                     "status": "completed", "exit_code": 0,
                     "stdout_base64": base64.b64encode(output).decode(),
-                    "stderr_base64": "", "cwd": "/workspace", "replayed": False,
+                    "stderr_base64": "", "cwd": observed_cwd, "replayed": False,
                 }
                 self.claims[call_id] = document
                 return DockerResult(0, json.dumps(document).encode(), accepted=True)
@@ -248,6 +251,21 @@ class AgentEnvironmentTests(unittest.TestCase):
         later = restarted_controller.execute("shell.exec", {"command": "get rootfs"})
         self.assertEqual(later.container_id, first.container_id)
         self.assertEqual(later.stdout, b"kept")
+
+    def test_logical_cwd_is_restart_persistent_and_deleted_directory_visibly_falls_back(self) -> None:
+        first = self.fixture.manager.execute("shell.exec", {"command": "cwd /workspace/project"})
+        self.assertEqual(first.cwd, "/workspace/project")
+        restarted = AgentEnvironment(
+            self.fixture.manager.config, state_root=self.fixture.manager.state_root,
+            workspace=self.fixture.manager.workspace, cache=self.fixture.manager.cache,
+            runner=self.fixture.docker, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        restarted.execute("shell.exec", {"command": "cwd /deleted"})
+        dispatches = [item for item in self.fixture.docker.commands if "claim-execute" in item]
+        self.assertEqual(dispatches[-1][dispatches[-1].index("--cwd") + 1], "/workspace/project")
+        self.assertEqual(restarted.status()["logical_cwd_persists_across_exec_and_controller_restart"], True)
+        fallback = restarted.execute("shell.exec", {"command": "get anything"})
+        self.assertEqual(fallback.cwd, "/workspace")
 
     def test_stop_starts_same_id_but_normal_events_issue_no_teardown(self) -> None:
         facts = self.fixture.manager.ensure_running()
@@ -359,6 +377,10 @@ class AgentEnvironmentTests(unittest.TestCase):
         self.assertEqual(status["state"], "running")
         self.assertTrue(status["rootfs_and_files_persist"])
         self.assertFalse(status["processes_survive_container_stop"])
+        root = Path(__file__).resolve().parents[1]
+        validate_schema(status, json.loads((root / "contracts/agent-environment-status.v2.schema.json").read_text()))
+        receipt = self.fixture.manager.execute("shell.exec", {"command": "status-receipt"})
+        validate_schema(receipt.document(), json.loads((root / "contracts/agent-call-receipt.v2.schema.json").read_text()))
         with self.assertRaises(AgentEnvironmentError):
             self.fixture.manager.lifecycle("remove", confirmed=False)
         removed = self.fixture.manager.lifecycle("remove", confirmed=True)
