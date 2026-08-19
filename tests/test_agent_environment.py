@@ -269,7 +269,11 @@ class ConfigV2Tests(unittest.TestCase):
         )
         self.assertNotIn(b"private-name", upgraded)
         self.assertNotIn(b"profile_id", upgraded)
-        self.assertEqual(parse_agent_config_v2(upgraded).semantic_revision, parsed.semantic_revision)
+        upgraded_snapshot = parse_agent_config_v2(upgraded)
+        self.assertFalse(upgraded_snapshot.model.agent.enabled)
+        self.assertFalse(upgraded_snapshot.model.agent_environment.enabled)
+        self.assertIsNone(upgraded_snapshot.model.agent_environment.docker.endpoint)
+        self.assertNotEqual(upgraded_snapshot.semantic_revision, parsed.semantic_revision)
         root = Path(__file__).resolve().parents[1]
         validate_schema(
             parsed.model.model_dump(mode="json"),

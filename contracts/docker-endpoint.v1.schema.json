@@ -2,11 +2,26 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://voice-agent-v2.local/contracts/docker-endpoint.v1.schema.json",
   "type": "object", "additionalProperties": false,
-  "required": ["schema", "endpoint", "kind", "ownership_verified"],
+  "required": ["schema", "endpoint", "kind", "ownership_verified", "socket_identity", "daemon_identity", "rootless", "user_namespace", "cgroup_version", "cgroup_driver", "explicit_host"],
   "properties": {
     "schema": {"const": "voice-agent.docker-endpoint.v1"},
     "endpoint": {"oneOf": [{"type": "string", "pattern": "^unix:///run/user/[1-9][0-9]*/docker\\.sock$"}, {"type": "null"}]},
     "kind": {"enum": ["rootless", "unavailable"]},
-    "ownership_verified": {"type": "boolean"}
-  }
+    "ownership_verified": {"type": "boolean"},
+    "socket_identity": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 128}, {"type": "null"}]},
+    "daemon_identity": {"oneOf": [{"type": "string", "pattern": "^[a-f0-9]{64}$"}, {"type": "null"}]},
+    "rootless": {"type": "boolean"},
+    "user_namespace": {"oneOf": [{"const": "rootless"}, {"type": "null"}]},
+    "cgroup_version": {"oneOf": [{"const": 2}, {"type": "null"}]},
+    "cgroup_driver": {"oneOf": [{"const": "systemd"}, {"type": "null"}]},
+    "explicit_host": {"type": "boolean"}
+  },
+  "allOf": [{
+    "if": {"properties": {"kind": {"const": "rootless"}}},
+    "then": {"properties": {
+      "endpoint": {"type": "string"}, "ownership_verified": {"const": true}, "rootless": {"const": true},
+      "socket_identity": {"type": "string"}, "daemon_identity": {"type": "string"}, "user_namespace": {"const": "rootless"},
+      "cgroup_version": {"const": 2}, "cgroup_driver": {"const": "systemd"}, "explicit_host": {"const": true}
+    }}
+  }]
 }

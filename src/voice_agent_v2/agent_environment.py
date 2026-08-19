@@ -128,18 +128,21 @@ class DockerCLI:
         "/opt/homebrew/bin/docker",
     )
 
-    def __init__(self, private_home: Path) -> None:
+    def __init__(self, private_home: Path, endpoint: str | None) -> None:
         self.binary = next(
             (path for path in self._RELEASE_PATHS if Path(path).is_file() and os.access(path, os.X_OK)),
             self._RELEASE_PATHS[0],
         )
         self.private_home = private_home
+        self.endpoint = endpoint
 
     def run(
         self, arguments: tuple[str, ...], *, stdin: bytes = b"", timeout: float = DOCKER_TIMEOUT
     ) -> DockerResult:
         if not arguments or any(not isinstance(value, str) or "\0" in value for value in arguments):
             raise AgentEnvironmentError("docker_request_invalid")
+        if self.endpoint is None or re.fullmatch(r"unix:///run/user/[1-9][0-9]*/docker\.sock", self.endpoint) is None:
+            raise AgentEnvironmentError("docker_runtime_unavailable")
         self.private_home.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.private_home, 0o700)
         environment = {
@@ -151,7 +154,7 @@ class DockerCLI:
         }
         try:
             completed = subprocess.run(
-                [self.binary, *arguments],
+                [self.binary, "--host", self.endpoint, *arguments],
                 input=stdin,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -338,7 +341,9 @@ class AgentEnvironment:
         self.state_root = state_root
         self.workspace = workspace
         self.cache = cache
-        self.runner = runner or DockerCLI(state_root / "docker-client")
+        self.runner = runner or DockerCLI(
+            state_root / "docker-client", config.model.agent_environment.docker.endpoint
+        )
         declarations = config.model.agent_environment.credentials
         has_credentials = any((
             declarations.creation_environment_names,

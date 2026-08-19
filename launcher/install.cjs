@@ -6,6 +6,7 @@ module.exports = function createInstaller(core) {
   const os = require('node:os');
   const path = require('node:path');
   const { spawnSync } = require('node:child_process');
+  const agentEnvironment = require('./agent-environment.cjs')(core);
 
   const SERVICE_UNIT = 'voice-agent.service';
   const REQUIRED_COMPONENTS = ['livekit', 'controller', 'stt', 'selected_llm', 'tts'];
@@ -17,9 +18,18 @@ module.exports = function createInstaller(core) {
   const UNIT_CONTRACT = `[Unit]\nDescription=Voice Agent\nAfter=network.target\nStartLimitIntervalSec=infinity\nStartLimitBurst=2\n\n[Service]\nType=notify\nWorkingDirectory=@RELEASE@\nEnvironmentFile=@PRIVATE@/service.env\nExecStart=@RELEASE@/bin/voice-agent-runtime --config @CONFIG@/config.yaml\nRestart=on-failure\nRestartSec=5s\nTimeoutStartSec=300s\nTimeoutStopSec=75s\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=strict\nProtectHome=read-only\nReadWritePaths=@DATA@ @CACHE@ @STATE@ @RUNTIME@\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nLockPersonality=yes\nRestrictSUIDSGID=yes\n\n[Install]\nWantedBy=default.target\n`;
   const UNIT_CONTRACT_SHA256 = digest(Buffer.from(UNIT_CONTRACT));
 
-  const AGENT_CONFIG = `schema_version: voice-agent.config.v2
+  const AGENT_IMAGE = 'ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421';
+  const AGENT_SPEC_DIGEST = `sha256:${digest(Buffer.from('voice-agent.agent-environment-spec.v1\\0' + AGENT_IMAGE))}`;
+
+  function renderAgentConfig(layout = null, installationId = null, endpoint = null, enabled = false) {
+    const quote = (value) => value === null ? 'null' : JSON.stringify(value);
+    const registry = layout ? path.join(layout.agent, 'private', 'registry.json') : null;
+    const rootfs = layout ? path.join(layout.agent, 'rootfs-storage') : null;
+    const workspace = layout ? path.join(layout.agent, 'workspace') : null;
+    const cache = layout ? path.join(layout.agent, 'cache') : null;
+    return `schema_version: voice-agent.config.v2
 agent:
-  enabled: false
+  enabled: ${enabled}
   max_decisions: 24
   active_deadline_seconds: 600
   tools:
@@ -38,9 +48,20 @@ agent:
     - report.artifact
     - report.deliver
 agent_environment:
+  enabled: ${enabled}
+  docker:
+    endpoint: ${quote(endpoint)}
+    authority: explicit_verified_rootless
   image:
-    reference: ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421
+    reference: ${AGENT_IMAGE}
+    spec_digest: ${AGENT_SPEC_DIGEST}
     pull_at_runtime: false
+  identity:
+    installation_id: ${quote(installationId)}
+    registry_path: ${quote(registry)}
+    rootfs_storage_path: ${quote(rootfs)}
+    workspace_path: ${quote(workspace)}
+    cache_path: ${quote(cache)}
   lifecycle:
     lazy_create: true
     persistent: true
@@ -51,8 +72,10 @@ agent_environment:
   additional_mounts: []
   network:
     enabled: false
+    mode: rootless_private
     publish_ports: []
   credentials:
+    store_reference: private/credentials.json
     creation_environment_names: []
     creation_file_names: []
     exec_environment_names: []
@@ -71,6 +94,8 @@ agent_environment:
     maximum_stream_bytes: 262144
     stream_timeout_seconds: 120
 `;
+  }
+  const AGENT_CONFIG = renderAgentConfig();
 
   function error(code, message) { throw new core.LauncherError(code, message); }
   function digest(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
@@ -116,7 +141,7 @@ agent_environment:
     return {
       identity: value, data, config, cache, state, runtime,
       releases: path.join(data, 'releases'), transactions: path.join(data, 'transactions'), migrations: path.join(data, 'migrations'),
-      appData: path.join(data, 'data'), agent: path.join(data, 'agent-environment'),
+      appData: path.join(data, 'data'), agent: path.join(data, 'agent-environment'), agentRootfs: path.join(data, 'agent-environment', 'rootfs-storage'),
       private: path.join(config, 'private'), downloads: path.join(cache, 'downloads'), models: path.join(cache, 'models', 'sha256'), runtimes: path.join(cache, 'runtimes', 'sha256'),
       logs: path.join(state, 'logs'), diagnostics: path.join(state, 'diagnostics'), serviceRuntime: path.join(runtime, 'service'),
       unit: path.join(value.configHome, 'systemd', 'user', SERVICE_UNIT), journal: path.join(data, 'transactions', 'install.json'),
@@ -295,10 +320,10 @@ agent_environment:
     if (observed.size !== expected.size || [...expected.keys()].some((name) => !observed.has(name))) error('extracted_release_invalid', 'extracted release is incomplete');
   }
 
-  function safeDefaults(randomBytes) {
+  function safeDefaults(randomBytes, layout = null, installationId = null, endpoint = null) {
     const secret = (bytes) => randomBytes(bytes).toString('base64url');
     return {
-      config: Buffer.from(AGENT_CONFIG),
+      config: Buffer.from(renderAgentConfig(layout, installationId, endpoint, false)),
       service: Buffer.from([
         `LIVEKIT_API_KEY=${secret(24)}`, `LIVEKIT_API_SECRET=${secret(48)}`, `VOICE_AGENT_API_SECRET=${secret(48)}`,
         'LIVEKIT_INTERNAL_URL=ws://127.0.0.1:7880', 'LIVEKIT_PUBLIC_URL=ws://127.0.0.1:7880',
@@ -313,7 +338,7 @@ agent_environment:
   function installDirectories(layout) {
     const uid = layout.identity.uid;
     for (const directory of [layout.data, layout.releases, layout.transactions, layout.migrations, layout.appData,
-      layout.agent, path.join(layout.agent, 'private'), path.join(layout.agent, 'workspace'), path.join(layout.agent, 'cache'),
+      layout.agent, path.join(layout.agent, 'private'), path.join(layout.agent, 'workspace'), path.join(layout.agent, 'cache'), layout.agentRootfs,
       layout.config, layout.private, layout.cache, layout.downloads, path.dirname(layout.models), layout.models, path.dirname(layout.runtimes), layout.runtimes,
       layout.state, layout.logs, layout.diagnostics, layout.runtime, layout.serviceRuntime, path.dirname(layout.unit)]) ensurePrivateDirectory(directory, uid);
   }
@@ -454,7 +479,7 @@ agent_environment:
           if (!validateReadiness(ready, release, layout.identity.uid)) error('existing_install_requires_doctor', 'the installed release is not exactly healthy; run voice-agent doctor');
           output.info(`Voice Agent ${release.version} is already selected, running, and five-component ready.`);
           output.info('Optional agent tools: unavailable until valid v2 configuration and a rootless Docker endpoint are configured. Telegram: disabled.');
-          return { state: 'already_healthy', release_id: existing.release_id, version: release.version, optional: { agent_environment: 'unconfigured', telegram: 'disabled' } };
+          return { state: 'already_healthy', release_id: existing.release_id, version: release.version, optional: { agent_environment: 'disabled', telegram: 'disabled' } };
         }
       }
 
@@ -472,10 +497,14 @@ agent_environment:
       if (['linger_enabled', 'unit_installed', 'service_started', 'ready_verified', 'healthy'].includes(phase)) serviceMutated = true;
 
       if (phase === 'layout_created') {
-        const defaults = safeDefaults(dependencies.randomBytes);
+        agentEnvironment.migrateLegacy(layout, journalBase.id, writeJson);
+        const defaults = safeDefaults(dependencies.randomBytes, layout, journalBase.id, null);
         atomicWrite(path.join(layout.config, 'config.yaml'), defaults.config, 0o600, layout.identity.uid);
         atomicWrite(path.join(layout.private, 'service.env'), defaults.service, 0o600, layout.identity.uid);
         atomicWrite(path.join(layout.private, 'credentials.json'), defaults.credentials, 0o600, layout.identity.uid);
+        writeJson(path.join(layout.private, 'docker-endpoint.json'), agentEnvironment.endpointRecord(layout.identity.uid), layout.identity.uid);
+        const environmentBefore = await agentEnvironment.capture(layout, dependencies, { phase: 'install_before' });
+        agentEnvironment.writePreservation(layout, { ...environmentBefore, checked_at: timestamp(dependencies.clock) }, writeJson);
         phase = writeJournal(layout, journalBase, 'defaults_written', dependencies).phase;
       }
 
@@ -528,6 +557,11 @@ agent_environment:
       }
 
       if (phase === 'ready_verified') {
+        const environmentBefore = agentEnvironment.readPreservation(layout.data, layout.identity.uid)
+          || await agentEnvironment.capture(layout, dependencies, { phase: 'install_before_recovery' });
+        const environmentAfter = await agentEnvironment.capture(layout, dependencies, { phase: 'install_after' });
+        agentEnvironment.assertPreserved(environmentBefore, environmentAfter);
+        agentEnvironment.writePreservation(layout, { ...environmentAfter, checked_at: timestamp(dependencies.clock) }, writeJson);
         const recordPath = path.join(releaseRoot, 'release-record.json');
         const releaseRecord = core.validateReleaseRecord(JSON.parse(fs.readFileSync(recordPath, 'utf8')));
         releaseRecord.readiness = { state: 'ready', checked_at: timestamp(dependencies.clock) };
@@ -551,7 +585,7 @@ agent_environment:
 
       output.info(`Voice Agent ${release.version} is installed, running, accepting admission, and five-component ready on http://127.0.0.1:8000.`);
       output.info('Optional agent tools: unavailable until valid v2 configuration and a rootless Docker endpoint are configured. Telegram: disabled.');
-      return { state: 'installed_healthy', release_id: releaseId, version: release.version, optional: { agent_environment: 'unconfigured', telegram: 'disabled' } };
+      return { state: 'installed_healthy', release_id: releaseId, version: release.version, optional: { agent_environment: 'disabled', telegram: 'disabled' } };
     } catch (reason) {
       if (reason && reason.code === 'install_interrupted') throw reason;
       if (journalBase && exists(layout.journal)) {
@@ -648,10 +682,10 @@ agent_environment:
   function installContractSchemaNames() { return ['install-transaction.v1.schema.json', 'installation.v1.schema.json']; }
 
   return {
-    AGENT_CONFIG, FREE_SPACE_RESERVE, MINIMUM_VRAM, REQUIRED_COMPONENTS, SERVICE_UNIT, STARTUP_DEADLINE_MS,
+    AGENT_CONFIG, AGENT_IMAGE, AGENT_SPEC_DIGEST, FREE_SPACE_RESERVE, MINIMUM_VRAM, REQUIRED_COMPONENTS, SERVICE_UNIT, STARTUP_DEADLINE_MS,
     UNIT_CONTRACT, UNIT_CONTRACT_SHA256, artifactPreflight, atomicWrite, compatibilityPreflight, defaultDependencies,
     ensurePrivateDirectory, extractVerifiedArchive, hostPreflight, installContractSchemaNames, installDirectories,
-    installVoiceAgent, inspectManagedPath, layoutFor, readPrivateJson, renderUnit, syncDirectory,
+    installVoiceAgent, inspectManagedPath, layoutFor, readPrivateJson, renderAgentConfig, renderUnit, safeDefaults, syncDirectory,
     validateReadiness, verifyExtractedTree, writeJson,
   };
 };

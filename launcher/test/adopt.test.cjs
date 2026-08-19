@@ -99,8 +99,12 @@ function harness(options = {}) {
   const artifact = candidateArtifact(); const calls = []; const lines = []; let oldActive = true; let candidateActive = false; let candidateEnabled = false; let retired = false; let monotonic = 0;
   function legacySnapshot() {
     const docker = options.noDocker ? null : {
-      endpoint: options.rootfulDocker ? 'unix:///var/run/docker.sock' : `unix:///run/user/${UID}/docker.sock`, socket_uid: options.foreignDocker ? UID + 1 : UID,
-      socket_type: 'socket', rootless: !options.rootfulDocker, daemon_identity_verified: !options.foreignDocker, explicit_host: true,
+      endpoint: options.rootfulDocker ? 'unix:///var/run/docker.sock' : `unix:///run/user/${UID}/docker.sock`,
+      socket_path: options.rootfulDocker ? '/var/run/docker.sock' : `/run/user/${UID}/docker.sock`,
+      socket_uid: options.foreignDocker ? UID + 1 : UID, socket_type: 'socket', socket_mode: 0o600,
+      socket_device: 31, socket_inode: 42, rootless: !options.rootfulDocker, daemon_uid: options.foreignDocker ? UID + 1 : UID,
+      daemon_identity: 'fixture-rootless-daemon', user_namespace: options.rootfulDocker ? 'host' : 'rootless', cgroup_version: 2,
+      cgroup_driver: 'systemd', ambient_context_used: false, explicit_host: true,
     };
     if (!oldActive) return { service: { name: 'voice-agent-v2.service', fragment_path: serviceUnitPath, active: 'inactive', main_pid: 0, control_group: '/system.slice/voice-agent-v2.service' }, process: null, runtime: null, docker, listener: { host: null, port: null, owner_uid: null, owner: 'unknown' } };
     const snapshot = {
@@ -141,12 +145,29 @@ function harness(options = {}) {
     clock: { now: () => new Date(NOW), monotonic: () => monotonic, sleep: async (ms) => { monotonic += ms; } },
     randomBytes: (length) => Buffer.alloc(length, 0x7c), output: { info: (line) => lines.push(line) }, fault: options.fault || null,
   };
+  if (options.environmentStatus) dependencies.agentEnvironment = { capture: async () => options.environmentStatus };
   const adoptOptions = { testMode: true, dependencies, legacyRoot, serviceUnitPath, serviceUnitOwner: UID, expectedPythonPath: runtime };
   function cleanup(context) { context.after(() => { function writable(file) { if (!exists(file)) return; const metadata = fs.lstatSync(file); if (metadata.isSymbolicLink()) return; if (metadata.isDirectory()) { fs.chmodSync(file, 0o700); for (const name of fs.readdirSync(file)) writable(path.join(file, name)); } else fs.chmodSync(file, 0o600); } writable(parent); fs.rmSync(parent, { recursive: true, force: true }); }); }
   return { parent, identity, layout, legacyRoot, configPath, secret, running, selected, serviceUnitPath, runtime, artifact, calls, lines, dependencies, adoptOptions, cleanup, snapshot: legacySnapshot };
 }
 
 async function adopt(value) { return adopter.installVoiceAgent(value.adoptOptions); }
+
+test('interrupted pre-preservation adoption journal upgrades with exact prior/candidate custody intact', () => {
+  const id = '8'.repeat(32);
+  const receipts = Object.fromEntries(adopter.RECEIPTS
+    .filter((name) => !['environment_before', 'environment_after'].includes(name)).map((name) => [name, name === 'candidate_staged']));
+  const old = {
+    schema: adopter.ADOPTION_SCHEMA, id, phase: 'prepared', prior_running: `legacy-${'1'.repeat(24)}`,
+    prior_healthy: `legacy-${'1'.repeat(24)}`, legacy_candidate: `legacy-${'2'.repeat(24)}`,
+    candidate: '1.0.0-candidate', config_source_sha256: 'a'.repeat(64), config_canonical_sha256: 'b'.repeat(64),
+    receipts, failure_code: null, started_at: '2026-08-21T00:00:00Z', updated_at: '2026-08-21T00:00:00Z',
+  };
+  const upgraded = adopter.validateJournal(old);
+  assert.deepEqual(upgraded.agent_environment, { before: null, after: null });
+  assert.equal(upgraded.receipts.candidate_staged, true);
+  assert.equal(upgraded.receipts.environment_before, false); assert.equal(upgraded.receipts.environment_after, false);
+});
 
 test('exact selected-new/running-old split adopts healthy prior, uncommitted legacy candidate, private config, rootless endpoint, and signed candidate', async (context) => {
   const value = harness(); value.cleanup(context); const beforeLegacy = fs.readFileSync(value.configPath);
@@ -194,6 +215,15 @@ test('canonical config conflict and rootful/foreign Docker are refused; absent D
   assert.equal(absent.calls.some((item) => /docker|container|pull|create/.test(item)), false);
 });
 
+test('legacy adoption preserves the exact existing AgentEnvironment identity without lifecycle mutation', async (context) => {
+  const environmentStatus = { state: 'ready', action: 'none', identity_digest: '9'.repeat(64), container_id_prefix: '8'.repeat(12), runtime_state: 'running' };
+  const value = harness({ environmentStatus }); value.cleanup(context);
+  assert.equal((await adopt(value)).state, 'legacy_adopted_healthy');
+  const receipt = JSON.parse(fs.readFileSync(path.join(value.layout.agent, 'private', 'preservation.json')));
+  assert.equal(receipt.identity_digest, environmentStatus.identity_digest);
+  assert.equal(value.calls.some((item) => /docker|container|agent-stop|agent-start/.test(item)), false);
+});
+
 test('candidate failure restores exact old service; double failure remains explicit with recovery evidence', async (context) => {
   const safe = harness({ candidateFailure: true }); safe.cleanup(context); await code('update_failed_safe', () => adopt(safe));
   assert.deepEqual(safe.calls.slice(-3), ['candidate-stop', 'candidate-disable', 'legacy-restore']); assert.equal(safe.snapshot().runtime.release_id, safe.running.document.release_id);
@@ -203,11 +233,12 @@ test('candidate failure restores exact old service; double failure remains expli
 });
 
 test('interruption after every durable write/action converges without duplicate service actions, config copy, release, or container', async (context) => {
-  const survey = harness(); survey.cleanup(context); const events = [];
+  const environmentStatus = { state: 'ready', action: 'none', identity_digest: '7'.repeat(64), container_id_prefix: '6'.repeat(12), runtime_state: 'running' };
+  const survey = harness({ environmentStatus }); survey.cleanup(context); const events = [];
   survey.dependencies.fault = { afterDurablePhase: (name) => events.push(`write:${name}`), afterAction: (name) => events.push(`action:${name}`) };
   await adopt(survey);
   for (const event of [...new Set(events)]) {
-    const value = harness(); value.cleanup(context); let fired = false;
+    const value = harness({ environmentStatus }); value.cleanup(context); let fired = false;
     value.dependencies.fault = {
       afterDurablePhase(name) { if (!fired && event === `write:${name}`) { fired = true; throw new core.LauncherError('legacy_adoption_interrupted', 'fixture'); } },
       afterAction(name) { if (!fired && event === `action:${name}`) { fired = true; throw new core.LauncherError('legacy_adoption_interrupted', 'fixture'); } },

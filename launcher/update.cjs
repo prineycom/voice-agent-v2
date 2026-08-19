@@ -5,6 +5,7 @@ module.exports = function createUpdater(core, installer) {
   const fs = require('node:fs');
   const path = require('node:path');
   const { spawnSync } = require('node:child_process');
+  const agentEnvironment = require('./agent-environment.cjs')(core);
 
   const PHASES = new Set([
     'recovering', 'checking', 'staging', 'verified', 'migrations_prepared', 'prior_custody',
@@ -17,14 +18,16 @@ module.exports = function createUpdater(core, installer) {
   ]);
   const RECEIPT_KEYS = [
     'artifact_verified', 'candidate_ready', 'channel_checked', 'migration_prepared',
-    'pointer_activated', 'pre_gc_complete', 'prior_custody', 'prior_ready', 'prior_restored',
+    'environment_after', 'environment_before', 'pointer_activated', 'pre_gc_complete', 'prior_custody', 'prior_ready', 'prior_restored',
     'release_staged', 'service_started', 'service_stopped', 'terminal', 'unit_reloaded',
   ];
   const JOURNAL_KEYS = [
-    'candidate', 'config_snapshot', 'failure_code', 'id', 'phase', 'prior_healthy',
+    'agent_environment', 'candidate', 'config_snapshot', 'failure_code', 'id', 'phase', 'prior_healthy',
     'prior_running', 'prior_selected', 'receipts', 'requested_channel', 'schema', 'service',
     'started_at', 'updated_at',
   ];
+  const PRE_PRESERVATION_JOURNAL_KEYS = JOURNAL_KEYS.filter((key) => key !== 'agent_environment');
+  const PRE_PRESERVATION_RECEIPT_KEYS = RECEIPT_KEYS.filter((key) => !['environment_before', 'environment_after'].includes(key));
   const MIGRATION_KEYS = ['destructive', 'from', 'id', 'operation', 'product_choice', 'reversible', 'scope', 'sha256', 'to'];
   const UPDATE_SCHEMA = 'voice-agent.update-transaction.v1';
 
@@ -68,7 +71,21 @@ module.exports = function createUpdater(core, installer) {
 
   function emptyReceipts() { return Object.fromEntries(RECEIPT_KEYS.map((key) => [key, false])); }
 
+  function normalizeJournal(document) {
+    if (document && typeof document === 'object' && !Array.isArray(document)
+      && Object.keys(document).sort().join('\0') === [...PRE_PRESERVATION_JOURNAL_KEYS].sort().join('\0')
+      && document.receipts && typeof document.receipts === 'object' && !Array.isArray(document.receipts)
+      && Object.keys(document.receipts).sort().join('\0') === [...PRE_PRESERVATION_RECEIPT_KEYS].sort().join('\0')) {
+      return {
+        ...document, agent_environment: { before: null, after: null },
+        receipts: { ...emptyReceipts(), ...document.receipts },
+      };
+    }
+    return document;
+  }
+
   function validateJournal(document) {
+    document = normalizeJournal(document);
     exactKeys(document, JOURNAL_KEYS, 'update_journal_invalid');
     if (document.schema !== UPDATE_SCHEMA || !/^[0-9a-f]{32}$/.test(document.id) || document.requested_channel !== 'stable'
       || !PHASES.has(document.phase) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.started_at)
@@ -79,6 +96,11 @@ module.exports = function createUpdater(core, installer) {
       || (document.failure_code !== null && (typeof document.failure_code !== 'string' || !/^[a-z0-9_]{1,64}$/.test(document.failure_code)))) {
       error('update_journal_invalid', 'the durable update journal is invalid');
     }
+    exactKeys(document.agent_environment, ['after', 'before'], 'update_journal_invalid');
+    try {
+      if (document.agent_environment.before !== null) agentEnvironment.validatePreservation(document.agent_environment.before);
+      if (document.agent_environment.after !== null) agentEnvironment.validatePreservation(document.agent_environment.after);
+    } catch { error('update_journal_invalid', 'AgentEnvironment custody receipt is invalid'); }
     exactKeys(document.service, ['unit_sha256', 'was_active', 'was_enabled'], 'update_journal_invalid');
     if (typeof document.service.was_active !== 'boolean' || typeof document.service.was_enabled !== 'boolean'
       || (document.service.unit_sha256 !== null && !/^[0-9a-f]{64}$/.test(document.service.unit_sha256))) error('update_journal_invalid', 'the service custody receipt is invalid');
@@ -382,7 +404,10 @@ module.exports = function createUpdater(core, installer) {
       next = persistJournal(layout, next, 'starting_prior', dependencies, { receipts: { service_started: true } });
       await waitReady(dependencies.service, prior, layout, dependencies);
       fault(dependencies, 'action', 'prior_readiness_proved');
-      next = persistJournal(layout, next, 'prior_ready', dependencies, { receipts: { prior_ready: true } });
+      const environmentAfter = await agentEnvironment.capture(layout, dependencies, { phase: 'update_rollback' });
+      agentEnvironment.assertPreserved(next.agent_environment.before, environmentAfter);
+      agentEnvironment.writePreservation(layout, environmentAfter, installer.writeJson);
+      next = persistJournal(layout, next, 'prior_ready', dependencies, { agent_environment: { ...next.agent_environment, after: environmentAfter }, receipts: { environment_after: true, prior_ready: true } });
       next = persistJournal(layout, next, 'failed_safe', dependencies, { receipts: { terminal: true } });
       removeTransactionPartials(layout, next, false); removeSnapshot(layout, next);
       fs.unlinkSync(layout.updateJournal); installer.syncDirectory(layout.transactions);
@@ -409,6 +434,10 @@ module.exports = function createUpdater(core, installer) {
     next = persistJournal(layout, next, 'healthy', dependencies, { receipts: { terminal: true } });
     const final = await dependencies.service.probe({ release_id: candidate.id, build_id: candidate.record.build_id, deadline_ms: 0 });
     if (!installer.validateReadiness(final, releaseLike(candidate), layout.identity.uid)) return rollback(layout, next, dependencies, 'candidate_lost_readiness');
+    const environmentAfter = await agentEnvironment.capture(layout, dependencies, { phase: 'update_after' });
+    agentEnvironment.assertPreserved(next.agent_environment.before, environmentAfter);
+    agentEnvironment.writePreservation(layout, environmentAfter, installer.writeJson);
+    next = persistJournal(layout, next, 'healthy', dependencies, { agent_environment: { ...next.agent_environment, after: environmentAfter }, receipts: { environment_after: true } });
     const gc = collectReleases(layout, next, [candidate.id, next.prior_healthy]);
     fault(dependencies, 'action', 'post_gc_complete');
     removeTransactionPartials(layout, next, true); removeSnapshot(layout, next);
@@ -429,6 +458,13 @@ module.exports = function createUpdater(core, installer) {
     if (!exists(layout.updateJournal)) return null;
     let journal = readJournal(layout);
     const interruptedPhase = journal.phase;
+    if (!journal.receipts.environment_before) {
+      const before = await agentEnvironment.capture(layout, dependencies, { phase: 'update_pre_preservation_recovery' });
+      agentEnvironment.writePreservation(layout, before, installer.writeJson);
+      journal = persistJournal(layout, journal, interruptedPhase, dependencies, {
+        agent_environment: { before, after: null }, receipts: { environment_before: true },
+      });
+    }
     journal = persistJournal(layout, journal, 'recovering', dependencies);
     const serviceUnchanged = !journal.receipts.service_stopped && await priorStillExactReady(layout, journal, dependencies);
     if ((!POST_QUIESCE.has(interruptedPhase) && !journal.receipts.service_stopped) || serviceUnchanged) {
@@ -503,6 +539,10 @@ module.exports = function createUpdater(core, installer) {
       const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, signed.publicKeyPem, { now: dependencies.clock.now(), trustedSequence: installRecord.channel_sequence });
       const release = selectCandidate(channel, selected);
       if (releaseId(release) === selected.id && prior.id === selected.id) {
+        const environmentBefore = await agentEnvironment.capture(layout, dependencies, { phase: 'reconcile_before' });
+        const environmentAfter = await agentEnvironment.capture(layout, dependencies, { phase: 'reconcile_after' });
+        agentEnvironment.assertPreserved(environmentBefore, environmentAfter);
+        agentEnvironment.writePreservation(layout, environmentAfter, installer.writeJson);
         const gc = collectReleases(layout, null, [selected.id, pointerId(layout, layout.rollback)]);
         output.info(options.offline || signed.cached === true
           ? `Using previously verified cached stable metadata; latest is unknown. Voice Agent ${selected.record.version} is selected, running, and ready.`
@@ -514,11 +554,14 @@ module.exports = function createUpdater(core, installer) {
         schema: UPDATE_SCHEMA, id: dependencies.randomBytes(16).toString('hex'), requested_channel: 'stable', phase: 'checking',
         prior_selected: selected.id, prior_running: prior.id, prior_healthy: prior.id, candidate: releaseId(release), config_snapshot: null,
         service: { was_active: priorSnapshot.service_active === true, was_enabled: priorSnapshot.service_enabled === true, unit_sha256: null },
-        receipts: emptyReceipts(), failure_code: null, started_at: timestamp(dependencies.clock), updated_at: timestamp(dependencies.clock),
+        agent_environment: { before: null, after: null }, receipts: emptyReceipts(), failure_code: null, started_at: timestamp(dependencies.clock), updated_at: timestamp(dependencies.clock),
       };
       journal.config_snapshot = journal.id;
       journal.service = serviceState(priorSnapshot, core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024));
       installer.writeJson(layout.updateJournal, journal, layout.identity.uid); fault(dependencies, 'write', 'checking');
+      const environmentBefore = await agentEnvironment.capture(layout, dependencies, { phase: 'update_before' });
+      agentEnvironment.writePreservation(layout, environmentBefore, installer.writeJson);
+      journal = persistJournal(layout, journal, 'checking', dependencies, { agent_environment: { before: environmentBefore, after: null }, receipts: { environment_before: true } });
       journal = persistJournal(layout, journal, 'staging', dependencies, { receipts: { channel_checked: true } });
       const preGc = collectReleases(layout, journal, [selected.id, prior.id]);
       fault(dependencies, 'action', 'pre_gc_complete');
@@ -613,6 +656,6 @@ module.exports = function createUpdater(core, installer) {
 
   return {
     PHASES, POST_QUIESCE, RECEIPT_KEYS, UPDATE_SCHEMA, acquireExclusiveLock, collectReleases,
-    loadMigrationDescriptors, migrationPlan, parseConfigSchema, readRelease, updateVoiceAgent, validateJournal,
+    loadMigrationDescriptors, migrationPlan, normalizeJournal, parseConfigSchema, readRelease, updateVoiceAgent, validateJournal,
   };
 };

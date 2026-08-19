@@ -76,7 +76,7 @@ Production signing-key provisioning, publication or downloads; install/update/ro
 1. **I2 fresh Linux install — implemented deterministically:** private XDG roots/default configuration, exact asset proof, user systemd/linger, one start and five-component readiness; physical publication/host evidence remains I8.
 2. **I3 transactional update/rollback — implemented deterministically:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection; real-host evidence remains I8.
 3. **I4 legacy adoption — implemented deterministically:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success; real-host execution remains I8.
-4. **I5 AgentEnvironment/config preservation:** move durable environment state out of cache classification and prove same ID/rootfs/workspace across application update; stale spec degrades agent tools only.
+4. **I5 AgentEnvironment/config preservation — implemented deterministically:** durable XDG-data migration, explicit owner-only rootless authority, content-free exact inventory and before/after identity proof across install/update/rollback/recovery/adoption; real Docker/host evidence remains I8.
 5. **I6 assets/cache/offline:** resumable exact downloads, signed content-addressed assets, cached metadata policy and genuine-space-only refusal.
 6. **I7 rollback/uninstall/support bundle:** complete user surfaces, exact destructive confirmation and privacy scanner.
 7. **I8 acceptance:** disposable real-host install, VM phase/power loss, reboot, update/rollback voice turn and physical/full-stack gates before stable publication. macOS native support remains later.
@@ -156,6 +156,31 @@ Live stand mutation; production release authority/network; real system/user syst
 ### Acceptance and evidence
 
 The launcher phase of `./verify` covers the exact split, compatible/incompatible historical control, tampered/foreign/mismatched custody, config conflict and secret-preserving copy, rootless/rootful/absent Docker, success/failure/double failure and every observed adoption write/action interruption. [`legacy-adoption.md`](evidence/legacy-adoption.md) owns evidence/nonclaims.
+
+## Installation evolution I5 — Durable AgentEnvironment/config-v2 preservation
+
+> **Implemented contract:** application install/update/rollback/recovery/adoption may inspect and preserve the one existing AgentEnvironment but never obtains container lifecycle authority.
+
+### User-visible outcome
+
+Ordinary voice installation/update remains healthy when agent tools are disabled, the exact rootless endpoint is unavailable, the container is missing/stopped/unhealthy, or its desired spec is stale. `status`/`doctor` reports one content-free state and explicit action. Any replacement of the previously observed container/rootfs/workspace/cache/mount identity aborts the application transaction instead of silently accepting or rebuilding it.
+
+### Included scope
+
+- Complete strict config-v2 authority: coupled explicit enablement, exact verified rootless endpoint, allowed image/spec, installation identity, canonical durable registry/rootfs-storage/workspace/cache paths, private credential-store reference, typed mounts, network and resource policy; fresh install/adoption/V1 upgrade stay disabled.
+- Durable XDG-data classification outside releases, reconstructible cache and GC, with same-filesystem rename or cross-filesystem staged no-follow owner/type/hash/CAS/fsync copy and retained old-tree custody.
+- Exact owner-only `0600` rootless socket, explicit-host/service endpoint, daemon/root-dir identity, rootless namespace and cgroup-v2/systemd proof; no ambient/rootful/foreign/group-authorized fallback.
+- Production inspection-only Docker `info` and exact recorded-ID `container inspect`, binding owner/schema/spec/generation labels plus hashed image/config/rootfs/workspace/cache/additional-mount/network/resource identity without content enumeration.
+- Content-free before/after preservation receipts in install, already-current reconciliation, update success, failed-safe rollback, power-loss recovery and legacy adoption, including compatible recovery of interrupted pre-I5 update/adoption journals.
+- Closed states/actions: `disabled`, `ready`, `degraded_endpoint_unavailable`, `degraded_identity_mismatch`, `stale_spec`; no lifecycle or automatic maintenance action.
+
+### Excluded scope
+
+Creating, adopting, starting, stopping, removing, retiring, pruning, rebuilding or upgrading an AgentEnvironment; credential/Telegram/mount collection; image publication/acquisition; live Docker calls; live-state migration; explicit rollback/uninstall/support bundle; real systemd/network/model/reboot/voice evidence; live-stand mutation; and macOS runtime support.
+
+### Acceptance and evidence
+
+The launcher phase of `./verify` uses disposable XDG trees and injected Docker/service states. It covers exact authority rejection, production-inspect parsing, disabled/ready/endpoint/container/stopped/unhealthy/stale states, same identity through candidate success/failure restoration/recovery/adoption, replacement detection, both migration methods, pre-I5 journal compatibility, release/asset GC exclusion and privacy-safe status/journals. Python behavior tests keep active V2 runtime configuration schema-valid and prove V1 upgrade becomes disabled. [`agent-environment-preservation.md`](evidence/agent-environment-preservation.md) records deterministic evidence and the unchanged real-host/nonclaims.
 
 ## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
 

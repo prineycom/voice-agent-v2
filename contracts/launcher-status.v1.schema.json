@@ -12,7 +12,11 @@
     "rollback": {"type": "object", "additionalProperties": false, "required": ["state", "release_id", "version", "build_id"], "properties": {"state": {"enum": ["verified", "verified_legacy", "missing", "invalid"]}, "release_id": {}, "version": {}, "build_id": {}}},
     "transaction": {"type": "object", "additionalProperties": false, "required": ["state", "phase"], "properties": {"state": {"enum": ["none", "present", "invalid"]}, "phase": {}}},
     "service": {"type": "object", "additionalProperties": false, "required": ["state", "enabled", "main_pid_present", "custody"], "properties": {"state": {"enum": ["active", "inactive", "unavailable"]}, "enabled": {}, "main_pid_present": {"type": "boolean"}, "custody": {"enum": ["verified", "unavailable"]}}},
-    "agent_environment": {"type": "object", "additionalProperties": false, "required": ["state", "reason_code"], "properties": {"state": {"type": "string"}, "reason_code": {}}},
+    "agent_environment": {"type": "object", "additionalProperties": false, "required": ["state", "action", "reason_code", "identity_digest", "container_id_prefix", "runtime_state"], "properties": {
+      "state": {"enum": ["disabled", "ready", "degraded_endpoint_unavailable", "degraded_identity_mismatch", "stale_spec"]},
+      "action": {"enum": ["none", "configure_agent", "restore_rootless_endpoint", "restore_exact_environment", "maintenance_rebuild_required"]},
+      "reason_code": {}, "identity_digest": {}, "container_id_prefix": {}, "runtime_state": {}
+    }},
     "docker": {"type": "object", "additionalProperties": false, "required": ["state", "endpoint_kind", "ownership_verified"], "properties": {"state": {"enum": ["available", "unavailable", "invalid"]}, "endpoint_kind": {"enum": ["none", "rootless"]}, "ownership_verified": {"type": "boolean"}}},
     "legacy": {"type": "object", "additionalProperties": false, "required": ["state", "adoption_eligible", "runtime_custody"], "properties": {"state": {"enum": ["absent", "legacy_unsupported", "invalid"]}, "adoption_eligible": {"type": "boolean"}, "runtime_custody": {"enum": ["verified_ready", "unavailable"]}}},
     "read_only": {"const": true}
