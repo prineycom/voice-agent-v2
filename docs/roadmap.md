@@ -75,7 +75,19 @@ The restart-pinned `additional_mounts` list admits only absolute precreated user
 
 `status`, confirmed `reset|rebuild|remove|retire`, exact reinspection, atomic validated rebuild selection, retained nonselection, and separate data-deletion authority are deterministic. Conflicts are disclosed rather than repaired by killing unrelated work. PR evidence is fake-Docker/disposable-process only; Linux Engine, Docker Desktop/macOS, exact-model, real stop/daemon/Desktop, reboot, physical voice, and full-stack acceptance remain separate.
 
-`./verify` uses synthetic values and fake Docker/network/transport transcripts. Linux Engine and Docker Desktop/macOS network/rotation/tmpfs/remote-Git facts, exact-model/live-network tasks, reboot, voice, and physical evidence remain independently pending. See [`evidence/e3-2-network-credentials-streams-remote-git.md`](evidence/e3-2-network-credentials-streams-remote-git.md).
+`./verify` uses synthetic values and fake Docker/network/transport transcripts. Linux Engine and Docker Desktop/macOS network/rotation/tmpfs/remote-Git facts, exact-model/live-network tasks, reboot, voice, and physical evidence remain independently pending. See [`evidence/e3-3-background-mounts-lifecycle.md`](evidence/e3-3-background-mounts-lifecycle.md).
+
+## Agent evolution E4.1 — Bounded natural multi-tool cited Web research
+
+> **Implemented contract:** E4.1 extends the same AgentRun and selected persistent Docker environment; it changes no E2.4/E3 identity, lifecycle, credential, persistence, at-most-once, resource, mount, or no-host-fallback rule.
+
+Natural RU/EN current-information requests may use provider-neutral `web.search`, `web.fetch`, and `web.extract` convenience operations in any model-chosen order alongside ordinary container `curl`, scripts, installed tools, SDKs/APIs, files and background processes. Search takes a caller-chosen HTTP(S) endpoint rather than selecting a provider. Search/fetch persist bounded exact bytes and receipt sidecars under `/workspace` or `/cache`; later AgentRuns can reuse those artifacts or explicitly use fresh/preferred/cache-only/stale-on-failure modes.
+
+Active AgentRun/decision v2 binds final citations only to actual completed controller call IDs. Citation records carry normalized displayed URL, title when available, retrieval time, bytes/SHA-256, redirects, truncation, cache/stale/network/extraction truth and bounded answer claims/spans. Failed/inaccessible pages remain failed research receipts. Raw page/tool/file/network bytes stay intact for model work and persistence; display redaction affects only UI/history/log/support/final accidental-secret copies. Citation traceability is not a guarantee that a source is true.
+
+Frozen synthetic tasks pass by useful concept outcome, distinct query refinement, independently fetched origins, citation coverage/receipt equality and decision bounds—not exact words or one prescribed tool/provider route. Hostile instructions, roles, fake citations and serialized calls remain inert tool data until a later admitted model decision. Such a decision retains the accepted authority to read/exfiltrate readable state, damage RW state, install persistent tools, use exposed credentials and call reachable endpoints. The actual boundary is only the correctly configured unescaped container: no unmounted host home/sentinel, Docker/control socket/CLI, host process/service/device, undeclared mount, second environment, dynamic mount/port/credential, lifecycle call, host execution or fallback.
+
+`./verify` proves the complete behavior with frozen fake-Docker/pages/search/error/adversarial/cache/redirect fixtures and no real Docker, Internet, credential or model. Linux Engine, Docker Desktop/macOS, exact-model/live-network and physical/reboot/voice/full-stack acceptance remain separate. Browser automation/paywall bypass, prompt-injection prevention, semantic taint/DLP/domain filtering, production credential/provider spend and Telegram report delivery are excluded. See [`evidence/e4-1-bounded-cited-web-research.md`](evidence/e4-1-bounded-cited-web-research.md).
 
 ## Slice 1 — Deterministic zero-secret voice-turn tracer
 

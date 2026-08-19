@@ -16,12 +16,13 @@ from typing import Callable, Mapping, Protocol
 import uuid
 
 from .agent_environment import AgentEnvironment, AgentEnvironmentError, CallReceipt, HELPERS
+from .agent_research import CitationRecord, CitationRequest, WEB_TOOLS, bind_citations
 from .contracts import StageFailure, valid_correlation_id
 from .local_lfm import LocalLFMProvider, MODEL_ALIAS, PROVIDER_IDENTITY
 from .tracer import CancellationToken
 
-AGENT_RUN_VERSION = "voice-agent.agent-run.v1"
-DECISION_VERSION = "voice-agent.agent-decision.v1"
+AGENT_RUN_VERSION = "voice-agent.agent-run.v2"
+DECISION_VERSION = "voice-agent.agent-decision.v2"
 OPERATION_VERSION = "voice-agent.agent-operation.v1"
 RESULT_VERSION = "voice-agent.agent-operation-result.v1"
 BUDGET_VERSION = "voice-agent.agent-budget.v1"
@@ -77,18 +78,20 @@ class AgentDecision:
     tool: str | None = None
     arguments: Mapping[str, object] | None = None
     answer: str | None = None
+    citations: tuple[CitationRequest, ...] = ()
 
     @classmethod
     def parse(cls, raw: object) -> "AgentDecision":
         if not isinstance(raw, dict) or raw.get("kind") not in {"operation", "final"}:
             raise StageFailure("llm_provider", "agent_decision_invalid")
         if raw["kind"] == "final":
-            if set(raw) != {"kind", "answer"} or not isinstance(raw.get("answer"), str):
+            if set(raw) not in ({"kind", "answer"}, {"kind", "answer", "citations"}) or not isinstance(raw.get("answer"), str):
                 raise StageFailure("llm_provider", "agent_decision_invalid")
             answer = raw["answer"].strip()
             if not answer or len(answer.encode("utf-8")) > 2_000:
                 raise StageFailure("llm_provider", "agent_decision_invalid")
-            return cls("final", answer=answer)
+            citations = CitationRequest.parse_many(raw.get("citations", []))
+            return cls("final", answer=answer, citations=citations)
         if (
             set(raw) != {"kind", "tool", "arguments"}
             or raw.get("tool") not in HELPERS
@@ -142,6 +145,8 @@ class AgentRunResult:
     decisions: int
     operations: int
     terminal: str
+    citations: tuple[CitationRecord, ...] = ()
+    research_receipts: tuple[Mapping[str, object], ...] = ()
 
     def document(self) -> dict[str, object]:
         return {
@@ -155,6 +160,8 @@ class AgentRunResult:
             "provider_mode": "local",
             "provider_identity": PROVIDER_IDENTITY,
             "automatic_fallback": False,
+            "citations": [item.document() for item in self.citations],
+            "research_receipts": [dict(item) for item in self.research_receipts],
         }
 
 
@@ -241,6 +248,8 @@ class AgentRun:
         history: list[dict[str, object]] = []
         run_id = uuid.uuid4().hex
         operations = 0
+        successful_research: dict[str, Mapping[str, object]] = {}
+        research_receipts: list[Mapping[str, object]] = []
         try:
             for decision_number in range(1, self.budget.maximum_decisions + 1):
                 if not self._live(identity, token):
@@ -253,12 +262,25 @@ class AgentRun:
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 if decision.kind == "final":
                     assert decision.answer is not None
+                    citations = bind_citations(decision.answer, decision.citations, successful_research)
                     if self.observation is not None:
-                        self.observation({"transition": "agent_run_completed", "decision_count": decision_number, "operation_count": operations})
+                        self.observation({"transition": "agent_run_completed", "decision_count": decision_number, "operation_count": operations, "citation_count": len(citations), "research_receipt_count": len(research_receipts)})
                     display_answer = self.environment.redact_display(
                         decision.answer.encode("utf-8")
                     ).decode("utf-8", "replace")
-                    return AgentRunResult(run_id, identity, display_answer, decision_number, operations, "completed")
+                    display_citations = tuple(CitationRecord(
+                        item.receipt_id, item.displayed_url,
+                        self.environment.redact_display(item.title.encode()).decode("utf-8", "replace") if item.title else None,
+                        item.retrieved_epoch_seconds, item.byte_count, item.sha256, item.truncated,
+                        item.redirects, item.cache_used, item.cache_stale, item.network_error,
+                        item.extraction_error,
+                        tuple(self.environment.redact_display(value.encode()).decode("utf-8", "replace") for value in item.claims),
+                        tuple(self.environment.redact_display(value.encode()).decode("utf-8", "replace") for value in item.spans),
+                    ) for item in citations)
+                    return AgentRunResult(
+                        run_id, identity, display_answer, decision_number, operations, "completed",
+                        display_citations, tuple(research_receipts),
+                    )
                 assert decision.tool is not None and decision.arguments is not None
                 call_id = uuid.uuid4().hex
                 facts = self.environment.ensure_running()
@@ -284,6 +306,20 @@ class AgentRun:
                 if not self._live(identity, token):
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 operations += 1
+                if decision.tool in WEB_TOOLS:
+                    details = receipt.metadata.get("details", {})
+                    if isinstance(details, dict):
+                        safe_details = dict(details)
+                        if isinstance(safe_details.get("title"), str):
+                            safe_details["title"] = self.environment.redact_display(
+                                safe_details["title"].encode()
+                            ).decode("utf-8", "replace")
+                        research_receipts.append({
+                            "receipt_id": receipt.call_id, "outcome": receipt.status,
+                            **safe_details,
+                        })
+                        if receipt.status == "completed" and details.get("kind") in {"web_fetch", "web_search"}:
+                            successful_research[receipt.call_id] = details
                 def bounded_result(data: bytes, stream: str) -> dict[str, object]:
                     visible = data[:1024]
                     accounting = receipt.metadata.get(stream, {})
