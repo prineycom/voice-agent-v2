@@ -19,14 +19,34 @@
     },
     "agent_environment": {
       "type": "object", "additionalProperties": false,
-      "required": ["image", "lifecycle", "additional_mounts", "network", "credentials", "resources"],
+      "required": ["enabled", "docker", "image", "identity", "lifecycle", "additional_mounts", "network", "credentials", "resources"],
       "properties": {
+        "enabled": {"type": "boolean"},
+        "docker": {
+          "type": "object", "additionalProperties": false, "required": ["endpoint", "authority"],
+          "properties": {
+            "endpoint": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^unix:///run/user/[1-9][0-9]*/docker\\.sock$"}]},
+            "authority": {"const": "explicit_verified_rootless"}
+          }
+        },
         "image": {
           "type": "object", "additionalProperties": false,
-          "required": ["reference", "pull_at_runtime"],
+          "required": ["reference", "spec_digest", "pull_at_runtime"],
           "properties": {
             "reference": {"const": "ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421"},
+            "spec_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
             "pull_at_runtime": {"const": false}
+          }
+        },
+        "identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["installation_id", "registry_path", "rootfs_storage_path", "workspace_path", "cache_path"],
+          "properties": {
+            "installation_id": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-f0-9]{32}$"}]},
+            "registry_path": {"$ref": "#/$defs/nullableAbsolutePath"},
+            "rootfs_storage_path": {"$ref": "#/$defs/nullableAbsolutePath"},
+            "workspace_path": {"$ref": "#/$defs/nullableAbsolutePath"},
+            "cache_path": {"$ref": "#/$defs/nullableAbsolutePath"}
           }
         },
         "lifecycle": {
@@ -45,21 +65,21 @@
             "type": "object", "additionalProperties": false,
             "required": ["source", "destination", "mode"],
             "properties": {
-              "source": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).*(?<!/)$"},
-              "destination": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).*(?<!/)$"},
+              "source": {"$ref": "#/$defs/absolutePath"}, "destination": {"$ref": "#/$defs/absolutePath"},
               "mode": {"enum": ["read_only", "read_write"]}
             }
           }
         },
         "network": {
           "type": "object", "additionalProperties": false,
-          "required": ["enabled", "publish_ports"],
-          "properties": {"enabled": {"type": "boolean"}, "publish_ports": {"const": []}}
+          "required": ["enabled", "mode", "publish_ports"],
+          "properties": {"enabled": {"type": "boolean"}, "mode": {"const": "rootless_private"}, "publish_ports": {"const": []}}
         },
         "credentials": {
           "type": "object", "additionalProperties": false,
-          "required": ["creation_environment_names", "creation_file_names", "exec_environment_names", "exec_file_names"],
+          "required": ["store_reference", "creation_environment_names", "creation_file_names", "exec_environment_names", "exec_file_names"],
           "properties": {
+            "store_reference": {"const": "private/credentials.json"},
             "creation_environment_names": {"$ref": "#/$defs/credentialNames"},
             "creation_file_names": {"$ref": "#/$defs/credentialNames"},
             "exec_environment_names": {"$ref": "#/$defs/credentialNames"},
@@ -70,27 +90,35 @@
           "type": "object", "additionalProperties": false,
           "required": ["cpus", "memory_mib", "pids", "shm_mib", "rootfs_target_mib", "workspace_target_mib", "cache_target_mib", "host_free_reserve_mib", "watchdog_interval_seconds", "maximum_output_bytes", "maximum_stream_bytes", "stream_timeout_seconds"],
           "properties": {
-            "cpus": {"type": "integer", "minimum": 1, "maximum": 4},
-            "memory_mib": {"type": "integer", "minimum": 512, "maximum": 8192},
-            "pids": {"type": "integer", "minimum": 16, "maximum": 256},
-            "shm_mib": {"type": "integer", "minimum": 64, "maximum": 1024},
-            "rootfs_target_mib": {"type": "integer", "minimum": 512, "maximum": 16384},
-            "workspace_target_mib": {"type": "integer", "minimum": 512, "maximum": 65536},
-            "cache_target_mib": {"type": "integer", "minimum": 512, "maximum": 32768},
-            "host_free_reserve_mib": {"type": "integer", "minimum": 8192},
-            "watchdog_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 10},
-            "maximum_output_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
-            "maximum_stream_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
-            "stream_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+            "cpus": {"type": "integer", "minimum": 1, "maximum": 4}, "memory_mib": {"type": "integer", "minimum": 512, "maximum": 8192},
+            "pids": {"type": "integer", "minimum": 16, "maximum": 256}, "shm_mib": {"type": "integer", "minimum": 64, "maximum": 1024},
+            "rootfs_target_mib": {"type": "integer", "minimum": 512, "maximum": 16384}, "workspace_target_mib": {"type": "integer", "minimum": 512, "maximum": 65536},
+            "cache_target_mib": {"type": "integer", "minimum": 512, "maximum": 32768}, "host_free_reserve_mib": {"type": "integer", "minimum": 8192},
+            "watchdog_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 10}, "maximum_output_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+            "maximum_stream_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576}, "stream_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
           }
         }
       }
     }
   },
-  "$defs": {
-    "credentialNames": {
-      "type": "array", "maxItems": 16, "uniqueItems": true,
-      "items": {"type": "string", "pattern": "^(?!VOICE_AGENT_)[A-Z_][A-Z0-9_]{0,63}$"}
+  "allOf": [{
+    "if": {"properties": {"agent_environment": {"properties": {"enabled": {"const": true}}}}},
+    "then": {
+      "properties": {
+        "agent": {"properties": {"enabled": {"const": true}}},
+        "agent_environment": {"properties": {
+          "docker": {"properties": {"endpoint": {"type": "string"}}},
+          "identity": {"properties": {
+            "installation_id": {"type": "string"}, "registry_path": {"type": "string"}, "rootfs_storage_path": {"type": "string"},
+            "workspace_path": {"type": "string"}, "cache_path": {"type": "string"}
+          }}
+        }}
+      }
     }
+  }],
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).*(?<!/)$"},
+    "nullableAbsolutePath": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/absolutePath"}]},
+    "credentialNames": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^(?!VOICE_AGENT_)[A-Z_][A-Z0-9_]{0,63}$"}}
   }
 }

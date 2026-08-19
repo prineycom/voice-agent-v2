@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://voice-agent-v2.local/contracts/legacy-adoption.v1.schema.json",
   "type": "object", "additionalProperties": false,
-  "required": ["schema", "id", "phase", "prior_running", "prior_healthy", "legacy_candidate", "candidate", "config_source_sha256", "config_canonical_sha256", "receipts", "failure_code", "started_at", "updated_at"],
+  "required": ["schema", "id", "phase", "prior_running", "prior_healthy", "legacy_candidate", "candidate", "config_source_sha256", "config_canonical_sha256", "agent_environment", "receipts", "failure_code", "started_at", "updated_at"],
   "properties": {
     "schema": {"const": "voice-agent.legacy-adoption.v1"},
     "id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
@@ -13,12 +13,13 @@
     "candidate": {"type": "string"},
     "config_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "config_canonical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "agent_environment": {"type": "object", "additionalProperties": false, "required": ["before", "after"], "properties": {"before": {"oneOf": [{"type": "object"}, {"type": "null"}]}, "after": {"oneOf": [{"type": "object"}, {"type": "null"}]}}},
     "receipts": {
       "type": "object", "additionalProperties": false,
-      "required": ["prior_imported", "selected_imported", "config_committed", "docker_recorded", "candidate_staged", "user_service_prepared", "legacy_stopped", "candidate_activated", "candidate_started", "candidate_ready", "prior_restored", "legacy_retired", "terminal"],
+      "required": ["prior_imported", "selected_imported", "config_committed", "docker_recorded", "environment_before", "environment_after", "candidate_staged", "user_service_prepared", "legacy_stopped", "candidate_activated", "candidate_started", "candidate_ready", "prior_restored", "legacy_retired", "terminal"],
       "properties": {
         "prior_imported": {"type": "boolean"}, "selected_imported": {"type": "boolean"}, "config_committed": {"type": "boolean"},
-        "docker_recorded": {"type": "boolean"}, "candidate_staged": {"type": "boolean"}, "user_service_prepared": {"type": "boolean"},
+        "docker_recorded": {"type": "boolean"}, "environment_before": {"type": "boolean"}, "environment_after": {"type": "boolean"}, "candidate_staged": {"type": "boolean"}, "user_service_prepared": {"type": "boolean"},
         "legacy_stopped": {"type": "boolean"}, "candidate_activated": {"type": "boolean"}, "candidate_started": {"type": "boolean"},
         "candidate_ready": {"type": "boolean"}, "prior_restored": {"type": "boolean"}, "legacy_retired": {"type": "boolean"}, "terminal": {"type": "boolean"}
       }

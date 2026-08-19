@@ -6,11 +6,12 @@ module.exports = function createAdopter(core, installer, updater) {
   const os = require('node:os');
   const path = require('node:path');
   const { spawnSync } = require('node:child_process');
+  const agentEnvironment = require('./agent-environment.cjs')(core);
 
   const SERVICE_NAME = 'voice-agent-v2.service';
   const ADOPTION_SCHEMA = 'voice-agent.legacy-adoption.v1';
   const PHASES = new Set(['discovered', 'prepared', 'legacy_stopped', 'candidate_started', 'candidate_ready', 'committed', 'failed_safe', 'failed_needs_repair']);
-  const RECEIPTS = ['prior_imported', 'selected_imported', 'config_committed', 'docker_recorded', 'candidate_staged', 'user_service_prepared', 'legacy_stopped', 'candidate_activated', 'candidate_started', 'candidate_ready', 'prior_restored', 'legacy_retired', 'terminal'];
+  const RECEIPTS = ['prior_imported', 'selected_imported', 'config_committed', 'docker_recorded', 'environment_before', 'environment_after', 'candidate_staged', 'user_service_prepared', 'legacy_stopped', 'candidate_activated', 'candidate_started', 'candidate_ready', 'prior_restored', 'legacy_retired', 'terminal'];
 
   function error(code, message) { throw new core.LauncherError(code, message); }
   function digest(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
@@ -30,7 +31,7 @@ module.exports = function createAdopter(core, installer, updater) {
   }
 
   function validateJournal(document) {
-    const keys = ['candidate', 'config_canonical_sha256', 'config_source_sha256', 'failure_code', 'id', 'legacy_candidate', 'phase', 'prior_healthy', 'prior_running', 'receipts', 'schema', 'started_at', 'updated_at'];
+    const keys = ['agent_environment', 'candidate', 'config_canonical_sha256', 'config_source_sha256', 'failure_code', 'id', 'legacy_candidate', 'phase', 'prior_healthy', 'prior_running', 'receipts', 'schema', 'started_at', 'updated_at'];
     if (!document || typeof document !== 'object' || Array.isArray(document) || Object.keys(document).sort().join('\0') !== keys.sort().join('\0')
         || document.schema !== ADOPTION_SCHEMA || !/^[0-9a-f]{32}$/.test(document.id) || !PHASES.has(document.phase)
         || !/^legacy-[0-9a-f]{24}$/.test(document.prior_running) || document.prior_healthy !== document.prior_running
@@ -39,6 +40,9 @@ module.exports = function createAdopter(core, installer, updater) {
         || (document.failure_code !== null && !/^[a-z0-9_]{1,64}$/.test(document.failure_code))
         || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.started_at)
         || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.updated_at)) error('legacy_adoption_journal_invalid', 'the legacy adoption journal is invalid');
+    if (!document.agent_environment || Object.keys(document.agent_environment).sort().join('\0') !== ['after', 'before'].sort().join('\0')
+        || (document.agent_environment.before !== null && typeof document.agent_environment.before !== 'object')
+        || (document.agent_environment.after !== null && typeof document.agent_environment.after !== 'object')) error('legacy_adoption_journal_invalid', 'AgentEnvironment custody receipt is invalid');
     if (!document.receipts || Object.keys(document.receipts).sort().join('\0') !== [...RECEIPTS].sort().join('\0')
         || RECEIPTS.some((name) => typeof document.receipts[name] !== 'boolean')) error('legacy_adoption_journal_invalid', 'a legacy adoption receipt is invalid');
     return document;
@@ -80,8 +84,12 @@ module.exports = function createAdopter(core, installer, updater) {
           || selected.document.configuration_fingerprint !== running.document.configuration_fingerprint) {
         error('legacy_config_identity_mismatch', 'selected and running legacy configuration custody differs');
       }
-      const docker = core.dockerEvidence(observed, uid);
-      if (docker.state === 'invalid') error('legacy_docker_endpoint_invalid', 'a rootful, foreign, ambient, or unverifiable Docker endpoint was refused');
+      let docker;
+      if (!observed.docker) docker = { state: 'unavailable', record: agentEnvironment.endpointRecord(uid) };
+      else {
+        try { docker = { state: 'available', record: agentEnvironment.endpointRecord(uid, { ...observed.docker, service_endpoint: agentEnvironment.endpointFor(uid) }) }; }
+        catch { error('legacy_docker_endpoint_invalid', 'a rootful, foreign, group-authorized, ambient, or unverifiable Docker endpoint was refused'); }
+      }
       return { selected, running, snapshot: observed, docker, legacyRoot };
     });
   }
@@ -165,7 +173,7 @@ module.exports = function createAdopter(core, installer, updater) {
     core.noSymlinkComponents(sourcePath);
     const source = core.readOwnedRegular(sourcePath, layout.identity.uid, [0o600], 4 * 1024 * 1024);
     if (digest(source) !== journal.config_source_sha256) error('legacy_config_cas_mismatch', 'legacy private configuration changed during adoption');
-    const endpoint = evidence.docker.state === 'available' ? `unix:///run/user/${layout.identity.uid}/docker.sock` : '';
+    const endpoint = evidence.docker.state === 'available' ? agentEnvironment.endpointFor(layout.identity.uid) : '';
     const canonical = canonicalServiceEnv(source, endpoint);
     if (digest(canonical) !== journal.config_canonical_sha256) error('legacy_config_cas_mismatch', 'canonical private configuration plan changed');
     const snapshot = path.join(layout.migrations, journal.id);
@@ -186,16 +194,19 @@ module.exports = function createAdopter(core, installer, updater) {
       if (!current.equals(canonical)) error('canonical_config_conflict', 'an unexpected canonical private configuration was preserved');
     } else installer.atomicWrite(target, canonical, 0o600, layout.identity.uid);
     const config = path.join(layout.config, 'config.yaml');
+    const expectedConfig = Buffer.from(installer.renderAgentConfig(layout, journal.id, endpoint || null, false));
     if (exists(config)) {
-      if (!core.readOwnedRegular(config, layout.identity.uid, [0o600], 4 * 1024 * 1024).equals(Buffer.from(installer.AGENT_CONFIG))) error('canonical_config_conflict', 'an unexpected canonical v2 configuration was preserved');
-    } else installer.atomicWrite(config, Buffer.from(installer.AGENT_CONFIG), 0o600, layout.identity.uid);
+      if (!core.readOwnedRegular(config, layout.identity.uid, [0o600], 4 * 1024 * 1024).equals(expectedConfig)) error('canonical_config_conflict', 'an unexpected canonical v2 configuration was preserved');
+    } else installer.atomicWrite(config, expectedConfig, 0o600, layout.identity.uid);
   }
 
-  function recordDocker(layout, evidence) {
-    const endpoint = evidence.docker.state === 'available' ? `unix:///run/user/${layout.identity.uid}/docker.sock` : null;
-    installer.writeJson(path.join(layout.private, 'docker-endpoint.json'), {
-      schema: 'voice-agent.docker-endpoint.v1', endpoint, kind: endpoint ? 'rootless' : 'unavailable', ownership_verified: Boolean(endpoint),
-    }, layout.identity.uid);
+  function recordDocker(layout, evidence, dependencies) {
+    installer.writeJson(path.join(layout.private, 'docker-endpoint.json'), evidence.docker.record, layout.identity.uid);
+    agentEnvironment.writePreservation(layout, {
+      schema: agentEnvironment.PRESERVATION_SCHEMA, state: 'disabled', action: 'configure_agent', identity_digest: null,
+      container_id_prefix: null, runtime_state: null, endpoint_identity: evidence.docker.record.socket_identity || null,
+      reason_code: 'not_configured', checked_at: timestamp(dependencies.clock),
+    }, installer.writeJson);
   }
 
   function selectRelease(channel) {
@@ -286,7 +297,10 @@ module.exports = function createAdopter(core, installer, updater) {
       await dependencies.legacy.restore({ serviceName: SERVICE_NAME, release_id: evidence.running.release_id, unit_sha256: digest(core.readOwnedRegular(evidence.serviceUnitPath, evidence.serviceUnitOwner, null, 256 * 1024)) });
       fault(dependencies, 'action', 'prior_restored');
       await provePrior(layout, evidence, dependencies);
-      next = writeJournal(layout, next, 'failed_safe', dependencies, { receipts: { prior_restored: true, terminal: true } });
+      const after = await agentEnvironment.capture(layout, dependencies, { phase: 'adoption_rollback' });
+      if (next.agent_environment.before) agentEnvironment.assertPreserved(next.agent_environment.before, after);
+      agentEnvironment.writePreservation(layout, after, installer.writeJson);
+      next = writeJournal(layout, next, 'failed_safe', dependencies, { agent_environment: { ...next.agent_environment, after }, receipts: { environment_after: true, prior_restored: true, terminal: true } });
       error('update_failed_safe', `legacy adoption candidate failed (${code}); the exact prior system service was restored and proved ready`);
     } catch (reason) {
       if (reason instanceof core.LauncherError && reason.code === 'update_failed_safe') throw reason;
@@ -317,12 +331,15 @@ module.exports = function createAdopter(core, installer, updater) {
         const running = core.validateLegacyRelease(path.join(legacyRoot, 'releases', runningLegacyId), legacyRoot, layout.identity.uid);
         const selected = core.validateLegacyRelease(path.join(legacyRoot, 'releases', selectedLegacyId), legacyRoot, layout.identity.uid);
         const snapshot = await dependencies.legacyProbe.inspectLegacy({ serviceName: SERVICE_NAME, uid: layout.identity.uid });
-        let docker = core.dockerEvidence(snapshot, layout.identity.uid);
+        let docker;
         const dockerRecord = path.join(layout.private, 'docker-endpoint.json');
-        if (docker.state === 'unavailable' && exists(dockerRecord)) {
-          const recorded = JSON.parse(core.readOwnedRegular(dockerRecord, layout.identity.uid, [0o600], 256 * 1024).toString('utf8'));
-          if (recorded.schema === 'voice-agent.docker-endpoint.v1' && recorded.endpoint === `unix:///run/user/${layout.identity.uid}/docker.sock`
-              && recorded.kind === 'rootless' && recorded.ownership_verified === true) docker = { state: 'available', endpoint_kind: 'rootless', ownership_verified: true };
+        if (exists(dockerRecord)) {
+          const recorded = agentEnvironment.validateEndpointRecord(JSON.parse(core.readOwnedRegular(dockerRecord, layout.identity.uid, [0o600], 256 * 1024).toString('utf8')), layout.identity.uid);
+          docker = { state: recorded.endpoint ? 'available' : 'unavailable', record: recorded };
+        } else if (!snapshot.docker) docker = { state: 'unavailable', record: agentEnvironment.endpointRecord(layout.identity.uid) };
+        else {
+          try { docker = { state: 'available', record: agentEnvironment.endpointRecord(layout.identity.uid, { ...snapshot.docker, service_endpoint: agentEnvironment.endpointFor(layout.identity.uid) }) }; }
+          catch { error('legacy_docker_endpoint_invalid', 'a rootful, foreign, group-authorized, ambient, or unverifiable Docker endpoint was refused'); }
         }
         evidence = { running, selected, snapshot, docker, legacyRoot };
       } else {
@@ -335,7 +352,7 @@ module.exports = function createAdopter(core, installer, updater) {
       let acquired = null;
       if (!candidate) acquired = await acquireCandidate(dependencies, layout);
       const source = core.readOwnedRegular(evidence.running.document.configuration_path, layout.identity.uid, [0o600], 4 * 1024 * 1024);
-      const endpoint = evidence.docker.state === 'available' ? `unix:///run/user/${layout.identity.uid}/docker.sock` : '';
+      const endpoint = evidence.docker.state === 'available' ? agentEnvironment.endpointFor(layout.identity.uid) : '';
       const canonical = canonicalServiceEnv(source, endpoint);
 
       if (!journal) {
@@ -344,10 +361,11 @@ module.exports = function createAdopter(core, installer, updater) {
           schema: ADOPTION_SCHEMA, id: dependencies.randomBytes(16).toString('hex'), phase: 'discovered',
           prior_running: importedId(evidence.running.release_id), prior_healthy: importedId(evidence.running.release_id),
           legacy_candidate: importedId(evidence.selected.release_id), candidate: releaseId(acquired.release),
-          config_source_sha256: digest(source), config_canonical_sha256: digest(canonical), receipts: emptyReceipts(),
+          config_source_sha256: digest(source), config_canonical_sha256: digest(canonical), agent_environment: { before: null, after: null }, receipts: emptyReceipts(),
           failure_code: null, started_at: timestamp(dependencies.clock), updated_at: timestamp(dependencies.clock),
         };
         installer.writeJson(layout.adoptionJournal, journal, layout.identity.uid); fault(dependencies, 'write', 'discovered');
+        agentEnvironment.migrateLegacy(layout, journal.id, installer.writeJson);
       } else installer.installDirectories(layout);
 
       if (journal.phase === 'failed_needs_repair') {
@@ -361,7 +379,7 @@ module.exports = function createAdopter(core, installer, updater) {
       if (!journal.receipts.prior_imported) { importLegacyRelease(layout, evidence.running, 'ready', dependencies); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { prior_imported: true } }); }
       if (!journal.receipts.selected_imported) { importLegacyRelease(layout, evidence.selected, 'not_verified', dependencies); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { selected_imported: true } }); }
       if (!journal.receipts.config_committed) { preparePrivateConfig(layout, evidence, journal, dependencies); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { config_committed: true } }); }
-      if (!journal.receipts.docker_recorded) { recordDocker(layout, evidence); fault(dependencies, 'action', 'docker_recorded'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { docker_recorded: true } }); }
+      if (!journal.receipts.docker_recorded) { recordDocker(layout, evidence, dependencies); fault(dependencies, 'action', 'docker_recorded'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { docker_recorded: true } }); }
       if (!candidate) { candidate = await stageCandidate(layout, acquired, dependencies); fault(dependencies, 'action', 'candidate_staged'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { candidate_staged: true } }); }
       if (!journal.receipts.user_service_prepared) {
         const unitBytes = installer.renderUnit(layout, candidate.root);
@@ -377,6 +395,11 @@ module.exports = function createAdopter(core, installer, updater) {
         journal = writeJournal(layout, journal, 'prepared', dependencies, { receipts: { user_service_prepared: true } });
       }
       if (!exists(layout.rollback)) atomicPointer(layout, layout.rollback, journal.prior_healthy, journal.id);
+      if (!journal.receipts.environment_before) {
+        const before = await agentEnvironment.capture(layout, dependencies, { phase: 'adoption_before' });
+        agentEnvironment.writePreservation(layout, before, installer.writeJson);
+        journal = writeJournal(layout, journal, journal.phase, dependencies, { agent_environment: { before, after: null }, receipts: { environment_before: true } });
+      }
 
       if (!journal.receipts.legacy_stopped) {
         let priorReady = false;
@@ -399,6 +422,12 @@ module.exports = function createAdopter(core, installer, updater) {
       if (!journal.receipts.candidate_ready) {
         if (!await candidateReady(layout, candidate, dependencies, true)) return rollback(layout, journal, evidence, dependencies, 'candidate_not_ready');
         fault(dependencies, 'action', 'candidate_ready'); journal = writeJournal(layout, journal, 'candidate_ready', dependencies, { receipts: { candidate_ready: true } });
+      }
+      if (!journal.receipts.environment_after) {
+        const after = await agentEnvironment.capture(layout, dependencies, { phase: 'adoption_after' });
+        agentEnvironment.assertPreserved(journal.agent_environment.before, after);
+        agentEnvironment.writePreservation(layout, after, installer.writeJson);
+        journal = writeJournal(layout, journal, journal.phase, dependencies, { agent_environment: { ...journal.agent_environment, after }, receipts: { environment_after: true } });
       }
       markCandidateReady(layout, candidate, dependencies);
       installer.writeJson(layout.installRecord, {

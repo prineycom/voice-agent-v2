@@ -129,13 +129,17 @@ function harness(options = {}) {
     },
     acquireArtifact: async () => ({ artifactBytes: sourceArtifact.artifactBytes, manifestBytes: sourceArtifact.manifestBytes, archiveEntries: sourceArtifact.archiveEntries, readEntry: sourceArtifact.readEntry }),
   };
+  let environmentCapture = 0;
   const dependencies = {
     identity, clock, source, service, randomBytes: (length) => Buffer.alloc(length, 0x6b), output: { info: (line) => lines.push(line) },
     host: { inspectBase: async () => ({ kernel: 'linux', kernel_release: 'fixture', architecture: 'x86_64', systemd: true, user: { uid: UID, name: identity.username, home: identity.home }, nvidia: { available: true, gpu_name: 'RTX 4070', runtime_compatible: true, driver_version: '610.57.04', vram_bytes: 12 * 1024 ** 3, devices: ['gpu', 'control', 'uvm'] } }), inspectCompatibility: async ({ requirements }) => ({ free_bytes: seeding ? 20 * 1024 ** 3 : (options.freeBytes ?? 20 * 1024 ** 3), assets: { ...requirements, model_available: true, runtime_available: true, runtime_compatible: true } }) },
     lock: options.lock, fault: null,
   };
+  if (options.environmentStatuses) dependencies.agentEnvironment = {
+    capture: async () => options.environmentStatuses[seeding ? 0 : Math.min(environmentCapture++, options.environmentStatuses.length - 1)],
+  };
   const layout = installer.layoutFor(identity, true);
-  async function seed() { sourceArtifact = initial; seeding = true; await installer.installVoiceAgent({ testMode: true, dependencies }); seeding = false; sourceArtifact = candidate; calls.length = 0; lines.length = 0; }
+  async function seed() { sourceArtifact = initial; seeding = true; await installer.installVoiceAgent({ testMode: true, dependencies }); seeding = false; environmentCapture = 0; sourceArtifact = candidate; calls.length = 0; lines.length = 0; }
   async function update(extra = {}) { return updater.updateVoiceAgent({ testMode: true, dependencies, ...extra }); }
   function cleanup(context) { context.after(() => { function writable(file) { if (!exists(file)) return; const meta = fs.lstatSync(file); if (meta.isSymbolicLink()) return; if (meta.isDirectory()) { fs.chmodSync(file, 0o700); for (const name of fs.readdirSync(file)) writable(path.join(file, name)); } else fs.chmodSync(file, 0o600); } writable(parent); fs.rmSync(parent, { recursive: true, force: true }); }); }
   return { parent, identity, initial, candidate, dependencies, layout, calls, lines, seed, update, cleanup, setSource(value) { sourceArtifact = value; } };
@@ -186,12 +190,13 @@ test('safe ordered migration preserves explicit values; destructive/product-choi
 });
 
 test('all durable phase/action interruption points converge on retry to candidate or proved prior without duplicate blind start', async (context) => {
-  const survey = harness(); survey.cleanup(context); await survey.seed();
+  const environment = { state: 'ready', action: 'none', identity_digest: 'f'.repeat(64), container_id_prefix: 'e'.repeat(12), runtime_state: 'running' };
+  const survey = harness({ environmentStatuses: [environment] }); survey.cleanup(context); await survey.seed();
   const events = [];
   survey.dependencies.fault = { afterDurablePhase: (name) => events.push(`write:${name}`), afterAction: (name) => events.push(`action:${name}`) };
   await survey.update();
   for (const event of [...new Set(events)]) {
-    const value = harness(); value.cleanup(context); await value.seed();
+    const value = harness({ environmentStatuses: [environment] }); value.cleanup(context); await value.seed();
     let fired = false;
     value.dependencies.fault = {
       afterDurablePhase(name) { if (!fired && event === `write:${name}`) { fired = true; throw new launcher.LauncherError('update_interrupted', 'power loss'); } },
@@ -235,6 +240,35 @@ test('concurrent updater, channel rollback/expiry, disk shortage, prior identity
 
   const mismatch = harness({ candidateMismatch: true }); mismatch.cleanup(context); await mismatch.seed();
   await code('update_failed_safe', () => mismatch.update()); assert.match(fs.readlinkSync(mismatch.layout.current), /1\.0\.0-/);
+});
+
+test('exact AgentEnvironment identity survives candidate success/failure rollback and replacement is detected without container lifecycle calls', async (context) => {
+  const exact = { state: 'ready', action: 'none', identity_digest: 'a'.repeat(64), container_id_prefix: '1'.repeat(12), runtime_state: 'running' };
+  const success = harness({ environmentStatuses: [exact] }); success.cleanup(context); await success.seed();
+  assert.equal((await success.update()).state, 'updated_healthy');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(success.layout.agent, 'private', 'preservation.json'))).identity_digest, exact.identity_digest);
+  assert.equal(success.calls.some((item) => /container|docker|stop-agent|start-agent/.test(item)), false);
+
+  const failure = harness({ candidateFailure: true, environmentStatuses: [exact] }); failure.cleanup(context); await failure.seed();
+  await code('update_failed_safe', () => failure.update());
+  assert.equal(JSON.parse(fs.readFileSync(path.join(failure.layout.agent, 'private', 'preservation.json'))).identity_digest, exact.identity_digest);
+
+  const replacement = { ...exact, identity_digest: 'b'.repeat(64), container_id_prefix: '2'.repeat(12) };
+  const changed = harness({ environmentStatuses: [exact, replacement] }); changed.cleanup(context); await changed.seed();
+  await code('update_failed_needs_repair', () => changed.update());
+  assert.equal(JSON.parse(fs.readFileSync(changed.layout.updateJournal)).failure_code, 'agent_environment_identity_mismatch');
+});
+
+test('stopped/unhealthy/missing and stale-spec capability states never fail ordinary update when identity is stable', async (context) => {
+  for (const state of [
+    { state: 'degraded_identity_mismatch', action: 'restore_exact_environment', identity_digest: null, reason_code: 'container_missing' },
+    { state: 'degraded_identity_mismatch', action: 'restore_exact_environment', identity_digest: 'c'.repeat(64), runtime_state: 'stopped' },
+    { state: 'degraded_identity_mismatch', action: 'restore_exact_environment', identity_digest: 'd'.repeat(64), runtime_state: 'unhealthy' },
+    { state: 'stale_spec', action: 'maintenance_rebuild_required', identity_digest: 'e'.repeat(64), runtime_state: 'running' },
+  ]) {
+    const value = harness({ environmentStatuses: [state] }); value.cleanup(context); await value.seed();
+    assert.equal((await value.update()).state, 'updated_healthy', state.reason_code || state.state);
+  }
 });
 
 test('reachability GC admits 0/1/2/3/100 release inventories and removes only exact unreachable owned releases', async (context) => {

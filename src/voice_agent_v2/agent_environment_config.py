@@ -65,10 +65,50 @@ class AgentSettingsV2(BaseModel):
         return TOOL_IDS
 
 
+AGENT_SPEC_DIGEST = "sha256:0bce866d8050e9c204131cd68441b766ed4ac19150620ec5fbdb3c60ccaaabc9"
+
+
+class DockerAuthorityV2(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    endpoint: str | None = None
+    authority: Literal["explicit_verified_rootless"] = "explicit_verified_rootless"
+
+    @field_validator("endpoint")
+    @classmethod
+    def explicit_rootless_endpoint(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"unix:///run/user/[1-9][0-9]*/docker\.sock", value) is None:
+            raise ValueError("only an explicit rootless Docker endpoint is accepted")
+        return value
+
+
 class ImageV2(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     reference: Literal[PINNED_IMAGE]
+    spec_digest: Literal[AGENT_SPEC_DIGEST] = AGENT_SPEC_DIGEST
     pull_at_runtime: Literal[False]
+
+
+class EnvironmentIdentityV2(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    installation_id: str | None = None
+    registry_path: str | None = None
+    rootfs_storage_path: str | None = None
+    workspace_path: str | None = None
+    cache_path: str | None = None
+
+    @field_validator("installation_id")
+    @classmethod
+    def installation_identity(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[a-f0-9]{32}", value) is None:
+            raise ValueError("installation identity is invalid")
+        return value
+
+    @field_validator("registry_path", "rootfs_storage_path", "workspace_path", "cache_path")
+    @classmethod
+    def canonical_path(cls, value: str | None) -> str | None:
+        if value is not None and (not value.startswith("/") or Path(value).as_posix() != value or "//" in value):
+            raise ValueError("installation-owned path is invalid")
+        return value
 
 
 class LifecycleV2(BaseModel):
@@ -100,6 +140,7 @@ class ResourceV2(BaseModel):
 class NetworkV2(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     enabled: bool
+    mode: Literal["rootless_private"] = "rootless_private"
     publish_ports: tuple[()]
 
     @field_validator("publish_ports", mode="before")
@@ -134,6 +175,7 @@ class CredentialsV2(BaseModel):
     """One declaration with fixed exposed names; private state owns all bytes."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    store_reference: Literal["private/credentials.json"] = "private/credentials.json"
     creation_environment_names: tuple[str, ...] = Field(max_length=16)
     creation_file_names: tuple[str, ...] = Field(max_length=16)
     exec_environment_names: tuple[str, ...] = Field(max_length=16)
@@ -171,7 +213,10 @@ class CredentialsV2(BaseModel):
 
 class AgentEnvironmentV2(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    enabled: bool = True
+    docker: DockerAuthorityV2 = DockerAuthorityV2()
     image: ImageV2
+    identity: EnvironmentIdentityV2 = EnvironmentIdentityV2()
     lifecycle: LifecycleV2
     additional_mounts: tuple[AdditionalMountV2, ...] = Field(max_length=16)
     network: NetworkV2
@@ -210,7 +255,10 @@ DEFAULT_DOCUMENT: dict[str, object] = {
         "tools": list(TOOL_IDS),
     },
     "agent_environment": {
-        "image": {"reference": PINNED_IMAGE, "pull_at_runtime": False},
+        "enabled": True,
+        "docker": {"endpoint": None, "authority": "explicit_verified_rootless"},
+        "image": {"reference": PINNED_IMAGE, "spec_digest": AGENT_SPEC_DIGEST, "pull_at_runtime": False},
+        "identity": {"installation_id": None, "registry_path": None, "rootfs_storage_path": None, "workspace_path": None, "cache_path": None},
         "lifecycle": {
             "lazy_create": True,
             "persistent": True,
@@ -220,8 +268,9 @@ DEFAULT_DOCUMENT: dict[str, object] = {
             "command_timeout_grace_seconds": 5,
         },
         "additional_mounts": [],
-        "network": {"enabled": True, "publish_ports": []},
+        "network": {"enabled": True, "mode": "rootless_private", "publish_ports": []},
         "credentials": {
+            "store_reference": "private/credentials.json",
             "creation_environment_names": [],
             "creation_file_names": [],
             "exec_environment_names": [],

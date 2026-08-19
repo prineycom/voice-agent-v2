@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-environment-preservation.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "state", "action", "identity_digest", "container_id_prefix", "runtime_state", "endpoint_identity", "reason_code", "checked_at"],
+  "properties": {
+    "schema": {"const": "voice-agent.agent-environment-preservation.v1"},
+    "state": {"enum": ["disabled", "ready", "degraded_endpoint_unavailable", "degraded_identity_mismatch", "stale_spec"]},
+    "action": {"enum": ["none", "configure_agent", "restore_rootless_endpoint", "restore_exact_environment", "maintenance_rebuild_required"]},
+    "identity_digest": {"oneOf": [{"type": "string", "pattern": "^[a-f0-9]{64}$"}, {"type": "null"}]},
+    "container_id_prefix": {"oneOf": [{"type": "string", "pattern": "^[a-f0-9]{12}$"}, {"type": "null"}]},
+    "runtime_state": {"oneOf": [{"enum": ["running", "stopped", "unhealthy"]}, {"type": "null"}]},
+    "endpoint_identity": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 128}, {"type": "null"}]},
+    "reason_code": {"oneOf": [{"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}, {"type": "null"}]},
+    "checked_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}
+  }
+}

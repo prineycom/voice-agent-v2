@@ -12,6 +12,7 @@ const LAUNCHER_VERSION = '0.4.0';
 const LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';
+function agentEnvironmentPreserver() { return require('./agent-environment.cjs')(module.exports); }
 const SHA256 = /^[0-9a-f]{64}$/;
 const BUILD_ID = /^[0-9a-f]{40}$/;
 const LEGACY_RELEASE_ID = /^[0-9a-f]{24}$/;
@@ -620,7 +621,7 @@ function readCanonicalReleaseById(root, releaseId, uid) {
 }
 
 function canonicalState(installRoot, uid) {
-  if (!lstatExists(installRoot)) return { state: 'absent', selected: null, rollback: null, transaction: { state: 'none', phase: null }, agent_environment: { state: 'unconfigured', reason_code: 'not_configured' } };
+  if (!lstatExists(installRoot)) return { state: 'absent', selected: null, rollback: null, transaction: { state: 'none', phase: null }, agent_environment: { state: 'disabled', action: 'configure_agent', reason_code: 'not_configured', identity_digest: null, container_id_prefix: null, runtime_state: null } };
   try {
     noSymlinkComponents(installRoot);
     ownedDirectory(installRoot, uid, 0o700);
@@ -636,18 +637,16 @@ function canonicalState(installRoot, uid) {
       }
       transaction = { state: 'present', phase: document.phase };
     }
-    let agent_environment = { state: 'unconfigured', reason_code: 'not_configured' };
-    const registry = path.join(installRoot, 'agent-environment', 'private', 'registry.json');
-    if (lstatExists(registry)) {
-      const document = JSON.parse(readOwnedRegular(registry, uid, [0o600], 256 * 1024).toString('utf8'));
-      const allowed = new Set(['absent', 'running', 'stopped', 'stale_spec', 'unhealthy', 'unavailable']);
-      agent_environment = allowed.has(document.state)
-        ? { state: document.state, reason_code: typeof document.reason_code === 'string' ? document.reason_code : null }
-        : { state: 'unknown', reason_code: 'registry_incompatible' };
-    }
+    let agent_environment = { state: 'disabled', action: 'configure_agent', reason_code: 'not_configured', identity_digest: null, container_id_prefix: null, runtime_state: null };
+    const preservation = agentEnvironmentPreserver().readPreservation(installRoot, uid);
+    if (preservation) agent_environment = {
+      state: preservation.state, action: preservation.action, reason_code: preservation.reason_code,
+      identity_digest: preservation.identity_digest, container_id_prefix: preservation.container_id_prefix,
+      runtime_state: preservation.runtime_state,
+    };
     return { state: selected ? 'canonical' : 'incomplete', selected, rollback, transaction, agent_environment };
   } catch (error) {
-    return { state: 'invalid', selected: null, rollback: null, transaction: { state: 'invalid', phase: null }, agent_environment: { state: 'unknown', reason_code: 'install_state_invalid' }, error_code: error instanceof LauncherError ? error.code : 'install_state_invalid' };
+    return { state: 'invalid', selected: null, rollback: null, transaction: { state: 'invalid', phase: null }, agent_environment: { state: 'degraded_identity_mismatch', action: 'restore_exact_environment', reason_code: 'install_state_invalid', identity_digest: null, container_id_prefix: null, runtime_state: null }, error_code: error instanceof LauncherError ? error.code : 'install_state_invalid' };
   }
 }
 
@@ -781,6 +780,7 @@ async function collectStatus(options = {}) {
   const home = options.home ?? os.homedir();
   const installRoot = options.installRoot ?? path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'voice-agent');
   const legacyRoot = options.legacyRoot ?? path.join(home, '.local', 'share', 'voice-agent-v2');
+  const configRoot = options.configRoot ?? path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'voice-agent');
   const serviceUnitPath = options.serviceUnitPath ?? path.join('/etc', 'systemd', 'system', SERVICE_NAME);
   const serviceProbe = options.serviceProbe ?? new SystemServiceProbe();
   const canonical = canonicalState(installRoot, uid);
@@ -815,6 +815,14 @@ async function collectStatus(options = {}) {
   } else if (running.release_id) alignment = 'running-only';
   else if (selected.release_id) alignment = 'selected-not-running';
   else alignment = 'not-installed';
+  let canonicalDocker = null;
+  try {
+    const filename = path.join(configRoot, 'private', 'docker-endpoint.json');
+    if (lstatExists(filename)) {
+      const record = agentEnvironmentPreserver().validateEndpointRecord(JSON.parse(readOwnedRegular(filename, uid, [0o600], 256 * 1024).toString('utf8')), uid);
+      canonicalDocker = { state: record.endpoint ? 'available' : 'unavailable', endpoint_kind: record.endpoint ? 'rootless' : 'none', ownership_verified: record.ownership_verified };
+    }
+  } catch { canonicalDocker = { state: 'invalid', endpoint_kind: 'none', ownership_verified: false }; }
   return {
     schema_version: 'voice-agent.launcher-status.v1',
     launcher: { version: LAUNCHER_VERSION, protocol: LAUNCHER_PROTOCOL },
@@ -831,7 +839,7 @@ async function collectStatus(options = {}) {
       custody: canonicalReady ? 'verified' : legacy.service_custody,
     },
     agent_environment: canonical.agent_environment,
-    docker: legacy.docker,
+    docker: canonicalDocker || legacy.docker,
     legacy: { state: legacy.state, adoption_eligible: legacy.adoption_eligible, runtime_custody: legacy.runtime_custody },
     read_only: true,
   };
@@ -864,7 +872,7 @@ function humanStatus(status) {
     `Alignment: ${status.alignment}`,
     `Rollback: ${status.rollback.release_id || 'none'} (${status.rollback.state})`,
     `Transaction: ${status.transaction.state}${status.transaction.phase ? `/${status.transaction.phase}` : ''}`,
-    `Agent tools: ${status.agent_environment.state}`,
+    `Agent tools: ${status.agent_environment.state} (action: ${status.agent_environment.action})`,
     `Docker: ${status.docker.state} (${status.docker.endpoint_kind})`,
     'Read only: yes',
   ].join('\n');

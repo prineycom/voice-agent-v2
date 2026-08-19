@@ -3,7 +3,7 @@
   "$id": "https://voice-agent-v2.local/contracts/update-transaction.v1.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "id", "requested_channel", "phase", "prior_selected", "prior_running", "prior_healthy", "candidate", "config_snapshot", "service", "receipts", "failure_code", "started_at", "updated_at"],
+  "required": ["schema", "id", "requested_channel", "phase", "prior_selected", "prior_running", "prior_healthy", "candidate", "config_snapshot", "agent_environment", "service", "receipts", "failure_code", "started_at", "updated_at"],
   "properties": {
     "schema": {"const": "voice-agent.update-transaction.v1"},
     "id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
@@ -14,6 +14,10 @@
     "prior_healthy": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},
     "candidate": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},
     "config_snapshot": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "agent_environment": {
+      "type": "object", "additionalProperties": false, "required": ["before", "after"],
+      "properties": {"before": {"oneOf": [{"type": "object"}, {"type": "null"}]}, "after": {"oneOf": [{"type": "object"}, {"type": "null"}]}}
+    },
     "service": {
       "type": "object", "additionalProperties": false,
       "required": ["was_active", "was_enabled", "unit_sha256"],
@@ -25,9 +29,10 @@
     },
     "receipts": {
       "type": "object", "additionalProperties": false,
-      "required": ["artifact_verified", "candidate_ready", "channel_checked", "migration_prepared", "pointer_activated", "pre_gc_complete", "prior_custody", "prior_ready", "prior_restored", "release_staged", "service_started", "service_stopped", "terminal", "unit_reloaded"],
+      "required": ["artifact_verified", "candidate_ready", "channel_checked", "environment_after", "environment_before", "migration_prepared", "pointer_activated", "pre_gc_complete", "prior_custody", "prior_ready", "prior_restored", "release_staged", "service_started", "service_stopped", "terminal", "unit_reloaded"],
       "properties": {
         "artifact_verified": {"type": "boolean"}, "candidate_ready": {"type": "boolean"}, "channel_checked": {"type": "boolean"},
+        "environment_after": {"type": "boolean"}, "environment_before": {"type": "boolean"},
         "migration_prepared": {"type": "boolean"}, "pointer_activated": {"type": "boolean"}, "pre_gc_complete": {"type": "boolean"},
         "prior_custody": {"type": "boolean"}, "prior_ready": {"type": "boolean"}, "prior_restored": {"type": "boolean"},
         "release_staged": {"type": "boolean"}, "service_started": {"type": "boolean"}, "service_stopped": {"type": "boolean"},

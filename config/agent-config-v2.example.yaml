@@ -1,6 +1,7 @@
 schema_version: voice-agent.config.v2
 agent:
-  enabled: true
+  # First install and legacy adoption keep this optional capability disabled.
+  enabled: false
   max_decisions: 24
   active_deadline_seconds: 600
   tools:
@@ -19,9 +20,24 @@ agent:
     - report.artifact
     - report.deliver
 agent_environment:
+  enabled: false
+  docker:
+    # Set only after the launcher verifies the exact owner-only rootless socket,
+    # daemon/user namespace/cgroup identity, and generated-service endpoint.
+    endpoint: null
+    authority: explicit_verified_rootless
   image:
     reference: ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421
+    spec_digest: sha256:0bce866d8050e9c204131cd68441b766ed4ac19150620ec5fbdb3c60ccaaabc9
     pull_at_runtime: false
+  identity:
+    # The installer writes its stable ID and canonical XDG data paths here. It
+    # never guesses an environment/container, mount, credential, or recipient.
+    installation_id: null
+    registry_path: null
+    rootfs_storage_path: null
+    workspace_path: null
+    cache_path: null
   lifecycle:
     lazy_create: true
     persistent: true
@@ -29,17 +45,18 @@ agent_environment:
     idle_action: none
     command_timeout_seconds: 120
     command_timeout_grace_seconds: 5
-  # Each source must already exist, be user-owned and non-symlinked. Read-only
-  # data remains readable/exfiltratable; read-write data may be changed/deleted.
+  # Sources are explicit typed authority. RO is readable/exfiltratable; RW may
+  # be changed/deleted. No ambient home, Docker socket, or user mounts exist.
   additional_mounts: []
   network:
-    enabled: true
+    enabled: false
+    mode: rootless_private
     publish_ports: []
   credentials:
+    # Names only live here; values remain in the private referenced document.
+    store_reference: private/credentials.json
     creation_environment_names: []
     creation_file_names: []
-    # Add TELEGRAM_BOT_TOKEN here only when E4.2/E4.3 delivery is configured;
-    # its bytes remain solely in private/credentials.json.
     exec_environment_names: []
     exec_file_names: []
   resources:
