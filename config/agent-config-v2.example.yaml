@@ -16,6 +16,7 @@ agent:
     - web.search
     - web.fetch
     - web.extract
+    - report.deliver
 agent_environment:
   image:
     reference: ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421
@@ -36,6 +37,8 @@ agent_environment:
   credentials:
     creation_environment_names: []
     creation_file_names: []
+    # Add TELEGRAM_BOT_TOKEN here only when E4.2 delivery is configured;
+    # its bytes remain solely in private/credentials.json.
     exec_environment_names: []
     exec_file_names: []
   resources:

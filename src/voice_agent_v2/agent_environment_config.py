@@ -45,6 +45,7 @@ TOOL_IDS = (
     "web.search",
     "web.fetch",
     "web.extract",
+    "report.deliver",
 )
 
 

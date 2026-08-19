@@ -200,7 +200,7 @@ class ResearchSliceTests(unittest.TestCase):
             root = Path(__file__).resolve().parents[1]
             for citation in result.citations:
                 validate_schema(citation.document(), json.loads((root / "contracts/research-citation.v1.schema.json").read_text()))
-            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v2.schema.json").read_text()))
+            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v3.schema.json").read_text()))
         finally:
             fixture.close()
 
