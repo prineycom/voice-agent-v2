@@ -25,6 +25,7 @@ from .operations import (
     load_operations_manifest,
     validate_host,
     validate_release,
+    validate_release_for_rollback,
 )
 
 
@@ -247,6 +248,84 @@ def _start_service_with_recovery_allowance(action: str) -> None:
         raise ValueError("unsupported systemd activation action")
     _sudo("systemctl", "reset-failed", SERVICE_NAME)
     _sudo("systemctl", action, SERVICE_NAME)
+
+
+def _systemctl_main_pid() -> int:
+    try:
+        result = subprocess.run(
+            [
+                "systemctl", "show", SERVICE_NAME,
+                "--property=LoadState,ActiveState,MainPID",
+            ],
+            capture_output=True, text=True, timeout=10, check=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OperationalError(
+            "systemd_status_failed", "system service process identity could not be queried",
+        ) from error
+    values = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    try:
+        main_pid = int(values.get("MainPID", ""))
+    except ValueError as error:
+        raise OperationalError(
+            "systemd_status_failed", "system service process identity is invalid",
+        ) from error
+    if (
+        result.returncode != 0
+        or values.get("LoadState") != "loaded"
+        or values.get("ActiveState") != "active"
+        or main_pid <= 0
+    ):
+        raise OperationalError(
+            "systemd_status_failed", "system service process identity is unavailable",
+        )
+    return main_pid
+
+
+def _validate_running_release_process(
+    release: Path,
+    main_pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+    expected_python: Path | None = None,
+) -> None:
+    proc = proc_root / str(main_pid)
+    expected_python = expected_python or (
+        Path.home() / ".cache/voice-agent-v2/slice-6/runtime/venv/bin/python"
+    )
+    expected_script = release / "scripts/run_slice6.py"
+    try:
+        process_metadata = proc.stat()
+        release_metadata = release.stat()
+        cwd_metadata = (proc / "cwd").stat()
+        python_metadata = expected_python.stat()
+        executable_metadata = (proc / "exe").stat()
+        command_metadata = (proc / "cmdline").lstat()
+        command = (proc / "cmdline").read_bytes()
+    except OSError as error:
+        raise OperationalError(
+            "systemd_install_failed", "active service process identity is unavailable",
+        ) from error
+    expected_command = b"\0".join((
+        os.fsencode(expected_python), b"-B", os.fsencode(expected_script), b"",
+    ))
+    if not (
+        process_metadata.st_uid == os.geteuid()
+        and command_metadata.st_uid == os.geteuid()
+        and stat.S_ISREG(command_metadata.st_mode)
+        and release_metadata.st_uid == os.geteuid()
+        and (cwd_metadata.st_dev, cwd_metadata.st_ino)
+        == (release_metadata.st_dev, release_metadata.st_ino)
+        and (executable_metadata.st_dev, executable_metadata.st_ino)
+        == (python_metadata.st_dev, python_metadata.st_ino)
+        and command == expected_command
+    ):
+        raise OperationalError(
+            "systemd_install_failed", "active service process does not match its release",
+        )
 
 
 def _systemctl_show() -> dict[str, object]:
@@ -548,6 +627,61 @@ def command_install_service(arguments: argparse.Namespace) -> None:
         _install_service_locked(arguments, store)
 
 
+def _reconcile_running_rollback(
+    *, store: ReleaseStore, current: Path, running: dict[str, object],
+) -> str:
+    release_id = running.get("release_id")
+    build_id = running.get("build_id")
+    if not isinstance(release_id, str) or not isinstance(build_id, str):
+        raise OperationalError(
+            "systemd_install_failed", "active service release identity is incomplete",
+        )
+    previous = store.previous()
+    if previous is not None and previous.name != release_id:
+        raise OperationalError(
+            "systemd_install_failed", "a different prior release is already recorded",
+        )
+    candidate = store.release(release_id)
+    document = validate_release_for_rollback(
+        candidate, state_root=store.state_root, verify_host_state=True,
+    )
+    if document.get("build_id") != build_id:
+        raise OperationalError(
+            "systemd_install_failed", "active service build identity mismatches its release",
+        )
+    candidate_unit = candidate / "ops/systemd/voice-agent-v2.service"
+    _validate_systemd_unit(candidate_unit)
+    if _sudo(
+        "cmp", "-s", str(candidate_unit), str(SYSTEM_UNIT_PATH), allowed=(0, 1),
+    ).returncode != 0:
+        raise OperationalError(
+            "systemd_install_failed", "active service unit cannot be restored after activation failure",
+        )
+    main_pid = _systemctl_main_pid()
+    _validate_running_release_process(candidate, main_pid)
+    retained = store.retain_previous(
+        expected_current=current, release_id=release_id, build_id=build_id,
+    )
+    try:
+        confirmed = _runtime_status()
+        if not isinstance(confirmed, dict) or any((
+            confirmed.get("release_id") != release_id,
+            confirmed.get("build_id") != build_id,
+            _systemctl_main_pid() != main_pid,
+        )):
+            raise OperationalError(
+                "systemd_install_failed", "active service identity changed during rollback reconciliation",
+            )
+        _validate_running_release_process(candidate, main_pid)
+    except BaseException:
+        if retained:
+            store.remove_retained_previous(
+                expected_current=current, release_id=release_id,
+            )
+        raise
+    return release_id
+
+
 def _install_service_locked(
     arguments: argparse.Namespace, store: ReleaseStore,
 ) -> None:
@@ -584,6 +718,20 @@ def _install_service_locked(
     active_before = _sudo(
         "systemctl", "is-active", SERVICE_NAME, allowed=(0, 3, 4),
     ).returncode == 0
+    running = _runtime_status() if active_before else None
+    release_changed = running is None or running.get("release_id") != current.name
+    rollback_release = False
+    restore_release_id = current.name
+    if active_before and release_changed:
+        if not isinstance(running, dict):
+            raise OperationalError(
+                "systemd_install_failed",
+                "active service release cannot be restored after activation failure",
+            )
+        restore_release_id = _reconcile_running_rollback(
+            store=store, current=current, running=running,
+        )
+        rollback_release = True
     changed = unit_changed
     service_restarted = False
     with tempfile.TemporaryDirectory(prefix="voice-agent-unit-backup-") as temporary:
@@ -596,8 +744,6 @@ def _install_service_locked(
         unit_attempted = False
         enable_attempted = False
         activation_attempted = False
-        rollback_release = False
-        restore_release_id = current.name
         try:
             if unit_changed:
                 unit_attempted = True
@@ -607,38 +753,6 @@ def _install_service_locked(
                 )
             _sudo("systemctl", "daemon-reload")
             _validate_effective_systemd_service()
-            running = _runtime_status() if active_before else None
-            release_changed = running is None or running.get("release_id") != current.name
-            if active_before and release_changed:
-                running_release_id = (
-                    running.get("release_id") if isinstance(running, dict) else None
-                )
-                previous = store.previous()
-                if (
-                    not isinstance(running_release_id, str)
-                    or previous is None
-                    or previous.name != running_release_id
-                ):
-                    raise OperationalError(
-                        "systemd_install_failed",
-                        "active service release cannot be restored after activation failure",
-                    )
-                validate_release(
-                    previous, state_root=store.state_root, verify_host_state=True,
-                )
-                previous_unit = previous / "ops/systemd/voice-agent-v2.service"
-                _validate_systemd_unit(previous_unit)
-                installed_unit_before = backup if unit_changed else SYSTEM_UNIT_PATH
-                if not exists or _sudo(
-                    "cmp", "-s", str(previous_unit), str(installed_unit_before),
-                    allowed=(0, 1),
-                ).returncode != 0:
-                    raise OperationalError(
-                        "systemd_install_failed",
-                        "active service unit cannot be restored after activation failure",
-                    )
-                rollback_release = True
-                restore_release_id = running_release_id
             if not enabled_before:
                 enable_attempted = True
                 _sudo("systemctl", "enable", SERVICE_NAME)

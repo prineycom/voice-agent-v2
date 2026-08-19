@@ -29,6 +29,7 @@ from voice_agent_v2.operations import (
     evaluate_sustained_run,
     execute_release,
     load_operations_manifest,
+    load_rollback_operations_manifest,
     parse_server_configuration,
     release_tree_digest,
     sha256_file,
@@ -224,6 +225,36 @@ class OperationsManifestTests(unittest.TestCase):
                     with self.assertRaisesRegex(OperationalError, "contract changed"):
                         load_operations_manifest(path)
 
+    def test_rollback_transition_admits_only_the_exact_superseded_python_contract(self) -> None:
+        manifest = json.loads(
+            (ROOT / DEFAULT_MANIFEST_RELATIVE).read_text(encoding="utf-8")
+        )
+        slice6 = next(
+            runtime for runtime in manifest["python_runtimes"]
+            if runtime["name"] == "slice6"
+        )
+        del slice6["packages"]["pydantic"]
+        del slice6["packages"]["PyYAML"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "operations.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(OperationalError, "Python runtime contract"):
+                load_operations_manifest(path)
+            accepted = load_rollback_operations_manifest(path)
+            self.assertEqual(accepted["python_runtimes"], manifest["python_runtimes"])
+
+            changed = json.loads(json.dumps(manifest))
+            changed["python_runtimes"][0]["packages"]["numpy"] = "0.0.0"
+            path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(OperationalError, "Python runtime contract"):
+                load_rollback_operations_manifest(path)
+
+            changed = json.loads(json.dumps(manifest))
+            changed["disk"]["cleanup_policy"] = "delete-oldest"
+            path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(OperationalError, "policy changed"):
+                load_rollback_operations_manifest(path)
+
     def test_manifest_rejects_json_scalar_type_substitutions(self) -> None:
         manifest = json.loads(
             (ROOT / DEFAULT_MANIFEST_RELATIVE).read_text(encoding="utf-8")
@@ -410,6 +441,37 @@ class ServiceApplicationTests(unittest.TestCase):
         self.assertEqual(observed["timeout"], operations_cli.RUNTIME_STATUS_TIMEOUT_SECONDS)
         self.assertEqual(observed["host"], "127.0.0.1")
         self.assertTrue(observed["closed"])
+
+    def test_running_release_process_requires_exact_pid_cwd_executable_and_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "release"
+            script = release / "scripts/run_slice6.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fixture\n", encoding="utf-8")
+            proc = root / "proc" / "123"
+            proc.mkdir(parents=True)
+            (proc / "cwd").symlink_to(release, target_is_directory=True)
+            (proc / "exe").symlink_to(Path(sys.executable))
+            (proc / "cmdline").write_bytes(b"\0".join((
+                os.fsencode(sys.executable), b"-B", os.fsencode(script), b"",
+            )))
+
+            operations_cli._validate_running_release_process(
+                release,
+                123,
+                proc_root=root / "proc",
+                expected_python=Path(sys.executable),
+            )
+            (proc / "cwd").unlink()
+            (proc / "cwd").symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(OperationalError, "does not match"):
+                operations_cli._validate_running_release_process(
+                    release,
+                    123,
+                    proc_root=root / "proc",
+                    expected_python=Path(sys.executable),
+                )
 
     def test_systemd_start_and_restart_allow_the_full_bounded_job(self) -> None:
         calls: list[dict[str, object]] = []
@@ -600,7 +662,11 @@ class ServiceApplicationTests(unittest.TestCase):
             def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
                 calls.append(command)
                 return SimpleNamespace(
-                    returncode=1 if command[:2] == ("cmp", "-s") else 0,
+                    returncode=(
+                        3 if command[:2] == ("systemctl", "is-active")
+                        else 1 if command[:2] == ("cmp", "-s")
+                        else 0
+                    ),
                 )
 
             with (
@@ -740,12 +806,24 @@ class ServiceApplicationTests(unittest.TestCase):
                     operations_cli, "validate_release",
                     return_value={"build_id": "a" * 40},
                 ),
-                patch.object(operations, "validate_release", return_value={"build_id": "a" * 40}),
+                patch.object(
+                    operations_cli, "validate_release_for_rollback",
+                    return_value={"build_id": "b" * 40},
+                ),
+                patch.object(
+                    operations, "validate_release_for_rollback",
+                    return_value={"build_id": "b" * 40},
+                ),
+                patch.object(
+                    operations, "validate_release", return_value={"build_id": "a" * 40},
+                ),
                 patch.object(operations_cli, "_sudo", side_effect=sudo),
                 patch.object(operations_cli, "_validate_effective_systemd_service"),
+                patch.object(operations_cli, "_systemctl_main_pid", return_value=123),
+                patch.object(operations_cli, "_validate_running_release_process"),
                 patch.object(
                     operations_cli, "_runtime_status",
-                    return_value={"release_id": prior.name},
+                    return_value={"release_id": prior.name, "build_id": "b" * 40},
                 ),
                 patch.object(
                     operations_cli, "_wait_for_runtime_release",
@@ -760,6 +838,173 @@ class ServiceApplicationTests(unittest.TestCase):
             self.assertEqual(waited, [release.name, prior.name])
             self.assertEqual(
                 calls.count(("systemctl", "restart", operations_cli.SERVICE_NAME)), 2,
+            )
+
+    def test_divergent_running_release_is_reconciled_idempotently_and_new_release_becomes_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, selected, arguments = self._fixture(root)
+            running = state / "releases" / ("b" * 24)
+            unrelated = state / "releases" / ("c" * 24)
+            for release in (running, unrelated):
+                unit = release / "ops/systemd/voice-agent-v2.service"
+                unit.parent.mkdir(parents=True)
+                shutil.copy2(ROOT / "ops/systemd/voice-agent-v2.service", unit)
+            installed = root / "installed.service"
+            shutil.copy2(running / "ops/systemd/voice-agent-v2.service", installed)
+            calls: list[tuple[str, ...]] = []
+            running_build = "b" * 40
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(
+                    operations_cli, "validate_release", return_value={"build_id": "a" * 40},
+                ),
+                patch.object(
+                    operations_cli, "validate_release_for_rollback",
+                    return_value={"build_id": running_build},
+                ),
+                patch.object(
+                    operations, "validate_release_for_rollback",
+                    return_value={"build_id": running_build},
+                ),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
+                patch.object(operations_cli, "_systemctl_main_pid", return_value=123),
+                patch.object(operations_cli, "_validate_running_release_process"),
+                patch.object(operations_cli, "_runtime_status", side_effect=[
+                    {"release_id": running.name, "build_id": running_build},
+                    {"release_id": running.name, "build_id": running_build},
+                    {"release_id": selected.name, "build_id": "a" * 40},
+                ]),
+                patch.object(operations_cli, "_wait_for_runtime_release") as wait,
+                patch.object(operations_cli, "_print") as output,
+            ):
+                operations_cli.command_install_service(arguments)
+                operations_cli.command_install_service(arguments)
+
+            self.assertEqual((state / "current").resolve(), selected.resolve())
+            self.assertEqual((state / "previous").resolve(), running.resolve())
+            self.assertTrue(unrelated.is_dir())
+            self.assertEqual(
+                calls.count(("systemctl", "restart", operations_cli.SERVICE_NAME)), 1,
+            )
+            self.assertEqual(wait.call_count, 2)
+            self.assertEqual(output.call_count, 2)
+            self.assertTrue(output.call_args_list[0].args[0]["service_restarted"])
+            self.assertFalse(output.call_args_list[1].args[0]["service_restarted"])
+
+    def test_divergent_activation_failure_restores_the_exact_running_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, selected, arguments = self._fixture(root)
+            running = state / "releases" / ("b" * 24)
+            running_unit = running / "ops/systemd/voice-agent-v2.service"
+            running_unit.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "ops/systemd/voice-agent-v2.service", running_unit)
+            installed = root / "installed.service"
+            shutil.copy2(running_unit, installed)
+            running_build = "b" * 40
+            calls: list[tuple[str, ...]] = []
+            waited: list[str] = []
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(returncode=0)
+
+            def wait_for_release(release_id: str, *, timeout: float = 90.0) -> None:
+                del timeout
+                waited.append(release_id)
+                if release_id == selected.name:
+                    raise OperationalError("systemd_install_failed", "fixture activation failure")
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(
+                    operations_cli, "validate_release", return_value={"build_id": "a" * 40},
+                ),
+                patch.object(
+                    operations_cli, "validate_release_for_rollback",
+                    return_value={"build_id": running_build},
+                ),
+                patch.object(
+                    operations, "validate_release_for_rollback",
+                    return_value={"build_id": running_build},
+                ),
+                patch.object(
+                    operations, "validate_release", return_value={"build_id": "a" * 40},
+                ),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(operations_cli, "_validate_effective_systemd_service"),
+                patch.object(operations_cli, "_systemctl_main_pid", return_value=123),
+                patch.object(operations_cli, "_validate_running_release_process"),
+                patch.object(
+                    operations_cli, "_runtime_status",
+                    return_value={"release_id": running.name, "build_id": running_build},
+                ),
+                patch.object(
+                    operations_cli, "_wait_for_runtime_release", side_effect=wait_for_release,
+                ),
+                self.assertRaisesRegex(OperationalError, "fixture activation failure"),
+            ):
+                operations_cli.command_install_service(arguments)
+
+            self.assertEqual((state / "current").resolve(), running.resolve())
+            self.assertEqual((state / "previous").resolve(), selected.resolve())
+            self.assertEqual(waited, [selected.name, running.name])
+            self.assertEqual(
+                calls.count(("systemctl", "restart", operations_cli.SERVICE_NAME)), 2,
+            )
+
+    def test_divergent_reconciliation_rejects_mismatched_candidate_without_adoption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, selected, arguments = self._fixture(root)
+            candidate = state / "releases" / ("b" * 24)
+            unrelated = state / "releases" / ("c" * 24)
+            for release in (candidate, unrelated):
+                unit = release / "ops/systemd/voice-agent-v2.service"
+                unit.parent.mkdir(parents=True)
+                shutil.copy2(ROOT / "ops/systemd/voice-agent-v2.service", unit)
+            installed = root / "installed.service"
+            shutil.copy2(candidate / "ops/systemd/voice-agent-v2.service", installed)
+            calls: list[tuple[str, ...]] = []
+
+            def sudo(*command: str, allowed: tuple[int, ...] = (0,)) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(operations_cli, "DEFAULT_STATE_ROOT", state),
+                patch.object(operations_cli, "SYSTEM_UNIT_PATH", installed),
+                patch.object(
+                    operations_cli, "validate_release", return_value={"build_id": "a" * 40},
+                ),
+                patch.object(
+                    operations_cli, "validate_release_for_rollback",
+                    return_value={"build_id": "d" * 40},
+                ),
+                patch.object(operations_cli, "_sudo", side_effect=sudo),
+                patch.object(
+                    operations_cli, "_runtime_status",
+                    return_value={"release_id": candidate.name, "build_id": "b" * 40},
+                ),
+                self.assertRaisesRegex(OperationalError, "build identity mismatches"),
+            ):
+                operations_cli.command_install_service(arguments)
+
+            self.assertEqual((state / "current").resolve(), selected.resolve())
+            self.assertFalse((state / "previous").exists())
+            self.assertTrue(candidate.is_dir())
+            self.assertTrue(unrelated.is_dir())
+            self.assertNotIn(
+                ("systemctl", "restart", operations_cli.SERVICE_NAME), calls,
             )
 
     def test_explicit_restart_revalidates_and_restarts_the_unchanged_release(self) -> None:
@@ -1832,6 +2077,18 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             self.assertEqual(list((failed_state / "releases").iterdir()), [])
             self.assertFalse((failed_state / "stage-transaction.json").exists())
 
+            legacy = state / "releases" / ("d" * 24)
+            legacy.mkdir(parents=True)
+            (legacy / "retained-payload").write_bytes(b"legacy")
+            (state / "current").symlink_to(f"releases/{legacy.name}")
+
+            def current_validation(path: Path, **_keywords: object) -> dict[str, object]:
+                if path == legacy:
+                    raise OperationalError(
+                        "operations_manifest_incompatible", "fixture prior contract",
+                    )
+                return {}
+
             with (
                 patch.dict(os.environ, environment, clear=True),
                 patch(
@@ -1839,7 +2096,14 @@ class ReleaseAndRollbackTests(unittest.TestCase):
                     side_effect=run_git_with_head_change,
                 ),
                 patch("voice_agent_v2.operations.validate_host", return_value=report),
-                patch("voice_agent_v2.operations.validate_release", return_value={}),
+                patch(
+                    "voice_agent_v2.operations.validate_release",
+                    side_effect=current_validation,
+                ),
+                patch(
+                    "voice_agent_v2.operations.validate_release_for_rollback",
+                    return_value={"build_id": "d" * 40},
+                ),
             ):
                 result = ReleaseStore(state).deploy(
                     source_root=source, config_path=config,
@@ -1860,6 +2124,8 @@ class ReleaseAndRollbackTests(unittest.TestCase):
             )
             self.assertTrue(raced)
             self.assertEqual(result["build_id"], captured_commit)
+            self.assertEqual(result["previous_release_id"], legacy.name)
+            self.assertEqual((state / "previous").resolve(), legacy.resolve())
             self.assertIn(captured_commit, built_asset.read_text(encoding="utf-8"))
             self.assertIn("committed", built_asset.read_text(encoding="utf-8"))
             self.assertNotIn("raced", built_asset.read_text(encoding="utf-8"))

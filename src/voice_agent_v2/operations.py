@@ -236,6 +236,25 @@ EXPECTED_PYTHON_RUNTIMES = {
         },
     },
 }
+# The sole release-contract transition admitted for rollback custody is the
+# immediately superseded Slice 6 runtime declaration.  It differs only by the
+# two packages required by the later inert agent-profile parser; its voice
+# runtime, artifacts, lifecycle, inventory, and every other policy stay exact.
+ROLLBACK_TRANSITION_PYTHON_RUNTIMES = {
+    "slice6": {
+        "name": "slice6",
+        "python": "{home}/.cache/voice-agent-v2/slice-6/runtime/venv/bin/python",
+        "packages": {
+            "fastapi": "0.141.1",
+            "uvicorn": "0.52.1",
+            "livekit": "1.1.14",
+            "livekit-api": "1.2.0",
+            "onnxruntime": "1.28.0",
+            "numpy": "2.5.2",
+        },
+    },
+    "stt": EXPECTED_PYTHON_RUNTIMES["stt"],
+}
 EXPECTED_CACHE_ROOTS = {
     "slice6-runtime": {
         "name": "slice6-runtime",
@@ -407,7 +426,9 @@ def _exact_json_equal(observed: object, expected: object) -> bool:
     return observed == expected
 
 
-def load_operations_manifest(path: Path) -> dict[str, object]:
+def _load_operations_manifest(
+    path: Path, *, admit_rollback_transition: bool,
+) -> dict[str, object]:
     manifest = _json_object(path, code="operations_manifest_invalid")
     _require_exact_keys(
         manifest,
@@ -487,9 +508,15 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     ):
         raise OperationalError("operations_manifest_invalid", "Python runtime declarations are invalid")
     observed_runtimes = {str(runtime["name"]): runtime for runtime in runtimes}
+    admitted_runtime_contracts = [EXPECTED_PYTHON_RUNTIMES]
+    if admit_rollback_transition:
+        admitted_runtime_contracts.append(ROLLBACK_TRANSITION_PYTHON_RUNTIMES)
     if (
         len(observed_runtimes) != len(runtimes)
-        or not _exact_json_equal(observed_runtimes, EXPECTED_PYTHON_RUNTIMES)
+        or not any(
+            _exact_json_equal(observed_runtimes, expected)
+            for expected in admitted_runtime_contracts
+        )
     ):
         raise OperationalError("operations_manifest_incompatible", "selected Python runtime contract changed")
     cache_roots = disk.get("cache_roots")
@@ -513,6 +540,14 @@ def load_operations_manifest(path: Path) -> dict[str, object]:
     )):
         raise OperationalError("operations_manifest_incompatible", "disk/cache/sustained policy changed")
     return manifest
+
+
+def load_operations_manifest(path: Path) -> dict[str, object]:
+    return _load_operations_manifest(path, admit_rollback_transition=False)
+
+
+def load_rollback_operations_manifest(path: Path) -> dict[str, object]:
+    return _load_operations_manifest(path, admit_rollback_transition=True)
 
 
 def _open_path_without_symlinks(path: Path) -> int:
@@ -968,14 +1003,13 @@ def verify_disk_policy(
     return usage.free, measured
 
 
-def validate_host(
-    *, source_root: Path, config_path: Path, state_root: Path = DEFAULT_STATE_ROOT,
-    verify_artifact_state: bool = True,
-    configuration_values: Mapping[str, str] | None = None,
+def _validate_host_manifest(
+    *, source_root: Path, config_path: Path, state_root: Path,
+    manifest: Mapping[str, object], verify_artifact_state: bool,
+    configuration_values: Mapping[str, str] | None,
 ) -> ValidationReport:
     state_root = _require_canonical_state_root_custody(state_root)
     _require_service_configuration_path(config_path, state_root=state_root)
-    manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
     verify_tracked_manifest_alignment(
         source_root=source_root, operations_manifest=manifest,
     )
@@ -988,8 +1022,7 @@ def validate_host(
     if verify_artifact_state:
         artifact_count = verify_artifacts(manifest, home=Path.home())
         verify_python_runtimes(manifest, home=Path.home())
-    state_root_parent = state_root.parent
-    filesystem_path = state_root_parent
+    filesystem_path = state_root.parent
     while not filesystem_path.exists() and filesystem_path != filesystem_path.parent:
         filesystem_path = filesystem_path.parent
     available, caches = verify_disk_policy(
@@ -1003,6 +1036,22 @@ def validate_host(
         cache_bytes=caches,
         disk_available_bytes=available,
         configuration_fingerprint=str(configuration["public_fingerprint"]),
+    )
+
+
+def validate_host(
+    *, source_root: Path, config_path: Path, state_root: Path = DEFAULT_STATE_ROOT,
+    verify_artifact_state: bool = True,
+    configuration_values: Mapping[str, str] | None = None,
+) -> ValidationReport:
+    manifest = load_operations_manifest(source_root / DEFAULT_MANIFEST_RELATIVE)
+    return _validate_host_manifest(
+        source_root=source_root,
+        config_path=config_path,
+        state_root=state_root,
+        manifest=manifest,
+        verify_artifact_state=verify_artifact_state,
+        configuration_values=configuration_values,
     )
 
 
@@ -1820,6 +1869,68 @@ class ReleaseStore:
     def previous(self) -> Path | None:
         return self._linked_release(self.previous_link)
 
+    def release(self, release_id: str) -> Path:
+        if not isinstance(release_id, str) or not RELEASE_ID.fullmatch(release_id):
+            raise OperationalError(
+                "release_state_invalid", "release identity is invalid",
+            )
+        return self._require_release_directory(self.releases / release_id)
+
+    def retain_previous(
+        self, *, expected_current: Path, release_id: str, build_id: str,
+    ) -> bool:
+        """Atomically retain only an exact freshly validated release as previous."""
+        with self.locked():
+            current = self.current()
+            previous = self.previous()
+            if current != expected_current:
+                raise OperationalError(
+                    "release_state_invalid", "active release changed during rollback reconciliation",
+                )
+            if previous is not None:
+                if previous.name != release_id:
+                    raise OperationalError(
+                        "release_state_invalid", "a different prior release is already recorded",
+                    )
+                document = validate_release_for_rollback(
+                    previous, state_root=self.state_root, verify_host_state=True,
+                )
+                if document.get("build_id") != build_id:
+                    raise OperationalError(
+                        "release_state_invalid", "recorded prior release identity changed",
+                    )
+                return False
+            candidate = self.release(release_id)
+            if candidate == current:
+                raise OperationalError(
+                    "release_state_invalid", "running prior release equals the selected release",
+                )
+            document = validate_release_for_rollback(
+                candidate, state_root=self.state_root, verify_host_state=True,
+            )
+            if document.get("build_id") != build_id:
+                raise OperationalError(
+                    "release_state_invalid", "running prior release build identity mismatches",
+                )
+            self._commit_links(
+                current=f"releases/{current.name}",
+                previous=f"releases/{candidate.name}",
+            )
+            return True
+
+    def remove_retained_previous(
+        self, *, expected_current: Path, release_id: str,
+    ) -> None:
+        """Undo only the exact reconciliation performed by retain_previous."""
+        with self.locked():
+            current = self.current()
+            previous = self.previous()
+            if current != expected_current or previous is None or previous.name != release_id:
+                raise OperationalError(
+                    "release_state_invalid", "reconciled rollback state changed",
+                )
+            self._commit_links(current=f"releases/{current.name}", previous=None)
+
     def _release_limit(self, manifest: Mapping[str, object]) -> tuple[int, int]:
         disk = manifest.get("disk")
         if not isinstance(disk, dict):
@@ -1864,13 +1975,21 @@ class ReleaseStore:
         with self.locked():
             current = self.current()
             current_release: dict[str, object] | None = None
+            rollback_release: dict[str, object] | None = None
             if current is not None:
                 try:
                     current_release = validate_release(
                         current, state_root=self.state_root, verify_host_state=True,
                     )
                 except OperationalError:
-                    current_release = None
+                    try:
+                        rollback_release = validate_release_for_rollback(
+                            current, state_root=self.state_root, verify_host_state=True,
+                        )
+                    except OperationalError:
+                        rollback_release = None
+                else:
+                    rollback_release = current_release
                 if current_release is not None and all((
                     current_release.get("build_id") == commit,
                     current_release.get("source_tree") == tree,
@@ -2035,7 +2154,7 @@ class ReleaseStore:
                 raise
             retained_previous: str | None = None
             previous_target: str | None = None
-            if current is not None and current != target and current_release is not None:
+            if current is not None and current != target and rollback_release is not None:
                 previous_target = f"releases/{current.name}"
                 retained_previous = current.name
             self._commit_links(
@@ -2056,7 +2175,7 @@ class ReleaseStore:
             previous = self.previous()
             if current is None or previous is None:
                 raise OperationalError("rollback_unavailable", "no verified prior release is available")
-            previous_document = validate_release(
+            previous_document = validate_release_for_rollback(
                 previous, state_root=self.state_root, verify_host_state=True,
             )
             if required_system_unit is not None:
@@ -2100,6 +2219,7 @@ class ReleaseStore:
 
 def _validate_release_snapshot(
     release_root: Path, *, state_root: Path, verify_host_state: bool,
+    admit_rollback_transition: bool = False,
 ) -> tuple[dict[str, object], dict[str, str]]:
     store = ReleaseStore(state_root)
     release_root = store._require_release_directory(release_root)
@@ -2162,7 +2282,11 @@ def _validate_release_snapshot(
     if expected_release_id != release_root.name:
         raise OperationalError("release_incompatible", "release metadata is not bound to its identity")
     operations_path = release_root / DEFAULT_MANIFEST_RELATIVE
-    load_operations_manifest(operations_path)
+    manifest = (
+        load_rollback_operations_manifest(operations_path)
+        if admit_rollback_transition
+        else load_operations_manifest(operations_path)
+    )
     if sha256_file(operations_path) != document.get("operations_manifest_sha256"):
         raise OperationalError("release_incompatible", "release operations manifest changed")
     if release_tree_digest(release_root) != document.get("release_tree_sha256"):
@@ -2184,10 +2308,12 @@ def _validate_release_snapshot(
     ):
         raise OperationalError("release_incompatible", "client build identity is missing")
     if verify_host_state:
-        validate_host(
+        _validate_host_manifest(
             source_root=release_root,
             config_path=config_path,
             state_root=state_root,
+            manifest=manifest,
+            verify_artifact_state=True,
             configuration_values=values,
         )
     return document, values
@@ -2198,6 +2324,27 @@ def validate_release(
 ) -> dict[str, object]:
     document, _values = _validate_release_snapshot(
         release_root, state_root=state_root, verify_host_state=verify_host_state,
+    )
+    return document
+
+
+def validate_release_for_rollback(
+    release_root: Path, *, state_root: Path, verify_host_state: bool,
+) -> dict[str, object]:
+    try:
+        return validate_release(
+            release_root,
+            state_root=state_root,
+            verify_host_state=verify_host_state,
+        )
+    except OperationalError as error:
+        if error.code != "operations_manifest_incompatible":
+            raise
+    document, _values = _validate_release_snapshot(
+        release_root,
+        state_root=state_root,
+        verify_host_state=verify_host_state,
+        admit_rollback_transition=True,
     )
     return document
 
