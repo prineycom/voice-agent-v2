@@ -31,6 +31,7 @@ from .agent_environment_config import AgentConfigV2Snapshot, PINNED_IMAGE
 from .agent_environment_credentials import (
     CredentialStore, CredentialStoreError, EmptyCredentialStore, InstallationCredentialStore,
 )
+from .agent_research import WEB_TOOLS, postprocess_research_output, research_command
 
 REGISTRY_SCHEMA = "voice-agent.agent-environment-registry.v1"
 STATUS_SCHEMA = "voice-agent.agent-environment-status.v2"
@@ -51,6 +52,12 @@ HELPERS: Mapping[str, str] = {
     "execute_code": "execute-code",
     "process": "process",
     "receipt": "receipt",
+    # Convenience Web operations still enter the exact selected container via
+    # the image's fixed shell helper; controller-generated source contains no
+    # model-controlled shell text and uses no host/alternate runtime.
+    "web.search": "shell-exec",
+    "web.fetch": "shell-exec",
+    "web.extract": "shell-exec",
 }
 CALL_ID = re.compile(r"^[a-f0-9]{32}$")
 CONTAINER_ID = re.compile(r"^[a-f0-9]{12,64}$")
@@ -1114,6 +1121,11 @@ class AgentEnvironment:
         data = dict(arguments)
         if any(not isinstance(key, str) or key.startswith("_voice_agent_") for key in data):
             raise AgentEnvironmentError("operation_arguments_invalid")
+        if tool_id in WEB_TOOLS:
+            try:
+                data = {"command": research_command(tool_id, data)}
+            except ValueError as error:
+                raise AgentEnvironmentError(str(error)) from None
         background = data.get("background", False)
         if type(background) is not bool:
             raise AgentEnvironmentError("background_mode_invalid")
@@ -1297,6 +1309,10 @@ class AgentEnvironment:
             next_cwd = str(document.get("cwd", "/workspace"))
             replayed = bool(document.get("replayed", False))
             metadata = _receipt_output_metadata(document, output, error_output)
+            if tool_id in WEB_TOOLS:
+                status, exit_code, output, error_output, metadata = postprocess_research_output(
+                    tool_id, output
+                )
         except (AgentEnvironmentError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             self._mark_call_unknown(identifier, facts.container_id)
             raise AgentEnvironmentError("execution_outcome_unknown") from error

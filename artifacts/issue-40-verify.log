@@ -1,0 +1,100 @@
+=== phase: deterministic tracer (remaining=90.0s) ===
+Voice Agent v2 deterministic tracer
+network: IP sockets denied; local AF_UNIX wake-up only
+correlation: session=session-synthetic-0001 turn=turn-synthetic-0001
+transcript: Привет, это синтетический тест.
+response: Здравствуйте! Детерминированный голосовой ответ готов.
+terminal: turn.completed count=1
+normalized_trace_sha256: 9b607f8f17878c9d1caf3caf85b106c896140a2f9ecd44e33dd39ef47d2f305f
+input_pcm_sha256: 9ee9638a619b160078dc8d86ca32a01bc5c32536eb9698c59b01b16c789ac844 bytes=6400
+output_pcm_sha256: 69935a91444eaca69d96477a0de66aea7640fd476ea5858fcdd1f2143a46131e bytes=6400
+repeatability: run1 == run2 for normalized trace and PCM
+case stt_failure: terminal=turn.failed detail=injected_stt_failure terminal_count=1
+case llm_failure: terminal=turn.failed detail=injected_selected_provider_failure terminal_count=1
+case tts_failure: terminal=turn.failed detail=injected_tts_failure terminal_count=1
+case cancel_after_first_audio: terminal=turn.interrupted detail=interrupted terminal_count=1
+tracer: PASS
+=== phase: bounded operation custody/failure matrix (remaining=89.6s) ===
+----------------------------------------------------------------------
+Ran 10 tests in 0.407s
+
+OK
+operation_custody_matrix: PASS cases=10 network=denied elapsed_ms=850
+=== phase: hermetic current Python behaviors (remaining=88.5s) ===
+=== phase: injected-timeout (remaining=0.2s) ===
+python_hermetic: PASS tests=375 unexpected_skips=0
+=== phase: bounded local-socket readiness (remaining=76.0s) ===
+python_local_socket: PASS tests=9 unexpected_skips=0
+=== phase: installed SDK/capability/composition contract (remaining=72.6s) ===
+Slice 6 installed-runtime contract: PASS
+SDK pins: livekit=1.1.14, livekit-api=1.2.0, fastapi=0.141.1, uvicorn=0.52.1, pydantic=2.13.4, PyYAML=6.0.3
+capability: one room, microphone publish, agent subscribe/data; no management grants
+room lifecycle: startup cancellation drains; incomplete cleanup retains capacity
+local VAD: pinned Silero v6 CPU artifact shape=verified
+Silero TTS: v2 manifest/composition fixed to kseniya/native48/two workers; exact-cache identity belongs to ./verify-silero-kseniya; CC-BY-NC-SA-4.0 private noncommercial evaluation only; no fallback
+local LFM: manifest/provider wiring verified; exact-cache identity belongs to ./verify-local-lfm; loopback endpoint, 2 x 32768-token slots, no fallback
+network: no sockets opened; no model inference, microphone, or physical browser used
+=== phase: full Vitest surface (remaining=71.4s) ===
+
+> voice-agent-v2-web@0.0.0 test
+> vitest run
+
+
+ RUN  v4.1.10 /home/priney/.treehouse/voice-agent-v2-c11fbd/1/voice-agent-v2/web
+
+
+ Test Files  9 passed (9)
+      Tests  88 passed (88)
+   Start at  19:58:10
+   Duration  2.72s (transform 868ms, setup 0ms, import 1.63s, tests 2.14s, environment 7.18s)
+
+npm notice
+npm notice New major version of npm available! 10.9.8 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice
+=== phase: TypeScript typecheck (remaining=68.2s) ===
+
+> voice-agent-v2-web@0.0.0 typecheck
+> tsc -b --pretty false
+
+=== phase: production web build (remaining=67.9s) ===
+
+> voice-agent-v2-web@0.0.0 build:production-only
+> vite build
+
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 37 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.69 kB │ gzip:   0.42 kB
+dist/assets/index-C4nHLEif.css   14.30 kB │ gzip:   3.87 kB
+dist/assets/index-CRWtUFee.js   764.92 kB │ gzip: 208.53 kB
+
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 240ms
+=== phase: review fixture probe build (remaining=67.4s) ===
+
+> voice-agent-v2-web@0.0.0 build:review-only
+> vite build --mode review
+
+vite v8.2.1 building client environment for review...
+[2Ktransforming...✓ 34 modules transformed.
+rendering chunks...
+computing gzip size...
+review/dist/index.html                   0.70 kB │ gzip:  0.42 kB
+review/dist/assets/index-D5A8619D.css   14.30 kB │ gzip:  3.84 kB
+review/dist/assets/index-1ozQimac.js   229.39 kB │ gzip: 71.00 kB
+
+✓ built in 97ms
+=== phase: short production Firefox/actual-LiveKit smoke (remaining=67.0s) ===
+Nvidia Decoder is supported.
+livekit_ffi::server:266:livekit_ffi::server - Attempted to drop unknown FFI handle: 19
+browser_smoke_cleanup: firefox=1.042 rtc=1.102 all=1.132
+Firefox/production/actual-LiveKit smoke: PASS wall_seconds=4.767 startup_seconds=1.847 functional_seconds=1.789 cleanup_seconds=1.132 review_swap=reject capability=reject current_pcm=present stale_generation=drop cleanup=verified
+canonical_pr_gate: PASS deadline_seconds=90 unexpected_skips=0
+RESULT: PASS

@@ -42,6 +42,9 @@ TOOL_IDS = (
     "execute_code",
     "process",
     "receipt",
+    "web.search",
+    "web.fetch",
+    "web.extract",
 )
 
 

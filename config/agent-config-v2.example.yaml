@@ -13,6 +13,9 @@ agent:
     - execute_code
     - process
     - receipt
+    - web.search
+    - web.fetch
+    - web.extract
 agent_environment:
   image:
     reference: ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421
