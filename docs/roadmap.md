@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 product delivery
 >
-> **Last updated:** 2026-08-14
+> **Last updated:** 2026-08-20
 
 This roadmap is a sequence of independently deliverable vertical slices. It contains no calendar estimates. A slice starts only when its dependencies and incoming evidence gate are satisfied; it finishes only with the stated user-visible behavior and evidence.
 
@@ -33,9 +33,53 @@ The architecture and contract ownership are defined in [`architecture.md`](archi
                └─ V Avatar/module Grill and design gate
                   └─ 7 Deterministic MVP eye module
                      └─ 8 Failure semantics and observability
-                        └─ 9 Single-host operational reliability  ← core MVP exit
-                           └─ 10 Optional wake activation
+                        └─ 9 Single-host operational reliability  ← current legacy runtime
+                           ├─ 10 Optional wake activation
+                           └─ I1 Signed launcher foundation
+                              └─ I2 Fresh Linux install
+                                 └─ I3 Transactional update/rollback
+                                    └─ I4 Legacy adoption
+                                       └─ I5 AgentEnvironment/config preservation
+                                          └─ I6 Assets/cache/offline hardening
+                                             └─ I7 Uninstall/support bundle
+                                                └─ I8 Host/power-loss/reboot/physical acceptance
 ```
+
+## Installation evolution I1 — Signed release and read-only launcher foundation
+
+> **Implemented contract:** ADR-0014 supersedes ADR-0013's source-built deployment as the target end-user mechanism without changing the current legacy service.
+
+### User-visible outcome
+
+A separately versioned self-contained `voice-agent` executable can run `status [--json]` and `doctor [--json]` against an injectable installation/service boundary. It reports selected, running, exact-ready, rollback, transaction, optional AgentEnvironment and explicit rootless Docker states without mutation. The known selected-new/running-old/no-previous legacy state remains visible, and an incompatible historical application manifest does not erase exact immutable running custody.
+
+### Included scope
+
+- Canonical detached-Ed25519 `stable` channel, exact Linux x86_64 NVIDIA artifact entry, platform manifest, release record and launcher protocol 1.
+- Monotonic sequence/expiry, exact artifact/manifest size/hash/platform/protocol/schema checks, canonical JSON and safe complete archive entry/link rules.
+- Deterministic signing utility that accepts an externally supplied test key, pre-signed bounded fixtures and public test keys only; no production private material.
+- Node.js 26 SEA packaging from the existing toolchain with code cache/snapshot disabled; the launcher contains only installation-manager code.
+- Stable XDG layout and launcher/application/config/data/cache/state/runtime/AgentEnvironment ownership boundary.
+- Read-only canonical status/doctor and exact legacy root/inventory/unit/MainPID/cwd/executable/argv/runtime/readiness/rootless-Docker discovery.
+- Content-free closed JSON schemas and deterministic zero-mutation/privacy behavior tests.
+
+### Excluded scope
+
+Production signing-key provisioning, publication or downloads; install/update/rollback/GC mutation; service installation/restart; configuration or AgentEnvironment migration; candidate activation; launcher replacement; macOS runtime; real Docker/model/network/Telegram/physical evidence; and any live-stand action.
+
+### Acceptance and evidence
+
+`./verify` owns signed/forged/wrong-key/expired/sequence-rollback, artifact/platform/protocol mismatch, traversal/absolute/duplicate/device/link archive denial, legacy split/missing rollback/incompatible manifest, invalid/unowned/unrelated candidate, privacy-safe output, zero-mutation, and deterministic executable SEA coverage. [`signed-launcher-read-only-foundation.md`](evidence/signed-launcher-read-only-foundation.md) records evidence and nonclaims; the full output is saved in the slice report artifact. Physical and live-host claims remain absent.
+
+### Remaining installation order
+
+1. **I2 fresh Linux install:** generate private XDG roots/default configuration and user systemd/linger, acquire exact assets, start once and prove five-component readiness.
+2. **I3 transactional update/rollback:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection.
+3. **I4 legacy adoption:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success.
+4. **I5 AgentEnvironment/config preservation:** move durable environment state out of cache classification and prove same ID/rootfs/workspace across application update; stale spec degrades agent tools only.
+5. **I6 assets/cache/offline:** resumable exact downloads, signed content-addressed assets, cached metadata policy and genuine-space-only refusal.
+6. **I7 rollback/uninstall/support bundle:** complete user surfaces, exact destructive confirmation and privacy scanner.
+7. **I8 acceptance:** disposable real-host install, VM phase/power loss, reboot, update/rollback voice turn and physical/full-stack gates before stable publication. macOS native support remains later.
 
 ## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
 

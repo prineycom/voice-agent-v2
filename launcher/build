@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+NODE=${VOICE_AGENT_SEA_NODE:-node}
+OUTPUT=${1:-"$ROOT/dist/voice-agent"}
+case "$OUTPUT" in /*) ;; *) OUTPUT="$PWD/$OUTPUT" ;; esac
+"$NODE" -e 'const major=Number(process.versions.node.split(".")[0]); process.exit(major >= 26 ? 0 : 1)' || {
+  echo "voice-agent SEA packaging requires Node.js 26 or newer" >&2
+  exit 2
+}
+mkdir -p "$(dirname -- "$OUTPUT")"
+TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voice-agent-sea.XXXXXX")
+trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+cat > "$TEMP/sea.json" <<EOF
+{"main":"$ROOT/launcher/voice-agent.cjs","output":"$OUTPUT","disableExperimentalSEAWarning":true,"useCodeCache":false,"useSnapshot":false}
+EOF
+"$NODE" --build-sea="$TEMP/sea.json"
+chmod 0755 "$OUTPUT"
+mkdir -p "$TEMP/home"
+HOME="$TEMP/home" "$OUTPUT" status --json >/dev/null
+printf 'voice-agent SEA ready: %s\n' "$OUTPUT"

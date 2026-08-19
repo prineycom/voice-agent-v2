@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/launcher-doctor.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "launcher", "overall", "checks", "status", "repair_performed", "read_only"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.launcher-doctor.v1"},
+    "launcher": {"type": "object"},
+    "overall": {"enum": ["read_only_complete", "recovery_required", "invalid"]},
+    "checks": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["code", "state"], "properties": {"code": {"enum": ["install_root", "selected_release", "running_release", "selected_running_alignment", "rollback_custody", "transaction", "rootless_docker", "agent_environment"]}, "state": {"type": "string"}}}},
+    "status": {"type": "object"},
+    "repair_performed": {"const": false},
+    "read_only": {"const": true}
+  }
+}

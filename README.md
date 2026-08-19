@@ -6,6 +6,8 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
+**The accepted installation/update redesign now has its first read-only vertical slice.** A separately versioned Node.js 26 SEA `voice-agent` launcher verifies the canonical signed stable-channel/platform contracts and exposes privacy-safe `status` and `doctor`. It distinguishes selected, running, exact-ready, rollback, transaction, optional AgentEnvironment and rootless Docker truth, including the known selected-new/running-old/no-previous legacy shape. This slice does not install, update, repair, restart, migrate, download, activate, garbage-collect, self-replace, or touch the live stand. ADR-0014 and [`docs/architecture.md` §6.7](docs/architecture.md#67-launcher-owned-installation-and-update-boundary) own the target transaction and XDG boundary; ADR-0013 remains the current legacy runtime lifecycle until migration.
+
 **E4.3 completes later report retrieval, revisioned update, optional bounded refresh, and current-byte exact-Pasha resend in the same single Docker AgentEnvironment.** `report.artifact` resolves only a trusted opaque artifact receipt or an exact bounded `reports/…` index match. `local_summary` returns existing container bytes with zero external calls; `local_update` performs expected-revision/SHA-256 atomic replacement; `bounded_refresh` accepts only actual new successful fetch receipts. Every commit records current bytes/hash/revision and a prior-receipt link. A concurrent writer mismatch is visible and unexpected current bytes are not silently replaced. `report.deliver` rereads the current committed revision through Docker-exec; resend does not research unless the chosen plan separately did so.
 
 The direct-private Pasha chat/user/no-thread tuple remains restart-pinned, the Bot API endpoint and `TELEGRAM_BOT_TOKEN` name remain release-fixed, and acknowledgement/unknown/no-auto-retry custody is unchanged. Model/content/filename metadata cannot select a recipient, credential, endpoint, environment, lifecycle action, mount, port, runtime or host path. Display redaction changes only UI/history/log/support copies—not model-needed results, files/patches, injected credentials, Web/Git/API requests, report/Telegram bytes or deliberate exfiltration.
@@ -43,6 +45,20 @@ The narrow immutable-release check remains available without the test runtime:
 ```
 
 The destination must not already exist. The preserved deterministic tracer PCM is signed 16-bit little-endian mono at 16 kHz; it is reproducibility evidence, not physical microphone or speaker acceptance.
+
+## Signed launcher foundation
+
+The source entry is `launcher/voice-agent.cjs`; Node.js 26 can package it deterministically as one self-contained executable with no extra compiler or language toolchain:
+
+```sh
+./launcher/build ./dist/voice-agent
+./dist/voice-agent status
+./dist/voice-agent status --json
+./dist/voice-agent doctor
+./dist/voice-agent doctor --json
+```
+
+`status` and `doctor` are strictly read-only. Internal install-root/service-probe injection exists for deterministic fixtures; it grants no repair or alternate adoption authority. The repository commits only a public Ed25519 fixture key and pre-signed bounded fixtures. `launcher/tools/sign-fixture.cjs` requires an explicitly supplied external test key; production signing-key provisioning/publication is not implemented here. The future installed path is `~/.local/bin/voice-agent`, with immutable/durable/config/cache/state/runtime ownership split under the standard XDG roots documented in the architecture.
 
 ## Slice 6 Silero/Kseniya development application
 

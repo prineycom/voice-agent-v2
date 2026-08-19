@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/legacy-discovery.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "state", "selected", "running", "rollback", "service_custody", "runtime_custody", "docker", "adoption_eligible"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.legacy-discovery.v1"},
+    "state": {"enum": ["absent", "legacy_unsupported", "invalid"]},
+    "selected": {"oneOf": [{"$ref": "#/$defs/legacyIdentity"}, {"type": "null"}]},
+    "running": {"oneOf": [{"$ref": "#/$defs/runningIdentity"}, {"type": "null"}]},
+    "rollback": {"type": "object", "additionalProperties": false, "required": ["state", "release_id"], "properties": {"state": {"enum": ["verified", "missing"]}, "release_id": {}}},
+    "service_custody": {"enum": ["verified", "unavailable"]},
+    "runtime_custody": {"enum": ["verified_ready", "unavailable"]},
+    "docker": {"type": "object"},
+    "adoption_eligible": {"type": "boolean"},
+    "error_code": {"type": "string"}
+  },
+  "$defs": {
+    "legacyIdentity": {"type": "object", "additionalProperties": false, "required": ["state", "release_id", "build_id"], "properties": {"state": {"const": "legacy_unsupported"}, "release_id": {"type": "string", "pattern": "^[0-9a-f]{24}$"}, "build_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}},
+    "runningIdentity": {"type": "object", "additionalProperties": false, "required": ["state", "release_id", "build_id", "ready"], "properties": {"state": {"const": "legacy_unsupported"}, "release_id": {"type": "string", "pattern": "^[0-9a-f]{24}$"}, "build_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "ready": {"const": true}}}
+  }
+}

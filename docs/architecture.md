@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 project architecture
 >
-> **Last updated:** 2026-08-16
+> **Last updated:** 2026-08-20
 
 This document defines the active target architecture. It records user-approved candidate identities and endpoints only at their evidence gate; a gateway investigation is not a passing provider/model selection.
 
@@ -49,6 +49,7 @@ Untested behavior is not implied by a target diagram.
 | D25 | Decision | E4.1 adds provider-neutral bounded Web search/fetch/extract conveniences and receipt-bound citations to the same AgentRun/AgentEnvironment. Outcome-based frozen evidence requires refinement, independent fetches, traceability and honest redirect/time/byte/hash/truncation/cache/error facts without prescribing a route. Web bytes are untrusted data that may influence later admitted decisions and exercise all existing container/mount/network/credential authority; no prompt-injection prevention, taint/DLP/filtering, browser automation, alternate runtime, environment/lifecycle selection, or host fallback is claimed. |
 | D26 | Decision | E4.2 adds one controller-owned atomic saved-report and Telegram delivery path. The private direct-Pasha tuple is restart-pinned, the Bot API endpoint and `TELEGRAM_BOT_TOKEN` credential name are release-fixed, document bytes come only from the existing Docker-exec stream, and durable opaque artifact/delivery IDs own exact hashes, acknowledgement, unknown/no-auto-resend, reconciliation, and explicit same-byte resend truth. No recipient/router selection, DLP/content rewriting, automatic uncertainty retry, second environment, host-file fallback, or live-Pasha claim is introduced. |
 | D27 | Decision | E4.3 adds trusted later-artifact resolution, expected-revision/hash atomic update, optional explicitly chosen new-receipt research refresh, and current-revision resend. Prompt injection remains unprevented: later admitted work has full configured RW/mount/network/credential authority. Display redaction is copy-only, and the sole containment claim is the measured correctly configured unescaped-container boundary against direct unmounted-host/process/socket/device access. No detection, taint/DLP/filtering, rollback, automatic retry/refresh, lifecycle/selection authority, or stronger sandbox claim is introduced. |
+| D28 | Decision | A separately versioned Node.js 26 SEA `voice-agent` launcher is the sole owner of signed stable-channel interpretation and the future XDG install/update/rollback transaction. Ed25519/canonical metadata, stable release records, exact selected/running/readiness truth, and read-only legacy custody supersede ADR-0013's source-built deployment as the target mechanism without changing the still-running legacy service in this slice. See [ADR-0014](adr/0014-launcher-owned-signed-install-update.md). |
 
 ## 3. System boundary
 
@@ -57,6 +58,8 @@ Untested behavior is not implied by a target diagram.
 The canonical Arch PC contains every media, control, STT/TTS, application, and inference process. Historical Slices 2–5 used the operator-fixed failed LiteLLM route under ADR-0005, and ADR-0006 briefly authorized it for Slice 6 implementation. ADR-0008 now supersedes that active path: the combined Slice 6 / Issue #15 app uses only the pinned cache-local official LFM2.5 Q4_K_M artifact on local GPU-enabled llama.cpp. No Slice 6 transcript crosses a cloud/provider boundary, and there is no active LiteLLM credential, endpoint, alias or fallback. Historical cloud evidence remains preserved rather than relabelled.
 
 The ordinary browser runs locally by default. An operator may independently expose the loopback application through a private reverse proxy, but that exposure is outside application correctness and acceptance. On the private ADR-0009 branch, local TTS is fixed directly to Silero/Kseniya and is authorized only for noncommercial evaluation; this does not alter the active local-LFM choice or create a runtime selector.
+
+The separately versioned `voice-agent` launcher is outside the application process tree. It interprets signed release authority and later owns one bounded install/update transaction, while systemd owns the selected application process and the application owns voice/AgentRun behavior. The launcher contains no application runtime, credentials, mutable checkout, persistent container, or background daemon.
 
 ```mermaid
 flowchart LR
@@ -168,6 +171,8 @@ Media and control remain distinct even when LiveKit transports both.
 | Web receipt / research citation | AgentEnvironment helper → AgentRun manager → final answer | AgentRun manager | A citation names one actual successful source-fetch call ID and carries its normalized display URL, optional title, retrieval time, bytes/hash, redirects, truncation/cache/stale/error facts, plus bounded answer claims/spans. Search receipts guide refinement but are not source citations. Failed or model-invented receipts cannot become citations; citation presence is not a truth guarantee. |
 | Saved report / Telegram delivery | AgentRun manager ↔ AgentEnvironment stream ↔ trusted Telegram transport | Report-delivery controller | `saved-report.v1` and `telegram-delivery.v1` bind opaque artifact/delivery IDs to one `/workspace` path, exact bytes/hash/media/citation receipt IDs, restart-pinned private target, fixed credential/endpoint, bounded text/caption/network hashes, and acknowledged/failed/unknown at-most-once truth. Raw report/multipart/network bytes are not display-redacted. |
 | AgentEnvironment registry/status/call receipt | Controller ↔ private installation state ↔ Docker container | AgentEnvironment controller | Stable owner and endpoint fingerprint, atomic exact-ID/spec/generation registry, cross-process lock, fresh label query plus inspect, bounded logical cwd and rootfs ledger. Status is content-free and distinguishes file/rootfs persistence from process survival. |
+| Signed channel / platform artifact manifest / release record | Release publisher → launcher → immutable release store | Voice Agent launcher | Canonical closed JSON, detached Ed25519, stable channel, monotonic sequence/expiry, exact artifact size/hash/platform/protocol, safe complete archive inventory, and one stable historical custody receipt. Production private signing material is outside the repository. |
+| Launcher status / doctor / legacy discovery | Canonical install + injected service probe → operator | Voice Agent launcher | Strictly read-only and content-free; selected, running, exact-ready, rollback, transaction, service, Docker and optional AgentEnvironment facts remain separate. Legacy eligibility requires exact root/inventory/unit/process/runtime evidence and never mutates or adopts. |
 
 Contract versions change for semantic compatibility, not every implementation release. During implementation, machine-readable schemas and executable producer/consumer contract tests become authoritative; this document continues to own the boundary and invariants.
 
@@ -265,9 +270,51 @@ The mode-`0600` LiveKit configuration is read into one validated private snapsho
 
 Runtime writes are disjoint from that tree. systemd exposes the release read-only and creates private non-root-owned mode-`0700` `/run/voice-agent-v2`, removed on every stop including automatic restart and reboot; boot therefore has no `/run/user/1000` or login-manager dependency, while diagnostic captures may be deleted early and cannot outlive TTL. The execution boundary validates its `pycache` subtree. STT and any historical isolated Python adapter name bounded cache-local bytecode roots, Silero/gateway/entry processes use `-B`, and detached diagnostic expiry processes receive an explicit private runtime-tmpfs prefix even though their environment otherwise remains minimal. The deterministic tracer allocates HOME/XDG cache/temp/bytecode under `VOICE_AGENT_MUTABLE_STATE_ROOT`, the user's runtime directory, or an owner-specific `/var/tmp` fallback. Compatibility never ignores a generated path: repeated recovered-release tracer and full-runtime runs must preserve the complete inventory.
 
-Rollback accepts only that `previous` target and revalidates its inventory, operations schema, referenced current-user mode-`0600` local configuration/public fingerprint, external artifacts/runtimes, and disk/cache preflight before swapping links and restarting the canonical unit. The desired `current`/`previous` pair is first persisted as a private fsynced transaction, so the next locked operation completes an interrupted swap before reading either pointer. Release staging likewise records one private transaction before creating its stage and carries ownership through promotion and final validation; the next locked operation custody-checks and removes only that named incomplete stage or unvalidated target, and neither is counted as a retained release. If that unit is installed, install and rollback reject any drop-in or normalized effective lifecycle/sandbox drift, and its root-owned bytes must already equal the verified target release unit before either pointer moves; rollback never installs a different lifecycle/sandbox policy, while a disposable store with no installed unit remains unprivileged. Reaching the three-release/1-GiB release-store bound or an active-cache bound refuses without deleting any existing release/model/cache. Optional external exposure is outside deployment and rollback. Artifact acquisition and automatic upgrades remain outside runtime.
+Rollback accepts only that `previous` target and revalidates its inventory, operations schema, referenced current-user mode-`0600` local configuration/public fingerprint, external artifacts/runtimes, and disk/cache preflight before swapping links and restarting the canonical unit. The desired `current`/`previous` pair is first persisted as a private fsynced transaction, so the next locked operation completes an interrupted swap before reading either pointer. Release staging likewise records one private transaction before creating its stage and carries ownership through promotion and final validation; the next locked operation custody-checks and removes only that named incomplete stage or unvalidated target, and neither is counted as a retained release. If that unit is installed, install and rollback reject any drop-in or normalized effective lifecycle/sandbox drift, and its root-owned bytes must already equal the verified target release unit before either pointer moves; rollback never installs a different lifecycle/sandbox policy, while a disposable store with no installed unit remains unprivileged. Reaching the three-release/1-GiB release-store bound or an active-cache bound refuses without deleting any existing release/model/cache. Optional external exposure is outside deployment and rollback. Artifact acquisition and automatic upgrades remain outside runtime. ADR-0014 supersedes this source-built release store, system-level unit installation, fixed release-count refusal, and application-manifest rollback validation as the target end-user installation/update mechanism. They remain factual legacy behavior until a later launcher migration slice proves and activates the replacement; this slice performs no host mutation.
 
 The systemd unit starts only loopback-local application processes and changes no firewall, proxy, private-network identity, route, or global exposure. Optional external exposure is an operator-owned setup concern with no application readiness, deployment, rollback, monitoring, cleanup, or acceptance claim. The active local deployment declares cloud LLM inactive; any separately authorized future cloud mode reports external readiness only and can never be listed as a supervised host process or automatic fallback. Avatar host/MVP-eye compatibility is delivered and reported as part of the exact browser build because kiosk/autostart remains excluded.
+
+### 6.7 Launcher-owned installation and update boundary
+
+The first launcher slice establishes only release authority, self-contained packaging, read-only status/doctor, and legacy discovery. `voice-agent install`, `update`, `rollback`, repair, migration, garbage collection, service generation, and self-replacement are reserved for later slices and do not exist as mutation paths yet.
+
+The stable per-user layout is:
+
+```text
+~/.local/bin/voice-agent
+~/.local/share/voice-agent/
+  install.json
+  releases/<version>-<artifact-prefix>/
+  current -> releases/…
+  rollback -> releases/…
+  transactions/update.json
+  migrations/
+  data/
+  agent-environment/{private,workspace,cache}/
+~/.config/voice-agent/
+  config.yaml
+  private/{service.env,credentials.json,telegram-delivery.json}
+~/.config/systemd/user/voice-agent.service
+~/.cache/voice-agent/{downloads,models/sha256,runtimes/sha256}/
+~/.local/state/voice-agent/{logs,diagnostics}/
+$XDG_RUNTIME_DIR/voice-agent/{update.lock,service}/
+```
+
+The launcher/package owner owns only the executable. The invoking service user owns the XDG roots; directories are private, configuration/private state is mode `0600`, and verified release payloads become read-only. The application owns `data/`; the AgentEnvironment controller owns its private registry/workspace/cache and exact rootless container; explicit additional-mount contents remain user-owned outside updater deletion authority. Downloads, models and runtime cache are reconstructible, while data, config, secrets, migrations and AgentEnvironment state are durable. No updater may interpret either class by an arbitrary caller path.
+
+`voice-agent.channel.v1` is canonical JSON signed with detached Ed25519. Only `stable` is admitted in protocol 1. A verifier rejects signature/key mismatch, noncanonical or open fields, expired metadata, sequence below previously trusted state, duplicate version/platform authorization, non-HTTPS artifact authority, and invalid semantic identity. One channel entry binds exact artifact byte count/SHA-256, manifest SHA-256, Linux x86_64 NVIDIA platform, launcher protocol floor, and data-schema range.
+
+The platform manifest binds version/build/platform, application/config/data ranges, service template, and every archive entry. Extraction may produce only the embedded exact manifest plus declared entries. Absolute, empty, dot/traversal, backslash/NUL, duplicate, device/FIFO/unknown, undeclared, non-directory-ancestor, escaping-link and undeclared-link paths fail before any activation. Artifact bytes, manifest bytes, channel entry and supported platform/protocol must all agree.
+
+`voice-agent.release-record.v1` is the launcher's stable installed-release receipt. It preserves signed channel/artifact/manifest identity, protocol/schema ranges, service template and readiness state without requiring a later launcher to accept every historical application operations manifest. Selection is only pointer intent. Running identity requires service process and runtime release/build proof; readiness additionally requires the five unique compatible ready voice components and admission true. Ordinary healthy truth is selected == running == exact-ready.
+
+`status` and `doctor` take an explicit install root and service-probe boundary internally. Both are read-only: no file creation, pointer repair, service action, secret/content enumeration, Docker lifecycle, or health inference from symlinks/systemd activity. Stable JSON reports release/build identifiers, state/reason codes and booleans only; human output is derived from the same document. A selected-new/running-old/no-rollback state is `selected-new-running-old`, with the exact ready running release visible as retained legacy custody rather than false success.
+
+Legacy discovery admits evidence only from the exact canonical legacy root. It verifies current-user private directories, exact pointer target, historical release identity and complete path/type/mode/size/hash inventory, regular-file/no-follow metadata, installed unit equality, service name/MainPID, process UID/cwd/executable/argv, runtime release/build, exact readiness, and an explicitly owned rootless `/run/user/<uid>/docker.sock` daemon. Historical application-manifest incompatibility remains `legacy_unsupported` and does not erase exact healthy running custody. A missing, unrelated, mismatched, symlinked or unowned candidate is never eligible. Discovery writes nothing; adoption is a later journaled transaction.
+
+The later mutation owner is one flock plus durable update journal. It must retain exact prior running healthy custody before quiesce, stage and validate everything before stopping service, make selection and configuration changes atomically, prove candidate readiness, and otherwise restore/prove prior readiness. AgentEnvironment update never rebuilds/removes the container. Reachability collection retains active, running, rollback and transaction targets and never deletes user/config/secret/AgentEnvironment/mount data. These later behaviors are architectural constraints, not claims of this first slice.
+
+ADR-0014 owns this decision and its supersession boundary. `config/launcher-protocol-v1.json` and the launcher schemas/executable validators own exact machine fields; this section owns lifecycle, authority and failure semantics without creating a second contract definition.
 
 ## 7. Failure semantics
 
@@ -465,6 +512,12 @@ Hostile role/system markers, fake tool calls/citations and instructions are ordi
 Redaction protects only derived UI/history/log/support/accidental-final-display copies. It never mutates raw model-needed output, report/patch/file bytes, credentials supplied to exec, Web/Git/API requests, Telegram JSON/multipart/document bytes, or deliberate exfiltration. Status exposes no credential or prompt/completion content and states `prompt_injection_prevented=false`. The only containment claim is that a correctly configured unescaped container cannot directly access unmounted host home/sentinels, Docker/control sockets or CLI, host processes/services/sockets, SSH/GPG/browser/keyring state, devices or undeclared mounts. Agent operations cannot create/select another environment, add mounts/ports, invoke lifecycle, or fall back to host/Podman. This does not claim resistance to Docker/kernel escape.
 
 Failure/cancellation preserves the last committed report revision, records no arbitrary-effect rollback or automatic retry, closes the one affected AgentRun outcome, and leaves the ordinary voice path and next identity healthy without stale tool output. Deterministic `./verify` uses only synthetic fake-Docker/Web/Telegram/credential/host-sentinel fixtures. Linux Engine and Docker Desktop authority matrices, exact-model/live-network/exact-Pasha Telegram, gateway/controller/daemon/Desktop/host restart, physical voice, reboot/full-stack and Raspberry Pi evidence remain separately authorized and unclaimed. [`evidence/e4-3-later-update-resend-open-sandbox.md`](evidence/e4-3-later-update-resend-open-sandbox.md) owns deterministic evidence and nonclaims.
+
+### 9.14 Launcher provenance and diagnostic privacy
+
+The launcher trust store contains public verification keys only. Release-maintainer production key provisioning, rotation ceremony and publication are separate security work. Repository fixtures use one clearly named public test key and pre-signed deterministic bytes; the signing tool accepts an explicitly supplied test key and never creates, embeds, prints, or provisions production private material.
+
+Launcher diagnostics contain no configuration values, secret names/values, environment, transcript/media/report/workspace/mount contents or filenames, command output, arbitrary absolute paths, process argv, or Docker credential/context content. Release/build IDs, bounded state codes, readiness booleans, transaction phase, rootless endpoint kind/ownership result, and optional AgentEnvironment state are allowed. Default telemetry and upload remain absent.
 
 ## 10. Local application and external exposure
 

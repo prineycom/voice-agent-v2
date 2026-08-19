@@ -1,6 +1,6 @@
 # ADR-0013: Use one bounded systemd service and verified immutable releases
 
-- **Status:** Accepted
+- **Status:** Accepted for the current legacy runtime; installation/update ownership superseded by ADR-0014
 - **Date:** 2026-08-16
 - **Decision owner:** Voice Agent v2 project architecture
 
@@ -11,6 +11,8 @@ Slices 6–8 deliberately used a foreground development runner. It already owns 
 The gateway/controller is already the correct owner of session admission, turn drain, STT/TTS worker custody, provider readiness, and terminal events. Splitting every logical role into a new network service or system unit would duplicate those contracts. The browser owns the avatar host and MVP eye, while kiosk/browser autostart remains excluded. The active provider is still only local LFM2.5; historical cloud mode must never be mistaken for a locally supervised process.
 
 ## Decision
+
+> **Supersession note:** [ADR-0014](0014-launcher-owned-signed-install-update.md) now owns end-user release provenance, XDG installation layout, user-service generation, rollback custody, retention, and the future atomic install/update transaction. This ADR remains authoritative only for the currently deployed legacy system service and its bounded application process lifecycle until a later migration slice completes. Its source-built `deploy`/`install-service`, system-level unit, fixed three-release refusal, and application-manifest rollback compatibility are historical mechanisms, not the target installer contract.
 
 Use the tracked [`voice-agent-v2.service`](../../ops/systemd/voice-agent-v2.service) as one system-level systemd service running as the existing non-root `priney` user. systemd owns the outer process group and boot activation. The existing foreground runner owns child startup and shutdown in this exact order:
 

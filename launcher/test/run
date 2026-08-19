@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+SELECTED=
+for CANDIDATE in ${VOICE_AGENT_SEA_NODE:-} /usr/bin/node "$(command -v node 2>/dev/null || true)"; do
+  [ -n "$CANDIDATE" ] && [ -x "$CANDIDATE" ] || continue
+  if "$CANDIDATE" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 26 ? 0 : 1)' 2>/dev/null; then
+    SELECTED=$CANDIDATE
+    break
+  fi
+done
+[ -n "$SELECTED" ] || {
+  echo "launcher verification requires repository toolchain Node.js 26+" >&2
+  exit 2
+}
+VOICE_AGENT_SEA_NODE="$SELECTED" exec "$SELECTED" --test "$@"
