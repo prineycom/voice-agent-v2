@@ -26,6 +26,8 @@ module.exports = function createUpdater(core, installer) {
     'prior_running', 'prior_selected', 'receipts', 'requested_channel', 'schema', 'service',
     'started_at', 'updated_at',
   ];
+  const PRE_PRESERVATION_JOURNAL_KEYS = JOURNAL_KEYS.filter((key) => key !== 'agent_environment');
+  const PRE_PRESERVATION_RECEIPT_KEYS = RECEIPT_KEYS.filter((key) => !['environment_before', 'environment_after'].includes(key));
   const MIGRATION_KEYS = ['destructive', 'from', 'id', 'operation', 'product_choice', 'reversible', 'scope', 'sha256', 'to'];
   const UPDATE_SCHEMA = 'voice-agent.update-transaction.v1';
 
@@ -69,7 +71,21 @@ module.exports = function createUpdater(core, installer) {
 
   function emptyReceipts() { return Object.fromEntries(RECEIPT_KEYS.map((key) => [key, false])); }
 
+  function normalizeJournal(document) {
+    if (document && typeof document === 'object' && !Array.isArray(document)
+      && Object.keys(document).sort().join('\0') === [...PRE_PRESERVATION_JOURNAL_KEYS].sort().join('\0')
+      && document.receipts && typeof document.receipts === 'object' && !Array.isArray(document.receipts)
+      && Object.keys(document.receipts).sort().join('\0') === [...PRE_PRESERVATION_RECEIPT_KEYS].sort().join('\0')) {
+      return {
+        ...document, agent_environment: { before: null, after: null },
+        receipts: { ...emptyReceipts(), ...document.receipts },
+      };
+    }
+    return document;
+  }
+
   function validateJournal(document) {
+    document = normalizeJournal(document);
     exactKeys(document, JOURNAL_KEYS, 'update_journal_invalid');
     if (document.schema !== UPDATE_SCHEMA || !/^[0-9a-f]{32}$/.test(document.id) || document.requested_channel !== 'stable'
       || !PHASES.has(document.phase) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.started_at)
@@ -81,8 +97,10 @@ module.exports = function createUpdater(core, installer) {
       error('update_journal_invalid', 'the durable update journal is invalid');
     }
     exactKeys(document.agent_environment, ['after', 'before'], 'update_journal_invalid');
-    if ((document.agent_environment.before !== null && typeof document.agent_environment.before !== 'object')
-      || (document.agent_environment.after !== null && typeof document.agent_environment.after !== 'object')) error('update_journal_invalid', 'AgentEnvironment custody receipt is invalid');
+    try {
+      if (document.agent_environment.before !== null) agentEnvironment.validatePreservation(document.agent_environment.before);
+      if (document.agent_environment.after !== null) agentEnvironment.validatePreservation(document.agent_environment.after);
+    } catch { error('update_journal_invalid', 'AgentEnvironment custody receipt is invalid'); }
     exactKeys(document.service, ['unit_sha256', 'was_active', 'was_enabled'], 'update_journal_invalid');
     if (typeof document.service.was_active !== 'boolean' || typeof document.service.was_enabled !== 'boolean'
       || (document.service.unit_sha256 !== null && !/^[0-9a-f]{64}$/.test(document.service.unit_sha256))) error('update_journal_invalid', 'the service custody receipt is invalid');
@@ -440,6 +458,13 @@ module.exports = function createUpdater(core, installer) {
     if (!exists(layout.updateJournal)) return null;
     let journal = readJournal(layout);
     const interruptedPhase = journal.phase;
+    if (!journal.receipts.environment_before) {
+      const before = await agentEnvironment.capture(layout, dependencies, { phase: 'update_pre_preservation_recovery' });
+      agentEnvironment.writePreservation(layout, before, installer.writeJson);
+      journal = persistJournal(layout, journal, interruptedPhase, dependencies, {
+        agent_environment: { before, after: null }, receipts: { environment_before: true },
+      });
+    }
     journal = persistJournal(layout, journal, 'recovering', dependencies);
     const serviceUnchanged = !journal.receipts.service_stopped && await priorStillExactReady(layout, journal, dependencies);
     if ((!POST_QUIESCE.has(interruptedPhase) && !journal.receipts.service_stopped) || serviceUnchanged) {
@@ -631,6 +656,6 @@ module.exports = function createUpdater(core, installer) {
 
   return {
     PHASES, POST_QUIESCE, RECEIPT_KEYS, UPDATE_SCHEMA, acquireExclusiveLock, collectReleases,
-    loadMigrationDescriptors, migrationPlan, parseConfigSchema, readRelease, updateVoiceAgent, validateJournal,
+    loadMigrationDescriptors, migrationPlan, normalizeJournal, parseConfigSchema, readRelease, updateVoiceAgent, validateJournal,
   };
 };

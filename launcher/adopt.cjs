@@ -30,7 +30,23 @@ module.exports = function createAdopter(core, installer, updater) {
     return { ...layout, adoptionJournal: path.join(layout.transactions, 'adoption.json') };
   }
 
+  function normalizeJournal(document) {
+    const oldKeys = ['candidate', 'config_canonical_sha256', 'config_source_sha256', 'failure_code', 'id', 'legacy_candidate', 'phase', 'prior_healthy', 'prior_running', 'receipts', 'schema', 'started_at', 'updated_at'];
+    const oldReceipts = RECEIPTS.filter((name) => !['environment_before', 'environment_after'].includes(name));
+    if (document && typeof document === 'object' && !Array.isArray(document)
+      && Object.keys(document).sort().join('\0') === oldKeys.sort().join('\0')
+      && document.receipts && typeof document.receipts === 'object' && !Array.isArray(document.receipts)
+      && Object.keys(document.receipts).sort().join('\0') === oldReceipts.sort().join('\0')) {
+      return {
+        ...document, agent_environment: { before: null, after: null },
+        receipts: { ...emptyReceipts(), ...document.receipts },
+      };
+    }
+    return document;
+  }
+
   function validateJournal(document) {
+    document = normalizeJournal(document);
     const keys = ['agent_environment', 'candidate', 'config_canonical_sha256', 'config_source_sha256', 'failure_code', 'id', 'legacy_candidate', 'phase', 'prior_healthy', 'prior_running', 'receipts', 'schema', 'started_at', 'updated_at'];
     if (!document || typeof document !== 'object' || Array.isArray(document) || Object.keys(document).sort().join('\0') !== keys.sort().join('\0')
         || document.schema !== ADOPTION_SCHEMA || !/^[0-9a-f]{32}$/.test(document.id) || !PHASES.has(document.phase)
@@ -40,9 +56,11 @@ module.exports = function createAdopter(core, installer, updater) {
         || (document.failure_code !== null && !/^[a-z0-9_]{1,64}$/.test(document.failure_code))
         || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.started_at)
         || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.updated_at)) error('legacy_adoption_journal_invalid', 'the legacy adoption journal is invalid');
-    if (!document.agent_environment || Object.keys(document.agent_environment).sort().join('\0') !== ['after', 'before'].sort().join('\0')
-        || (document.agent_environment.before !== null && typeof document.agent_environment.before !== 'object')
-        || (document.agent_environment.after !== null && typeof document.agent_environment.after !== 'object')) error('legacy_adoption_journal_invalid', 'AgentEnvironment custody receipt is invalid');
+    if (!document.agent_environment || Object.keys(document.agent_environment).sort().join('\0') !== ['after', 'before'].sort().join('\0')) error('legacy_adoption_journal_invalid', 'AgentEnvironment custody receipt is invalid');
+    try {
+      if (document.agent_environment.before !== null) agentEnvironment.validatePreservation(document.agent_environment.before);
+      if (document.agent_environment.after !== null) agentEnvironment.validatePreservation(document.agent_environment.after);
+    } catch { error('legacy_adoption_journal_invalid', 'AgentEnvironment custody receipt is invalid'); }
     if (!document.receipts || Object.keys(document.receipts).sort().join('\0') !== [...RECEIPTS].sort().join('\0')
         || RECEIPTS.some((name) => typeof document.receipts[name] !== 'boolean')) error('legacy_adoption_journal_invalid', 'a legacy adoption receipt is invalid');
     return document;
@@ -482,5 +500,5 @@ module.exports = function createAdopter(core, installer, updater) {
     return dependencies;
   }
 
-  return { ADOPTION_SCHEMA, PHASES, RECEIPTS, canonicalServiceEnv, defaultDependencies, installVoiceAgent, validateImportedRelease, validateJournal };
+  return { ADOPTION_SCHEMA, PHASES, RECEIPTS, canonicalServiceEnv, defaultDependencies, installVoiceAgent, normalizeJournal, validateImportedRelease, validateJournal };
 };

@@ -101,21 +101,27 @@
       }
     }
   },
-  "allOf": [{
-    "if": {"properties": {"agent_environment": {"properties": {"enabled": {"const": true}}}}},
-    "then": {
-      "properties": {
-        "agent": {"properties": {"enabled": {"const": true}}},
-        "agent_environment": {"properties": {
-          "docker": {"properties": {"endpoint": {"type": "string"}}},
-          "identity": {"properties": {
-            "installation_id": {"type": "string"}, "registry_path": {"type": "string"}, "rootfs_storage_path": {"type": "string"},
-            "workspace_path": {"type": "string"}, "cache_path": {"type": "string"}
+  "allOf": [
+    {
+      "if": {"properties": {"agent_environment": {"properties": {"enabled": {"const": true}}}}},
+      "then": {
+        "properties": {
+          "agent": {"properties": {"enabled": {"const": true}}},
+          "agent_environment": {"properties": {
+            "docker": {"properties": {"endpoint": {"type": "string"}}},
+            "identity": {"properties": {
+              "installation_id": {"type": "string"}, "registry_path": {"type": "string"}, "rootfs_storage_path": {"type": "string"},
+              "workspace_path": {"type": "string"}, "cache_path": {"type": "string"}
+            }}
           }}
-        }}
+        }
       }
+    },
+    {
+      "if": {"properties": {"agent": {"properties": {"enabled": {"const": true}}}}},
+      "then": {"properties": {"agent_environment": {"properties": {"enabled": {"const": true}}}}}
     }
-  }],
+  ],
   "$defs": {
     "absolutePath": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).*(?<!/)$"},
     "nullableAbsolutePath": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/absolutePath"}]},

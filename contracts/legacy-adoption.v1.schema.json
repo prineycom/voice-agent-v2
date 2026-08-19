@@ -13,7 +13,7 @@
     "candidate": {"type": "string"},
     "config_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "config_canonical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "agent_environment": {"type": "object", "additionalProperties": false, "required": ["before", "after"], "properties": {"before": {"oneOf": [{"type": "object"}, {"type": "null"}]}, "after": {"oneOf": [{"type": "object"}, {"type": "null"}]}}},
+    "agent_environment": {"type": "object", "additionalProperties": false, "required": ["before", "after"], "properties": {"before": {"oneOf": [{"$ref": "agent-environment-preservation.v1.schema.json"}, {"type": "null"}]}, "after": {"oneOf": [{"$ref": "agent-environment-preservation.v1.schema.json"}, {"type": "null"}]}}},
     "receipts": {
       "type": "object", "additionalProperties": false,
       "required": ["prior_imported", "selected_imported", "config_committed", "docker_recorded", "environment_before", "environment_after", "candidate_staged", "user_service_prepared", "legacy_stopped", "candidate_activated", "candidate_started", "candidate_ready", "prior_restored", "legacy_retired", "terminal"],

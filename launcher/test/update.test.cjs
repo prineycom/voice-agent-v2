@@ -242,6 +242,22 @@ test('concurrent updater, channel rollback/expiry, disk shortage, prior identity
   await code('update_failed_safe', () => mismatch.update()); assert.match(fs.readlinkSync(mismatch.layout.current), /1\.0\.0-/);
 });
 
+test('interrupted pre-preservation update journal is upgraded without discarding prior transaction custody', () => {
+  const id = '9'.repeat(32);
+  const receipts = Object.fromEntries(updater.RECEIPT_KEYS
+    .filter((name) => !['environment_before', 'environment_after'].includes(name)).map((name) => [name, name === 'artifact_verified']));
+  const old = {
+    schema: updater.UPDATE_SCHEMA, id, requested_channel: 'stable', phase: 'verified',
+    prior_selected: '1.0.0-old', prior_running: '1.0.0-old', prior_healthy: '1.0.0-old', candidate: '1.1.0-new',
+    config_snapshot: id, service: { was_active: true, was_enabled: true, unit_sha256: 'a'.repeat(64) },
+    receipts, failure_code: null, started_at: '2026-08-21T00:00:00Z', updated_at: '2026-08-21T00:00:00Z',
+  };
+  const upgraded = updater.validateJournal(old);
+  assert.deepEqual(upgraded.agent_environment, { before: null, after: null });
+  assert.equal(upgraded.receipts.artifact_verified, true);
+  assert.equal(upgraded.receipts.environment_before, false); assert.equal(upgraded.receipts.environment_after, false);
+});
+
 test('exact AgentEnvironment identity survives candidate success/failure rollback and replacement is detected without container lifecycle calls', async (context) => {
   const exact = { state: 'ready', action: 'none', identity_digest: 'a'.repeat(64), container_id_prefix: '1'.repeat(12), runtime_state: 'running' };
   const success = harness({ environmentStatuses: [exact] }); success.cleanup(context); await success.seed();

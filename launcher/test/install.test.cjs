@@ -62,7 +62,7 @@ function fixtureArtifact(overrides = {}) {
   return { artifactBytes, manifestBytes, archiveEntries, readEntry, channelBytes, signatureBytes, publicKeyPem, release, manifest };
 }
 
-function readyDocument(artifact, active = true, optional = { agent_environment: 'unconfigured', telegram: 'disabled' }) {
+function readyDocument(artifact, active = true, optional = { agent_environment: 'disabled', telegram: 'disabled' }) {
   return {
     service_active: active, service_enabled: active, process_uid: UID,
     runtime: {
@@ -143,7 +143,7 @@ test('pristine install creates safe XDG defaults, immutable exact release, user 
   const value = makeHarness(); cleanup(context, value);
   const result = await install(value);
   assert.equal(result.state, 'installed_healthy');
-  assert.equal(result.optional.agent_environment, 'unconfigured');
+  assert.equal(result.optional.agent_environment, 'disabled');
   assert.equal(fs.readlinkSync(value.layout.current), `releases/${result.release_id}`);
   assert.equal(mode(value.layout.data), 0o700);
   for (const filename of [value.layout.installRecord, path.join(value.layout.config, 'config.yaml'), path.join(value.layout.private, 'service.env'), path.join(value.layout.private, 'credentials.json'), value.layout.unit]) assert.equal(mode(filename), 0o600, filename);

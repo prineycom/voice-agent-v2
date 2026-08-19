@@ -255,6 +255,7 @@ test('all launcher schemas, protocol, public keys, and signed fixtures are bound
     'install-transaction.v1.schema.json', 'update-transaction.v1.schema.json', 'legacy-adoption.v1.schema.json', 'legacy-import-release.v1.schema.json',
     'legacy-config-migration.v1.schema.json', 'docker-endpoint.v1.schema.json', 'config-migrations.v1.schema.json', 'installation.v1.schema.json',
     'launcher-status.v1.schema.json', 'launcher-doctor.v1.schema.json', 'legacy-discovery.v1.schema.json',
+    'agent-environment-preservation.v1.schema.json',
   ]) JSON.parse(fs.readFileSync(path.join(ROOT, 'contracts', name), 'utf8'));
   const protocol = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'launcher-protocol-v1.json'), 'utf8'));
   assert.equal(protocol.protocol, 1);

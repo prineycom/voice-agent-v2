@@ -181,7 +181,10 @@ class CredentialsV2(BaseModel):
     exec_environment_names: tuple[str, ...] = Field(max_length=16)
     exec_file_names: tuple[str, ...] = Field(max_length=16)
 
-    @field_validator("*", mode="before")
+    @field_validator(
+        "creation_environment_names", "creation_file_names",
+        "exec_environment_names", "exec_file_names", mode="before",
+    )
     @classmethod
     def fixed_names(cls, value: object) -> tuple[str, ...]:
         if not isinstance(value, (list, tuple)):
@@ -245,7 +248,25 @@ class AgentConfigV2(BaseModel):
     agent: AgentSettingsV2
     agent_environment: AgentEnvironmentV2
 
+    @model_validator(mode="after")
+    def complete_enabled_capability(self) -> "AgentConfigV2":
+        environment = self.agent_environment
+        if self.agent.enabled != environment.enabled:
+            raise ValueError("agent and AgentEnvironment enablement must change together")
+        if environment.enabled and (
+            environment.docker.endpoint is None
+            or environment.identity.installation_id is None
+            or environment.identity.registry_path is None
+            or environment.identity.rootfs_storage_path is None
+            or environment.identity.workspace_path is None
+            or environment.identity.cache_path is None
+        ):
+            raise ValueError("enabled AgentEnvironment requires explicit installation identity and paths")
+        return self
 
+
+# Active compatibility fixture for the already-landed runtime tests. Production
+# install/adoption render their own exact XDG values and start disabled.
 DEFAULT_DOCUMENT: dict[str, object] = {
     "schema_version": CONFIG_SCHEMA,
     "agent": {
@@ -256,9 +277,15 @@ DEFAULT_DOCUMENT: dict[str, object] = {
     },
     "agent_environment": {
         "enabled": True,
-        "docker": {"endpoint": None, "authority": "explicit_verified_rootless"},
+        "docker": {"endpoint": "unix:///run/user/1000/docker.sock", "authority": "explicit_verified_rootless"},
         "image": {"reference": PINNED_IMAGE, "spec_digest": AGENT_SPEC_DIGEST, "pull_at_runtime": False},
-        "identity": {"installation_id": None, "registry_path": None, "rootfs_storage_path": None, "workspace_path": None, "cache_path": None},
+        "identity": {
+            "installation_id": "00000000000000000000000000000000",
+            "registry_path": "/var/lib/voice-agent-fixture/agent-environment/private/registry.json",
+            "rootfs_storage_path": "/var/lib/voice-agent-fixture/agent-environment/rootfs-storage",
+            "workspace_path": "/var/lib/voice-agent-fixture/agent-environment/workspace",
+            "cache_path": "/var/lib/voice-agent-fixture/agent-environment/cache",
+        },
         "lifecycle": {
             "lazy_create": True,
             "persistent": True,
@@ -293,6 +320,14 @@ DEFAULT_DOCUMENT: dict[str, object] = {
     },
 }
 DEFAULT_CONFIG_BYTES = yaml.safe_dump(DEFAULT_DOCUMENT, sort_keys=False).encode("utf-8")
+
+DISABLED_DOCUMENT: dict[str, object] = json.loads(json.dumps(DEFAULT_DOCUMENT))
+DISABLED_DOCUMENT["agent"]["enabled"] = False  # type: ignore[index]
+DISABLED_DOCUMENT["agent_environment"]["enabled"] = False  # type: ignore[index]
+DISABLED_DOCUMENT["agent_environment"]["docker"]["endpoint"] = None  # type: ignore[index]
+for _field in ("installation_id", "registry_path", "rootfs_storage_path", "workspace_path", "cache_path"):
+    DISABLED_DOCUMENT["agent_environment"]["identity"][_field] = None  # type: ignore[index]
+DISABLED_CONFIG_BYTES = yaml.safe_dump(DISABLED_DOCUMENT, sort_keys=False).encode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,7 +379,7 @@ def upgrade_v1_to_v2(source: bytes) -> bytes:
     historical = _typed_model(_parse_yaml(_decode_config(source)))
     if not isinstance(historical, AgentConfigV1):
         raise AgentConfigError("config_schema_unsupported")
-    return DEFAULT_CONFIG_BYTES
+    return DISABLED_CONFIG_BYTES
 
 
 class AgentConfigV2Service(AgentConfigService):

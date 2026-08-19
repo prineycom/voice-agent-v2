@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const LAUNCHER_VERSION = '0.4.0';
+const LAUNCHER_VERSION = '0.5.0';
 const LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';

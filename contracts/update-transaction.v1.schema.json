@@ -16,7 +16,7 @@
     "config_snapshot": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "agent_environment": {
       "type": "object", "additionalProperties": false, "required": ["before", "after"],
-      "properties": {"before": {"oneOf": [{"type": "object"}, {"type": "null"}]}, "after": {"oneOf": [{"type": "object"}, {"type": "null"}]}}
+      "properties": {"before": {"oneOf": [{"$ref": "agent-environment-preservation.v1.schema.json"}, {"type": "null"}]}, "after": {"oneOf": [{"$ref": "agent-environment-preservation.v1.schema.json"}, {"type": "null"}]}}
     },
     "service": {
       "type": "object", "additionalProperties": false,

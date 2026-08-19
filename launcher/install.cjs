@@ -479,7 +479,7 @@ agent_environment:
           if (!validateReadiness(ready, release, layout.identity.uid)) error('existing_install_requires_doctor', 'the installed release is not exactly healthy; run voice-agent doctor');
           output.info(`Voice Agent ${release.version} is already selected, running, and five-component ready.`);
           output.info('Optional agent tools: unavailable until valid v2 configuration and a rootless Docker endpoint are configured. Telegram: disabled.');
-          return { state: 'already_healthy', release_id: existing.release_id, version: release.version, optional: { agent_environment: 'unconfigured', telegram: 'disabled' } };
+          return { state: 'already_healthy', release_id: existing.release_id, version: release.version, optional: { agent_environment: 'disabled', telegram: 'disabled' } };
         }
       }
 
@@ -585,7 +585,7 @@ agent_environment:
 
       output.info(`Voice Agent ${release.version} is installed, running, accepting admission, and five-component ready on http://127.0.0.1:8000.`);
       output.info('Optional agent tools: unavailable until valid v2 configuration and a rootless Docker endpoint are configured. Telegram: disabled.');
-      return { state: 'installed_healthy', release_id: releaseId, version: release.version, optional: { agent_environment: 'unconfigured', telegram: 'disabled' } };
+      return { state: 'installed_healthy', release_id: releaseId, version: release.version, optional: { agent_environment: 'disabled', telegram: 'disabled' } };
     } catch (reason) {
       if (reason && reason.code === 'install_interrupted') throw reason;
       if (journalBase && exists(layout.journal)) {

@@ -1,6 +1,6 @@
 {
   "schema": "voice-agent.launcher-protocol.v1",
-  "launcher_version": "0.4.0",
+  "launcher_version": "0.5.0",
   "protocol": 1,
   "channels": ["stable"],
   "platforms": ["linux-x86_64-nvidia"],
@@ -13,6 +13,7 @@
   "legacy_import_release_schema": "voice-agent.legacy-import-release.v1",
   "legacy_config_migration_schema": "voice-agent.legacy-config-migration.v1",
   "docker_endpoint_schema": "voice-agent.docker-endpoint.v1",
+  "agent_environment_preservation_schema": "voice-agent.agent-environment-preservation.v1",
   "config_migrations_schema": "voice-agent.config-migrations.v1",
   "installation_schema": "voice-agent.installation.v1",
   "status_schema": "voice-agent.launcher-status.v1",

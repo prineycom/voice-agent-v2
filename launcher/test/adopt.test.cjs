@@ -153,6 +153,22 @@ function harness(options = {}) {
 
 async function adopt(value) { return adopter.installVoiceAgent(value.adoptOptions); }
 
+test('interrupted pre-preservation adoption journal upgrades with exact prior/candidate custody intact', () => {
+  const id = '8'.repeat(32);
+  const receipts = Object.fromEntries(adopter.RECEIPTS
+    .filter((name) => !['environment_before', 'environment_after'].includes(name)).map((name) => [name, name === 'candidate_staged']));
+  const old = {
+    schema: adopter.ADOPTION_SCHEMA, id, phase: 'prepared', prior_running: `legacy-${'1'.repeat(24)}`,
+    prior_healthy: `legacy-${'1'.repeat(24)}`, legacy_candidate: `legacy-${'2'.repeat(24)}`,
+    candidate: '1.0.0-candidate', config_source_sha256: 'a'.repeat(64), config_canonical_sha256: 'b'.repeat(64),
+    receipts, failure_code: null, started_at: '2026-08-21T00:00:00Z', updated_at: '2026-08-21T00:00:00Z',
+  };
+  const upgraded = adopter.validateJournal(old);
+  assert.deepEqual(upgraded.agent_environment, { before: null, after: null });
+  assert.equal(upgraded.receipts.candidate_staged, true);
+  assert.equal(upgraded.receipts.environment_before, false); assert.equal(upgraded.receipts.environment_after, false);
+});
+
 test('exact selected-new/running-old split adopts healthy prior, uncommitted legacy candidate, private config, rootless endpoint, and signed candidate', async (context) => {
   const value = harness(); value.cleanup(context); const beforeLegacy = fs.readFileSync(value.configPath);
   const result = await adopt(value);
