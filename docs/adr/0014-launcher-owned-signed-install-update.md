@@ -24,6 +24,8 @@ Fresh-install evolution I2 implements the pristine-host prefix of that decision:
 
 I3 implements the separate general update journal and keeps the prior exact running healthy release before quiescing. One open-descriptor nonblocking `flock` owns concurrency while the durable mode-`0600` journal owns recovery. Signed selection and safe pre-GC precede exact staging; digest-bound ordered reversible/snapshotted migrations prepare a CAS configuration copy before service action. Success means selected == running == exact-ready. Failure after quiesce restores exact prior configuration/unit/pointers and proves the prior release; a double failure retains all recovery material and remains explicit. Reachability collection keeps active plus one verified rollback and transaction references, never deletes user/config/model/AgentEnvironment/mount state or Docker objects, and has no fixed release-count admission deadlock.
 
+I4 consumes read-only discovery only for the exact selected-new/running-old/no-previous legacy split. Its closed journal copies both immutable legacy inventories into launcher custody: running-old is `prior_running`/`prior_healthy`/ready rollback, while selected-new remains uncommitted/not-ready evidence. Before stopping the authoritative system service it verifies a signed activation candidate, stages and hash/CAS-copies the ignored mode-`0600` private locator, creates absent disabled v2 defaults, records only an explicitly probed rootless user socket, enables linger and installs the candidate user unit. It never uses ambient/rootful Docker and never creates/adopts/rebuilds an AgentEnvironment. Candidate success retires the legacy system unit only after exact readiness; failure restarts and proves the original exact system-service process, with double-failure recovery material retained.
+
 This ADR supersedes ADR-0013 only for installation/update provenance, layout, service-install ownership, release retention, rollback custody, and activation transaction semantics. ADR-0013 remains the current legacy application's bounded foreground/systemd lifecycle until migration. Machine fields are owned by [`contracts/`](../../contracts/README.md) and `config/launcher-protocol-v1.json`; this ADR does not duplicate them.
 
 ## Consequences
@@ -40,7 +42,7 @@ This ADR supersedes ADR-0013 only for installation/update provenance, layout, se
 
 - Release maintainers need offline-root/online-key custody and signed publication procedures before production release.
 - A bridge launcher is required when a channel's minimum protocol exceeds the installed protocol.
-- I1 proves contracts, packaging, and read-only discovery; I2 adds deterministic fresh install; I3 adds canonical update/automatic restoration through isolated injected fixtures. None migrates or touches the live stand. Production key/channel/artifact publication, real service/network/model mutation, reboot and physical voice acceptance remain separately gated.
+- I1 proves contracts/discovery, I2 fresh install, I3 canonical update, and I4 legacy adoption through isolated injected fixtures. No implementation evidence mutates the live stand. Production key/channel/artifact publication, real service/network/model mutation, reboot and physical voice acceptance remain separately gated.
 - Linux x86_64 NVIDIA/systemd is the first product platform. macOS runtime support remains unclaimed; install stops before mutation there.
 
 ## Alternatives considered

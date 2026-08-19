@@ -394,12 +394,18 @@ agent_environment:
     if (Object.keys(record).sort().join('\0') !== keys.sort().join('\0') || record.schema !== 'voice-agent.installation.v1'
         || !/^[0-9a-f]{32}$/.test(record.installation_id) || !Number.isSafeInteger(record.channel_sequence) || record.channel_sequence < 1
         || record.launcher_protocol !== core.LAUNCHER_PROTOCOL || record.release_id !== releaseId || record.healthy_release !== releaseId
-        || record.rollback_release !== null || record.version !== release.version || record.build_id !== release.build_id
+        || (record.rollback_release !== null && !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$/.test(record.rollback_release))
+        || record.version !== release.version || record.build_id !== release.build_id
         || record.artifact_sha256 !== release.artifact_sha256 || record.channel !== 'stable' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(record.installed_at)) {
       error('existing_install_requires_doctor', 'an existing installation differs or is partial; run voice-agent doctor');
     }
     const pointer = fs.lstatSync(layout.current);
     if (!pointer.isSymbolicLink() || fs.readlinkSync(layout.current) !== `releases/${releaseId}`) error('existing_install_requires_doctor', 'the selected release is ambiguous; run voice-agent doctor');
+    if (record.rollback_release !== null) {
+      const rollback = fs.lstatSync(layout.rollback);
+      if (!rollback.isSymbolicLink() || fs.readlinkSync(layout.rollback) !== `releases/${record.rollback_release}`) error('existing_install_requires_doctor', 'the recorded rollback release is ambiguous; run voice-agent doctor');
+      inspectManagedPath(path.join(layout.releases, record.rollback_release), uid, 0o500);
+    }
     const releaseRoot = path.join(layout.releases, releaseId);
     inspectManagedPath(releaseRoot, uid, 0o500);
     verifyExtractedTree(releaseRoot, manifest, manifestBytes, uid, true);
@@ -600,6 +606,14 @@ agent_environment:
       const reload = spawnSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8', timeout: 10000, env: { PATH: '/usr/bin:/bin' } });
       if (reload.status !== 0) error('user_systemd_unavailable', 'the user systemd manager could not load the generated unit');
     }
+    async enable({ unit }) {
+      const result = spawnSync('systemctl', ['--user', 'enable', unit], { encoding: 'utf8', timeout: 10000, env: { PATH: '/usr/bin:/bin' } });
+      if (result.status !== 0) error('service_enable_failed', 'the user service could not be enabled');
+    }
+    async isEnabled({ unit }) {
+      const result = spawnSync('systemctl', ['--user', 'is-enabled', unit], { encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin' } });
+      return result.status === 0;
+    }
     async enableAndStart({ unit }) {
       for (const args of [['--user', 'enable', unit], ['--user', 'reset-failed', unit], ['--user', 'start', unit]]) {
         const result = spawnSync('systemctl', args, { encoding: 'utf8', timeout: 10000, env: { PATH: '/usr/bin:/bin' } });
@@ -635,8 +649,8 @@ agent_environment:
 
   return {
     AGENT_CONFIG, FREE_SPACE_RESERVE, MINIMUM_VRAM, REQUIRED_COMPONENTS, SERVICE_UNIT, STARTUP_DEADLINE_MS,
-    UNIT_CONTRACT, UNIT_CONTRACT_SHA256, artifactPreflight, atomicWrite, defaultDependencies,
-    ensurePrivateDirectory, extractVerifiedArchive, installContractSchemaNames, installDirectories,
+    UNIT_CONTRACT, UNIT_CONTRACT_SHA256, artifactPreflight, atomicWrite, compatibilityPreflight, defaultDependencies,
+    ensurePrivateDirectory, extractVerifiedArchive, hostPreflight, installContractSchemaNames, installDirectories,
     installVoiceAgent, inspectManagedPath, layoutFor, readPrivateJson, renderUnit, syncDirectory,
     validateReadiness, verifyExtractedTree, writeJson,
   };

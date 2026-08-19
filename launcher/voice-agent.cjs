@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const LAUNCHER_VERSION = '0.3.0';
+const LAUNCHER_VERSION = '0.4.0';
 const LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';
@@ -436,6 +436,7 @@ function validateLegacyRelease(releaseRoot, legacyRoot, uid) {
     application_manifest: 'unsupported',
     immutable_inventory: 'verified',
     root: releaseRoot,
+    document,
   };
 }
 
@@ -467,6 +468,7 @@ function validateLegacyRunning(release, snapshot, options) {
   const runtime = snapshot.runtime;
   if (service.name !== SERVICE_NAME || service.fragment_path !== unitPath || service.active !== 'active'
       || !Number.isSafeInteger(service.main_pid) || service.main_pid <= 0 || service.main_pid !== process.pid
+      || typeof service.control_group !== 'string' || !service.control_group.startsWith('/') || process.control_group !== service.control_group
       || process.uid !== uid || process.cwd !== release.root || runtime.release_id !== release.release_id
       || runtime.build_id !== release.build_id) fail('legacy_runtime_mismatch', 'runtime identity differs from release custody');
   const releaseUnit = readOwnedRegular(path.join(release.root, 'ops', 'systemd', SERVICE_NAME), uid, null, 256 * 1024);
@@ -490,6 +492,10 @@ function validateLegacyRunning(release, snapshot, options) {
     && health.components.every((item) => requiredComponents.has(item.component)
       && item.liveness === 'alive' && item.readiness === 'ready' && item.compatible === true));
   if (!ready) fail('legacy_runtime_unready', 'running legacy release is not exactly ready');
+  const listener = snapshot.listener;
+  if (!listener || listener.host !== '127.0.0.1' || listener.port !== 8000 || listener.owner_uid !== uid || listener.owner !== 'service') {
+    fail('legacy_listener_mismatch', 'legacy loopback readiness listener is not owned by the service cgroup');
+  }
   return true;
 }
 
@@ -497,7 +503,8 @@ function dockerEvidence(snapshot, uid) {
   const docker = snapshot && snapshot.docker;
   const expected = `unix:///run/user/${uid}/docker.sock`;
   if (!docker) return { state: 'unavailable', endpoint_kind: 'none', ownership_verified: false };
-  if (docker.endpoint !== expected || docker.socket_uid !== uid || docker.socket_type !== 'socket' || docker.rootless !== true) {
+  if (docker.endpoint !== expected || docker.socket_uid !== uid || docker.socket_type !== 'socket'
+      || docker.rootless !== true || docker.daemon_identity_verified !== true || docker.explicit_host !== true) {
     return { state: 'invalid', endpoint_kind: 'rootless', ownership_verified: false };
   }
   return { state: 'available', endpoint_kind: 'rootless', ownership_verified: true };
@@ -577,11 +584,28 @@ function validateReleaseRecord(record) {
   return record;
 }
 
+function validateLegacyImportRecord(record) {
+  const keys = ['application_manifest', 'build_id', 'checked_at', 'immutable_inventory_sha256', 'legacy_release_id', 'readiness', 'release_id', 'release_metadata_sha256', 'schema', 'service_unit_sha256'];
+  exactKeys(record, keys, 'legacy_import_record_invalid');
+  if (record.schema !== 'voice-agent.legacy-import-release.v1' || record.release_id !== `legacy-${record.legacy_release_id}`
+      || !LEGACY_RELEASE_ID.test(record.legacy_release_id) || !BUILD_ID.test(record.build_id)
+      || ![record.immutable_inventory_sha256, record.release_metadata_sha256, record.service_unit_sha256].every((value) => SHA256.test(value))
+      || record.application_manifest !== 'unsupported' || !['ready', 'not_verified'].includes(record.readiness)) {
+    fail('legacy_import_record_invalid', 'legacy import release identity is invalid');
+  }
+  parseTime(record.checked_at, 'legacy_import_record_invalid');
+  return record;
+}
+
 function readCanonicalRelease(root, pointer, uid) {
   const releaseRoot = safePointer(root, pointer, RELEASE_ID, uid, 0o500);
   if (!releaseRoot) return null;
-  const record = validateReleaseRecord(JSON.parse(readOwnedRegular(path.join(releaseRoot, 'release-record.json'), uid, [0o400, 0o600], 256 * 1024).toString('utf8')));
+  const legacyRecord = path.join(releaseRoot, 'legacy-import-record.json');
+  const record = lstatExists(legacyRecord)
+    ? validateLegacyImportRecord(JSON.parse(readOwnedRegular(legacyRecord, uid, [0o400], 256 * 1024).toString('utf8')))
+    : validateReleaseRecord(JSON.parse(readOwnedRegular(path.join(releaseRoot, 'release-record.json'), uid, [0o400, 0o600], 256 * 1024).toString('utf8')));
   if (record.release_id !== path.basename(releaseRoot)) fail('release_record_invalid', 'release record directory differs');
+  if (record.schema === 'voice-agent.legacy-import-release.v1') return { ...record, version: null, state: 'verified_legacy' };
   return record;
 }
 
@@ -656,7 +680,7 @@ class SystemServiceProbe {
   }
 
   async inspectLegacy({ uid }) {
-    const result = spawnSync('systemctl', ['show', SERVICE_NAME, '--property=FragmentPath,LoadState,ActiveState,SubState,MainPID'], {
+    const result = spawnSync('systemctl', ['show', SERVICE_NAME, '--property=FragmentPath,LoadState,ActiveState,SubState,MainPID,ControlGroup'], {
       encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }, maxBuffer: 65536,
     });
     const values = {};
@@ -669,6 +693,7 @@ class SystemServiceProbe {
           pid, uid: fs.lstatSync(`/proc/${pid}`).uid, cwd: fs.readlinkSync(`/proc/${pid}/cwd`),
           executable: fs.readlinkSync(`/proc/${pid}/exe`),
           argv: fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').split('\0').filter(Boolean),
+          control_group: (fs.readFileSync(`/proc/${pid}/cgroup`, 'utf8').split('\n').find((line) => line.startsWith('0::')) || '').slice(3),
         };
       } catch { process = null; }
     }
@@ -677,14 +702,39 @@ class SystemServiceProbe {
     let docker = null;
     try {
       const metadata = fs.lstatSync(socketPath);
-      const info = spawnSync('docker', ['--host', `unix://${socketPath}`, 'info', '--format', '{{json .SecurityOptions}}'], {
-        encoding: 'utf8', timeout: 3000, env: { PATH: '/usr/bin:/bin', HOME: '/nonexistent', DOCKER_CONFIG: '/nonexistent' }, maxBuffer: 65536,
+      const info = spawnSync('docker', ['--host', `unix://${socketPath}`, 'info', '--format', '{{json .SecurityOptions}}\n{{json .DockerRootDir}}'], {
+        encoding: 'utf8', timeout: 3000, env: { PATH: '/usr/bin:/bin', HOME: '/nonexistent', DOCKER_CONFIG: '/nonexistent', DOCKER_HOST: '' }, maxBuffer: 65536,
       });
-      docker = { endpoint: `unix://${socketPath}`, socket_uid: metadata.uid, socket_type: metadata.isSocket() ? 'socket' : 'other', rootless: info.status === 0 && info.stdout.includes('rootless') };
+      const lines = info.status === 0 ? info.stdout.trim().split('\n') : [];
+      let security = null; let dockerRoot = null; let rootOwned = false;
+      try { security = JSON.parse(lines[0]); dockerRoot = JSON.parse(lines[1]); } catch {}
+      try {
+        noSymlinkComponents(dockerRoot);
+        const rootMetadata = fs.lstatSync(dockerRoot);
+        rootOwned = rootMetadata.isDirectory() && rootMetadata.uid === uid && dockerRoot.startsWith(`${os.homedir()}/`);
+      } catch {}
+      docker = {
+        endpoint: `unix://${socketPath}`, socket_uid: metadata.uid, socket_type: metadata.isSocket() ? 'socket' : 'other',
+        rootless: Array.isArray(security) && security.some((item) => String(item).includes('rootless')),
+        daemon_identity_verified: rootOwned, explicit_host: true,
+      };
     } catch { docker = null; }
+    const servicePids = new Set();
+    function collectPids(directory) {
+      try {
+        for (const line of fs.readFileSync(path.join(directory, 'cgroup.procs'), 'utf8').split('\n')) if (/^[1-9][0-9]*$/.test(line)) servicePids.add(Number(line));
+        for (const name of fs.readdirSync(directory)) { const child = path.join(directory, name); if (fs.lstatSync(child).isDirectory()) collectPids(child); }
+      } catch {}
+    }
+    if (typeof values.ControlGroup === 'string' && values.ControlGroup.startsWith('/')) collectPids(path.join('/sys/fs/cgroup', values.ControlGroup));
+    const socket = spawnSync('ss', ['-H', '-ltnp', 'sport = :8000'], { encoding: 'utf8', timeout: 3000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } });
+    const loopback = socket.status === 0 && socket.stdout.split('\n').find((line) => /127\.0\.0\.1:8000\b/.test(line));
+    const listenerPid = loopback && /pid=([1-9][0-9]*)/.exec(loopback);
+    const listenerOwned = Boolean(listenerPid && servicePids.has(Number(listenerPid[1])));
     return {
-      service: { name: SERVICE_NAME, fragment_path: values.FragmentPath || null, load: values.LoadState || 'unknown', active: values.ActiveState || 'unknown', substate: values.SubState || 'unknown', main_pid: pid },
+      service: { name: SERVICE_NAME, fragment_path: values.FragmentPath || null, load: values.LoadState || 'unknown', active: values.ActiveState || 'unknown', substate: values.SubState || 'unknown', main_pid: pid, control_group: values.ControlGroup || null },
       process, runtime, docker,
+      listener: { host: loopback ? '127.0.0.1' : null, port: loopback ? 8000 : null, owner_uid: listenerOwned ? uid : null, owner: listenerOwned ? 'service' : 'unknown' },
     };
   }
 
@@ -853,11 +903,21 @@ function loadUpdater() {
   return embedded.exports(module.exports, installer);
 }
 
+function loadAdopter() {
+  const installer = loadInstaller();
+  const updater = loadUpdater();
+  if (!require('node:sea').isSea()) return require('./adopt.cjs')(module.exports, installer, updater);
+  const source = require('node:sea').getAsset('adopt.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports, installer, updater);
+}
+
 async function main(argv = process.argv.slice(2)) {
   try {
     const arguments_ = parseCli(argv);
     if (arguments_.command === 'install') {
-      await loadInstaller().installVoiceAgent();
+      await loadAdopter().installVoiceAgent();
       return 0;
     }
     if (arguments_.command === 'update') {
@@ -869,7 +929,7 @@ async function main(argv = process.argv.slice(2)) {
     return 0;
   } catch (error) {
     const code = error instanceof LauncherError ? error.code : 'launcher_failed';
-    const actionable = (argv[0] === 'install' && ['host_unsupported', 'linger_privilege_unavailable', 'release_authority_unprovisioned'].includes(code))
+    const actionable = (argv[0] === 'install' && ['host_unsupported', 'linger_privilege_unavailable', 'release_authority_unprovisioned', 'update_failed_safe', 'update_failed_needs_repair', 'canonical_config_conflict', 'legacy_split_not_eligible'].includes(code))
       || (argv[0] === 'update' && ['update_failed_safe', 'update_failed_needs_repair', 'update_in_progress', 'migration_requires_decision', 'insufficient_space'].includes(code));
     process.stderr.write(actionable ? `${code}: ${error.message}\n` : `${code}: command failed safely; no healthy installation was claimed\n`);
     return 2;
@@ -878,10 +938,10 @@ async function main(argv = process.argv.slice(2)) {
 
 module.exports = {
   LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError, SystemServiceProbe,
-  canonicalJson, collectDoctor, collectStatus, discoverLegacy, humanDoctor, humanStatus, readOwnedRegular,
-  legacyReleaseId, legacyTreeDigest, loadInstaller, loadUpdater, main, parseCanonicalJson, parseCli, signCanonicalFixture,
-  validateArchiveEntries, validateArtifactManifest, validateChannel, validateReleaseRecord,
-  verifyPlatformArtifact, verifySignedChannel,
+  canonicalJson, collectDoctor, collectStatus, discoverLegacy, dockerEvidence, humanDoctor, humanStatus, readOwnedRegular,
+  legacyReleaseId, legacyTreeDigest, loadAdopter, loadInstaller, loadUpdater, main, noSymlinkComponents, ownedDirectory, parseCanonicalJson, parseCli,
+  safePointer, signCanonicalFixture, validateArchiveEntries, validateArtifactManifest, validateChannel, validateLegacyImportRecord,
+  validateLegacyRelease, validateLegacyRunning, validateReleaseRecord, verifyPlatformArtifact, verifySignedChannel,
 };
 
 if (require.main === module) main().then((status) => { process.exitCode = status; });
