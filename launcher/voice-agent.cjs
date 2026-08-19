@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const LAUNCHER_VERSION = '0.2.0';
+const LAUNCHER_VERSION = '0.3.0';
 const LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';
@@ -585,6 +585,16 @@ function readCanonicalRelease(root, pointer, uid) {
   return record;
 }
 
+function readCanonicalReleaseById(root, releaseId, uid) {
+  if (!RELEASE_ID.test(releaseId)) fail('release_record_invalid', 'running release identity is invalid');
+  const releaseRoot = path.join(root, 'releases', releaseId);
+  if (path.dirname(releaseRoot) !== path.join(root, 'releases')) fail('release_record_invalid', 'running release escaped its canonical root');
+  ownedDirectory(releaseRoot, uid, 0o500);
+  const record = validateReleaseRecord(JSON.parse(readOwnedRegular(path.join(releaseRoot, 'release-record.json'), uid, [0o400], 256 * 1024).toString('utf8')));
+  if (record.release_id !== releaseId) fail('release_record_invalid', 'running release record differs');
+  return record;
+}
+
 function canonicalState(installRoot, uid) {
   if (!lstatExists(installRoot)) return { state: 'absent', selected: null, rollback: null, transaction: { state: 'none', phase: null }, agent_environment: { state: 'unconfigured', reason_code: 'not_configured' } };
   try {
@@ -719,7 +729,7 @@ function identity(record, source, ready = false) {
 async function collectStatus(options = {}) {
   const uid = options.expectedUid ?? process.geteuid();
   const home = options.home ?? os.homedir();
-  const installRoot = options.installRoot ?? path.join(home, '.local', 'share', 'voice-agent');
+  const installRoot = options.installRoot ?? path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'voice-agent');
   const legacyRoot = options.legacyRoot ?? path.join(home, '.local', 'share', 'voice-agent-v2');
   const serviceUnitPath = options.serviceUnitPath ?? path.join('/etc', 'systemd', 'system', SERVICE_NAME);
   const serviceProbe = options.serviceProbe ?? new SystemServiceProbe();
@@ -730,14 +740,17 @@ async function collectStatus(options = {}) {
   });
   let canonicalSnapshot = null;
   let canonicalReady = false;
+  let canonicalRunning = null;
   if (canonical.selected && typeof serviceProbe.inspectCanonical === 'function') {
     try {
       canonicalSnapshot = await serviceProbe.inspectCanonical({ uid, release: canonical.selected });
-      canonicalReady = canonicalSnapshotReady(canonicalSnapshot, canonical.selected, uid);
-    } catch { canonicalSnapshot = null; }
+      const runtimeId = canonicalSnapshot && canonicalSnapshot.runtime && canonicalSnapshot.runtime.release_id;
+      if (typeof runtimeId === 'string') canonicalRunning = readCanonicalReleaseById(installRoot, runtimeId, uid);
+      canonicalReady = Boolean(canonicalRunning && canonicalSnapshotReady(canonicalSnapshot, canonicalRunning, uid));
+    } catch { canonicalSnapshot = null; canonicalRunning = null; }
   }
   let selected = identity(canonical.selected, 'canonical');
-  let running = canonicalReady ? identity(canonical.selected, 'canonical_service', true) : identity(null, 'service');
+  let running = canonicalReady ? identity(canonicalRunning, 'canonical_service', true) : identity(null, 'service');
   let rollback = canonical.rollback ? { state: 'verified', release_id: canonical.rollback.release_id, version: canonical.rollback.version, build_id: canonical.rollback.build_id } : { state: 'missing', release_id: null, version: null, build_id: null };
   let installationState = canonical.state;
   if (!canonical.selected && legacy.selected) {
@@ -762,7 +775,7 @@ async function collectStatus(options = {}) {
     rollback,
     transaction: canonical.transaction,
     service: {
-      state: canonicalReady || legacy.running ? 'active' : canonicalSnapshot ? 'inactive' : legacy.service_custody === 'unavailable' ? 'unavailable' : 'inactive',
+      state: canonicalReady || legacy.running || (canonicalSnapshot && canonicalSnapshot.service_active) ? 'active' : canonicalSnapshot ? 'inactive' : legacy.service_custody === 'unavailable' ? 'unavailable' : 'inactive',
       enabled: canonicalSnapshot ? Boolean(canonicalSnapshot.service_enabled) : null,
       main_pid_present: Boolean(canonicalReady || legacy.running),
       custody: canonicalReady ? 'verified' : legacy.service_custody,
@@ -812,11 +825,12 @@ function humanDoctor(doctor) {
 }
 
 function parseCli(argv) {
-  if (argv.length < 1 || !['install', 'status', 'doctor'].includes(argv[0])) fail('usage', 'expected install, status, or doctor');
-  const result = { command: argv[0], json: false };
+  if (argv.length < 1 || !['install', 'update', 'status', 'doctor'].includes(argv[0])) fail('usage', 'expected install, update, status, or doctor');
+  const result = { command: argv[0], json: false, offline: false };
   for (let index = 1; index < argv.length; index += 1) {
     const item = argv[index];
-    if (item === '--json' && result.command !== 'install') result.json = true;
+    if (item === '--json' && ['status', 'doctor'].includes(result.command)) result.json = true;
+    else if (item === '--offline' && result.command === 'update') result.offline = true;
     else fail('usage', 'unknown option; production installation roots are fixed by XDG');
   }
   return result;
@@ -830,6 +844,15 @@ function loadInstaller() {
   return embedded.exports(module.exports);
 }
 
+function loadUpdater() {
+  const installer = loadInstaller();
+  if (!require('node:sea').isSea()) return require('./update.cjs')(module.exports, installer);
+  const source = require('node:sea').getAsset('update.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports, installer);
+}
+
 async function main(argv = process.argv.slice(2)) {
   try {
     const arguments_ = parseCli(argv);
@@ -837,21 +860,26 @@ async function main(argv = process.argv.slice(2)) {
       await loadInstaller().installVoiceAgent();
       return 0;
     }
+    if (arguments_.command === 'update') {
+      await loadUpdater().updateVoiceAgent({ offline: arguments_.offline });
+      return 0;
+    }
     const document = arguments_.command === 'status' ? await collectStatus() : await collectDoctor();
     process.stdout.write(arguments_.json ? `${JSON.stringify(document, null, 2)}\n` : `${arguments_.command === 'status' ? humanStatus(document) : humanDoctor(document)}\n`);
     return 0;
   } catch (error) {
     const code = error instanceof LauncherError ? error.code : 'launcher_failed';
-    const actionable = argv[0] === 'install' && ['host_unsupported', 'linger_privilege_unavailable', 'release_authority_unprovisioned'].includes(code);
-    process.stderr.write(actionable ? `${error.message}\n` : `${code}: command failed safely; no healthy installation was claimed\n`);
+    const actionable = (argv[0] === 'install' && ['host_unsupported', 'linger_privilege_unavailable', 'release_authority_unprovisioned'].includes(code))
+      || (argv[0] === 'update' && ['update_failed_safe', 'update_failed_needs_repair', 'update_in_progress', 'migration_requires_decision', 'insufficient_space'].includes(code));
+    process.stderr.write(actionable ? `${code}: ${error.message}\n` : `${code}: command failed safely; no healthy installation was claimed\n`);
     return 2;
   }
 }
 
 module.exports = {
   LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError, SystemServiceProbe,
-  canonicalJson, collectDoctor, collectStatus, discoverLegacy, humanDoctor, humanStatus,
-  legacyReleaseId, legacyTreeDigest, loadInstaller, main, parseCanonicalJson, parseCli, signCanonicalFixture,
+  canonicalJson, collectDoctor, collectStatus, discoverLegacy, humanDoctor, humanStatus, readOwnedRegular,
+  legacyReleaseId, legacyTreeDigest, loadInstaller, loadUpdater, main, parseCanonicalJson, parseCli, signCanonicalFixture,
   validateArchiveEntries, validateArtifactManifest, validateChannel, validateReleaseRecord,
   verifyPlatformArtifact, verifySignedChannel,
 };

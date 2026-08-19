@@ -265,7 +265,7 @@ test('partial/foreign/symlinked state routes to doctor and preserves pre-existin
 
 test('production CLI accepts no arbitrary install root and install output/records leak no secret or content bytes', async (context) => {
   assert.throws(() => launcher.parseCli(['install', '--install-root', '/tmp/x']));
-  assert.throws(() => launcher.parseCli(['update']));
+  assert.deepEqual(launcher.parseCli(['update']), { command: 'update', json: false, offline: false });
   assert.throws(() => launcher.parseCli(['rollback']));
   const value = makeHarness(); cleanup(context, value);
   await install(value);
