@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/platform-artifact-manifest.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "build_id", "platform", "launcher_protocol", "application_protocol", "config_schema", "data_schema", "service_template_sha256", "entries"],
+  "properties": {
+    "schema": {"const": "voice-agent.platform-artifact-manifest.v1"},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$"},
+    "build_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "platform": {"const": "linux-x86_64-nvidia"},
+    "launcher_protocol": {"$ref": "#/$defs/range"},
+    "application_protocol": {"$ref": "#/$defs/range"},
+    "config_schema": {"$ref": "#/$defs/range"},
+    "data_schema": {"$ref": "#/$defs/range"},
+    "service_template_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "entries": {
+      "type": "array", "minItems": 1, "maxItems": 20000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "type", "mode", "size", "sha256", "target"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "type": {"enum": ["directory", "file", "symlink", "hardlink"]},
+          "mode": {"type": "string", "pattern": "^0[0-7]{3}$"},
+          "size": {"type": "integer", "minimum": 0},
+          "sha256": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
+          "target": {"oneOf": [{"type": "string"}, {"type": "null"}]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "range": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimum", "maximum"],
+      "properties": {"minimum": {"type": "integer", "minimum": 1}, "maximum": {"type": "integer", "minimum": 1}}
+    }
+  }
+}

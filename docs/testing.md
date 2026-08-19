@@ -18,17 +18,21 @@ Then run the only PR command:
 
 `./verify` owns a 90-second monotonic deadline and runs these phases in order:
 
-1. the sole historical E2.2/E2.3 operation custody/failure matrix under IP-network denial, with its own 8-second bound;
-2. the explicit current Python behavior manifest under IP-network denial, including strict V2/no-selector and V1 one-way-upgrade tests plus deterministic fake-Docker/network/transport/disposable-root evidence for locking, lazy single creation, exact reuse/start, ordinary binary/range/hash/atomic-file semantics, logical-cwd persistence/fallback, one credential declaration and private custody, create/per-exec rotation, no ambient inheritance, normal/disabled network transcripts, HTTP/download/upload/multipart/remote-Git transcripts, exact binary controller streams, acknowledgement/unknown/no-retry, display-only redaction, opaque background receipts, bounded poll/log/wait/write/kill, rootfs+fresh-`/proc` PID-reuse defence, foreground/background cancellation separation, typed mount custody/RO-RW/spec drift, precise survival truth, stale/duplicate/uncertain failure, exec-only routing, at-most-once receipts, resources, selector-free confirmation, atomic rebuild selection/retained nonselection, conflict disclosure, exact lifecycle reinspection, E4.1 frozen outcome/refinement/multi-source/citation/redirect/truncation/cache/error/persistence/hostile-authority/containment/raw-byte-redaction evidence, E4.2 fake-Telegram atomic save-before-send, exact document/network hashes, fixed target/credential authority, text/caption bounds, acknowledged/failed/unknown/no-auto-resend, persistence/reconciliation and explicit restart-resend evidence, plus E4.3 trusted later resolution, zero-network local summary, expected-revision/hash atomic update/conflict, explicit fresh-receipt refresh, current-byte resend, closed admission, accepted synthetic RW/credential egress, denied unmounted-host/lifecycle/selection authority, raw-byte redaction and clean-next-voice evidence (the historical matrix is not selected again);
-3. the bounded local-socket readiness/VAD phase;
-4. the installed SDK, capability, and active-composition contract;
-5. the complete Vitest surface once;
-6. TypeScript typecheck once, then one production and one review-fixture Vite build without repeated typecheck;
-7. a short production-entry Firefox smoke through an actual task-owned local LiveKit.
+1. the deterministic zero-secret tracer;
+2. the Node.js 26 signed-release/launcher phase: canonical Ed25519 channel freshness and sequence, artifact/manifest/platform/protocol binding, unsafe archive denial, exact legacy selected/running custody, missing rollback, invalid/unowned/unrelated rejection, content-free zero-mutation status/doctor, and two byte-identical executable SEA builds that run without another host runtime;
+3. the sole historical E2.2/E2.3 operation custody/failure matrix under IP-network denial, with its own 8-second bound;
+4. the explicit current Python behavior manifest under IP-network denial, including strict V2/no-selector and V1 one-way-upgrade tests plus deterministic fake-Docker/network/transport/disposable-root evidence for locking, lazy single creation, exact reuse/start, ordinary binary/range/hash/atomic-file semantics, logical-cwd persistence/fallback, one credential declaration and private custody, create/per-exec rotation, no ambient inheritance, normal/disabled network transcripts, HTTP/download/upload/multipart/remote-Git transcripts, exact binary controller streams, acknowledgement/unknown/no-retry, display-only redaction, opaque background receipts, bounded poll/log/wait/write/kill, rootfs+fresh-`/proc` PID-reuse defence, foreground/background cancellation separation, typed mount custody/RO-RW/spec drift, precise survival truth, stale/duplicate/uncertain failure, exec-only routing, at-most-once receipts, resources, selector-free confirmation, atomic rebuild selection/retained nonselection, conflict disclosure, exact lifecycle reinspection, E4.1 frozen outcome/refinement/multi-source/citation/redirect/truncation/cache/error/persistence/hostile-authority/containment/raw-byte-redaction evidence, E4.2 fake-Telegram atomic save-before-send, exact document/network hashes, fixed target/credential authority, text/caption bounds, acknowledged/failed/unknown/no-auto-resend, persistence/reconciliation and explicit restart-resend evidence, plus E4.3 trusted later resolution, zero-network local summary, expected-revision/hash atomic update/conflict, explicit fresh-receipt refresh, current-byte resend, closed admission, accepted synthetic RW/credential egress, denied unmounted-host/lifecycle/selection authority, raw-byte redaction and clean-next-voice evidence (the historical matrix is not selected again);
+5. the bounded local-socket readiness/VAD phase;
+6. the installed SDK, capability, and active-composition contract;
+7. the complete Vitest surface once;
+8. TypeScript typecheck once, then one production and one review-fixture Vite build without repeated typecheck;
+9. a short production-entry Firefox smoke through an actual task-owned local LiveKit.
 
 Every phase is a separate process group. The owner sends `TERM`, waits at most 10 seconds, then sends `KILL`; detached children are found by a per-run environment nonce. A leaked process, TCP listener, or private artifact makes the gate fail even if final cleanup succeeds. Python skips also fail. Once its task-owned LiveKit and real Firefox are ready, the functional browser smoke is bounded to 15 seconds and injects regressions for ReviewStand at the production URL, an invalid capability, missing current-generation PCM, and stale request/media correlation. Cold Firefox/GeckoDriver provisioning remains inside the canonical 90-second deadline rather than weakening the behavior budget; browser cleanup has its own 10-second maximum and leak assertion.
 
 `./verify --tracer-only` remains the narrow immutable-release recovery check. It does not run the PR suite and requires only Python 3.11+.
+
+The launcher phase receives no production key, network, Docker daemon, service mutation or live install root. It uses only a committed public fixture key/pre-signed bytes, disposable roots, an injected service probe and Node.js built-ins. GitHub and the canonical local toolchain use Node.js 26 because direct SEA construction is part of the behavior contract; application/browser compatibility remains covered by the same phase order.
 
 ### Direct pull-request path
 
@@ -41,6 +45,16 @@ Run `./verify` locally once, push the feature branch, then open or update the pu
 ```
 
 This command has a 600-second outer deadline and owns the longer mute/unmute, reconnect, diagnostics-download, production/review isolation, detached guardian, and repeated interruption scenarios. It uses deterministic inference over actual Firefox and local LiveKit; it does not claim hardware acceptance.
+
+## Installation/update platform tiers
+
+The launcher deterministic phase is not install/update evidence. Later installation slices require separate authorized tiers:
+
+- **Disposable Linux install root/user service:** exact signed artifact install, private XDG custody, user systemd/linger, exact readiness and no shared/project service mutation.
+- **Transaction interruption/VM power loss:** kill or reboot at every durable journal, download, extraction, migration, stop, pointer, readiness, restoration, GC and launcher-replacement phase; next invocation converges to candidate healthy or prior healthy.
+- **Legacy migration:** exact current selected/running split fixture and then one separately authorized live migration only after automatic restoration is complete; no manual pointer repair.
+- **Upgrade/downgrade:** every supported N-1→N, candidate failure→exact N-1, schema migration/restore, expired/cached/offline metadata and bridge-launcher floor.
+- **Physical/reboot:** normal boot, real voice after install and after rollback, full local stack/resources and licensing approval. Deterministic signature/status evidence proves none of these.
 
 ## E2.4–E4.3 platform and production-evidence tiers
 
@@ -118,5 +132,8 @@ The operator procedure remains in [`evidence/silero-kseniya-48k-private-evaluati
 | Background receipt leaks a PID, stale/tampered/PID-reused identity signals, foreground cancellation kills unrelated work, mount custody drifts silently, or rebuild selects before validation | `tests.test_agent_environment` plus disposable real-process `tests.test_agent_environment_processes` in the hermetic manifest |
 | Proposal corpus/order/schema drift, unsafe envelope parsing, mutable thresholds, test capability leakage, or evidence relabelling | `tests.test_tool_proposals_benchmark` in the hermetic behavior manifest; exact-model outcome remains a separate canonical-host fact |
 | Corrupt/incompatible prior release moves pointers | operations rollback owners |
+| Forged/expired/sequence-rollback channel or artifact size/hash/platform/protocol mismatch is accepted | Node.js launcher contract phase in `./verify` |
+| Archive traversal, absolute/duplicate/device/escaping-link/undeclared output is admitted | platform-manifest/archive index cases in the launcher phase |
+| Status/doctor writes, infers health from a pointer, hides selected-new/running-old, adopts an unowned release, or exposes content/path/argv | disposable legacy/status/doctor zero-mutation and privacy cases in the launcher phase |
 | Gateway dies while adapter descendant survives | real adapter parent-death and startup descendant cleanup owners |
 | Alive nonresponsive LiveKit/LFM remains ready | bounded local-socket Slice 9 and backend-readiness owners |

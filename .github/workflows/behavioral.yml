@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-node@v4
         timeout-minutes: 1
         with:
-          node-version: "22"
+          node-version: "26"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Restore pinned test-runtime cache
@@ -33,7 +33,7 @@ jobs:
         timeout-minutes: 1
         with:
           path: ~/.cache/voice-agent-v2/slice-6
-          key: pr-test-runtime-${{ runner.os }}-py312-node22-${{ hashFiles('requirements-slice6.lock', 'web/package-lock.json', 'setup-test-runtime') }}
+          key: pr-test-runtime-${{ runner.os }}-py312-node26-${{ hashFiles('requirements-slice6.lock', 'web/package-lock.json', 'setup-test-runtime') }}
       - name: Install bounded test dependencies without running checks or builds
         timeout-minutes: 2
         run: ./setup-test-runtime

@@ -1,5 +1,12 @@
 # Domain glossary
 
+- **Voice Agent launcher** — The separately versioned `voice-agent` installation manager. It owns signed release interpretation and the later installation/update transaction, but contains no voice runtime, credentials, mutable product checkout, or updater daemon.
+- **Signed channel** — The canonical detached-Ed25519 `voice-agent.channel.v1` document that authorizes only stable-channel platform artifacts within a monotonic sequence and expiry window.
+- **Platform artifact manifest** — The closed `voice-agent.platform-artifact-manifest.v1` inventory for one immutable version/build/platform payload, including every permitted archive path, type, mode, size, hash, internal link, and protocol/schema range.
+- **Release record** — The stable launcher-owned `voice-agent.release-record.v1` receipt that binds an installed immutable release to its signed artifact/manifest/channel identity and readiness custody without requiring later launchers to parse every historical application manifest.
+- **Legacy discovery** — Read-only proof of a historical installation's canonical root, immutable inventory, unit, exact service process/runtime identity, readiness, and explicit rootless Docker endpoint. Discovery grants no mutation or adoption by itself.
+- **Selected release** — The immutable release named by the canonical installation pointer; selection alone is never readiness or proof of what the service is running.
+- **Running release** — The release proven by service MainPID/process and runtime release/build evidence; a selected-new/running-old split remains explicit and the exact ready running release retains rollback custody.
 - **Agent response** — The assistant content produced for one voice turn, including response text and synthesized speech.
 - **Agent configuration** — The strict restart-pinned `voice-agent.config.v2` installation configuration. It enables one bounded AgentRun path and contains no selectable identity, execution backend, raw Docker arguments, or task override. Historical V1 input is readable only by the explicit one-way upgrade.
 - **AgentRun** — One versioned natural-request decision loop owned by the full realtime identity and cancellation token. It uses only the exact pinned local LFM, bounded decisions/time/output, controller-owned call IDs, and one final answer. Active v4 adds revisioned later-artifact operations to v3's saved-report delivery and v2's receipt-bound Web citations; v1 is the historical pre-research shape.

@@ -105,6 +105,13 @@ def main() -> int:
             print("RESULT: PASS (tracer-only)")
             return 0
 
+        owner.run(
+            "signed release and read-only launcher behaviors",
+            [str(ROOT / "launcher/test/run"), str(ROOT / "launcher/test/launcher.test.cjs")],
+            cwd=ROOT,
+            environment=environment,
+            deadline=deadline,
+        )
         python = require_executable(
             runtime_python,
             "test runtime is missing; run ./setup-test-runtime",

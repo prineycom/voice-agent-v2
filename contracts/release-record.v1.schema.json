@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/release-record.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "release_id", "version", "build_id", "platform", "channel", "channel_sequence", "artifact_sha256", "artifact_bytes", "manifest_sha256", "launcher_protocol", "application_protocol", "data_schema", "service_template_sha256", "verified_at", "readiness"],
+  "properties": {
+    "schema": {"const": "voice-agent.release-record.v1"},
+    "release_id": {"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"},
+    "version": {"type": "string"}, "build_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "platform": {"const": "linux-x86_64-nvidia"}, "channel": {"const": "stable"},
+    "channel_sequence": {"type": "integer", "minimum": 1},
+    "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "artifact_bytes": {"type": "integer", "minimum": 1},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "launcher_protocol": {"const": 1},
+    "application_protocol": {"$ref": "#/$defs/range"}, "data_schema": {"$ref": "#/$defs/range"},
+    "service_template_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verified_at": {"type": "string"},
+    "readiness": {
+      "type": "object", "additionalProperties": false, "required": ["state", "checked_at"],
+      "properties": {"state": {"enum": ["ready", "not_verified"]}, "checked_at": {"oneOf": [{"type": "string"}, {"type": "null"}]}}
+    }
+  },
+  "$defs": {"range": {"type": "object", "additionalProperties": false, "required": ["minimum", "maximum"], "properties": {"minimum": {"type": "integer", "minimum": 1}, "maximum": {"type": "integer", "minimum": 1}}}}
+}
