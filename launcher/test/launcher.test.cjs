@@ -99,13 +99,14 @@ function legacyFixture() {
   fs.symlinkSync('../python-real', expectedPythonPath);
   const uid = process.geteuid();
   const snapshot = {
-    service: { name: 'voice-agent-v2.service', fragment_path: serviceUnitPath, load: 'loaded', active: 'active', substate: 'running', main_pid: 4242 },
-    process: { pid: 4242, uid, cwd: running.release, executable: fs.realpathSync(expectedPythonPath), argv: [expectedPythonPath, '-B', path.join(running.release, 'scripts', 'run_slice6.py')] },
+    service: { name: 'voice-agent-v2.service', fragment_path: serviceUnitPath, load: 'loaded', active: 'active', substate: 'running', main_pid: 4242, control_group: '/system.slice/voice-agent-v2.service' },
+    process: { pid: 4242, uid, cwd: running.release, executable: fs.realpathSync(expectedPythonPath), argv: [expectedPythonPath, '-B', path.join(running.release, 'scripts', 'run_slice6.py')], control_group: '/system.slice/voice-agent-v2.service' },
     runtime: {
       release_id: running.document.release_id, build_id: running.document.build_id, accepting: true,
       health: { overall_readiness: 'ready', components: ['livekit', 'controller', 'stt', 'selected_llm', 'tts'].map((component) => ({ component, liveness: 'alive', readiness: 'ready', compatible: true })) },
     },
-    docker: { endpoint: `unix:///run/user/${uid}/docker.sock`, socket_uid: uid, socket_type: 'socket', rootless: true },
+    docker: { endpoint: `unix:///run/user/${uid}/docker.sock`, socket_uid: uid, socket_type: 'socket', rootless: true, daemon_identity_verified: true, explicit_host: true },
+    listener: { host: '127.0.0.1', port: 8000, owner_uid: uid, owner: 'service' },
   };
   const serviceProbe = { inspectLegacy: async () => structuredClone(snapshot) };
   return { parent, legacyRoot, installRoot, serviceUnitPath, expectedPythonPath, uid, snapshot, serviceProbe, selected, running };
@@ -251,7 +252,8 @@ test('Node 26 SEA packaging is deterministic and executable without another host
 test('all launcher schemas, protocol, public keys, and signed fixtures are bounded public material', () => {
   for (const name of [
     'release-channel.v1.schema.json', 'platform-artifact-manifest.v1.schema.json', 'release-record.v1.schema.json',
-    'install-transaction.v1.schema.json', 'update-transaction.v1.schema.json', 'config-migrations.v1.schema.json', 'installation.v1.schema.json',
+    'install-transaction.v1.schema.json', 'update-transaction.v1.schema.json', 'legacy-adoption.v1.schema.json', 'legacy-import-release.v1.schema.json',
+    'legacy-config-migration.v1.schema.json', 'docker-endpoint.v1.schema.json', 'config-migrations.v1.schema.json', 'installation.v1.schema.json',
     'launcher-status.v1.schema.json', 'launcher-doctor.v1.schema.json', 'legacy-discovery.v1.schema.json',
   ]) JSON.parse(fs.readFileSync(path.join(ROOT, 'contracts', name), 'utf8'));
   const protocol = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'launcher-protocol-v1.json'), 'utf8'));

@@ -12,7 +12,7 @@ mkdir -p "$(dirname -- "$OUTPUT")"
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voice-agent-sea.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 cat > "$TEMP/sea.json" <<EOF
-{"main":"$ROOT/launcher/voice-agent.cjs","output":"$OUTPUT","disableExperimentalSEAWarning":true,"useCodeCache":false,"useSnapshot":false,"assets":{"install.cjs":"$ROOT/launcher/install.cjs","update.cjs":"$ROOT/launcher/update.cjs"}}
+{"main":"$ROOT/launcher/voice-agent.cjs","output":"$OUTPUT","disableExperimentalSEAWarning":true,"useCodeCache":false,"useSnapshot":false,"assets":{"install.cjs":"$ROOT/launcher/install.cjs","update.cjs":"$ROOT/launcher/update.cjs","adopt.cjs":"$ROOT/launcher/adopt.cjs"}}
 EOF
 "$NODE" --build-sea="$TEMP/sea.json"
 chmod 0755 "$OUTPUT"

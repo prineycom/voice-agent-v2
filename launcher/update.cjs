@@ -112,6 +112,16 @@ module.exports = function createUpdater(core, installer) {
     if (typeof id !== 'string' || !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$/.test(id)) error('release_record_invalid', 'release identity is invalid');
     const root = path.join(layout.releases, id);
     installer.inspectManagedPath(root, layout.identity.uid, 0o500);
+    const legacyPath = path.join(root, 'legacy-import-record.json');
+    if (exists(legacyPath)) {
+      const record = core.validateLegacyImportRecord(JSON.parse(core.readOwnedRegular(legacyPath, layout.identity.uid, [0o400], 256 * 1024).toString('utf8')));
+      if (record.release_id !== id || exists(path.join(root, 'payload', 'release.json'))
+          || core.legacyTreeDigest(path.join(root, 'payload'), layout.identity.uid) !== record.immutable_inventory_sha256
+          || digest(core.readOwnedRegular(path.join(root, 'payload', 'ops', 'systemd', 'voice-agent-v2.service'), layout.identity.uid, null, 256 * 1024)) !== record.service_unit_sha256) {
+        error('legacy_import_record_invalid', 'imported legacy release differs from its custody record');
+      }
+      return { id, root, record: { ...record, artifact_bytes: 0 }, manifest: null, manifestBytes: null, kind: 'legacy_import' };
+    }
     const recordPath = path.join(root, 'release-record.json');
     const record = core.validateReleaseRecord(JSON.parse(core.readOwnedRegular(recordPath, layout.identity.uid, [0o400], 256 * 1024).toString('utf8')));
     if (record.release_id !== id) error('release_record_invalid', 'release record identity differs from its directory');
@@ -121,7 +131,7 @@ module.exports = function createUpdater(core, installer) {
     if (manifest.version !== record.version || manifest.build_id !== record.build_id || manifest.platform !== record.platform
       || manifest.service_template_sha256 !== record.service_template_sha256) error('release_record_invalid', 'release and manifest identity differ');
     installer.verifyExtractedTree(root, manifest, manifestBytes, layout.identity.uid, true);
-    return { id, root, record, manifest, manifestBytes };
+    return { id, root, record, manifest, manifestBytes, kind: 'signed_artifact' };
   }
 
   function atomicPointer(layout, filename, id, transactionId) {

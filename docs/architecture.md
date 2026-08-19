@@ -276,7 +276,7 @@ The systemd unit starts only loopback-local application processes and changes no
 
 ### 6.7 Launcher-owned installation and update boundary
 
-The launcher foundation establishes release authority, self-contained packaging, read-only status/doctor, and legacy discovery. Installation evolution I2 adds `voice-agent install` for a pristine Linux `x86_64` systemd/NVIDIA host; I3 adds the canonical `voice-agent update` transaction for that completed installation. Explicit rollback, general repair, legacy adoption, AgentEnvironment migration, uninstall, launcher self-replacement, macOS activation, arbitrary production roots, and production publication remain absent.
+The launcher foundation establishes release authority, self-contained packaging, read-only status/doctor, and legacy discovery. I2 adds pristine Linux install, I3 canonical update, and I4 routes a first `voice-agent install` against the exact selected-new/running-old/no-previous legacy split into one adoption transaction. Explicit rollback, general repair, AgentEnvironment state migration, uninstall, launcher self-replacement, macOS activation, arbitrary production roots, and production publication remain absent.
 
 The stable per-user layout is:
 
@@ -285,9 +285,10 @@ The stable per-user layout is:
 ~/.local/share/voice-agent/
   install.json
   releases/<version>-<artifact-prefix>/
+  releases/legacy-<legacy-id>/{payload,legacy-import-record.json}
   current -> releases/…
   rollback -> releases/…
-  transactions/update.json
+  transactions/{update.json,adoption.json}
   migrations/
   data/
   agent-environment/{private,workspace,cache}/
@@ -310,7 +311,9 @@ The platform manifest binds version/build/platform, application/config/data rang
 
 `status` and `doctor` take an explicit install root and service-probe boundary internally. Both are read-only: no file creation, pointer repair, service action, secret/content enumeration, Docker lifecycle, or health inference from symlinks/systemd activity. Stable JSON reports release/build identifiers, state/reason codes and booleans only; human output is derived from the same document. A selected-new/running-old/no-rollback state is `selected-new-running-old`, with the exact ready running release visible as retained legacy custody rather than false success.
 
-Legacy discovery admits evidence only from the exact canonical legacy root. It verifies current-user private directories, exact pointer target, historical release identity and complete path/type/mode/size/hash inventory, regular-file/no-follow metadata, installed unit equality, service name/MainPID, process UID/cwd/executable/argv, runtime release/build, exact readiness, and an explicitly owned rootless `/run/user/<uid>/docker.sock` daemon. Historical application-manifest incompatibility remains `legacy_unsupported` and does not erase exact healthy running custody. A missing, unrelated, mismatched, symlinked or unowned candidate is never eligible. Discovery writes nothing; adoption is a later journaled transaction.
+Legacy discovery admits evidence only from the exact canonical legacy root. It verifies current-user private directories, exact pointer target, historical release identity and complete path/type/mode/size/hash inventory, regular-file/no-follow metadata, installed unit equality, service name/MainPID, process UID/cwd/executable/argv, runtime release/build, exact readiness, listener ownership, and an explicitly addressed owner-matching rootless `/run/user/<uid>/docker.sock` daemon. Historical application-manifest incompatibility remains `legacy_unsupported` and does not erase exact healthy running custody. A missing, unrelated, mismatched, symlinked or unowned candidate is never eligible. Discovery writes nothing.
+
+I4 adoption consumes only that exact evidence when legacy `current` is selected-new, the proven runtime is running-old, and `previous` is absent. Under the same update lock, `voice-agent.legacy-adoption.v1` records the copied exact running inventory as `prior_running` and `prior_healthy`, a ready `legacy-import-release.v1` rollback record, and the copied selected inventory only as not-ready/uncommitted evidence. The historical operations manifest is integrity-checked by its own stored digest; it is never parsed as a current application contract. Missing/foreign/tampered release, unit, PID/cgroup/process, runtime/readiness/listener or config identity refuses without service action.
 
 Fresh installation first proves kernel/architecture/systemd/user identity; NVIDIA driver/GPU/VRAM/device visibility; exact signed model/runtime descriptor availability; artifact/runtime compatibility; and payload plus 8-GiB free-space reserve. It then verifies the stable-channel signature/freshness/sequence, exact artifact and complete safe archive before creating any managed path. Production roots come only from the invoking user's XDG identity; isolated roots, host facts, archive bytes, privilege, service and network observations are injectable only through the internal deterministic-test boundary.
 
@@ -328,7 +331,11 @@ Only then does `quiescing → activating → starting → ready → committing �
 
 Terminal success marks the release ready, updates the installation receipt, durably records terminal truth, re-probes, then collects only exact verified owned releases unreachable from active/running healthy, one verified rollback and any incomplete transaction. No release-count refusal exists: zero through arbitrary old owned releases are valid, and a third release is ordinary transaction state. Collection re-reads protected pointers/journal before each exact deletion and may remove only the current transaction's exact partial/stage. It cannot construct deletion of configuration, secrets, application data, models, AgentEnvironment registry/workspace/cache/container, additional mounts, arbitrary cache paths or Docker objects. A genuine remaining free-space shortage after safe pre-GC is the only disk refusal.
 
-Interruption hooks after every durable write/action prove retry convergence to exact candidate healthy or exact prior healthy without blind duplicate start. `status`/`doctor` expose the journal phase and canonical selected/running/rollback split without content. I3 uses isolated roots and fake service/network/host facts only; legacy selected-new/running-old import, live stand repair, physical systemd/network/model/Docker/reboot evidence, AgentEnvironment migration and production authority remain later gates.
+I4 stages the legacy source configuration before committing it to canonical private `service.env`; both source and staged bytes are no-follow owner/mode checked and SHA-256 compared again as CAS. An unexpected existing canonical config is never overwritten. Absent non-secret v2 config enables ordinary local voice but disables AgentRun/tools, Telegram, credentials and mounts. Only a socket-type/owner/explicit-host/rootless-daemon verified `unix:///run/user/<uid>/docker.sock` is recorded; rootful/foreign evidence fails and absence records unavailable. No Docker lifecycle method is called.
+
+The signed candidate and all private/import/rollback prerequisites become durable before linger/user-unit preparation and before the old system service is stopped. The system service stays authoritative until this pre-quiesce boundary. Then the transaction stops it once, activates/starts the user-service candidate, and requires the same exact five-component readiness. Failure removes candidate selection, restarts and proves the untouched legacy unit/pointers/config; double failure retains journal, copied releases and private migration receipt. Success commits the signed current plus legacy rollback, disables the old system unit, and removes migration evidence only after readiness. A later successful canonical update replaces that rollback and reachability-GCs the imported legacy copies. The legacy service file may remain as disabled forensic bytes; it has no authority after success.
+
+Interruption hooks after every durable write/action prove retry convergence to exact candidate healthy or exact prior healthy without blind duplicate start/service transition. `status`/`doctor` expose journal phase and canonical selected/running/rollback split without content. I1–I4 use isolated roots and fake service/network/host facts only; live-stand mutation, physical systemd/network/model/Docker/reboot evidence, AgentEnvironment state migration and production authority remain later gates.
 
 ADR-0014 owns this decision and its supersession boundary. `config/launcher-protocol-v1.json` and the launcher schemas/executable validators own exact machine fields; this section owns lifecycle, authority and failure semantics without creating a second contract definition.
 

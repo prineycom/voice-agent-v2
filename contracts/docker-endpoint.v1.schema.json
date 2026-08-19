@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/docker-endpoint.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "endpoint", "kind", "ownership_verified"],
+  "properties": {
+    "schema": {"const": "voice-agent.docker-endpoint.v1"},
+    "endpoint": {"oneOf": [{"type": "string", "pattern": "^unix:///run/user/[1-9][0-9]*/docker\\.sock$"}, {"type": "null"}]},
+    "kind": {"enum": ["rootless", "unavailable"]},
+    "ownership_verified": {"type": "boolean"}
+  }
+}

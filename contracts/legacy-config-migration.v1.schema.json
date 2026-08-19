@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/legacy-config-migration.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "source_sha256", "canonical_sha256", "source_mode", "canonical_mode"],
+  "properties": {
+    "schema": {"const": "voice-agent.legacy-config-migration.v1"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "canonical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_mode": {"const": "0600"}, "canonical_mode": {"const": "0600"}
+  }
+}

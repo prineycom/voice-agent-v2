@@ -75,7 +75,7 @@ Production signing-key provisioning, publication or downloads; install/update/ro
 
 1. **I2 fresh Linux install — implemented deterministically:** private XDG roots/default configuration, exact asset proof, user systemd/linger, one start and five-component readiness; physical publication/host evidence remains I8.
 2. **I3 transactional update/rollback — implemented deterministically:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection; real-host evidence remains I8.
-3. **I4 legacy adoption — next:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success.
+3. **I4 legacy adoption — implemented deterministically:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success; real-host execution remains I8.
 4. **I5 AgentEnvironment/config preservation:** move durable environment state out of cache classification and prove same ID/rootfs/workspace across application update; stale spec degrades agent tools only.
 5. **I6 assets/cache/offline:** resumable exact downloads, signed content-addressed assets, cached metadata policy and genuine-space-only refusal.
 6. **I7 rollback/uninstall/support bundle:** complete user surfaces, exact destructive confirmation and privacy scanner.
@@ -131,6 +131,31 @@ Legacy selected-new/running-old/no-previous import; live stand repair; launcher 
 ### Acceptance and evidence
 
 The launcher phase of `./verify` injects isolated XDG roots plus deterministic signed artifact, service, listener, clock, failure, disk and network owners. It covers success, candidate/prior double-failure truth, every observed durable write/action interruption with retry convergence, safe/destructive migration variants, online/offline/current metadata, concurrent lock, channel rollback/expiry, genuine space shortage, service/readiness identity mismatch, exact partial/GC boundaries and preservation sentinels. [`transactional-canonical-update.md`](evidence/transactional-canonical-update.md) records evidence and nonclaims.
+
+## Installation evolution I4 — Exact legacy adoption
+
+> **Implemented contract:** a first `voice-agent install` may adopt only the exact discovered selected-new/running-old/no-previous legacy stand. No live-host execution is claimed.
+
+### User-visible outcome
+
+The launcher preserves the exact healthy running old release as verified rollback custody, imports the selected legacy release only as uncommitted evidence, migrates private configuration and safe v2 defaults, records only a verified explicit rootless endpoint, then moves from the authoritative system service to a signed user-service candidate. Candidate failure restores and proves the old service; success disables it and leaves ordinary `voice-agent update` ownership.
+
+### Included scope
+
+- Closed durable adoption/import/config/Docker records under the canonical update lock.
+- Legacy root, inventory, release/build, installed unit, systemd MainPID/cgroup, cwd/executable/argv, five-component readiness and loopback-listener custody proof independent of historical manifest shape.
+- Exact copy/import of running-old as ready prior/rollback and selected-new as not-ready/uncommitted evidence.
+- No-follow owner/mode private config staging, hashes, CAS, fsync, conflict refusal and secret-value-free output.
+- Absent disabled v2 AgentRun/tools/Telegram/credentials/mount defaults; explicit rootless socket record or honest unavailable state; no AgentEnvironment/Docker lifecycle.
+- All prerequisites/user-unit preparation before old-service quiesce; exact candidate success, failed-safe prior restoration, double-failure retention and interruption/idempotence recovery.
+
+### Excluded scope
+
+Live stand mutation; production release authority/network; real system/user systemd, rootless daemon, GPU/model/reboot/voice proof; AgentEnvironment state/container migration; deletion of the disabled historical unit; broad manifest compatibility; old-release/manual-pointer repair; explicit rollback/uninstall/support bundle.
+
+### Acceptance and evidence
+
+The launcher phase of `./verify` covers the exact split, compatible/incompatible historical control, tampered/foreign/mismatched custody, config conflict and secret-preserving copy, rootless/rootful/absent Docker, success/failure/double failure and every observed adoption write/action interruption. [`legacy-adoption.md`](evidence/legacy-adoption.md) owns evidence/nonclaims.
 
 ## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
 
