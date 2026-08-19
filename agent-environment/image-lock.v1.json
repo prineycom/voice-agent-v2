@@ -7,5 +7,6 @@
   },
   "runtime_pull": false,
   "entrypoint": ["/sbin/tini", "--"],
+  "command": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
   "user": "1000:1000"
 }

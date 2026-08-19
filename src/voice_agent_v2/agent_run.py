@@ -255,7 +255,10 @@ class AgentRun:
                     assert decision.answer is not None
                     if self.observation is not None:
                         self.observation({"transition": "agent_run_completed", "decision_count": decision_number, "operation_count": operations})
-                    return AgentRunResult(run_id, identity, decision.answer, decision_number, operations, "completed")
+                    display_answer = self.environment.redact_display(
+                        decision.answer.encode("utf-8")
+                    ).decode("utf-8", "replace")
+                    return AgentRunResult(run_id, identity, display_answer, decision_number, operations, "completed")
                 assert decision.tool is not None and decision.arguments is not None
                 call_id = uuid.uuid4().hex
                 facts = self.environment.ensure_running()

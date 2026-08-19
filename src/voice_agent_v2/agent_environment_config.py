@@ -11,9 +11,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 import yaml
 
 from .agent_config import (
@@ -87,11 +88,13 @@ class ResourceV2(BaseModel):
     host_free_reserve_mib: int = Field(ge=8192, le=65536)
     watchdog_interval_seconds: int = Field(ge=1, le=10)
     maximum_output_bytes: int = Field(ge=1024, le=1048576)
+    maximum_stream_bytes: int = Field(ge=1024, le=1048576)
+    stream_timeout_seconds: int = Field(ge=1, le=600)
 
 
 class NetworkV2(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    enabled: Literal[True]
+    enabled: bool
     publish_ports: tuple[()]
 
     @field_validator("publish_ports", mode="before")
@@ -103,18 +106,42 @@ class NetworkV2(BaseModel):
 
 
 class CredentialsV2(BaseModel):
+    """One declaration with fixed exposed names; private state owns all bytes."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    creation_environment_names: tuple[()]
-    creation_file_names: tuple[()]
-    exec_environment_names: tuple[()]
-    exec_file_names: tuple[()]
+    creation_environment_names: tuple[str, ...] = Field(max_length=16)
+    creation_file_names: tuple[str, ...] = Field(max_length=16)
+    exec_environment_names: tuple[str, ...] = Field(max_length=16)
+    exec_file_names: tuple[str, ...] = Field(max_length=16)
 
     @field_validator("*", mode="before")
     @classmethod
-    def empty_e2_4_credentials(cls, value: object) -> tuple[()]:
-        if value not in ([], ()):
-            raise ValueError("live credentials are outside E2.4")
-        return ()
+    def fixed_names(cls, value: object) -> tuple[str, ...]:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("credential names must be a list")
+        names = tuple(value)
+        for name in names:
+            if (
+                not isinstance(name, str)
+                or re.fullmatch(r"[A-Z_][A-Z0-9_]{0,63}", name) is None
+                or name.startswith("VOICE_AGENT_")
+            ):
+                raise ValueError("credential exposure name is invalid or reserved")
+        if len(names) != len(set(names)):
+            raise ValueError("credential exposure names must be unique")
+        return names
+
+    @model_validator(mode="after")
+    def no_mode_overlap(self) -> "CredentialsV2":
+        names = (
+            self.creation_environment_names
+            + self.creation_file_names
+            + self.exec_environment_names
+            + self.exec_file_names
+        )
+        if len(names) != len(set(names)):
+            raise ValueError("a credential name has exactly one exposure mode")
+        return self
 
 
 class AgentEnvironmentV2(BaseModel):
@@ -169,6 +196,8 @@ DEFAULT_DOCUMENT: dict[str, object] = {
             "host_free_reserve_mib": 8192,
             "watchdog_interval_seconds": 2,
             "maximum_output_bytes": 262144,
+            "maximum_stream_bytes": 262144,
+            "stream_timeout_seconds": 120,
         },
     },
 }
