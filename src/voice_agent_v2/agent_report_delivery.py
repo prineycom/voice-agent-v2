@@ -28,9 +28,11 @@ import uuid
 from .agent_environment import AgentEnvironment, AgentEnvironmentError
 
 DELIVERY_CONFIG_SCHEMA = "voice-agent.telegram-delivery-config.v1"
-ARTIFACT_SCHEMA = "voice-agent.saved-report.v1"
-DELIVERY_SCHEMA = "voice-agent.telegram-delivery.v1"
-DELIVERY_STATUS_SCHEMA = "voice-agent.telegram-delivery-status.v1"
+ARTIFACT_SCHEMA = "voice-agent.saved-report.v2"
+ARTIFACT_OPERATION_SCHEMA = "voice-agent.report-artifact-operation.v1"
+DELIVERY_SCHEMA = "voice-agent.telegram-delivery.v2"
+DELIVERY_STATUS_SCHEMA = "voice-agent.telegram-delivery-status.v2"
+LEDGER_SCHEMA = "voice-agent.report-delivery-ledger.v2"
 TELEGRAM_API_HOST = "api.telegram.org"
 TELEGRAM_API_ENDPOINT = "https://api.telegram.org"
 TELEGRAM_CREDENTIAL_NAME = "TELEGRAM_BOT_TOKEN"
@@ -175,6 +177,94 @@ class ReportDeliveryRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ReportArtifactRequest:
+    """One closed later-artifact action with no path/runtime authority."""
+
+    action: str
+    artifact_id: str | None
+    relative_path: str | None
+    expected_revision: int | None = None
+    expected_sha256: str | None = None
+    report_bytes: bytes | None = None
+    mode: str | None = None
+    summary: str | None = None
+    citation_receipt_ids: tuple[str, ...] = ()
+
+    @staticmethod
+    def _locator(arguments: Mapping[str, object]) -> tuple[str | None, str | None]:
+        artifact_id = arguments.get("artifact_id")
+        relative_path = arguments.get("relative_path")
+        if (artifact_id is None) == (relative_path is None):
+            raise ReportDeliveryError("artifact_locator_invalid")
+        if artifact_id is not None:
+            if not isinstance(artifact_id, str) or IDENTITY.fullmatch(artifact_id) is None:
+                raise ReportDeliveryError("artifact_identity_invalid")
+            return artifact_id, None
+        candidate = Path(relative_path) if isinstance(relative_path, str) else Path("/")
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path.startswith("reports/")
+            or candidate.is_absolute()
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+            or len(relative_path.encode("utf-8")) > 512
+        ):
+            raise ReportDeliveryError("artifact_search_invalid")
+        return None, relative_path
+
+    @classmethod
+    def parse(cls, arguments: Mapping[str, object]) -> "ReportArtifactRequest":
+        if not isinstance(arguments, Mapping) or arguments.get("action") not in {
+            "local_summary", "local_update", "bounded_refresh",
+        }:
+            raise ReportDeliveryError("artifact_request_invalid")
+        action = str(arguments["action"])
+        artifact_id, relative_path = cls._locator(arguments)
+        locator_key = "artifact_id" if artifact_id is not None else "relative_path"
+        if action == "local_summary":
+            if set(arguments) != {"action", locator_key}:
+                raise ReportDeliveryError("artifact_request_invalid")
+            return cls(action, artifact_id, relative_path)
+        common = {
+            "action", "artifact_id", "expected_revision", "expected_sha256",
+            "mode", "summary",
+        }
+        if relative_path is not None:
+            raise ReportDeliveryError("artifact_update_requires_receipt")
+        if set(arguments) == common | {"report_text"} | ({"citation_receipt_ids"} if action == "bounded_refresh" else set()):
+            value = arguments.get("report_text")
+            report = value.encode("utf-8") if isinstance(value, str) else b""
+        elif set(arguments) == common | {"report_base64"} | ({"citation_receipt_ids"} if action == "bounded_refresh" else set()):
+            try:
+                report = base64.b64decode(str(arguments.get("report_base64")), validate=True)
+            except ValueError as error:
+                raise ReportDeliveryError("artifact_request_invalid") from error
+        else:
+            raise ReportDeliveryError("artifact_request_invalid")
+        revision = arguments.get("expected_revision")
+        digest = arguments.get("expected_sha256")
+        mode = arguments.get("mode")
+        summary = arguments.get("summary")
+        identifiers = arguments.get("citation_receipt_ids", [])
+        if (
+            not report or len(report) > MAX_REPORT_BYTES
+            or type(revision) is not int or revision < 1
+            or not isinstance(digest, str) or SHA256.fullmatch(digest) is None
+            or mode not in {"text", "document", "both"}
+            or not isinstance(summary, str) or len(summary.encode("utf-8")) > MAX_SUMMARY_BYTES
+            or (mode in {"text", "both"} and not summary.strip())
+            or not isinstance(identifiers, list)
+            or (action == "bounded_refresh" and not 1 <= len(identifiers) <= 16)
+            or len(identifiers) != len(set(map(str, identifiers)))
+            or any(not isinstance(item, str) or IDENTITY.fullmatch(item) is None for item in identifiers)
+        ):
+            raise ReportDeliveryError("artifact_request_invalid")
+        return cls(
+            action, artifact_id, None, revision, digest, report, str(mode),
+            summary.strip(), tuple(map(str, identifiers)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TelegramOperation:
     operation_id: str
     kind: str
@@ -231,7 +321,7 @@ class TelegramBotAPITransport:
                     "Content-Type": operation.content_type,
                     "Content-Length": str(len(operation.request_body)),
                     "Accept": "application/json",
-                    "User-Agent": "voice-agent-v2/e4.2",
+                    "User-Agent": "voice-agent-v2/e4.3",
                 },
             )
             response = connection.getresponse()
@@ -435,17 +525,40 @@ class ReportDeliveryController:
 
     def _ledger(self) -> dict[str, object]:
         if not self.ledger_path.exists():
-            return {"schema_version": "voice-agent.report-delivery-ledger.v1", "artifacts": {}, "deliveries": {}}
+            return {"schema_version": LEDGER_SCHEMA, "artifacts": {}, "revisions": {}, "deliveries": {}}
         try:
             value = json.loads(self.ledger_path.read_bytes())
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             raise ReportDeliveryError("delivery_ledger_unavailable") from error
+        if not isinstance(value, dict):
+            raise ReportDeliveryError("delivery_ledger_invalid")
+        # E4.2 ledgers are ordinary persistent input. Upgrade their opaque
+        # artifacts in memory without reading a host path or selecting state.
         if (
-            not isinstance(value, dict)
-            or set(value) != {"schema_version", "artifacts", "deliveries"}
-            or value.get("schema_version") != "voice-agent.report-delivery-ledger.v1"
-            or not isinstance(value.get("artifacts"), dict)
-            or not isinstance(value.get("deliveries"), dict)
+            set(value) == {"schema_version", "artifacts", "deliveries"}
+            and value.get("schema_version") == "voice-agent.report-delivery-ledger.v1"
+            and isinstance(value.get("artifacts"), dict)
+            and isinstance(value.get("deliveries"), dict)
+        ):
+            revisions: dict[str, object] = {}
+            for artifact_id, original in value["artifacts"].items():
+                if not isinstance(original, dict) or not IDENTITY.fullmatch(str(artifact_id)):
+                    raise ReportDeliveryError("delivery_ledger_invalid")
+                artifact = dict(original)
+                artifact.update(
+                    schema_version=ARTIFACT_SCHEMA, revision=1,
+                    current_receipt_id=artifact_id, prior_receipt_id=None,
+                )
+                value["artifacts"][artifact_id] = artifact
+                revisions[artifact_id] = self._revision_document(artifact)
+            value = {
+                "schema_version": LEDGER_SCHEMA, "artifacts": value["artifacts"],
+                "revisions": revisions, "deliveries": value["deliveries"],
+            }
+        if (
+            set(value) != {"schema_version", "artifacts", "revisions", "deliveries"}
+            or value.get("schema_version") != LEDGER_SCHEMA
+            or not all(isinstance(value.get(key), dict) for key in ("artifacts", "revisions", "deliveries"))
         ):
             raise ReportDeliveryError("delivery_ledger_invalid")
         return value
@@ -470,12 +583,16 @@ class ReportDeliveryController:
     @staticmethod
     def _safe_delivery(document: Mapping[str, object]) -> dict[str, object]:
         keys = (
-            "schema_version", "delivery_id", "artifact_id", "container_path", "artifact_byte_count",
+            "schema_version", "delivery_id", "artifact_id", "artifact_revision",
+            "artifact_receipt_id", "container_path", "artifact_byte_count",
             "artifact_sha256", "media_type", "citation_receipt_ids", "target", "mode", "outcome",
             "acknowledgement_state", "acknowledged_operation_count", "operation_count", "duration_ms",
             "reason_code", "automatic_resend", "remote_effects_retracted", "research_rerun",
         )
         result = {key: document.get(key) for key in keys}
+        result["schema_version"] = DELIVERY_SCHEMA
+        result["artifact_revision"] = document.get("artifact_revision", 1)
+        result["artifact_receipt_id"] = document.get("artifact_receipt_id", document.get("artifact_id"))
         receipts = document.get("operation_receipts", [])
         result["operations"] = [
             {
@@ -492,6 +609,254 @@ class ReportDeliveryController:
 
     def _save_ledger(self, ledger: Mapping[str, object]) -> None:
         _atomic_json(self.ledger_path, ledger)
+
+    @staticmethod
+    def _revision_document(artifact: Mapping[str, object]) -> dict[str, object]:
+        return {
+            "schema_version": "voice-agent.report-artifact-revision.v1",
+            "receipt_id": artifact["current_receipt_id"],
+            "artifact_id": artifact["artifact_id"],
+            "revision": artifact["revision"],
+            "prior_receipt_id": artifact["prior_receipt_id"],
+            "root": artifact["root"],
+            "relative_path": artifact["relative_path"],
+            "container_path": artifact["container_path"],
+            "byte_count": artifact["byte_count"],
+            "sha256": artifact["sha256"],
+            "media_type": artifact["media_type"],
+            "citation_receipt_ids": list(artifact["citation_receipt_ids"]),
+            "sidecar_relative_path": artifact["sidecar_relative_path"],
+            "sidecar_byte_count": artifact["sidecar_byte_count"],
+            "sidecar_sha256": artifact["sidecar_sha256"],
+        }
+
+    @staticmethod
+    def _artifact_result(
+        artifact: Mapping[str, object], *, operation_receipt_id: str, action: str,
+        outcome: str, conflict: bool, atomic_replacement: bool,
+        research_receipt_ids: tuple[str, ...] = (), reason_code: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": ARTIFACT_OPERATION_SCHEMA,
+            "operation_receipt_id": operation_receipt_id,
+            "artifact_id": artifact["artifact_id"],
+            "artifact_receipt_id": artifact["current_receipt_id"],
+            "prior_receipt_id": artifact["prior_receipt_id"],
+            "action": action,
+            "outcome": outcome,
+            "revision": artifact["revision"],
+            "container_path": artifact["container_path"],
+            "byte_count": artifact["byte_count"],
+            "sha256": artifact["sha256"],
+            "media_type": artifact["media_type"],
+            "citation_receipt_ids": list(artifact["citation_receipt_ids"]),
+            "research_receipt_ids": list(research_receipt_ids),
+            "external_call_count": len(research_receipt_ids),
+            "research_refresh": action == "bounded_refresh",
+            "atomic_replacement": atomic_replacement,
+            "conflict": conflict,
+            "reason_code": reason_code,
+            "host_path_read": False,
+            "automatic_retry": False,
+            "arbitrary_effects_rolled_back": False,
+        }
+
+    def _resolve_artifact(
+        self, ledger: Mapping[str, object], request: ReportArtifactRequest,
+    ) -> dict[str, object]:
+        artifacts = ledger["artifacts"]
+        if not isinstance(artifacts, dict) or len(artifacts) > 128:
+            raise ReportDeliveryError("artifact_search_out_of_bounds")
+        if request.artifact_id is not None:
+            artifact = artifacts.get(request.artifact_id)
+            if not isinstance(artifact, dict):
+                raise ReportDeliveryError("saved_artifact_unknown")
+            return artifact
+        matches = [
+            item for item in artifacts.values()
+            if isinstance(item, dict) and item.get("relative_path") == request.relative_path
+        ]
+        if not matches:
+            raise ReportDeliveryError("saved_artifact_unknown")
+        if len(matches) != 1:
+            raise ReportDeliveryError("artifact_search_ambiguous")
+        return matches[0]
+
+    @staticmethod
+    def _citations_from_plan(plan: Mapping[str, object]) -> tuple[DeliveryCitation, ...]:
+        raw = plan.get("citations")
+        if not isinstance(raw, list) or not raw:
+            raise ReportDeliveryError("saved_artifact_changed")
+        result = []
+        for item in raw:
+            try:
+                result.append(DeliveryCitation(
+                    str(item["receipt_id"]), str(item["displayed_url"]),
+                    int(item["source_byte_count"]), str(item["source_sha256"]),
+                ))
+            except (KeyError, TypeError, ValueError) as error:
+                raise ReportDeliveryError("saved_artifact_changed") from error
+        return tuple(result)
+
+    @staticmethod
+    def _refreshed_citations(
+        identifiers: tuple[str, ...], successful_research: Mapping[str, Mapping[str, object]],
+    ) -> tuple[DeliveryCitation, ...]:
+        result = []
+        for identifier in identifiers:
+            details = successful_research.get(identifier)
+            if (
+                details is None or details.get("kind") != "web_fetch"
+                or (details.get("network_error") is not None and not details.get("cache_used"))
+            ):
+                raise ReportDeliveryError("artifact_refresh_citation_invalid")
+            try:
+                result.append(DeliveryCitation(
+                    identifier, str(details["display_url"]), int(details["artifact_bytes"]),
+                    str(details["artifact_sha256"]),
+                ))
+            except (KeyError, TypeError, ValueError) as error:
+                raise ReportDeliveryError("artifact_refresh_citation_invalid") from error
+        return tuple(result)
+
+    def manage_artifact(
+        self, request: ReportArtifactRequest, *,
+        successful_research: Mapping[str, Mapping[str, object]],
+        cancellation: object | None = None,
+    ) -> tuple[dict[str, object], bytes]:
+        """Resolve or CAS-update one installation-owned report.
+
+        The returned raw bytes are model-needed operation data. The durable and
+        public operation document is content-minimal and is never a host path.
+        """
+        operation_receipt_id = uuid.uuid4().hex
+        with self._locked():
+            ledger = self._ledger()
+            artifact = self._resolve_artifact(ledger, request)
+            try:
+                current, current_receipt = self.environment.stream_outbound(
+                    root="workspace", relative_path=str(artifact["relative_path"]),
+                )
+            except AgentEnvironmentError as error:
+                raise ReportDeliveryError("saved_artifact_unavailable") from error
+            current_matches = (
+                current_receipt.byte_count == artifact.get("byte_count")
+                and current_receipt.sha256 == artifact.get("sha256")
+            )
+            if request.action == "local_summary":
+                if not current_matches:
+                    observed = dict(artifact)
+                    observed["byte_count"] = current_receipt.byte_count
+                    observed["sha256"] = current_receipt.sha256
+                    return self._artifact_result(
+                        observed, operation_receipt_id=operation_receipt_id,
+                        action=request.action, outcome="conflict", conflict=True,
+                        atomic_replacement=False, reason_code="artifact_changed_concurrently",
+                    ), b""
+                return self._artifact_result(
+                    artifact, operation_receipt_id=operation_receipt_id,
+                    action=request.action, outcome="resolved", conflict=False,
+                    atomic_replacement=False,
+                ), current
+            if getattr(cancellation, "cancelled", False):
+                raise ReportDeliveryError("artifact_update_cancelled")
+            expected_matches = (
+                current_matches
+                and request.expected_revision == artifact.get("revision")
+                and request.expected_sha256 == artifact.get("sha256")
+            )
+            if not expected_matches:
+                observed = dict(artifact)
+                observed["byte_count"] = current_receipt.byte_count
+                observed["sha256"] = current_receipt.sha256
+                return self._artifact_result(
+                    observed, operation_receipt_id=operation_receipt_id,
+                    action=request.action, outcome="conflict", conflict=True,
+                    atomic_replacement=False, reason_code="artifact_expected_revision_mismatch",
+                ), b""
+            assert request.report_bytes is not None and request.mode is not None and request.summary is not None
+            _, prior_plan = self._read_artifact(artifact)
+            citations = (
+                self._refreshed_citations(request.citation_receipt_ids, successful_research)
+                if request.action == "bounded_refresh"
+                else self._citations_from_plan(prior_plan)
+            )
+            delivery_request = ReportDeliveryRequest(
+                request.report_bytes, str(artifact["relative_path"]),
+                str(artifact["media_type"]), request.mode, request.summary, citations,
+            )
+            sidecar = self._sidecar(delivery_request)
+            sidecar_path = f"reports/.delivery/{operation_receipt_id}.json"
+            try:
+                sidecar_receipt = self.environment.stream_inbound(
+                    sidecar, root="workspace", relative_path=sidecar_path,
+                )
+                write_receipt = self.environment.execute(
+                    "file.write", {
+                        "path": artifact["container_path"],
+                        "data_base64": base64.b64encode(request.report_bytes).decode("ascii"),
+                        "expected_bytes": len(request.report_bytes),
+                        "expected_sha256": hashlib.sha256(request.report_bytes).hexdigest(),
+                        "expected_current_sha256": request.expected_sha256,
+                    }, call_id=operation_receipt_id,
+                )
+            except AgentEnvironmentError as error:
+                raise ReportDeliveryError("artifact_update_outcome_unknown") from error
+            if write_receipt.status != "completed":
+                reason = (
+                    "artifact_changed_concurrently"
+                    if write_receipt.stderr == b"expected_current_sha256_mismatch"
+                    else "artifact_update_failed"
+                )
+                # Reinspection reports current truth; no arbitrary shell or
+                # background side effect is represented as rolled back.
+                latest, latest_receipt = self.environment.stream_outbound(
+                    root="workspace", relative_path=str(artifact["relative_path"]),
+                )
+                del latest
+                observed = dict(artifact)
+                observed["byte_count"] = latest_receipt.byte_count
+                observed["sha256"] = latest_receipt.sha256
+                return self._artifact_result(
+                    observed, operation_receipt_id=operation_receipt_id,
+                    action=request.action, outcome="conflict" if reason.endswith("concurrently") else "failed",
+                    conflict=reason.endswith("concurrently"), atomic_replacement=False,
+                    reason_code=reason,
+                ), b""
+            digest = hashlib.sha256(request.report_bytes).hexdigest()
+            latest, latest_receipt = self.environment.stream_outbound(
+                root="workspace", relative_path=str(artifact["relative_path"]),
+            )
+            if latest != request.report_bytes or latest_receipt.sha256 != digest:
+                observed = dict(artifact)
+                observed["byte_count"] = latest_receipt.byte_count
+                observed["sha256"] = latest_receipt.sha256
+                return self._artifact_result(
+                    observed, operation_receipt_id=operation_receipt_id,
+                    action=request.action, outcome="conflict", conflict=True,
+                    atomic_replacement=False, reason_code="artifact_changed_concurrently",
+                ), b""
+            updated = dict(artifact)
+            updated.update(
+                schema_version=ARTIFACT_SCHEMA,
+                revision=int(artifact["revision"]) + 1,
+                current_receipt_id=operation_receipt_id,
+                prior_receipt_id=artifact["current_receipt_id"],
+                byte_count=len(request.report_bytes), sha256=digest,
+                citation_receipt_ids=[item.receipt_id for item in citations],
+                sidecar_relative_path=sidecar_path,
+                sidecar_byte_count=sidecar_receipt.byte_count,
+                sidecar_sha256=sidecar_receipt.sha256,
+            )
+            ledger["artifacts"][str(artifact["artifact_id"])] = updated
+            ledger["revisions"][operation_receipt_id] = self._revision_document(updated)
+            self._save_ledger(ledger)
+            return self._artifact_result(
+                updated, operation_receipt_id=operation_receipt_id,
+                action=request.action, outcome="updated", conflict=False,
+                atomic_replacement=True,
+                research_receipt_ids=request.citation_receipt_ids,
+            ), b""
 
     def _credential(self) -> bytes:
         declarations = self.environment.config.model.agent_environment.credentials
@@ -543,6 +908,9 @@ class ReportDeliveryController:
         artifact = {
             "schema_version": ARTIFACT_SCHEMA,
             "artifact_id": artifact_id,
+            "revision": 1,
+            "current_receipt_id": artifact_id,
+            "prior_receipt_id": None,
             "root": "workspace",
             "relative_path": request.relative_path,
             "container_path": report_receipt.container_path,
@@ -557,6 +925,7 @@ class ReportDeliveryController:
         with self._locked():
             ledger = self._ledger()
             ledger["artifacts"][artifact_id] = artifact
+            ledger["revisions"][artifact_id] = self._revision_document(artifact)
             self._save_ledger(ledger)
         return self._new_attempt(artifact_id, cancellation=cancellation)
 
@@ -564,7 +933,8 @@ class ReportDeliveryController:
         delivery_id = uuid.uuid4().hex
         document = {
             "schema_version": DELIVERY_SCHEMA, "delivery_id": delivery_id,
-            "artifact_id": artifact_id, "container_path": receipt.container_path,
+            "artifact_id": artifact_id, "artifact_revision": 1,
+            "artifact_receipt_id": artifact_id, "container_path": receipt.container_path,
             "artifact_byte_count": receipt.byte_count, "artifact_sha256": receipt.sha256,
             "media_type": request.media_type,
             "citation_receipt_ids": [item.receipt_id for item in request.citations],
@@ -656,7 +1026,9 @@ class ReportDeliveryController:
                 raise ReportDeliveryError("saved_artifact_unknown")
         base = {
             "schema_version": DELIVERY_SCHEMA, "delivery_id": delivery_id,
-            "artifact_id": artifact_id, "container_path": artifact["container_path"],
+            "artifact_id": artifact_id, "artifact_revision": artifact.get("revision", 1),
+            "artifact_receipt_id": artifact.get("current_receipt_id", artifact_id),
+            "container_path": artifact["container_path"],
             "artifact_byte_count": artifact["byte_count"], "artifact_sha256": artifact["sha256"],
             "media_type": artifact["media_type"],
             "citation_receipt_ids": artifact["citation_receipt_ids"],
@@ -777,10 +1149,13 @@ class ReportDeliveryController:
             return {
                 "schema_version": DELIVERY_STATUS_SCHEMA, "state": "unavailable", "reason_code": error.code,
                 "target": self.target.document() if self.target else None, "artifact_count": 0,
-                "delivery_count": 0, "unknown_delivery_count": 0,
+                "revision_count": 0, "delivery_count": 0, "unknown_delivery_count": 0,
                 "credential_name": TELEGRAM_CREDENTIAL_NAME,
                 "credential_value_exposed": False, "endpoint_model_selectable": False,
                 "target_model_selectable": False, "automatic_resend": False,
+                "prompt_injection_prevented": False, "display_redaction_scope": "display_only",
+                "open_sandbox_authority_accepted": True,
+                "containment_claim": "correctly_configured_unescaped_container_unmounted_host_boundary_only",
             }
         credential_declared = (
             self.environment.config.model.agent_environment.credentials.exec_environment_names.count(
@@ -792,9 +1167,12 @@ class ReportDeliveryController:
             "state": "ready" if self.target is not None and credential_declared else "unavailable",
             "reason_code": self.target_reason if self.target is None else None if credential_declared else "telegram_credential_not_configured",
             "target": self.target.document() if self.target else None,
-            "artifact_count": len(artifacts), "delivery_count": len(deliveries),
-            "unknown_delivery_count": unknown,
+            "artifact_count": len(artifacts), "revision_count": len(ledger["revisions"]),
+            "delivery_count": len(deliveries), "unknown_delivery_count": unknown,
             "credential_name": TELEGRAM_CREDENTIAL_NAME,
             "credential_value_exposed": False, "endpoint_model_selectable": False,
             "target_model_selectable": False, "automatic_resend": False,
+            "prompt_injection_prevented": False, "display_redaction_scope": "display_only",
+            "open_sandbox_authority_accepted": True,
+            "containment_claim": "correctly_configured_unescaped_container_unmounted_host_boundary_only",
         }

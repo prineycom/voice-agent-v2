@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/report-artifact-operation.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "operation_receipt_id", "artifact_id", "artifact_receipt_id", "prior_receipt_id", "action", "outcome", "revision", "container_path", "byte_count", "sha256", "media_type", "citation_receipt_ids", "research_receipt_ids", "external_call_count", "research_refresh", "atomic_replacement", "conflict", "reason_code", "host_path_read", "automatic_retry", "arbitrary_effects_rolled_back"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.report-artifact-operation.v1"},
+    "operation_receipt_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "artifact_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "artifact_receipt_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "prior_receipt_id": {"oneOf": [{"type": "string", "pattern": "^[a-f0-9]{32}$"}, {"type": "null"}]},
+    "action": {"enum": ["local_summary", "local_update", "bounded_refresh"]},
+    "outcome": {"enum": ["resolved", "updated", "conflict", "failed"]},
+    "revision": {"type": "integer", "minimum": 1},
+    "container_path": {"type": "string", "pattern": "^/workspace/reports/"},
+    "byte_count": {"type": "integer", "minimum": 0, "maximum": 262144},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "media_type": {"type": "string", "minLength": 1, "maxLength": 127},
+    "citation_receipt_ids": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-f0-9]{32}$"}},
+    "research_receipt_ids": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-f0-9]{32}$"}},
+    "external_call_count": {"type": "integer", "minimum": 0, "maximum": 16},
+    "research_refresh": {"type": "boolean"},
+    "atomic_replacement": {"type": "boolean"},
+    "conflict": {"type": "boolean"},
+    "reason_code": {"oneOf": [{"type": "string", "maxLength": 64}, {"type": "null"}]},
+    "host_path_read": {"const": false},
+    "automatic_retry": {"const": false},
+    "arbitrary_effects_rolled_back": {"const": false}
+  }
+}

@@ -14,7 +14,7 @@
         "enabled": {"type": "boolean"},
         "max_decisions": {"type": "integer", "minimum": 1, "maximum": 24},
         "active_deadline_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
-        "tools": {"const": ["shell.exec", "file.read", "file.search", "file.write", "file.edit", "file.patch", "execute_code", "process", "receipt", "web.search", "web.fetch", "web.extract", "report.deliver"]}
+        "tools": {"const": ["shell.exec", "file.read", "file.search", "file.write", "file.edit", "file.patch", "execute_code", "process", "receipt", "web.search", "web.fetch", "web.extract", "report.artifact", "report.deliver"]}
       }
     },
     "agent_environment": {

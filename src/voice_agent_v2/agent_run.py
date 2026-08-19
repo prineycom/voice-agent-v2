@@ -17,23 +17,25 @@ import uuid
 
 from .agent_environment import AgentEnvironment, AgentEnvironmentError, CallReceipt, HELPERS
 from .agent_report_delivery import (
-    ReportDeliveryController, ReportDeliveryError, ReportDeliveryRequest,
+    ReportArtifactRequest, ReportDeliveryController, ReportDeliveryError,
+    ReportDeliveryRequest,
 )
 from .agent_research import CitationRecord, CitationRequest, WEB_TOOLS, bind_citations
 from .contracts import StageFailure, valid_correlation_id
 from .local_lfm import LocalLFMProvider, MODEL_ALIAS, PROVIDER_IDENTITY
 from .tracer import CancellationToken
 
-AGENT_RUN_VERSION = "voice-agent.agent-run.v3"
-DECISION_VERSION = "voice-agent.agent-decision.v3"
+AGENT_RUN_VERSION = "voice-agent.agent-run.v4"
+DECISION_VERSION = "voice-agent.agent-decision.v4"
 OPERATION_VERSION = "voice-agent.agent-operation.v1"
 RESULT_VERSION = "voice-agent.agent-operation-result.v1"
 BUDGET_VERSION = "voice-agent.agent-budget.v1"
 IDENTITY_VERSION = "voice-agent.agent-realtime-identity.v1"
 CANCELLATION_VERSION = "voice-agent.agent-cancellation.v1"
 MAX_DECISION_INPUT_BYTES = 16_384
+REPORT_ARTIFACT_TOOL = "report.artifact"
 REPORT_DELIVERY_TOOL = "report.deliver"
-AGENT_TOOLS = (*HELPERS, REPORT_DELIVERY_TOOL)
+AGENT_TOOLS = (*HELPERS, REPORT_ARTIFACT_TOOL, REPORT_DELIVERY_TOOL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +154,7 @@ class AgentRunResult:
     terminal: str
     citations: tuple[CitationRecord, ...] = ()
     research_receipts: tuple[Mapping[str, object], ...] = ()
+    artifact_operations: tuple[Mapping[str, object], ...] = ()
     deliveries: tuple[Mapping[str, object], ...] = ()
 
     def document(self) -> dict[str, object]:
@@ -168,6 +171,7 @@ class AgentRunResult:
             "automatic_fallback": False,
             "citations": [item.document() for item in self.citations],
             "research_receipts": [dict(item) for item in self.research_receipts],
+            "artifact_operations": [dict(item) for item in self.artifact_operations],
             "deliveries": [dict(item) for item in self.deliveries],
         }
 
@@ -259,6 +263,7 @@ class AgentRun:
         operations = 0
         successful_research: dict[str, Mapping[str, object]] = {}
         research_receipts: list[Mapping[str, object]] = []
+        artifact_operations: list[Mapping[str, object]] = []
         deliveries: list[Mapping[str, object]] = []
         try:
             for decision_number in range(1, self.budget.maximum_decisions + 1):
@@ -289,7 +294,8 @@ class AgentRun:
                     ) for item in citations)
                     return AgentRunResult(
                         run_id, identity, display_answer, decision_number, operations, "completed",
-                        display_citations, tuple(research_receipts), tuple(deliveries),
+                        display_citations, tuple(research_receipts),
+                        tuple(artifact_operations), tuple(deliveries),
                     )
                 assert decision.tool is not None and decision.arguments is not None
                 call_id = uuid.uuid4().hex
@@ -303,7 +309,29 @@ class AgentRun:
                         raise StageFailure("llm_provider", "selected_provider_cancelled")
                     self._active_call = (call_id, facts.container_id)
                 try:
-                    if decision.tool == REPORT_DELIVERY_TOOL:
+                    if decision.tool == REPORT_ARTIFACT_TOOL:
+                        try:
+                            artifact_request = ReportArtifactRequest.parse(decision.arguments)
+                            artifact_result, model_bytes = self.delivery.manage_artifact(
+                                artifact_request, successful_research=successful_research,
+                                cancellation=token,
+                            )
+                        except ReportDeliveryError as error:
+                            raise StageFailure("agent_environment", error.code) from None
+                        artifact_operations.append(artifact_result)
+                        safe_output = json.dumps(
+                            artifact_result, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                        output = model_bytes if model_bytes else safe_output
+                        receipt = CallReceipt(
+                            call_id, facts.container_id, facts.generation, "completed", 0,
+                            output, b"", "/workspace", metadata={
+                                "stdout": {"byte_count": len(output), "sha256": hashlib.sha256(output).hexdigest(), "truncated": False},
+                                "stderr": {"byte_count": 0, "sha256": hashlib.sha256(b"").hexdigest(), "truncated": False},
+                                "details": artifact_result,
+                            },
+                        )
+                    elif decision.tool == REPORT_DELIVERY_TOOL:
                         try:
                             if set(decision.arguments) == {"action", "artifact_id"} and decision.arguments.get("action") == "resend":
                                 artifact_id = decision.arguments.get("artifact_id")

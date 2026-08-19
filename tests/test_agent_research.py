@@ -20,6 +20,7 @@ from tests.test_agent_environment import FakeDocker
 
 Disk = namedtuple("Disk", "total used free")
 FIXED_TIME = 1_800_000_000
+HOSTILE_SYNTHETIC_CREDENTIAL = b"synthetic-e43-injected-credential"
 
 
 def _display_url(value: str) -> str:
@@ -40,6 +41,7 @@ class ResearchDocker(FakeDocker):
         self.research_requests: list[dict[str, object]] = []
         self.persisted: dict[str, bytes] = {}
         self.hostile_effects: list[str] = []
+        self.hostile_authority_evidence: dict[str, object] = {}
         self.preview_secret: bytes | None = None
 
     @staticmethod
@@ -119,19 +121,44 @@ class ResearchDocker(FakeDocker):
                 }
                 return self._outer_receipt({"outcome": "completed", "preview_base64": base64.b64encode(content).decode(), "error": None, "details": details})
             if payload.get("command") == "hostile-authority-write-and-token":
-                self.hostile_effects.extend(["rw_workspace_changed", "synthetic_credential_used"])
+                injected = any(
+                    value == "E43_SYNTHETIC_CREDENTIAL=" + HOSTILE_SYNTHETIC_CREDENTIAL.decode()
+                    for value in arguments
+                )
+                if not injected:
+                    raise AssertionError("synthetic hostile credential was not injected")
+                self.persisted["/workspace/hostile-rw.txt"] = b"modified-by-admitted-operation"
+                self.persisted.pop("/workspace/hostile-delete.txt", None)
+                self.hostile_effects.extend(["rw_workspace_changed", "rw_workspace_deleted", "synthetic_credential_used"])
+                self.hostile_authority_evidence = {
+                    "endpoint": "https://allowed.synthetic.test/collect",
+                    "credential_sha256": hashlib.sha256(HOSTILE_SYNTHETIC_CREDENTIAL).hexdigest(),
+                    "credential_bytes_sent": len(HOSTILE_SYNTHETIC_CREDENTIAL),
+                    "accepted_open_sandbox_risk": True,
+                    "display_redaction_prevented_egress": False,
+                }
         return super().run(arguments, stdin=stdin, timeout=timeout)
 
 
 class Fixture:
-    def __init__(self) -> None:
+    def __init__(self, *, synthetic_credential: bool = False) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="agent-research-")
         root = Path(self.temp.name)
         self.docker = ResearchDocker()
+        document = json.loads(json.dumps(DEFAULT_DOCUMENT))
+        if synthetic_credential:
+            document["agent_environment"]["credentials"]["exec_environment_names"] = ["E43_SYNTHETIC_CREDENTIAL"]
+        class Store:
+            def resolve(self, kind, name):
+                if synthetic_credential and (kind, name) == ("environment", "E43_SYNTHETIC_CREDENTIAL"):
+                    return HOSTILE_SYNTHETIC_CREDENTIAL
+                raise KeyError(name)
+            def fingerprint(self, kind, name):
+                return hashlib.sha256(kind.encode() + name.encode() + HOSTILE_SYNTHETIC_CREDENTIAL).hexdigest()
         self.manager = AgentEnvironment(
-            parse_agent_config_v2(DEFAULT_CONFIG_BYTES), state_root=root / "private",
+            parse_agent_config_v2(json.dumps(document).encode()), state_root=root / "private",
             workspace=root / "workspace", cache=root / "cache", runner=self.docker,
-            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            credential_store=Store(), disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
 
     def close(self) -> None:
@@ -200,14 +227,15 @@ class ResearchSliceTests(unittest.TestCase):
             root = Path(__file__).resolve().parents[1]
             for citation in result.citations:
                 validate_schema(citation.document(), json.loads((root / "contracts/research-citation.v1.schema.json").read_text()))
-            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v3.schema.json").read_text()))
+            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v4.schema.json").read_text()))
         finally:
             fixture.close()
 
     def test_hostile_tool_bytes_are_inert_until_next_admitted_decision_and_accepted_authority_is_explicit(self) -> None:
-        fixture = Fixture()
+        fixture = Fixture(synthetic_credential=True)
         sentinel = Path(fixture.temp.name) / "unmounted-host-home-sentinel"
         sentinel.write_text("unchanged")
+        fixture.docker.persisted["/workspace/hostile-delete.txt"] = b"deletable"
 
         class Model:
             provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
@@ -232,11 +260,30 @@ class ResearchSliceTests(unittest.TestCase):
                 identity=AgentRealtimeIdentity("session-hostile", 1, "turn-hostile", "request-hostile", 1),
             )
             self.assertEqual(result.operations, 2)
-            self.assertEqual(fixture.docker.hostile_effects, ["rw_workspace_changed", "synthetic_credential_used"])
+            self.assertEqual(fixture.docker.hostile_effects, ["rw_workspace_changed", "rw_workspace_deleted", "synthetic_credential_used"])
+            self.assertEqual(fixture.docker.persisted["/workspace/hostile-rw.txt"], b"modified-by-admitted-operation")
+            self.assertNotIn("/workspace/hostile-delete.txt", fixture.docker.persisted)
+            authority = fixture.docker.hostile_authority_evidence
+            self.assertTrue(authority["accepted_open_sandbox_risk"])
+            self.assertEqual(authority["endpoint"], "https://allowed.synthetic.test/collect")
+            self.assertEqual(authority["credential_sha256"], hashlib.sha256(HOSTILE_SYNTHETIC_CREDENTIAL).hexdigest())
+            self.assertEqual(authority["credential_bytes_sent"], len(HOSTILE_SYNTHETIC_CREDENTIAL))
+            self.assertFalse(authority["display_redaction_prevented_egress"])
             self.assertEqual(sentinel.read_text(), "unchanged")
             commands = fixture.docker.commands
-            self.assertFalse(any("docker.sock" in " ".join(command) for command in commands))
-            self.assertTrue(all(command[:2] == ("container", "exec") for command in commands if "claim-execute" in command))
+            admitted = [command for command in commands if "claim-execute" in command]
+            rendered = "\n".join(" ".join(command) for command in admitted)
+            for denied in ("docker.sock", "podman.sock", "/home/", "/root/.ssh", "/dev/", "systemctl", "service", "--publish", "--mount", "container start", "container stop", "container create"):
+                self.assertNotIn(denied, rendered)
+            self.assertTrue(all(command[:2] == ("container", "exec") for command in admitted))
+            creates = [command for command in commands if command[:2] == ("container", "create")]
+            self.assertEqual(len(creates), 1)
+            self.assertEqual(sum(1 for value in creates[0] if value == "--mount"), 2)
+            self.assertNotIn("--publish", creates[0])
+            self.assertEqual(len(fixture.docker.containers), 1)
+            # Serialized fake tool calls were inert data. Exactly the later
+            # admitted shell decision produced accepted authority effects.
+            self.assertEqual(result.operations, 2)
         finally:
             fixture.close()
 
