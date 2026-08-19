@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-realtime-identity.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "stream_epoch",
+    "turn_id",
+    "request_id",
+    "turn_generation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "voice-agent.agent-realtime-identity.v1"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "stream_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "turn_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "turn_generation": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

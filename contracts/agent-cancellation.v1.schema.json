@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-cancellation.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "call_id",
+    "scope"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "voice-agent.agent-cancellation.v1"
+    },
+    "call_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "scope": {
+      "const": "foreground_call_process_group"
+    }
+  }
+}

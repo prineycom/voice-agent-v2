@@ -23,6 +23,13 @@ SYSTEM_PROMPT = (
     "Сначала кратко обдумай ответ скрыто, затем обязательно дай видимый ответ. "
     "Не раскрывай рассуждения, не используй Markdown, списки или служебные маркеры."
 )
+AGENT_DECISION_SYSTEM_PROMPT = (
+    "You are the exact local Voice Agent decision model. Return one compact JSON object only. "
+    "Choose either {\"kind\":\"operation\",\"tool\":<allowed tool>,\"arguments\":{...}} "
+    "or {\"kind\":\"final\",\"answer\":<short natural answer in the user's language>}. "
+    "Use tool results to take several steps when required. Never invent container identity, "
+    "runtime, endpoint, mounts, credentials, labels, generation, or lifecycle arguments."
+)
 MAX_CONTEXT_MESSAGES = 4
 MAX_VISIBLE_CHARS = 500
 MAX_VISIBLE_BYTES = 2_000
@@ -903,6 +910,66 @@ class LocalLFMProvider:
             on_handoff_abort=on_handoff_abort,
             cancellation=cancellation,
         )
+
+    def agent_decision(
+        self,
+        *,
+        request: str,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, object]:
+        """Return one production AgentRun decision from the exact pinned model.
+
+        This is a separate versioned decision path, not a retry or reinterpretation
+        of the consumed E2.1 proposal benchmark.
+        """
+        if not request or len(request.encode("utf-8")) > 16_384:
+            raise StageFailure("llm_provider", "agent_decision_input_out_of_bounds")
+        generation = self._begin_operation(cancellation)
+        started = time.monotonic()
+        deadline = started + self._request_timeout_seconds
+        unregister = (
+            cancellation.register(lambda: self._cancel_operation(generation))
+            if cancellation is not None else lambda: None
+        )
+        payload = {
+            "model": MODEL_ALIAS,
+            "messages": [
+                {"role": "system", "content": AGENT_DECISION_SYSTEM_PROMPT},
+                {"role": "user", "content": request},
+            ],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "top_k": 40,
+            "repeat_penalty": 1.05,
+            "max_tokens": MAX_TOKENS,
+            "reasoning_format": "deepseek",
+            "reasoning_budget": REASONING_BUDGET,
+            "cache_prompt": False,
+            "timings": True,
+        }
+        try:
+            result = self._execute(
+                payload, generation, started, deadline, None, None, None
+            )
+            text = result.get("text")
+            if not isinstance(text, str):
+                raise StageFailure("llm_provider", "agent_decision_invalid")
+            document = json.loads(text)
+            if not isinstance(document, dict):
+                raise StageFailure("llm_provider", "agent_decision_invalid")
+            self._set_runtime_health(
+                live=True, ready=True, compatible=True, reason_code=None
+            )
+            return document
+        except (json.JSONDecodeError, UnicodeError, ValueError) as error:
+            self._record_runtime_failure("agent_decision_invalid")
+            raise StageFailure("llm_provider", "agent_decision_invalid") from error
+        finally:
+            unregister()
+            with self._operation_lock:
+                self._cancelled_generations.discard(generation)
 
     def cancel_request(self) -> None:
         with self._operation_lock:

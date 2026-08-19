@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**Slice 9's deterministic and canonical-host operational boundaries pass: exact config/artifact/cache preflight, versioned immutable release, idempotent deploy, compatible rollback, declared drain, one systemd recovery, controlled full-stack/core-process loss, and no surviving inference process. Physical reboot and physical voice/avatar acceptance remain explicitly open, so core MVP physical sign-off is still pending.** The private Silero/Kseniya native-48 path remains fixed to exact cache-local `v5_5_ru` / `kseniya` behind TTS v2; the active LLM remains only local LFM2.5 Q4_K_M. There is no provider/model/TTS/avatar fallback, Qwen co-start, cloud supervision, wake, kiosk, or public exposure. Input microphone/VAD/Whisper stays mono `pcm_s16le/16000`; agent output is native mono `pcm_s16le/48000`.
+**E2.4 adds a production multi-step AgentRun backed by exactly one installation-owned persistent Docker AgentEnvironment. Deterministic fake-Docker PR evidence passes independently from Linux Docker Engine, Docker Desktop/macOS, exact-model/network, reboot, and physical acceptance, which remain separate.** Slice 9's operational boundaries remain intact. The private Silero/Kseniya path stays exact cache-local `v5_5_ru` / `kseniya`; the only active LLM identity remains local LFM2.5 Q4_K_M/llama.cpp. There is no provider/model/TTS/avatar/execution-runtime fallback, selectable environment, implicit cleanup, wake, kiosk, or application-managed public exposure.
 
 Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
@@ -57,7 +57,7 @@ Generate a dedicated LiveKit key pair and fill every blank in ignored `.env.slic
 "${XDG_CACHE_HOME:-$HOME/.cache}/voice-agent-v2/slice-6/tooling/livekit-server-v1.13.5" generate-keys
 ```
 
-The active app accepts no `LITELLM_*` or TTS-selection configuration. `./verify` owns the model-free browser/runtime boundary. `./verify-local-lfm` and `./verify-silero-kseniya` are separate exact-cache canonical-host checks. E2.1's one-shot `./verify-local-lfm --tool-proposals-only` attempt is already consumed for its frozen preregistration and recorded unavailable; do not rerun it. Its machine decision is `model_operation_proposals_unavailable`, so ordinary conversation remains the only active LFM behavior and the production capability registry remains empty.
+The active app accepts no `LITELLM_*` or TTS-selection configuration. `./verify` owns the model-free browser/runtime boundary. `./verify-local-lfm` and `./verify-silero-kseniya` are separate exact-cache canonical-host checks. E2.1's one-shot `./verify-local-lfm --tool-proposals-only` attempt is already consumed for its frozen preregistration and recorded unavailable; do not rerun it. Its machine decision remains `model_operation_proposals_unavailable` and is never rerun or relabelled. E2.4 is a new versioned production AgentRun path rather than promotion of that consumed attempt.
 
 `./verify-silero-kseniya` loads exactly two resident CPU workers from the pinned read-only model cache, proves native 48-kHz totals, obsolete/current overlap with stale discard, full two-worker RSS/CPU, VAD/Whisper coexistence, and explicit controlled recovery. It writes content-free task evidence only under `~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship/`. It does not claim audibility, voice quality, physical barge-in, or the complete browser stack. The historical Qwen/LiteLLM executable harnesses are retired; their dated evidence remains under the explicit `./verify-evidence` tier.
 
@@ -97,17 +97,27 @@ Default metadata diagnostics contain no conversation/media content, secrets, exc
 
 [`docs/architecture.md` §8.2](docs/architecture.md#82-data-handling) owns the capture limits, expiry, and privacy contract. The complete exercised matrix, example redacted report, privacy evidence, and exact nonclaims are in [`docs/evidence/slice-8-failure-observability.md`](docs/evidence/slice-8-failure-observability.md).
 
-### Minimal private agent profile
+### Agent configuration and persistent Docker environment
 
-The E1.1 operator path creates and inspects an inert owner-only profile without changing the voice runtime or granting a capability:
+Active configuration is strict [`voice-agent.config.v2`](contracts/agent-config.v2.schema.json), illustrated by [`config/agent-config-v2.example.yaml`](config/agent-config-v2.example.yaml). It pins one AgentRun decision budget, one fixed tool set, one OCI image and fixed lifecycle/resource bounds. It contains no selectable identity, execution backend, environment alias, credential set, persistence mode, task override, or raw Docker arguments. Historical E1 V1 input can be inspected and upgraded once; the upgrade carries no former identity:
 
 ```sh
-./voice-agent-ops agent-config init
-./voice-agent-ops agent-config validate
-./voice-agent-ops agent-config status
+./voice-agent-ops agent-config upgrade-v2 --json
+./voice-agent-ops agent-environment status
 ```
 
-Use `agent-config validate --path <mode-0600-candidate>` to validate another current-user-owned regular file without activation, and add `--json` to any of the three subcommands for the closed machine-readable result. Production resolves `~/.voice-agent/` from the effective user account rather than ambient `HOME`. The generated `config.yaml` is non-secret; empty `SOUL.md` plus `skills/`, `sessions/`, and `memory/` are reserved and inert. The immutable production capability registry is empty, so status always reports zero effective capabilities. Commands reject unsafe ownership, modes, links, path types, YAML, and schema data without printing source content, paths, environment, credentials, or raw exceptions.
+The first admitted tool call lazily creates the installation's sole owner-labelled Docker container. Later calls and AgentRuns reuse the exact selected ID, writable rootfs, managed `/workspace`, managed `/cache`, and logical cwd. Every terminal/file/search/write/edit/patch/code/process/receipt call enters a fixed helper through `docker container exec`; missing/unreachable Docker fails only the agent plane and never reaches host execution or another runtime.
+
+Turn/session completion, cancellation, `/quit`, idle expiry, gateway restart, shutdown, and controller death do not stop or remove the environment. An explicitly stopped compatible container is started with the same ID: files/rootfs persist, old processes and sockets do not. Operator lifecycle is selector-free and destructive actions require confirmation; workspace/cache remain by default:
+
+```sh
+./voice-agent-ops agent-environment reset --confirm
+./voice-agent-ops agent-environment rebuild --confirm
+./voice-agent-ops agent-environment remove --confirm
+./voice-agent-ops agent-environment retire --confirm
+```
+
+There is no prune, wildcard cleanup, runtime image pull, Docker installation/configuration, or normal-event destruction. See [`docs/architecture.md` §9.7](docs/architecture.md#97-e24-production-agentrun-and-agentenvironment) for identity, locking, state, receipt, persistence, cancellation, security, resource, and evidence boundaries.
 
 ### Slice 9 single-host operations
 

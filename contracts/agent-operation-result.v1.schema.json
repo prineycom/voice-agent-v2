@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-operation-result.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "voice-agent.agent-operation-result.v1"
+    },
+    "receipt": {
+      "type": "object"
+    }
+  }
+}

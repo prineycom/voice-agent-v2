@@ -17,7 +17,9 @@ from urllib.parse import urlsplit
 
 from livekit import api, rtc
 
-from .agent_profile_runtime import AgentProfileRuntime
+from .agent_runtime import AgentRuntime
+from .agent_config import AgentUserContext
+from .agent_run_provider import AgentRunProvider
 from .v2_audio import (
     INPUT_AUDIO_FORMAT,
     OUTPUT_DELIVERY_BLOCK_BYTES,
@@ -116,10 +118,22 @@ class SessionCapacityError(RuntimeError):
 class LiveTurnRunner:
     """Reuse the cumulative real controller and warm every resident adapter."""
 
-    def __init__(self, settings: Slice6Settings) -> None:
+    def __init__(
+        self, settings: Slice6Settings, *, agent_runtime: AgentRuntime | None = None
+    ) -> None:
         self.stt = WhisperSTT()
         del settings
-        self.llm = LocalLFMProvider()
+        runtime = agent_runtime or AgentRuntime.startup()
+        if runtime.config is not None and runtime.config.model.agent.enabled:
+            home = AgentUserContext.effective().home
+            self.llm = AgentRunProvider(
+                runtime.config,
+                installation_root=home / ".cache" / "voice-agent-v2" / "agent-environment",
+            )
+        else:
+            # Configuration failure disables tools only; ordinary voice stays on
+            # the exact same local provider with no fallback.
+            self.llm = LocalLFMProvider()
         self.tts_profile = SileroVoiceProfile()
         self.tts = SileroKseniyaTTS()
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
@@ -1445,11 +1459,11 @@ class LiveKitRoomController:
 
 class SessionRegistry:
     def __init__(
-        self, settings: Slice6Settings, *, agent_profile: AgentProfileRuntime
+        self, settings: Slice6Settings, *, agent_runtime: AgentRuntime
     ) -> None:
         self.settings = settings
-        self.agent_profile = agent_profile
-        self.runner = LiveTurnRunner(settings)
+        self.agent_runtime = agent_runtime
+        self.runner = LiveTurnRunner(settings, agent_runtime=agent_runtime)
         runtime_id = f"runtime-{os.getpid()}-{time.monotonic_ns():x}"
         self.trace = PrivacySafeTrace(
             TRACE_ROOT / f"{runtime_id}.jsonl", TraceIdentity(runtime_id)

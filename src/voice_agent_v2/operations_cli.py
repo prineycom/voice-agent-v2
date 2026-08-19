@@ -352,6 +352,34 @@ def command_agent_config_status(arguments: argparse.Namespace) -> None:
         _print_agent_human(document)
 
 
+def command_agent_config_upgrade(arguments: argparse.Namespace) -> None:
+    from .agent_environment_config import parse_agent_config_v2, upgrade_v1_to_v2
+
+    service = _agent_service(arguments)
+    service.status()  # strict V1 custody and validation immediately before rewrite
+    root = service.context.profile_root
+    target = root / "config.yaml"
+    content = upgrade_v1_to_v2(target.read_bytes())
+    descriptor, name = tempfile.mkstemp(prefix=".config-upgrade-", dir=root)
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+        snapshot = parse_agent_config_v2(content)
+    finally:
+        temporary.unlink(missing_ok=True)
+    document = snapshot.status_document()
+    if arguments.json:
+        _print(document)
+    else:
+        print("agent configuration: upgraded to voice-agent.config.v2")
+        print(f"semantic revision: {snapshot.semantic_revision}")
+
+
 def command_validate(arguments: argparse.Namespace) -> None:
     report = validate_host(
         source_root=ROOT,
@@ -431,7 +459,7 @@ def command_status(arguments: argparse.Namespace) -> None:
             "build_id": public_status.get("build_id") if public_status else None,
             "overall_readiness": health.get("overall_readiness") if isinstance(health, dict) else None,
             "accepting": public_status.get("accepting") if public_status else False,
-            "agent_profile": public_status.get("agent_profile") if public_status else None,
+            "agent_runtime": public_status.get("agent_runtime") if public_status else None,
         }
     else:
         service = {
@@ -450,7 +478,7 @@ def command_status(arguments: argparse.Namespace) -> None:
             "build_id": None,
             "overall_readiness": "not-applicable",
             "accepting": False,
-            "agent_profile": None,
+            "agent_runtime": None,
         }
     _print({
         "schema_version": "voice-agent.operational-status.v1",
@@ -727,6 +755,31 @@ def command_rollback(arguments: argparse.Namespace) -> None:
         _print(result)
 
 
+def _agent_environment_manager():
+    from .agent_config import AgentUserContext
+    from .agent_environment import AgentEnvironment
+    from .agent_environment_config import load_agent_config_v2
+
+    context = AgentUserContext.effective()
+    config = load_agent_config_v2(context.profile_root / "config.yaml")
+    root = context.home / ".cache" / "voice-agent-v2" / "agent-environment"
+    return AgentEnvironment(
+        config,
+        state_root=root / "private",
+        workspace=root / "workspace",
+        cache=root / "cache",
+    )
+
+
+def command_agent_environment(arguments: argparse.Namespace) -> None:
+    manager = _agent_environment_manager()
+    document = manager.lifecycle(
+        arguments.agent_environment_action,
+        confirmed=bool(getattr(arguments, "confirm", False)),
+    )
+    _print(document)
+
+
 def command_sustained_report(arguments: argparse.Namespace) -> None:
     try:
         evidence = json.loads(arguments.evidence.read_text(encoding="utf-8"))
@@ -797,9 +850,36 @@ def parser() -> argparse.ArgumentParser:
     agent_validate.add_argument("--json", action="store_true", help="emit stable machine-readable output")
     agent_validate.set_defaults(function=command_agent_config_validate)
 
-    agent_status = agent_commands.add_parser("status", help="report identity, revision, and zero authority")
+    agent_status = agent_commands.add_parser("status", help="report historical V1 compatibility input")
     agent_status.add_argument("--json", action="store_true", help="emit stable machine-readable output")
     agent_status.set_defaults(function=command_agent_config_status)
+
+    agent_upgrade = agent_commands.add_parser(
+        "upgrade-v2", help="one-way upgrade to the active single-environment configuration"
+    )
+    agent_upgrade.add_argument("--json", action="store_true", help="emit stable machine-readable output")
+    agent_upgrade.set_defaults(function=command_agent_config_upgrade)
+
+    environment = subcommands.add_parser(
+        "agent-environment",
+        help="inspect or explicitly operate the installation-owned Docker AgentEnvironment",
+    )
+    environment_commands = environment.add_subparsers(
+        dest="agent_environment_action", required=True
+    )
+    environment_status = environment_commands.add_parser(
+        "status", help="inspect persistence, process, identity, and resource truth"
+    )
+    environment_status.set_defaults(function=command_agent_environment)
+    for action in ("reset", "rebuild", "remove", "retire"):
+        destructive = environment_commands.add_parser(
+            action, help=f"explicitly {action} exact installation-owned state"
+        )
+        destructive.add_argument(
+            "--confirm", action="store_true", required=True,
+            help="confirm exact-ID destructive action; workspace/cache remain",
+        )
+        destructive.set_defaults(function=command_agent_environment)
 
     run = subcommands.add_parser("run", help=argparse.SUPPRESS)
     run.add_argument("--state-root", type=_state_root, default=DEFAULT_STATE_ROOT)
@@ -824,10 +904,18 @@ def main(
         print("voice-agent-ops failed: interrupted", file=sys.stderr)
         return 130
     except Exception as error:
+        if arguments.command == "agent-environment":
+            from .agent_environment import AgentEnvironmentError
+            from .agent_config import AgentConfigError
+            if isinstance(error, (AgentEnvironmentError, AgentConfigError)):
+                print(f"voice-agent-ops failed: {error.code}", file=sys.stderr)
+                return CONFIGURATION_EXIT_STATUS
+            print("voice-agent-ops failed: agent_environment_operation_failed", file=sys.stderr)
+            return CONFIGURATION_EXIT_STATUS
         if arguments.command != "agent-config":
             raise
-        # Agent-profile failures are normalized at the public boundary; an
-        # unexpected parser/runtime exception must not reveal source or host data.
+        # Historical V1 inspection failures remain normalized at their boundary;
+        # an unexpected parser/runtime exception must not reveal source or host data.
         try:
             from .agent_config import AgentConfigError, ERROR_SCHEMA
         except ImportError:

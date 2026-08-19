@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-runtime-status.v2.schema.json",
+  "title": "Restart-pinned active agent runtime status v2",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "status", "reason_code", "config_revision", "agent_enabled", "agent_tools_admitted", "environment_count", "provider_mode", "automatic_fallback"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.agent-runtime-status.v2"},
+    "status": {"enum": ["active", "degraded"]},
+    "reason_code": {"type": "string", "pattern": "^[a-z0-9_]{1,64}$"},
+    "config_revision": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
+    "agent_enabled": {"type": "boolean"},
+    "agent_tools_admitted": {"type": "boolean"},
+    "environment_count": {"const": 1},
+    "provider_mode": {"const": "local"},
+    "automatic_fallback": {"const": false}
+  }
+}

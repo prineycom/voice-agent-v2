@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .agent_profile_runtime import AgentProfileRuntime
+from .agent_runtime import AgentRuntime
 from .livekit_runtime import SessionCapacityError, SessionRegistry
 from .slice6_config import Slice6Settings, app_origin_allowed
 
@@ -18,13 +18,13 @@ async def lifespan(app: FastAPI):
     settings = Slice6Settings.from_environment()
     if not settings.web_dist.is_dir() or not (settings.web_dist / "index.html").is_file():
         raise RuntimeError("Slice 6 web build is missing; run (cd web && npm run build)")
-    agent_profile = AgentProfileRuntime.startup()
-    registry = SessionRegistry(settings, agent_profile=agent_profile)
+    agent_runtime = AgentRuntime.startup()
+    registry = SessionRegistry(settings, agent_runtime=agent_runtime)
     try:
         await registry.start()
         app.state.settings = settings
         app.state.registry = registry
-        app.state.agent_profile = agent_profile
+        app.state.agent_runtime = agent_runtime
         yield
     finally:
         await registry.close()
@@ -63,7 +63,7 @@ def public_status_document(
 
     health = registry.operational_health()
     return {
-        "schema_version": "voice-agent.public-operational-status.v1",
+        "schema_version": "voice-agent.public-operational-status.v2",
         "available": (
             registry.accepting and registry.active_count == 0
             and health["overall_readiness"] == "ready"
@@ -77,7 +77,7 @@ def public_status_document(
         "automatic_fallback": False,
         "avatar_host_contract": "voice-agent.avatar-host.v1",
         "selected_avatar_module": "mvp-eye-svg-v1",
-        "agent_profile": registry.agent_profile.status_document(),
+        "agent_runtime": registry.agent_runtime.status_document(),
         "health": health,
     }
 

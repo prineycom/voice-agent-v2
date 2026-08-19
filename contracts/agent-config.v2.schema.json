@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-config.v2.schema.json",
+  "title": "Single installation AgentEnvironment configuration v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "agent", "agent_environment"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.config.v2"},
+    "agent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "max_decisions", "active_deadline_seconds", "tools"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "max_decisions": {"type": "integer", "minimum": 1, "maximum": 24},
+        "active_deadline_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+        "tools": {"const": ["shell.exec", "file.read", "file.search", "file.write", "file.edit", "file.patch", "execute_code", "process", "receipt"]}
+      }
+    },
+    "agent_environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["image", "lifecycle", "resources"],
+      "properties": {
+        "image": {
+          "type": "object", "additionalProperties": false,
+          "required": ["reference", "pull_at_runtime"],
+          "properties": {
+            "reference": {"const": "ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421"},
+            "pull_at_runtime": {"const": false}
+          }
+        },
+        "lifecycle": {
+          "type": "object", "additionalProperties": false,
+          "required": ["lazy_create", "persistent", "restart_policy", "idle_action", "command_timeout_seconds", "command_timeout_grace_seconds"],
+          "properties": {
+            "lazy_create": {"const": true}, "persistent": {"const": true},
+            "restart_policy": {"const": "no"}, "idle_action": {"const": "none"},
+            "command_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+            "command_timeout_grace_seconds": {"type": "integer", "minimum": 1, "maximum": 30}
+          }
+        },
+        "resources": {
+          "type": "object", "additionalProperties": false,
+          "required": ["cpus", "memory_mib", "pids", "shm_mib", "rootfs_target_mib", "workspace_target_mib", "cache_target_mib", "host_free_reserve_mib", "watchdog_interval_seconds", "maximum_output_bytes"],
+          "properties": {
+            "cpus": {"type": "integer", "minimum": 1, "maximum": 4},
+            "memory_mib": {"type": "integer", "minimum": 512, "maximum": 8192},
+            "pids": {"type": "integer", "minimum": 16, "maximum": 256},
+            "shm_mib": {"type": "integer", "minimum": 64, "maximum": 1024},
+            "rootfs_target_mib": {"type": "integer", "minimum": 512, "maximum": 16384},
+            "workspace_target_mib": {"type": "integer", "minimum": 512, "maximum": 65536},
+            "cache_target_mib": {"type": "integer", "minimum": 512, "maximum": 32768},
+            "host_free_reserve_mib": {"type": "integer", "minimum": 8192},
+            "watchdog_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 10},
+            "maximum_output_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576}
+          }
+        }
+      }
+    }
+  }
+}
