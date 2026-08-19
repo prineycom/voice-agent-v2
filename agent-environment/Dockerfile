@@ -9,7 +9,7 @@ RUN apk add --no-cache ca-certificates curl git openssh-client patch ripgrep sud
     && chmod 0440 /etc/sudoers.d/agent \
     && install -d -m 0700 -o agent -g agent /workspace /cache \
        /var/lib/voice-agent/exec-ledger /var/lib/voice-agent/stream-ledger \
-       /var/lib/voice-agent/credentials
+       /var/lib/voice-agent/process-ledger /var/lib/voice-agent/credentials
 COPY --chmod=0555 helpers/agent-helper /usr/local/lib/voice-agent/agent-helper
 USER 1000:1000
 WORKDIR /workspace

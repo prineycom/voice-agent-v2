@@ -65,6 +65,16 @@ Docker bridge egress enables ordinary DNS/TLS/HTTP(S), `curl`, SDK/package clien
 
 Inbound/outbound helpers move binary data only over Docker-exec stdin/stdout, enforce configured byte/time limits, validate SHA-256, and never interpret container paths on the host. Target delivery is attempted once and is `sent` only after exact acknowledgement; ambiguity is `unknown`. Redaction changes only display/log/support/final-human copies, never raw model/tool/file/network/Git/transport bytes. Status exposes names/modes and the broad authority warning, not sources, values, or fingerprints. There is no credential profile/selector, domain/payload binding, DLP, proxy guarantee, remote rollback, extra mount/service, Telegram/Web-research/background-job UX, or live credential/provider spend.
 
+## Agent evolution E3.3 — Persistent background work, explicit mounts, and lifecycle UX
+
+> **Implemented contract:** E3.3 extends only the same selected Docker container. It adds bounded opaque process receipts and typed operator mounts, and completes the already explicit selector-free lifecycle surface.
+
+A background shell/code call returns promptly with an opaque controller receipt. Later calls can poll, read bounded logs, wait, write bounded stdin, or TERM→KILL only after private/rootfs claims match fresh `/proc` PID/start/executable/process-group and PID 1 start identities. Controller restart reconciliation retains that authority without trusting a PID alone. Foreground cancellation uses a separate proven call group. Background work survives controller/turn/session events only while the exact container runs; a real container/Engine/Desktop/VM stop loses old processes and listeners, same-ID restart preserves files but reports them gone, and nothing automatically restarts them.
+
+The restart-pinned `additional_mounts` list admits only absolute precreated user-owned non-symlink sources, fixed nonoverlapping destinations, explicit RO/RW mode, and pinned custody identity. Docker receives explicit `--mount` only. RO remains readable/exfiltratable; RW may also be changed/deleted/encrypted. Mount drift is `stale_spec`; raw/model paths, Docker socket/control/device/system roots, undeclared host paths, and published ports remain forbidden.
+
+`status`, confirmed `reset|rebuild|remove|retire`, exact reinspection, atomic validated rebuild selection, retained nonselection, and separate data-deletion authority are deterministic. Conflicts are disclosed rather than repaired by killing unrelated work. PR evidence is fake-Docker/disposable-process only; Linux Engine, Docker Desktop/macOS, exact-model, real stop/daemon/Desktop, reboot, physical voice, and full-stack acceptance remain separate.
+
 `./verify` uses synthetic values and fake Docker/network/transport transcripts. Linux Engine and Docker Desktop/macOS network/rotation/tmpfs/remote-Git facts, exact-model/live-network tasks, reboot, voice, and physical evidence remain independently pending. See [`evidence/e3-2-network-credentials-streams-remote-git.md`](evidence/e3-2-network-credentials-streams-remote-git.md).
 
 ## Slice 1 — Deterministic zero-secret voice-turn tracer

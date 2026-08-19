@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-process-receipt.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "process_receipt", "state", "writable_stdin", "operations"],
+  "properties": {
+    "schema_version": {"const": "voice-agent.process-receipt.v1"},
+    "kind": {"const": "background_process"},
+    "process_receipt": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "state": {"const": "running"},
+    "writable_stdin": {"type": "boolean"},
+    "operations": {"const": ["poll", "logs", "wait", "write", "kill"]}
+  }
+}
