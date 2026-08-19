@@ -16,19 +16,24 @@ from typing import Callable, Mapping, Protocol
 import uuid
 
 from .agent_environment import AgentEnvironment, AgentEnvironmentError, CallReceipt, HELPERS
+from .agent_report_delivery import (
+    ReportDeliveryController, ReportDeliveryError, ReportDeliveryRequest,
+)
 from .agent_research import CitationRecord, CitationRequest, WEB_TOOLS, bind_citations
 from .contracts import StageFailure, valid_correlation_id
 from .local_lfm import LocalLFMProvider, MODEL_ALIAS, PROVIDER_IDENTITY
 from .tracer import CancellationToken
 
-AGENT_RUN_VERSION = "voice-agent.agent-run.v2"
-DECISION_VERSION = "voice-agent.agent-decision.v2"
+AGENT_RUN_VERSION = "voice-agent.agent-run.v3"
+DECISION_VERSION = "voice-agent.agent-decision.v3"
 OPERATION_VERSION = "voice-agent.agent-operation.v1"
 RESULT_VERSION = "voice-agent.agent-operation-result.v1"
 BUDGET_VERSION = "voice-agent.agent-budget.v1"
 IDENTITY_VERSION = "voice-agent.agent-realtime-identity.v1"
 CANCELLATION_VERSION = "voice-agent.agent-cancellation.v1"
 MAX_DECISION_INPUT_BYTES = 16_384
+REPORT_DELIVERY_TOOL = "report.deliver"
+AGENT_TOOLS = (*HELPERS, REPORT_DELIVERY_TOOL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +99,7 @@ class AgentDecision:
             return cls("final", answer=answer, citations=citations)
         if (
             set(raw) != {"kind", "tool", "arguments"}
-            or raw.get("tool") not in HELPERS
+            or raw.get("tool") not in AGENT_TOOLS
             or not isinstance(raw.get("arguments"), dict)
         ):
             raise StageFailure("llm_provider", "agent_decision_invalid")
@@ -147,6 +152,7 @@ class AgentRunResult:
     terminal: str
     citations: tuple[CitationRecord, ...] = ()
     research_receipts: tuple[Mapping[str, object], ...] = ()
+    deliveries: tuple[Mapping[str, object], ...] = ()
 
     def document(self) -> dict[str, object]:
         return {
@@ -162,6 +168,7 @@ class AgentRunResult:
             "automatic_fallback": False,
             "citations": [item.document() for item in self.citations],
             "research_receipts": [dict(item) for item in self.research_receipts],
+            "deliveries": [dict(item) for item in self.deliveries],
         }
 
 
@@ -172,6 +179,7 @@ class AgentRun:
         *,
         model: DecisionModel | None = None,
         observation: Callable[[dict[str, object]], None] | None = None,
+        delivery: ReportDeliveryController | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.environment = environment
@@ -179,6 +187,7 @@ class AgentRun:
         if self.model.provider_mode != "local" or self.model.provider_identity != PROVIDER_IDENTITY:
             raise ValueError("AgentRun cannot use a fallback model")
         self.observation = observation
+        self.delivery = delivery or ReportDeliveryController(environment)
         self.clock = clock
         config = environment.config.model
         self.budget = AgentBudget(
@@ -220,7 +229,7 @@ class AgentRun:
             "identity": identity.document(),
             "budget": self.budget.document(),
             "user_request": transcript,
-            "allowed_tools": list(HELPERS),
+            "allowed_tools": list(AGENT_TOOLS),
             "history": history,
         }
         encoded = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -250,6 +259,7 @@ class AgentRun:
         operations = 0
         successful_research: dict[str, Mapping[str, object]] = {}
         research_receipts: list[Mapping[str, object]] = []
+        deliveries: list[Mapping[str, object]] = []
         try:
             for decision_number in range(1, self.budget.maximum_decisions + 1):
                 if not self._live(identity, token):
@@ -279,7 +289,7 @@ class AgentRun:
                     ) for item in citations)
                     return AgentRunResult(
                         run_id, identity, display_answer, decision_number, operations, "completed",
-                        display_citations, tuple(research_receipts),
+                        display_citations, tuple(research_receipts), tuple(deliveries),
                     )
                 assert decision.tool is not None and decision.arguments is not None
                 call_id = uuid.uuid4().hex
@@ -293,10 +303,46 @@ class AgentRun:
                         raise StageFailure("llm_provider", "selected_provider_cancelled")
                     self._active_call = (call_id, facts.container_id)
                 try:
-                    receipt = self.environment.execute(
-                        decision.tool, decision.arguments, call_id=call_id,
-                        timeout_seconds=min(self.budget.maximum_operation_seconds, max(0.001, deadline - self.clock())),
-                    )
+                    if decision.tool == REPORT_DELIVERY_TOOL:
+                        try:
+                            if set(decision.arguments) == {"action", "artifact_id"} and decision.arguments.get("action") == "resend":
+                                artifact_id = decision.arguments.get("artifact_id")
+                                if not isinstance(artifact_id, str):
+                                    raise ReportDeliveryError("artifact_identity_invalid")
+                                delivery_result = self.delivery.resend_artifact(
+                                    artifact_id, cancellation=token,
+                                )
+                            elif set(decision.arguments) == {"action", "delivery_id"} and decision.arguments.get("action") == "reconcile":
+                                delivery_id = decision.arguments.get("delivery_id")
+                                if not isinstance(delivery_id, str):
+                                    raise ReportDeliveryError("delivery_identity_invalid")
+                                delivery_result = self.delivery.reconcile_delivery(delivery_id)
+                            else:
+                                delivery_request = ReportDeliveryRequest.parse(
+                                    decision.arguments, successful_research,
+                                )
+                                delivery_result = self.delivery.save_and_deliver(
+                                    delivery_request, cancellation=token,
+                                )
+                        except ReportDeliveryError as error:
+                            raise StageFailure("agent_environment", error.code) from None
+                        deliveries.append(delivery_result)
+                        safe_output = json.dumps(
+                            delivery_result, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                        receipt = CallReceipt(
+                            call_id, facts.container_id, facts.generation, "completed", 0,
+                            safe_output, b"", "/workspace", metadata={
+                                "stdout": {"byte_count": len(safe_output), "sha256": hashlib.sha256(safe_output).hexdigest(), "truncated": False},
+                                "stderr": {"byte_count": 0, "sha256": hashlib.sha256(b"").hexdigest(), "truncated": False},
+                                "details": delivery_result,
+                            },
+                        )
+                    else:
+                        receipt = self.environment.execute(
+                            decision.tool, decision.arguments, call_id=call_id,
+                            timeout_seconds=min(self.budget.maximum_operation_seconds, max(0.001, deadline - self.clock())),
+                        )
                 except AgentEnvironmentError as error:
                     raise StageFailure("agent_environment", error.code) from None
                 finally:
