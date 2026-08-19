@@ -27,7 +27,7 @@ The Node.js 26 launcher phase of the repository-owned `./verify` owns:
 
 The Python behavior phase validates the expanded strict schema, complete active compatibility fixture and disabled V1 upgrade while retaining the existing fake-Docker AgentEnvironment/AgentRun matrix.
 
-The final complete command output is stored at `artifacts/agent-environment-preservation-verify.log`.
+The sole final canonical `./verify` run passed with `canonical_pr_gate: PASS deadline_seconds=90 unexpected_skips=0` and `RESULT: PASS`. Its complete 147-line output is stored at `artifacts/agent-environment-preservation-verify.log` (SHA-256 `976a127d4dce420d96dc183ad5daa3b1988d774cb884923a2e6518c582dc9280`).
 
 ## Explicit nonclaims
 
