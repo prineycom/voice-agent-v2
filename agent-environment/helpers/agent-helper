@@ -1,25 +1,56 @@
 #!/usr/bin/env python3
-"""Fixed in-container helper and persistent at-most-once receipt ledger."""
+"""Fixed in-container helper for ordinary persistent development work.
+
+The controller can only invoke this executable through ``docker container exec``.
+It keeps the at-most-once receipt ledger in the writable container rootfs; user
+files remain ordinary container files rather than gateway paths.
+"""
 
 from __future__ import annotations
 
 import argparse
 import base64
+from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 
-LEDGER = Path("/var/lib/voice-agent/exec-ledger")
+LEDGER = Path(os.environ.get("VOICE_AGENT_LEDGER", "/var/lib/voice-agent/exec-ledger"))
 MAX_LEDGER = 4096
 MAX_INPUT = 256 * 1024
-MAX_OUTPUT = 256 * 1024
+# The Docker exec JSON envelope base64-encodes stdout, so this deliberately
+# stays below the controller's 256-KiB wire-output limit.
+MAX_OUTPUT = 128 * 1024
+MAX_FILE_BYTES = 8 * 1024 * 1024
+MAX_SEARCH_MATCHES = 256
 CALL_ID = re.compile(r"^[a-f0-9]{32}$")
+SHA256 = re.compile(r"^[a-f0-9]{64}$")
+
+
+@dataclass(slots=True)
+class Captured:
+    data: bytes = b""
+    byte_count: int = 0
+    digest: hashlib._Hash = field(default_factory=hashlib.sha256)
+    truncated: bool = False
+
+    def add(self, chunk: bytes) -> None:
+        self.byte_count += len(chunk)
+        self.digest.update(chunk)
+        if len(self.data) < MAX_OUTPUT:
+            remaining = MAX_OUTPUT - len(self.data)
+            self.data += chunk[:remaining]
+        if self.byte_count > MAX_OUTPUT:
+            self.truncated = True
 
 
 def emit(value: dict[str, object]) -> None:
@@ -36,32 +67,70 @@ def input_document() -> dict[str, object]:
     return value
 
 
-def bounded(data: bytes) -> bytes:
-    return data[:MAX_OUTPUT]
-
-
 def atomic_json(path: Path, value: dict[str, object]) -> None:
     descriptor, name = tempfile.mkstemp(prefix=".receipt-", dir=path.parent)
+    temporary = Path(name)
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             json.dump(value, output, sort_keys=True, separators=(",", ":"))
             output.flush()
             os.fsync(output.fileno())
-        os.replace(name, path)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
-        Path(name).unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
-def receipt(status: str, exit_code: int | None, stdout: bytes, stderr: bytes, cwd: str, *, replayed: bool = False) -> dict[str, object]:
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _metadata(captured: Captured, *, prefix: str) -> dict[str, object]:
     return {
+        f"{prefix}_bytes": captured.byte_count,
+        f"{prefix}_sha256": captured.digest.hexdigest(),
+        f"{prefix}_truncated": captured.truncated,
+    }
+
+
+def receipt(
+    status: str,
+    exit_code: int | None,
+    stdout: Captured,
+    stderr: Captured,
+    cwd: str,
+    *,
+    details: dict[str, object] | None = None,
+    replayed: bool = False,
+) -> dict[str, object]:
+    result: dict[str, object] = {
         "status": status,
         "exit_code": exit_code,
-        "stdout_base64": base64.b64encode(bounded(stdout)).decode("ascii"),
-        "stderr_base64": base64.b64encode(bounded(stderr)).decode("ascii"),
+        "stdout_base64": base64.b64encode(stdout.data).decode("ascii"),
+        "stderr_base64": base64.b64encode(stderr.data).decode("ascii"),
         "cwd": cwd,
         "replayed": replayed,
+        **_metadata(stdout, prefix="stdout"),
+        **_metadata(stderr, prefix="stderr"),
     }
+    if details:
+        result["details"] = details
+    return result
+
+
+def captured(data: bytes) -> Captured:
+    result = Captured()
+    result.add(data)
+    return result
+
+
+def error_result(code: str, cwd: str, *, details: dict[str, object] | None = None) -> dict[str, object]:
+    return receipt("failed", 2, captured(b""), captured(code.encode("ascii")), cwd, details=details)
 
 
 def safe_cwd(value: str) -> str:
@@ -71,49 +140,300 @@ def safe_cwd(value: str) -> str:
     return str(path)
 
 
-def execute(tool: str, data: dict[str, object], cwd: str, call: Path) -> dict[str, object]:
-    command: list[str]
-    stdin = b""
-    if tool == "shell-exec":
-        command = ["/bin/sh", "-lc", str(data.get("command", ""))]
-    elif tool == "file-read":
-        command = ["/usr/bin/python3", __file__, "internal-read", str(data.get("path", ""))]
-    elif tool == "file-search":
-        command = ["/usr/bin/python3", __file__, "internal-search", str(data.get("path", cwd)), str(data.get("query", ""))]
-    elif tool == "file-write":
-        command = ["/usr/bin/python3", __file__, "internal-write", str(data.get("path", ""))]
-        stdin = base64.b64decode(str(data.get("data_base64", "")), validate=True)
-    elif tool in {"file-edit", "file-patch"}:
-        command = ["/usr/bin/python3", __file__, "internal-patch", str(data.get("path", ""))]
-        stdin = str(data.get("patch", "")).encode("utf-8")
-    elif tool == "execute-code":
-        language = str(data.get("language", "python"))
-        interpreters = {"python": "/usr/bin/python3", "sh": "/bin/sh"}
-        command = [interpreters[language], "-"]
-        stdin = str(data.get("code", "")).encode("utf-8")
-    elif tool == "process":
-        command = ["/usr/bin/python3", __file__, "internal-process", str(data.get("action", "poll")), str(data.get("process_id", ""))]
-    elif tool == "receipt":
-        command = ["/usr/bin/python3", __file__, "internal-receipt", str(data.get("call_id", ""))]
-    else:
-        raise ValueError("tool_invalid")
+def _relative(path: str, cwd: str) -> Path:
+    candidate = Path(path)
+    if not str(path) or "\0" in str(path):
+        raise ValueError("path_invalid")
+    return candidate if candidate.is_absolute() else Path(cwd) / candidate
+
+
+def _regular(path: Path) -> os.stat_result:
+    metadata = path.stat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("path_not_regular")
+    if metadata.st_size > MAX_FILE_BYTES:
+        raise ValueError("file_out_of_bounds")
+    return metadata
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _expected(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not SHA256.fullmatch(value):
+        raise ValueError(f"{name}_invalid")
+    return value
+
+
+def _atomic_replace(target: Path, data: bytes, *, expected_current: str | None = None) -> dict[str, object]:
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if expected_current is not None:
+        if not target.exists() or _sha256_path(target) != expected_current:
+            raise ValueError("expected_current_sha256_mismatch")
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "mode": "0600", "atomic": True}
+
+
+def _file_read(data: dict[str, object], cwd: str) -> dict[str, object]:
+    path = _relative(str(data.get("path", "")), cwd)
+    metadata = _regular(path)
+    offset = data.get("offset", 0)
+    length = data.get("length", MAX_OUTPUT)
+    if type(offset) is not int or type(length) is not int or offset < 0 or length < 0 or length > MAX_OUTPUT:
+        raise ValueError("range_invalid")
+    with path.open("rb") as source:
+        source.seek(offset)
+        output = source.read(length)
+    total_hash = _sha256_path(path)
+    end = offset + len(output)
+    return receipt(
+        "completed", 0, captured(output), captured(b""), cwd,
+        details={
+            "kind": "file_read", "file_bytes": metadata.st_size, "file_sha256": total_hash,
+            "mode": f"{stat.S_IMODE(metadata.st_mode):04o}", "range_start": offset,
+            "range_end": end, "range_complete": end >= metadata.st_size,
+            "range_truncated": end < metadata.st_size,
+        },
+    )
+
+
+def _file_search(data: dict[str, object], cwd: str) -> dict[str, object]:
+    root = _relative(str(data.get("path", cwd)), cwd)
+    query = data.get("query", "")
+    if not isinstance(query, str) or not query or len(query.encode("utf-8")) > 4096 or not root.is_dir():
+        raise ValueError("search_invalid")
+    needle = query.encode("utf-8")
+    matches: list[str] = []
+    scanned = 0
+    complete = True
+    for candidate in sorted(root.rglob("*")):
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        metadata = candidate.stat()
+        if metadata.st_size > MAX_FILE_BYTES or scanned + metadata.st_size > MAX_FILE_BYTES:
+            complete = False
+            break
+        scanned += metadata.st_size
+        content = candidate.read_bytes()
+        start = 0
+        while (position := content.find(needle, start)) >= 0:
+            relative = str(candidate.relative_to(root))
+            entry = f"{relative}:{position}\n"
+            if sum(len(value.encode("utf-8")) for value in matches) + len(entry.encode("utf-8")) > MAX_OUTPUT:
+                complete = False
+                break
+            matches.append(entry)
+            if len(matches) >= MAX_SEARCH_MATCHES:
+                complete = False
+                break
+            start = position + max(1, len(needle))
+        if not complete:
+            break
+    output = "".join(matches).encode("utf-8")
+    return receipt(
+        "completed", 0, captured(output), captured(b""), cwd,
+        details={"kind": "file_search", "match_count": len(matches), "scanned_bytes": scanned, "complete": complete},
+    )
+
+
+def _file_write(data: dict[str, object], cwd: str) -> dict[str, object]:
+    target = _relative(str(data.get("path", "")), cwd)
+    encoded = data.get("data_base64", "")
+    if not isinstance(encoded, str):
+        raise ValueError("data_invalid")
+    content = base64.b64decode(encoded, validate=True)
+    if len(content) > MAX_FILE_BYTES:
+        raise ValueError("file_out_of_bounds")
+    expected_bytes = data.get("expected_bytes")
+    expected_hash = _expected(data.get("expected_sha256"), name="expected_sha256")
+    expected_current = _expected(data.get("expected_current_sha256"), name="expected_current_sha256")
+    if expected_bytes is not None and (type(expected_bytes) is not int or expected_bytes != len(content)):
+        raise ValueError("expected_bytes_mismatch")
+    if expected_hash is not None and expected_hash != hashlib.sha256(content).hexdigest():
+        raise ValueError("expected_sha256_mismatch")
+    details = _atomic_replace(target, content, expected_current=expected_current)
+    details["kind"] = "file_write"
+    return receipt("completed", 0, captured(b""), captured(b""), cwd, details=details)
+
+
+def _file_edit(data: dict[str, object], cwd: str) -> dict[str, object]:
+    target = _relative(str(data.get("path", "")), cwd)
+    _regular(target)
+    old = data.get("old_text")
+    new = data.get("new_text")
+    if not isinstance(old, str) or not isinstance(new, str):
+        raise ValueError("edit_invalid")
+    original = target.read_bytes()
+    old_bytes, new_bytes = old.encode("utf-8"), new.encode("utf-8")
+    if original.count(old_bytes) != 1:
+        raise ValueError("edit_expected_text_not_unique")
+    updated = original.replace(old_bytes, new_bytes, 1)
+    expected_current = _expected(data.get("expected_current_sha256"), name="expected_current_sha256")
+    details = _atomic_replace(target, updated, expected_current=expected_current)
+    details["kind"] = "file_edit"
+    return receipt("completed", 0, captured(b""), captured(b""), cwd, details=details)
+
+
+def _file_patch(data: dict[str, object], cwd: str) -> dict[str, object]:
+    target = _relative(str(data.get("path", "")), cwd)
+    _regular(target)
+    patch = data.get("patch")
+    if not isinstance(patch, str) or len(patch.encode("utf-8")) > MAX_INPUT:
+        raise ValueError("patch_invalid")
+    expected_current = _expected(data.get("expected_current_sha256"), name="expected_current_sha256")
+    if expected_current is not None and _sha256_path(target) != expected_current:
+        raise ValueError("expected_current_sha256_mismatch")
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    temporary = Path(name)
+    os.close(descriptor)
+    try:
+        temporary.unlink()
+        process = subprocess.run(
+            ["/usr/bin/patch", "--batch", "--forward", "--output", str(temporary), str(target)],
+            input=patch.encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=_tool_environment(), timeout=30,
+        )
+        if process.returncode != 0 or not temporary.is_file():
+            return receipt("failed", process.returncode, captured(process.stdout), captured(process.stderr), cwd,
+                           details={"kind": "file_patch", "atomic": True, "applied": False})
+        content = temporary.read_bytes()
+        if len(content) > MAX_FILE_BYTES:
+            raise ValueError("file_out_of_bounds")
+        with temporary.open("r+b") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+        details = {"kind": "file_patch", "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest(), "mode": "0600", "atomic": True, "applied": True}
+        return receipt("completed", 0, captured(process.stdout), captured(process.stderr), cwd, details=details)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _tool_environment() -> dict[str, str]:
+    # Deliberately do not inherit host/controller Git, SSH, GPG, Docker, or
+    # credential state. A repository-local config remains ordinary user data.
+    return {
+        "HOME": "/workspace",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/false",
+    }
+
+
+def _drain(stream, result: Captured) -> None:
+    try:
+        while chunk := stream.read(64 * 1024):
+            result.add(chunk)
+    finally:
+        stream.close()
+
+
+def _run_process(command: list[str], *, cwd: str, stdin: bytes, call: Path) -> tuple[int | None, Captured, Captured, bool]:
     process = subprocess.Popen(
         command, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, env={"HOME": "/workspace", "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+        start_new_session=True, env=_tool_environment(),
     )
     (call / "pgid").write_text(str(process.pid), encoding="ascii")
+    stdout, stderr = Captured(), Captured()
+    stdout_thread = threading.Thread(target=_drain, args=(process.stdout, stdout), daemon=True)
+    stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr), daemon=True)
+    stdout_thread.start(); stderr_thread.start()
+    assert process.stdin is not None
     try:
-        stdout, stderr = process.communicate(stdin, timeout=600)
-        next_cwd = safe_cwd(str(data.get("cwd", cwd)))
-        return receipt("completed" if process.returncode == 0 else "failed", process.returncode, stdout, stderr, next_cwd)
+        process.stdin.write(stdin)
+        process.stdin.close()
+        process.wait(timeout=600)
+        cancelled = False
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
         try:
-            stdout, stderr = process.communicate(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-        return receipt("cancelled", None, stdout, stderr, cwd)
+            process.wait()
+        cancelled = True
+    finally:
+        stdout_thread.join(); stderr_thread.join()
+    return process.returncode, stdout, stderr, cancelled
+
+
+def _shell(data: dict[str, object], cwd: str, call: Path) -> dict[str, object]:
+    command = data.get("command", "")
+    if not isinstance(command, str) or len(command.encode("utf-8")) > MAX_INPUT:
+        raise ValueError("command_invalid")
+    cwd_record = call / "cwd"
+    # $1 is data, never shell source construction. The footer observes the
+    # final directory of this fresh shell, so only an explicit successful cd
+    # affects the next call.
+    shell = 'eval "$1"; code=$?; /bin/pwd > "$2"; exit "$code"'
+    code, stdout, stderr, cancelled = _run_process(["/bin/sh", "-c", shell, "shell-exec", command, str(cwd_record)], cwd=cwd, stdin=b"", call=call)
+    next_cwd = safe_cwd(cwd_record.read_text(encoding="utf-8").strip()) if cwd_record.exists() else "/workspace"
+    if cancelled:
+        return receipt("cancelled", None, stdout, stderr, next_cwd, details={"kind": "shell", "output_complete": False})
+    output_complete = not stdout.truncated and not stderr.truncated
+    status = "completed" if code == 0 and output_complete else "failed"
+    return receipt(status, code if output_complete else 75, stdout, stderr, next_cwd,
+                   details={"kind": "shell", "output_complete": output_complete})
+
+
+def _execute_code(data: dict[str, object], cwd: str, call: Path) -> dict[str, object]:
+    language = data.get("language", "python")
+    code = data.get("code", "")
+    interpreters = {"python": "/usr/bin/python3", "sh": "/bin/sh"}
+    if language not in interpreters or not isinstance(code, str) or len(code.encode("utf-8")) > MAX_INPUT:
+        raise ValueError("code_invalid")
+    returncode, stdout, stderr, cancelled = _run_process([interpreters[language], "-"], cwd=cwd, stdin=code.encode("utf-8"), call=call)
+    if cancelled:
+        return receipt("cancelled", None, stdout, stderr, cwd, details={"kind": "execute_code", "output_complete": False})
+    complete = not stdout.truncated and not stderr.truncated
+    return receipt("completed" if returncode == 0 and complete else "failed", returncode if complete else 75, stdout, stderr, cwd,
+                   details={"kind": "execute_code", "output_complete": complete})
+
+
+def execute(tool: str, data: dict[str, object], cwd: str, call: Path) -> dict[str, object]:
+    current = safe_cwd(cwd)
+    if tool == "shell-exec":
+        return _shell(data, current, call)
+    if tool == "file-read":
+        return _file_read(data, current)
+    if tool == "file-search":
+        return _file_search(data, current)
+    if tool == "file-write":
+        return _file_write(data, current)
+    if tool == "file-edit":
+        return _file_edit(data, current)
+    if tool == "file-patch":
+        return _file_patch(data, current)
+    if tool == "execute-code":
+        return _execute_code(data, current, call)
+    if tool in {"process", "receipt"}:
+        return receipt("failed", 2, captured(b""), captured(b"unsupported_in_e3_1"), current,
+                       details={"kind": tool, "supported": False})
+    raise ValueError("tool_invalid")
 
 
 def claim_execute(arguments: argparse.Namespace) -> int:
@@ -134,16 +454,24 @@ def claim_execute(arguments: argparse.Namespace) -> int:
             emit(prior)
             return 0
         except (OSError, ValueError, TypeError):
-            emit(receipt("failed", None, b"", b"execution outcome unknown", "/workspace", replayed=True))
+            emit(error_result("execution_outcome_unknown", "/workspace"))
             return 3
     try:
         value = execute(arguments.tool, input_document(), safe_cwd(arguments.cwd), call)
-    except Exception:
-        value = receipt("failed", 2, b"", b"helper rejected operation", safe_cwd(arguments.cwd))
+    except Exception as error:
+        # Stable errors deliberately avoid paths, command text, and file bytes.
+        code = str(error)
+        allowed = {
+            "input_out_of_bounds", "input_invalid", "path_invalid", "path_not_regular",
+            "file_out_of_bounds", "range_invalid", "search_invalid", "data_invalid",
+            "expected_bytes_mismatch", "expected_sha256_invalid", "expected_sha256_mismatch",
+            "expected_current_sha256_invalid", "expected_current_sha256_mismatch",
+            "edit_invalid", "edit_expected_text_not_unique", "patch_invalid", "command_invalid",
+            "code_invalid", "tool_invalid",
+        }
+        value = error_result(code if code in allowed else "helper_rejected_operation", safe_cwd(arguments.cwd))
     atomic_json(receipt_path, value)
     emit(value)
-    # Bounded eviction removes receipts only after MAX_LEDGER newer claims exist;
-    # loss never grants replay because a caller may not choose a prior call ID.
     claims = sorted((item for item in LEDGER.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime_ns)
     for old in claims[:-MAX_LEDGER]:
         shutil.rmtree(old)
@@ -162,26 +490,6 @@ def main() -> int:
         except (OSError, ValueError):
             pass
         return 0
-    if len(sys.argv) >= 2 and sys.argv[1] == "internal-read":
-        sys.stdout.buffer.write(Path(sys.argv[2]).read_bytes()[:MAX_OUTPUT])
-        return 0
-    if len(sys.argv) >= 2 and sys.argv[1] == "internal-search":
-        root, query = Path(sys.argv[2]), sys.argv[3]
-        for path in sorted(root.rglob("*")):
-            if path.is_file() and query in path.name:
-                print(path)
-        return 0
-    if len(sys.argv) >= 2 and sys.argv[1] == "internal-write":
-        target = Path(sys.argv[2]); target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-        with os.fdopen(descriptor, "wb") as output: output.write(sys.stdin.buffer.read(MAX_INPUT)); output.flush(); os.fsync(output.fileno())
-        os.replace(name, target)
-        return 0
-    if len(sys.argv) >= 2 and sys.argv[1] == "internal-patch":
-        result = subprocess.run(["/usr/bin/patch", "--batch", "--forward", sys.argv[2]], input=sys.stdin.buffer.read(MAX_INPUT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        sys.stdout.buffer.write(result.stdout); sys.stderr.buffer.write(result.stderr); return result.returncode
-    if len(sys.argv) >= 2 and sys.argv[1] in {"internal-process", "internal-receipt"}:
-        emit({"status": "unsupported_in_e2_4"}); return 0
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("claim-execute",))
     parser.add_argument("--call-id", required=True)

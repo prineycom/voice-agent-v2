@@ -9,7 +9,7 @@ container-selection fallback.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import base64
 import fcntl
 import hashlib
@@ -30,8 +30,8 @@ import uuid
 from .agent_environment_config import AgentConfigV2Snapshot, PINNED_IMAGE
 
 REGISTRY_SCHEMA = "voice-agent.agent-environment-registry.v1"
-STATUS_SCHEMA = "voice-agent.agent-environment-status.v1"
-RECEIPT_SCHEMA = "voice-agent.agent-call-receipt.v1"
+STATUS_SCHEMA = "voice-agent.agent-environment-status.v2"
+RECEIPT_SCHEMA = "voice-agent.agent-call-receipt.v2"
 MANAGED_LABEL = "io.priney.voice-agent-v2.managed"
 SCHEMA_LABEL = "io.priney.voice-agent-v2.schema"
 OWNER_LABEL = "io.priney.voice-agent-v2.owner"
@@ -152,6 +152,7 @@ class CallReceipt:
     stderr: bytes
     cwd: str
     replayed: bool = False
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     def document(self) -> dict[str, object]:
         return {
@@ -165,12 +166,39 @@ class CallReceipt:
             "stderr_base64": base64.b64encode(self.stderr).decode("ascii"),
             "cwd": self.cwd,
             "replayed": self.replayed,
+            "output": dict(self.metadata),
         }
 
 
 def owner_key(installation_uuid: str) -> str:
     digest = hashlib.sha256(b"voice-agent-v2\0" + installation_uuid.encode("ascii")).digest()
     return base64.b32encode(digest).decode("ascii").lower().rstrip("=")[:26]
+
+
+def _receipt_output_metadata(document: Mapping[str, object], stdout: bytes, stderr: bytes) -> dict[str, object]:
+    """Validate bounded, binary-safe helper accounting without retaining content."""
+    streams: dict[str, dict[str, object]] = {}
+    for name, value in (("stdout", stdout), ("stderr", stderr)):
+        byte_count = document.get(f"{name}_bytes", len(value))
+        digest = document.get(f"{name}_sha256", hashlib.sha256(value).hexdigest())
+        truncated = document.get(f"{name}_truncated", False)
+        if (
+            type(byte_count) is not int or byte_count < len(value) or byte_count > 64 * 1024 * 1024
+            or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)
+            or type(truncated) is not bool
+        ):
+            raise AgentEnvironmentError("execution_receipt_invalid")
+        if not truncated and (byte_count != len(value) or digest != hashlib.sha256(value).hexdigest()):
+            raise AgentEnvironmentError("execution_receipt_invalid")
+        streams[name] = {"byte_count": byte_count, "sha256": digest, "truncated": truncated}
+    details = document.get("details", {})
+    try:
+        encoded = _canonical(details)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise AgentEnvironmentError("execution_receipt_invalid") from error
+    if not isinstance(details, dict) or len(encoded) > 8 * 1024:
+        raise AgentEnvironmentError("execution_receipt_invalid")
+    return {"stdout": streams["stdout"], "stderr": streams["stderr"], "details": details}
 
 
 def _canonical(value: object) -> bytes:
@@ -657,7 +685,7 @@ class AgentEnvironment:
                         str(saved["status"]), saved.get("exit_code"),
                         base64.b64decode(str(saved["stdout_base64"]), validate=True),
                         base64.b64decode(str(saved["stderr_base64"]), validate=True),
-                        str(saved["cwd"]), True,
+                        str(saved["cwd"]), True, dict(saved.get("output", {})),
                     )
                 except (KeyError, TypeError, ValueError) as error:
                     raise AgentEnvironmentError("execution_outcome_unknown") from error
@@ -711,7 +739,8 @@ class AgentEnvironment:
             error_output = base64.b64decode(document.get("stderr_base64", ""), validate=True)
             next_cwd = str(document.get("cwd", "/workspace"))
             replayed = bool(document.get("replayed", False))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            metadata = _receipt_output_metadata(document, output, error_output)
+        except (AgentEnvironmentError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             self._mark_call_unknown(identifier, facts.container_id)
             raise AgentEnvironmentError("execution_outcome_unknown") from error
         if status not in {"completed", "failed", "cancelled"} or not next_cwd.startswith("/"):
@@ -732,6 +761,7 @@ class AgentEnvironment:
                         "stdout_base64": base64.b64encode(output).decode("ascii"),
                         "stderr_base64": base64.b64encode(error_output).decode("ascii"),
                         "cwd": next_cwd,
+                        "output": metadata,
                     },
                 }
             else:
@@ -741,7 +771,7 @@ class AgentEnvironment:
                     "stderr_sha256": hashlib.sha256(error_output).hexdigest(),
                 }
             _atomic_private(self.registry_path, current)
-        return CallReceipt(identifier, facts.container_id, facts.generation, status, exit_code, output, error_output, next_cwd, replayed)
+        return CallReceipt(identifier, facts.container_id, facts.generation, status, exit_code, output, error_output, next_cwd, replayed, metadata)
 
     def _mark_call_unknown(self, call_id: str, container_id: str) -> None:
         try:
@@ -818,9 +848,18 @@ class AgentEnvironment:
             "reason_code": reason if isinstance(reason, str) else None,
             "mismatch_fields": list(mismatch),
             "bounds": self.config.model.agent_environment.resources.model_dump(mode="json"),
+            # These are lifecycle facts, not a claim that destroyed rootfs or
+            # tmpfs/process state can be recovered. They contain no path,
+            # command, file, package, or repository content.
             "rootfs_and_files_persist": persistence,
+            "rootfs_persists_until_exact_container_destruction": persistence,
+            "workspace_persists_after_reset_rebuild_remove_by_default": True,
+            "cache_persists_after_reset_rebuild_remove_by_default": True,
+            "tmpfs_persists_across_container_stop": False,
             "processes_survive_controller_events_only_while_container_running": True,
             "processes_survive_container_stop": False,
+            "shell_local_state_persists_across_exec": False,
+            "logical_cwd_persists_across_exec_and_controller_restart": persistence,
             "workspace_and_cache_preserved_by_default": True,
         }
 

@@ -281,13 +281,14 @@ class AgentRun:
                 if not self._live(identity, token):
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 operations += 1
-                def bounded_result(data: bytes) -> dict[str, object]:
+                def bounded_result(data: bytes, stream: str) -> dict[str, object]:
                     visible = data[:1024]
+                    accounting = receipt.metadata.get(stream, {})
                     return {
                         "data_base64": base64.b64encode(visible).decode("ascii"),
-                        "byte_count": len(data),
-                        "sha256": hashlib.sha256(data).hexdigest(),
-                        "truncated": len(data) > len(visible),
+                        "byte_count": accounting.get("byte_count", len(data)),
+                        "sha256": accounting.get("sha256", hashlib.sha256(data).hexdigest()),
+                        "truncated": bool(accounting.get("truncated", False)) or len(data) > len(visible),
                     }
 
                 history.append({
@@ -296,14 +297,15 @@ class AgentRun:
                     "result": {
                         "schema_version": RESULT_VERSION,
                         "receipt": {
-                            "schema_version": "voice-agent.agent-call-receipt.v1",
+                            "schema_version": "voice-agent.agent-call-receipt.v2",
                             "call_id": receipt.call_id,
                             "status": receipt.status,
                             "exit_code": receipt.exit_code,
                             "cwd": receipt.cwd,
                             "replayed": receipt.replayed,
-                            "stdout": bounded_result(receipt.stdout),
-                            "stderr": bounded_result(receipt.stderr),
+                            "stdout": bounded_result(receipt.stdout, "stdout"),
+                            "stderr": bounded_result(receipt.stderr, "stderr"),
+                            "details": receipt.metadata.get("details", {}),
                         },
                     },
                 })

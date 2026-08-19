@@ -389,6 +389,16 @@ Only selector-free `voice-agent-ops agent-environment status|reset|rebuild|remov
 
 The release image context and lock publish native `linux/amd64` and `linux/arm64` child identities beneath one pinned OCI index. Deterministic PR tests use a fake Docker transcript only. Linux Docker Engine, Docker Desktop/macOS, exact-model/network, daemon/Desktop restart, physical reboot/voice, and resource-pressure results are separate evidence tiers and are never borrowed from one another.
 
+### 9.8 E3.1 ordinary persistent files, packages, archives, and local Git
+
+E3.1 keeps the E2.4 execution and lifecycle boundary unchanged: shell, file, archive, package, binary, and local-Git work still reaches only the fixed helper through `docker container exec` in the selected exact container. The helper is not a replacement virtual filesystem; general shell authority remains inside the existing container/rootfs and declared bind boundary. The release image contains ordinary local Git/archive tooling and permits a noninteractive container-local package-manager elevation, so installed packages persist in the writable rootfs while that exact ID/rootfs remains selected.
+
+File convenience helpers are binary-safe and bounded. Receipts report byte counts, SHA-256, modes, ranges, and truncation so a partial response cannot be read as complete bytes. Write/edit/patch paths use a same-filesystem mode-`0600` temporary file, validate supported expected bytes/hash conditions, fsync before atomic rename, and fsync the parent directory. A failed foreground operation preserves already committed user files; it does not claim rollback of arbitrary shell/package/Git side effects.
+
+The controller retains only a bounded logical cwd record after the helper successfully observes it. Each shell remains fresh; `cd` may update that record, while shell variables, aliases, and exports do not cross calls unless ordinary files/profile configuration causes a later shell to load them. A missing record directory falls back visibly to `/workspace`. Status v2 is content-free and separates rootfs, workspace/cache bind, tmpfs, process, shell-local, and logical-cwd persistence. Rootfs/package state survives ordinary calls, AgentRuns, controller restart, and same-ID stop/start; tmpfs and processes do not survive a real stop. Workspace/cache remain after an explicit environment reset/rebuild/remove by default. An unexported old rootfs is not claimed to survive destruction/replacement.
+
+No host Git configuration, credentials/helpers, `.netrc`, SSH/GPG agent, Docker auth/socket, browser/keyring data, host home, or unrelated host path enters the helper environment. Remote Git, credentials, network transfer, downloads/uploads, background-process product UX, extra mounts, and alternate environments remain outside E3.1. [`evidence/e3-1-persistent-ordinary-files.md`](evidence/e3-1-persistent-ordinary-files.md) owns deterministic evidence and explicit nonclaims.
+
 ## 10. Local application and external exposure
 
 **Decision:** Voice Agent v2 is a loopback-local application. Its gateway binds `127.0.0.1:8000`, LiveKit signaling binds `127.0.0.1:7880`, WebRTC UDP is restricted to loopback `7882`, and llama.cpp binds only `127.0.0.1:18080`. ICE/TCP and TURN remain disabled.

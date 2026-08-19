@@ -47,6 +47,16 @@ The vertical slice includes strict selector-free `voice-agent.config.v2` and one
 
 PR acceptance is deterministic fake-Docker evidence in `./verify`. Linux Docker Engine, Docker Desktop/macOS, exact-model/network, daemon/Desktop/reboot, write-pressure, and physical voice acceptance are independent later tiers; a missing platform prerequisite is unavailable evidence, never permission to substitute another execution path.
 
+## Agent evolution E3.1 — Persistent ordinary files, packages, binaries, archives, and Git
+
+> **Implemented contract:** E3.1 retains E2.4's one installation-owned Docker `AgentEnvironment`, exact-ID lifecycle, Docker-exec-only route, resource controls, and no-host-fallback rule. It adds only ordinary work within that boundary.
+
+Natural multi-step work can create, read/search, atomically edit/patch, rename/copy/delete, archive/extract, hash, and local-Git-track text or binary files; invoke image tools; and install rootfs packages through the container-local package-manager privilege path. Convenience helpers give bounded binary/range/hash/mode receipts and never relabel partial bytes as complete. Rootfs/workspace/cache persist through normal completion/cancellation/quit/controller restart and same-ID stop/start; tmpfs and processes do not survive a real stop. Workspace/cache remain after explicit reset/rebuild/remove by default, while unexported old rootfs state is not claimed after destruction.
+
+The logical cwd record survives calls/controller restart only after successful observation and visibly falls back to `/workspace` if deleted. Fresh shells do not carry exports/aliases/variables; ordinary files/profile configuration remains the explicit persistence mechanism. Status v2 describes rootfs, managed binds/cache, tmpfs, process, shell-local, and cwd persistence without contents. Host Git config/helper, `.netrc`, SSH/GPG agent, Docker auth/socket, host home, and unrelated host state remain absent.
+
+`./verify` uses fake Docker and disposable container-shaped roots only. Linux Engine, Docker Desktop/macOS, package repository/network behavior, exact-model natural tasks, daemon/Desktop/reboot, and physical acceptance are independent evidence. See [`evidence/e3-1-persistent-ordinary-files.md`](evidence/e3-1-persistent-ordinary-files.md).
+
 ## Slice 1 — Deterministic zero-secret voice-turn tracer
 
 ### User-visible outcome
