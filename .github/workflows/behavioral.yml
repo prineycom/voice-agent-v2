@@ -21,11 +21,18 @@ jobs:
         timeout-minutes: 1
         with:
           python-version: "3.12"
-      - name: Set up Node
+      - name: Set up launcher Node
         uses: actions/setup-node@v4
         timeout-minutes: 1
         with:
           node-version: "26"
+      - name: Record launcher Node
+        run: echo "VOICE_AGENT_SEA_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - name: Set up application Node
+        uses: actions/setup-node@v4
+        timeout-minutes: 1
+        with:
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Restore pinned test-runtime cache
@@ -33,7 +40,7 @@ jobs:
         timeout-minutes: 1
         with:
           path: ~/.cache/voice-agent-v2/slice-6
-          key: pr-test-runtime-${{ runner.os }}-py312-node26-${{ hashFiles('requirements-slice6.lock', 'web/package-lock.json', 'setup-test-runtime') }}
+          key: pr-test-runtime-${{ runner.os }}-py312-node22-launcher26-${{ hashFiles('requirements-slice6.lock', 'web/package-lock.json', 'setup-test-runtime') }}
       - name: Install bounded test dependencies without running checks or builds
         timeout-minutes: 2
         run: ./setup-test-runtime

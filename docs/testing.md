@@ -32,7 +32,7 @@ Every phase is a separate process group. The owner sends `TERM`, waits at most 1
 
 `./verify --tracer-only` remains the narrow immutable-release recovery check. It does not run the PR suite and requires only Python 3.11+.
 
-The launcher phase receives no production key, network, Docker daemon, service mutation or live install root. It uses only a committed public fixture key/pre-signed bytes, disposable roots, an injected service probe and Node.js built-ins. GitHub and the canonical local toolchain use Node.js 26 because direct SEA construction is part of the behavior contract; application/browser compatibility remains covered by the same phase order.
+The launcher phase receives no production key, network, Docker daemon, service mutation or live install root. It uses only a committed public fixture key/pre-signed bytes, disposable roots, an injected service probe and Node.js built-ins. GitHub records an isolated Node.js 26 executable for direct SEA construction while retaining the established Node.js 22 application/browser toolchain on `PATH`; the canonical host similarly injects its system Node 26 only into the launcher phase.
 
 ### Direct pull-request path
 
