@@ -24,6 +24,9 @@ agent_environment:
     idle_action: none
     command_timeout_seconds: 120
     command_timeout_grace_seconds: 5
+  # Each source must already exist, be user-owned and non-symlinked. Read-only
+  # data remains readable/exfiltratable; read-write data may be changed/deleted.
+  additional_mounts: []
   network:
     enabled: true
     publish_ports: []

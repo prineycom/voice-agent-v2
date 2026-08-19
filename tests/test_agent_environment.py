@@ -34,9 +34,11 @@ class FakeDocker:
         self.partial_inspect = False
         self.ambiguous_exec = False
         self.reject_stopped_once = False
+        self.fail_next_start = False
         self.claims: dict[str, dict[str, object]] = {}
         self.dispatch_count: dict[str, int] = {}
         self.markers: dict[str, str] = {}
+        self.processes: dict[str, dict[str, object]] = {}
 
     def _id(self) -> str:
         value = f"{self.next_id:064x}"
@@ -79,10 +81,7 @@ class FakeDocker:
                 },
                 "PortBindings": None,
             },
-            "Mounts": [
-                {"Type": "bind", "Source": container["workspace"], "Destination": "/workspace", "RW": True},
-                {"Type": "bind", "Source": container["cache"], "Destination": "/cache", "RW": True},
-            ],
+            "Mounts": list(container["mounts"]),
         }
 
     @staticmethod
@@ -116,19 +115,35 @@ class FakeDocker:
                         key, item = arguments[index + 1].split("=", 1)
                         labels[key] = item
                 mounts = [arguments[index + 1] for index, value in enumerate(arguments) if value == "--mount"]
+                inspected_mounts = []
+                for declaration in mounts:
+                    fields = dict(
+                        part.split("=", 1) for part in declaration.split(",") if "=" in part
+                    )
+                    inspected_mounts.append({
+                        "Type": "bind", "Source": fields["src"], "Destination": fields["dst"],
+                        "RW": declaration.endswith(",rw"),
+                    })
                 self.containers[identifier] = {
                     "labels": labels,
                     "state": "created",
                     "workspace": mounts[0].split(",")[1].removeprefix("src="),
                     "cache": mounts[1].split(",")[1].removeprefix("src="),
+                    "mounts": inspected_mounts,
                 }
                 return DockerResult(0, (identifier + "\n").encode())
             if arguments[:2] == ("container", "start"):
+                if self.fail_next_start:
+                    self.fail_next_start = False
+                    return DockerResult(1, stderr=b"injected start failure")
                 self.containers[arguments[2]]["state"] = "running"
                 return DockerResult(0, (arguments[2] + "\n").encode())
             if arguments[:2] == ("container", "stop"):
                 identifier = arguments[-1]
                 self.containers[identifier]["state"] = "exited"
+                for process in self.processes.values():
+                    if process["container_id"] == identifier:
+                        process["state"] = "gone"
                 return DockerResult(0, (identifier + "\n").encode())
             if arguments[:2] == ("container", "rm"):
                 identifier = arguments[2]
@@ -154,6 +169,57 @@ class FakeDocker:
                     return DockerResult(0, json.dumps(prior).encode(), accepted=True)
                 self.dispatch_count[call_id] = self.dispatch_count.get(call_id, 0) + 1
                 data = json.loads(stdin)
+                tool = self._value(arguments, "--tool")
+                if data.get("background") is True:
+                    receipt = data["_voice_agent_process_receipt"]
+                    identity = {
+                        "pid": 101 + len(self.processes), "pgid": 101 + len(self.processes),
+                        "start_time": 9001 + len(self.processes),
+                        "executable": "/bin/sh", "init_start_time": 77,
+                    }
+                    self.processes[receipt] = {
+                        "container_id": identifier, "identity": identity, "state": "running",
+                        "stdout": b"preview ready\n", "stdin": b"",
+                    }
+                    document = {
+                        "status": "completed", "exit_code": 0, "stdout_base64": "",
+                        "stderr_base64": "", "cwd": "/workspace", "replayed": False,
+                        "details": {
+                            "schema_version": "voice-agent.process-receipt.v1",
+                            "kind": "background_process", "process_receipt": receipt,
+                            "state": "running", "writable_stdin": True,
+                            "operations": ["poll", "logs", "wait", "write", "kill"],
+                            "_voice_agent_identity": identity,
+                        },
+                    }
+                    return DockerResult(0, json.dumps(document).encode(), accepted=True)
+                if tool in {"process", "receipt"}:
+                    receipt = data.get("receipt")
+                    process = self.processes.get(receipt)
+                    if process is None or data.get("_voice_agent_expected_identity") != process["identity"]:
+                        document = {
+                            "status": "failed", "exit_code": 2, "stdout_base64": "",
+                            "stderr_base64": base64.b64encode(b"process_identity_unknown").decode(),
+                            "cwd": "/workspace", "replayed": False,
+                            "details": {"kind": "process", "state": "unknown"},
+                        }
+                        return DockerResult(0, json.dumps(document).encode(), accepted=True)
+                    action = data.get("action", "poll")
+                    if action == "kill" and process["state"] == "running":
+                        process["state"] = "killed"
+                    if action == "write" and process["state"] == "running":
+                        process["stdin"] += base64.b64decode(data.get("data_base64", ""))
+                    output = process["stdout"] if action == "logs" else b""
+                    document = {
+                        "status": "completed", "exit_code": 0,
+                        "stdout_base64": base64.b64encode(output).decode(), "stderr_base64": "",
+                        "cwd": "/workspace", "replayed": False,
+                        "details": {
+                            "kind": "process", "process_receipt": receipt, "action": action,
+                            "state": process["state"], "timed_out": action == "wait" and process["state"] == "running",
+                        },
+                    }
+                    return DockerResult(0, json.dumps(document).encode(), accepted=True)
                 command = str(data.get("command", ""))
                 if command.startswith("set "):
                     key, value = command[4:].split("=", 1); self.markers[key] = value; output = value.encode()
@@ -337,17 +403,84 @@ class AgentEnvironmentTests(unittest.TestCase):
     def test_all_tool_routes_are_fixed_docker_exec_and_model_has_no_identity_input(self) -> None:
         for index, tool in enumerate((
             "shell.exec", "file.read", "file.search", "file.write", "file.edit",
-            "file.patch", "execute_code", "process", "receipt",
+            "file.patch", "execute_code",
         ), start=1):
             self.fixture.manager.execute(tool, {"command": f"route-{tool}"}, call_id=f"{index:032x}")
         dispatches = [
             command for command in self.fixture.docker.commands
             if command[:2] == ("container", "exec") and "claim-execute" in command
         ]
-        self.assertEqual(len(dispatches), 9)
+        self.assertEqual(len(dispatches), 7)
         container_ids = {command[3] for command in dispatches}
         self.assertEqual(len(container_ids), 1)
         self.assertTrue(all(command[4] == "/usr/local/lib/voice-agent/agent-helper" for command in dispatches))
+
+    def test_background_receipt_reconciles_after_controller_restart_and_isolated_kill(self) -> None:
+        started = self.fixture.manager.execute(
+            "shell.exec", {"command": "preview", "background": True}
+        )
+        details = started.metadata["details"]
+        receipt = details["process_receipt"]
+        self.assertRegex(receipt, r"^[a-f0-9]{32}$")
+        self.assertNotIn("pid", json.dumps(details))
+        container_id = started.container_id
+        restarted = AgentEnvironment(
+            self.fixture.manager.config, state_root=self.fixture.manager.state_root,
+            workspace=self.fixture.manager.workspace, cache=self.fixture.manager.cache,
+            runner=self.fixture.docker, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        poll = restarted.execute("process", {"action": "poll", "receipt": receipt})
+        self.assertEqual(poll.metadata["details"]["state"], "running")
+        logs = restarted.execute("process", {
+            "action": "logs", "receipt": receipt, "offset": 0, "maximum_bytes": 1024,
+        })
+        self.assertEqual(logs.stdout, b"preview ready\n")
+        restarted.execute("process", {
+            "action": "write", "receipt": receipt,
+            "data_base64": base64.b64encode(b"reload\n").decode(),
+        })
+        self.assertEqual(self.fixture.docker.processes[receipt]["stdin"], b"reload\n")
+        waited = restarted.execute("process", {
+            "action": "wait", "receipt": receipt, "timeout_seconds": 0.01,
+        })
+        self.assertTrue(waited.metadata["details"]["timed_out"])
+        other = restarted.execute(
+            "shell.exec", {"command": "watcher", "background": True}
+        ).metadata["details"]["process_receipt"]
+        restarted.cancel_call("f" * 32, container_id)
+        self.assertEqual(self.fixture.docker.processes[receipt]["state"], "running")
+        killed = restarted.execute("process", {"action": "kill", "receipt": receipt})
+        self.assertEqual(killed.metadata["details"]["state"], "killed")
+        self.assertEqual(self.fixture.docker.processes[other]["state"], "running")
+        restarted.execute("process", {"action": "kill", "receipt": other})
+
+    def test_stale_or_tampered_process_identity_never_signals_and_stop_truth_is_gone(self) -> None:
+        started = self.fixture.manager.execute(
+            "shell.exec", {"command": "watch", "background": True}
+        )
+        receipt = started.metadata["details"]["process_receipt"]
+        registry = json.loads(self.fixture.manager.registry_path.read_text())
+        registry["processes"][receipt]["identity"]["start_time"] += 1
+        from voice_agent_v2.agent_environment import _atomic_private
+        _atomic_private(self.fixture.manager.registry_path, registry)
+        rejected = self.fixture.manager.execute("process", {"action": "kill", "receipt": receipt})
+        self.assertEqual(rejected.status, "failed")
+        self.assertEqual(self.fixture.docker.processes[receipt]["state"], "running")
+        # Restore trusted controller identity, then an actual container stop
+        # eliminates the old process while preserving and restarting the same ID.
+        registry["processes"][receipt]["identity"]["start_time"] -= 1
+        _atomic_private(self.fixture.manager.registry_path, registry)
+        container_id = started.container_id
+        self.fixture.docker.run(("container", "stop", "--time", "5", container_id))
+        stopped_status = self.fixture.manager.status()
+        self.assertEqual(stopped_status["process_receipts"][0]["state"], "gone")
+        gone = self.fixture.manager.execute("process", {"action": "poll", "receipt": receipt})
+        self.assertEqual(gone.metadata["details"]["state"], "gone")
+        old_logs = self.fixture.manager.execute("process", {
+            "action": "logs", "receipt": receipt, "offset": 0, "maximum_bytes": 1024,
+        })
+        self.assertEqual(old_logs.stdout, b"preview ready\n")
+        self.assertEqual(self.fixture.manager.ensure_running().container_id, container_id)
 
     def test_resource_reserve_stops_but_never_removes_exact_environment(self) -> None:
         facts = self.fixture.manager.ensure_running()
@@ -367,9 +500,38 @@ class AgentEnvironmentTests(unittest.TestCase):
         self.assertNotEqual(selected.container_id, old.container_id)
         self.assertEqual(selected.generation, old.generation + 1)
         self.assertIn(old.container_id, self.fixture.docker.containers)
+        retained = self.fixture.manager.status()["retained_generations"]
+        self.assertEqual(retained[0]["container_id_prefix"], old.container_id[:12])
+        self.assertFalse(retained[0]["selectable"])
         self.fixture.manager.lifecycle("retire", confirmed=True)
         self.assertNotIn(old.container_id, self.fixture.docker.containers)
         self.assertIn(selected.container_id, self.fixture.docker.containers)
+
+    def test_reset_is_confirmed_exact_and_next_use_lazily_creates_same_spec(self) -> None:
+        old = self.fixture.manager.ensure_running()
+        sentinel = self.fixture.manager.workspace / "kept.txt"
+        sentinel.write_text("kept", encoding="utf-8")
+        with self.assertRaisesRegex(AgentEnvironmentError, "confirmation_required"):
+            self.fixture.manager.lifecycle("reset", confirmed=False)
+        reset = self.fixture.manager.lifecycle("reset", confirmed=True)
+        self.assertEqual(reset["state"], "absent")
+        self.assertEqual(sentinel.read_text(), "kept")
+        replacement = self.fixture.manager.ensure_running()
+        self.assertNotEqual(replacement.container_id, old.container_id)
+        self.assertEqual(replacement.generation, old.generation + 1)
+        self.assertEqual(replacement.spec, old.spec)
+
+    def test_failed_rebuild_never_selects_unvalidated_generation(self) -> None:
+        old = self.fixture.manager.ensure_running()
+        self.fixture.docker.fail_next_start = True
+        with self.assertRaisesRegex(AgentEnvironmentError, "environment_unhealthy"):
+            self.fixture.manager.lifecycle("rebuild", confirmed=True)
+        registry = json.loads(self.fixture.manager.registry_path.read_text())
+        self.assertEqual(registry["selected_container_id"], old.container_id)
+        self.assertEqual(registry["generation"], old.generation)
+        self.assertEqual(registry["retained"], [])
+        self.assertEqual(set(self.fixture.docker.containers), {old.container_id})
+        self.assertEqual(self.fixture.manager.ensure_running().container_id, old.container_id)
 
     def test_status_and_explicit_lifecycle_are_truthful_and_exact(self) -> None:
         facts = self.fixture.manager.ensure_running()
@@ -389,6 +551,100 @@ class AgentEnvironmentTests(unittest.TestCase):
         destructive = [item for item in self.fixture.docker.commands if item[:2] in {("container", "stop"), ("container", "rm")}]
         self.assertTrue(all(item[-1] == facts.container_id or item[2] == facts.container_id for item in destructive))
         self.assertFalse(any("prune" in item for command in self.fixture.docker.commands for item in command))
+
+
+class AdditionalMountTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="agent-mounts-")
+        self.root = Path(self.temp.name)
+        self.ro = self.root / "ro-data"; self.ro.mkdir(mode=0o700)
+        self.rw = self.root / "rw-data"; self.rw.mkdir(mode=0o700)
+        self.docker = FakeDocker()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _config(self, mounts: list[dict[str, str]]):
+        document = parse_agent_config_v2(DEFAULT_CONFIG_BYTES).model.model_dump(mode="json")
+        document["agent_environment"]["additional_mounts"] = mounts
+        return parse_agent_config_v2(json.dumps(document).encode())
+
+    def _manager(self, mounts: list[dict[str, str]]) -> AgentEnvironment:
+        return AgentEnvironment(
+            self._config(mounts), state_root=self.root / "private",
+            workspace=self.root / "workspace", cache=self.root / "cache",
+            runner=self.docker, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+
+    def test_typed_ro_rw_mounts_are_explicit_pinned_and_disclosed(self) -> None:
+        declarations = [
+            {"source": str(self.ro), "destination": "/data/reference", "mode": "read_only"},
+            {"source": str(self.rw), "destination": "/data/output", "mode": "read_write"},
+        ]
+        config = self._config(declarations)
+        root = Path(__file__).resolve().parents[1]
+        validate_schema(
+            config.model.model_dump(mode="json"),
+            json.loads((root / "contracts/agent-config.v2.schema.json").read_text()),
+        )
+        (self.ro / "sentinel").write_text("readable", encoding="utf-8")
+        (self.rw / "sentinel").write_text("writable", encoding="utf-8")
+        manager = AgentEnvironment(
+            config, state_root=self.root / "private", workspace=self.root / "workspace",
+            cache=self.root / "cache", runner=self.docker,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        facts = manager.ensure_running()
+        mounts = self.docker._inspect(facts.container_id)["Mounts"]
+        observed = {(item["Destination"], item["RW"]) for item in mounts}
+        self.assertIn(("/data/reference", False), observed)
+        self.assertIn(("/data/output", True), observed)
+        status = manager.status()
+        self.assertEqual(status["additional_mounts"], declarations)
+        self.assertIn("exfiltratable", status["additional_mount_authority_warning"])
+        self.assertFalse(status["docker_socket_mounted"])
+        self.assertEqual(status["published_ports"], [])
+        root = Path(__file__).resolve().parents[1]
+        validate_schema(status, json.loads((root / "contracts/agent-environment-status.v2.schema.json").read_text()))
+
+        changed = self._manager([
+            {**declarations[0], "mode": "read_write"}, declarations[1],
+        ])
+        stale = changed.status()
+        self.assertEqual(stale["state"], "stale_spec")
+        self.assertIn(facts.container_id, self.docker.containers)
+        changed.lifecycle("remove", confirmed=True)
+        self.assertEqual((self.ro / "sentinel").read_text(), "readable")
+        self.assertEqual((self.rw / "sentinel").read_text(), "writable")
+
+    def test_mount_admission_rejects_symlink_custody_overlap_and_model_escape_fields(self) -> None:
+        link = self.root / "linked"
+        link.symlink_to(self.ro, target_is_directory=True)
+        with self.assertRaisesRegex(AgentEnvironmentError, "additional_mount_custody_invalid"):
+            self._manager([{"source": str(link), "destination": "/data/link", "mode": "read_only"}])
+        with self.assertRaisesRegex(AgentEnvironmentError, "additional_mount_destination_forbidden"):
+            self._manager([{"source": str(self.ro), "destination": "/proc/host", "mode": "read_only"}])
+        document = parse_agent_config_v2(DEFAULT_CONFIG_BYTES).model.model_dump(mode="json")
+        document["agent_environment"]["additional_mounts"] = [{
+            "source": str(self.ro), "destination": "/data", "mode": "read_only",
+            "docker_args": ["-v", "/:/host"],
+        }]
+        with self.assertRaises(AgentConfigError):
+            parse_agent_config_v2(json.dumps(document).encode())
+
+    def test_changed_mount_custody_blocks_as_stale_without_replacement(self) -> None:
+        manager = self._manager([
+            {"source": str(self.ro), "destination": "/data/reference", "mode": "read_only"},
+        ])
+        facts = manager.ensure_running()
+        old = self.root / "old-ro"
+        self.ro.rename(old)
+        self.ro.mkdir(mode=0o700)
+        status = manager.status()
+        self.assertEqual(status["state"], "stale_spec")
+        self.assertIn("mount_custody", status["mismatch_fields"])
+        self.assertIn(facts.container_id, self.docker.containers)
+        self.assertEqual(sum(command[:2] == ("container", "create") for command in self.docker.commands), 1)
 
 
 class FakeModel:

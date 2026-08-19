@@ -105,6 +105,26 @@ class NetworkV2(BaseModel):
         return ()
 
 
+class AdditionalMountV2(BaseModel):
+    """One restart-pinned operator mount; runtime custody is checked separately."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    source: str
+    destination: str
+    mode: Literal["read_only", "read_write"]
+
+    @field_validator("source", "destination")
+    @classmethod
+    def absolute_clean_path(cls, value: str) -> str:
+        if (
+            not isinstance(value, str) or not value.startswith("/") or "\0" in value or "," in value
+            or value == "/" or "//" in value or value.endswith("/")
+            or any(part in {"", ".", ".."} for part in Path(value).parts[1:])
+        ):
+            raise ValueError("mount paths must be clean absolute paths")
+        return value
+
+
 class CredentialsV2(BaseModel):
     """One declaration with fixed exposed names; private state owns all bytes."""
 
@@ -148,9 +168,25 @@ class AgentEnvironmentV2(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     image: ImageV2
     lifecycle: LifecycleV2
+    additional_mounts: tuple[AdditionalMountV2, ...] = Field(max_length=16)
     network: NetworkV2
     credentials: CredentialsV2
     resources: ResourceV2
+
+    @field_validator("additional_mounts", mode="before")
+    @classmethod
+    def mount_list(cls, value: object) -> tuple[object, ...]:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("additional mounts must be a list")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def unique_mounts(self) -> "AgentEnvironmentV2":
+        sources = tuple(item.source for item in self.additional_mounts)
+        destinations = tuple(item.destination for item in self.additional_mounts)
+        if len(sources) != len(set(sources)) or len(destinations) != len(set(destinations)):
+            raise ValueError("additional mount sources and destinations must be unique")
+        return self
 
 
 class AgentConfigV2(BaseModel):
@@ -178,6 +214,7 @@ DEFAULT_DOCUMENT: dict[str, object] = {
             "command_timeout_seconds": 120,
             "command_timeout_grace_seconds": 5,
         },
+        "additional_mounts": [],
         "network": {"enabled": True, "publish_ports": []},
         "credentials": {
             "creation_environment_names": [],

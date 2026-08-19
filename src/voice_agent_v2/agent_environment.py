@@ -71,6 +71,24 @@ EXPECTED_TMPFS = {
     "/var/tmp": "size=256m,noexec,nosuid,nodev",
     "/run": "size=64m,noexec,nosuid,nodev",
 }
+PROCESS_RECEIPT = re.compile(r"^[a-f0-9]{32}$")
+MAX_BACKGROUND_PROCESSES = 64
+MAX_PROCESS_LOG_BYTES = 128 * 1024
+MAX_PROCESS_WRITE_BYTES = 64 * 1024
+MAX_PROCESS_WAIT_SECONDS = 30.0
+MOUNT_AUTHORITY_WARNING = (
+    "Read-only mounts are readable and exfiltratable. Read-write mounts may be changed, "
+    "deleted, or encrypted. Additional mounts are restart-pinned operator authority."
+)
+FORBIDDEN_MOUNT_DESTINATIONS = (
+    "/workspace", "/cache", "/proc", "/sys", "/dev", "/run", "/var/run",
+    "/var/lib/voice-agent", "/usr/local/lib/voice-agent",
+)
+FORBIDDEN_MOUNT_SOURCES = (
+    "/etc", "/proc", "/sys", "/dev", "/boot", "/root",
+    "/var/run/docker.sock", "/run/docker.sock",
+)
+FORBIDDEN_SOURCE_MARKERS = ("docker.sock", "podman.sock", "containerd.sock", "/systemd/", "/dbus/", "/bus/")
 
 
 class AgentEnvironmentError(RuntimeError):
@@ -151,6 +169,25 @@ class ContainerFacts:
     state: str
     labels: Mapping[str, str]
     raw: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class MountCustody:
+    source: str
+    destination: str
+    mode: str
+    device: int
+    inode: int
+    owner: int
+    permissions: int
+    file_type: str
+
+    def spec_document(self) -> dict[str, object]:
+        return {
+            "source": self.source, "destination": self.destination, "mode": self.mode,
+            "device": self.device, "inode": self.inode, "owner": self.owner,
+            "permissions": self.permissions, "file_type": self.file_type,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +344,7 @@ class AgentEnvironment:
         )
         self.disk_usage = disk_usage
         self.clock = clock
+        self._mounts = self._admit_additional_mounts()
         self._credential_lock = threading.Lock()
         self._redaction_values: list[bytes] = []
         credentials = config.model.agent_environment.credentials
@@ -332,6 +370,72 @@ class AgentEnvironment:
         self.registry_path = state_root / "registry.json"
         self.lock_path = state_root / "installation.lock"
         self._thread_lock = threading.RLock()
+
+    @staticmethod
+    def _paths_overlap(first: str, second: str) -> bool:
+        left = Path(first).parts
+        right = Path(second).parts
+        return left == right[:len(left)] or right == left[:len(right)]
+
+    def _admit_additional_mounts(self) -> tuple[MountCustody, ...]:
+        admitted: list[MountCustody] = []
+        home = str(Path.home().resolve())
+        protected_sources = tuple(map(str, (self.state_root, self.workspace, self.cache)))
+        for declaration in self.config.model.agent_environment.additional_mounts:
+            source = Path(declaration.source)
+            destination = declaration.destination
+            if "," in declaration.source or "," in destination:
+                raise AgentEnvironmentError("additional_mount_path_invalid")
+            if any(self._paths_overlap(destination, reserved) for reserved in FORBIDDEN_MOUNT_DESTINATIONS):
+                raise AgentEnvironmentError("additional_mount_destination_forbidden")
+            if any(self._paths_overlap(destination, prior.destination) for prior in admitted):
+                raise AgentEnvironmentError("additional_mount_destination_overlap")
+            if any(self._paths_overlap(declaration.source, prior.source) for prior in admitted):
+                raise AgentEnvironmentError("additional_mount_source_overlap")
+            if self._paths_overlap(declaration.source, home) or any(
+                self._paths_overlap(declaration.source, forbidden)
+                for forbidden in FORBIDDEN_MOUNT_SOURCES
+            ) or declaration.source in {"/run", "/var/run"} or any(
+                marker in declaration.source for marker in FORBIDDEN_SOURCE_MARKERS
+            ) or any(self._paths_overlap(declaration.source, protected) for protected in protected_sources):
+                raise AgentEnvironmentError("additional_mount_source_forbidden")
+            try:
+                metadata = source.lstat()
+                resolved = source.resolve(strict=True)
+            except OSError as error:
+                raise AgentEnvironmentError("additional_mount_custody_invalid") from error
+            if (
+                str(resolved) != declaration.source or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o022
+                or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode))
+            ):
+                raise AgentEnvironmentError("additional_mount_custody_invalid")
+            admitted.append(MountCustody(
+                declaration.source, destination, declaration.mode,
+                metadata.st_dev, metadata.st_ino, metadata.st_uid, stat.S_IMODE(metadata.st_mode),
+                "directory" if stat.S_ISDIR(metadata.st_mode) else "file",
+            ))
+        return tuple(admitted)
+
+    def _mount_custody_valid(self) -> bool:
+        for mount in self._mounts:
+            try:
+                metadata = Path(mount.source).lstat()
+                resolved = Path(mount.source).resolve(strict=True)
+            except OSError:
+                return False
+            if (
+                str(resolved) != mount.source or metadata.st_dev != mount.device
+                or metadata.st_ino != mount.inode or metadata.st_uid != mount.owner
+                or stat.S_IMODE(metadata.st_mode) != mount.permissions or stat.S_ISLNK(metadata.st_mode)
+                or ("directory" if stat.S_ISDIR(metadata.st_mode) else "file") != mount.file_type
+            ):
+                return False
+        return True
+
+    def _require_mount_custody(self) -> None:
+        if not self._mount_custody_valid():
+            raise AgentEnvironmentError("additional_mount_custody_changed")
 
     def _credential_value(self, kind: str, name: str) -> bytes:
         try:
@@ -385,7 +489,10 @@ class AgentEnvironment:
             "platforms": ["linux/amd64", "linux/arm64"],
             "workspace": str(self.workspace),
             "cache": str(self.cache),
-            "mounts": {"/workspace": "rw", "/cache": "rw"},
+            "mounts": {
+                "managed": {"/workspace": "rw", "/cache": "rw"},
+                "additional": [mount.spec_document() for mount in self._mounts],
+            },
             "network": model.agent_environment.network.model_dump(mode="json"),
             "credentials": {
                 "declaration": model.agent_environment.credentials.model_dump(mode="json"),
@@ -454,6 +561,7 @@ class AgentEnvironment:
             "spec": self.spec,
             "retained": [],
             "calls": {},
+            "processes": {},
             "logical_cwd": "/workspace",
             "state": "absent",
             "reason_code": None,
@@ -473,9 +581,14 @@ class AgentEnvironment:
             raise AgentEnvironmentError("environment_registry_invalid") from error
         required = {
             "schema_version", "installation_uuid", "owner_key", "endpoint_fingerprint",
-            "selected_container_id", "generation", "spec", "retained", "calls", "logical_cwd",
-            "state", "reason_code",
+            "selected_container_id", "generation", "spec", "retained", "calls", "processes",
+            "logical_cwd", "state", "reason_code",
         }
+        historical = required - {"processes"}
+        if isinstance(document, dict) and set(document) == historical:
+            # Safe in-place registry evolution: old state gains no process authority.
+            document["processes"] = {}
+            _atomic_private(self.registry_path, document)
         if (
             not isinstance(document, dict)
             or set(document) != required
@@ -487,6 +600,7 @@ class AgentEnvironment:
             or document.get("owner_key") != owner_key(str(document.get("installation_uuid")))
             or not isinstance(document.get("retained"), list)
             or not isinstance(document.get("calls"), dict)
+            or not isinstance(document.get("processes"), dict)
         ):
             raise AgentEnvironmentError("environment_registry_invalid")
         return document
@@ -589,7 +703,10 @@ class AgentEnvironment:
         mounts = raw.get("Mounts", []) if isinstance(raw, dict) else []
         resource = self.config.model.agent_environment.resources
         network = self.config.model.agent_environment.network
-        expected_mounts = {(str(self.workspace), "/workspace", True), (str(self.cache), "/cache", True)}
+        expected_mounts = {
+            (str(self.workspace), "/workspace", True), (str(self.cache), "/cache", True),
+            *((mount.source, mount.destination, mount.mode == "read_write") for mount in self._mounts),
+        }
         observed_mounts = {
             (str(item.get("Source")), str(item.get("Destination")), bool(item.get("RW")))
             for item in mounts if isinstance(item, dict) and item.get("Type") == "bind"
@@ -614,6 +731,7 @@ class AgentEnvironment:
             ),
             "tmpfs": host.get("Tmpfs") == EXPECTED_TMPFS,
             "mounts": observed_mounts == expected_mounts,
+            "mount_custody": self._mount_custody_valid(),
             "ports": not config.get("ExposedPorts") and not host.get("PortBindings"),
         }
         mismatches.extend(name for name, passed in checks.items() if not passed)
@@ -642,6 +760,10 @@ class AgentEnvironment:
 
     def _resolve(self, registry: dict[str, object]) -> ContainerFacts | None:
         facts = self._all_facts(registry)
+        observed = {item.container_id: item for item in facts}
+        for record in registry["retained"]:
+            if isinstance(record, dict) and str(record.get("container_id")) in observed:
+                record["state"] = observed[str(record["container_id"])].state
         retained = {str(item["container_id"]) for item in registry["retained"] if isinstance(item, dict)}
         current = tuple(item for item in facts if item.container_id not in retained)
         selected = registry.get("selected_container_id")
@@ -672,10 +794,21 @@ class AgentEnvironment:
             and facts_one.state in {"created", "exited"}
         )
         registry["state"] = "resource_stopped" if preserve_resource_stop else self._state(facts_one.state)
+        if facts_one.state in {"created", "exited", "dead"}:
+            self._mark_container_processes_gone(registry, facts_one.container_id)
         if not preserve_resource_stop:
             registry["reason_code"] = None
         _atomic_private(self.registry_path, registry)
         return facts_one
+
+    @staticmethod
+    def _mark_container_processes_gone(registry: dict[str, object], container_id: str) -> None:
+        processes = registry.get("processes", {})
+        if not isinstance(processes, dict):
+            return
+        for claim in processes.values():
+            if isinstance(claim, dict) and claim.get("container_id") == container_id:
+                claim["last_state"] = "gone"
 
     @staticmethod
     def _state(value: str) -> str:
@@ -686,6 +819,7 @@ class AgentEnvironment:
         }.get(value, "unavailable")
 
     def _prepare_bind_roots(self) -> None:
+        self._require_mount_custody()
         for path in (self.workspace, self.cache):
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             if path.is_symlink() or not path.is_dir():
@@ -722,6 +856,13 @@ class AgentEnvironment:
             "--network", "bridge" if network.enabled else "none",
             "--mount", f"type=bind,src={self.workspace},dst=/workspace,rw",
             "--mount", f"type=bind,src={self.cache},dst=/cache,rw",
+        ))
+        for mount in self._mounts:
+            mode = "readonly" if mount.mode == "read_only" else "rw"
+            arguments.extend((
+                "--mount", f"type=bind,src={mount.source},dst={mount.destination},{mode}",
+            ))
+        arguments.extend((
             "--tmpfs", "/scratch:size=1024m,exec,nosuid,nodev",
             "--tmpfs", "/tmp:size=512m,exec,nosuid,nodev",
             "--tmpfs", "/var/tmp:size=256m,noexec,nosuid,nodev",
@@ -739,6 +880,7 @@ class AgentEnvironment:
             raise AgentEnvironmentError("environment_unhealthy")
 
     def _start(self, registry: dict[str, object], facts: ContainerFacts) -> ContainerFacts:
+        self._mark_container_processes_gone(registry, facts.container_id)
         registry["state"] = "starting"
         _atomic_private(self.registry_path, registry)
         result = self._docker("container", "start", facts.container_id)
@@ -787,7 +929,8 @@ class AgentEnvironment:
             registry["state"] = "unavailable"
             registry["reason_code"] = "container_create_failed"
             _atomic_private(self.registry_path, registry)
-            raise AgentEnvironmentError("environment_creation_failed")
+            code = "additional_mount_creation_rejected" if self._mounts else "environment_creation_failed"
+            raise AgentEnvironmentError(code)
         facts = self._inspect(candidate)
         mismatch = self._effective_mismatches(facts, registry)
         if mismatch or facts.generation != generation:
@@ -801,6 +944,79 @@ class AgentEnvironment:
         registry["state"] = "running"
         _atomic_private(self.registry_path, registry)
         return started
+
+    def _create_unselected_rebuild(self, registry: dict[str, object], generation: int) -> ContainerFacts:
+        """Create and validate a next generation without changing current selection."""
+        self._prepare_bind_roots()
+        environment_file: Path | None = None
+        candidate: str | None = None
+        try:
+            names = self.config.model.agent_environment.credentials.creation_environment_names
+            creation_environment = self._creation_environment()
+            private_names = list(names) + sorted(
+                name for name in creation_environment if name.startswith("VOICE_AGENT_CREATE_FILE_B64_")
+            )
+            if private_names:
+                descriptor, file_name = tempfile.mkstemp(prefix=".rebuild-environment.", dir=self.state_root)
+                environment_file = Path(file_name)
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "wb", closefd=True) as output:
+                    for name in private_names:
+                        output.write(name.encode("ascii") + b"=" + creation_environment[name].encode("utf-8") + b"\n")
+                    output.flush(); os.fsync(output.fileno())
+            result = self._docker(*self._create_arguments(registry, generation, environment_file=environment_file))
+            candidate = result.stdout.decode("ascii", "ignore").strip()
+            if result.returncode != 0 or not CONTAINER_ID.fullmatch(candidate):
+                code = "additional_mount_creation_rejected" if self._mounts else "environment_creation_failed"
+                raise AgentEnvironmentError(code)
+            facts = self._inspect(candidate)
+            mismatch = self._effective_mismatches(facts, registry)
+            if mismatch or facts.generation != generation:
+                raise AgentEnvironmentError("environment_inspection_failed", fields=mismatch)
+            started = self._docker("container", "start", candidate)
+            if started.returncode != 0:
+                raise AgentEnvironmentError("environment_unhealthy")
+            fresh = self._inspect(candidate)
+            if fresh.state != "running" or fresh.generation != generation or self._effective_mismatches(fresh, registry):
+                raise AgentEnvironmentError("environment_unhealthy")
+            self._readiness(fresh)
+            return fresh
+        except AgentEnvironmentError:
+            if candidate and CONTAINER_ID.fullmatch(candidate):
+                cleaned = False
+                recovery: ContainerFacts | None = None
+                try:
+                    fresh = self._inspect(candidate)
+                    exact = (
+                        fresh.labels.get(MANAGED_LABEL) == "1"
+                        and fresh.labels.get(SCHEMA_LABEL) == "1"
+                        and fresh.labels.get(OWNER_LABEL) == registry["owner_key"]
+                        and fresh.labels.get(SPEC_LABEL) == self.spec
+                        and fresh.generation == generation
+                    )
+                    if exact:
+                        recovery = fresh
+                        if fresh.state == "running":
+                            stopped = self._docker("container", "stop", "--time", "5", candidate)
+                            if stopped.returncode == 0:
+                                recovery = self._inspect(candidate)
+                        if recovery.state != "running":
+                            cleaned = self._docker("container", "rm", candidate).returncode == 0
+                except AgentEnvironmentError:
+                    recovery = None
+                if recovery is not None and not cleaned and not any(
+                    isinstance(record, dict) and record.get("container_id") == candidate
+                    for record in registry["retained"]
+                ):
+                    registry["retained"].append({
+                        "container_id": candidate, "generation": generation, "spec": self.spec,
+                        "state": recovery.state,
+                    })
+                    _atomic_private(self.registry_path, registry)
+            raise
+        finally:
+            if environment_file is not None:
+                environment_file.unlink(missing_ok=True)
 
     def ensure_running(self) -> ContainerFacts:
         if self._credential_initialization_error is not None:
@@ -834,7 +1050,18 @@ class AgentEnvironment:
                 or self._effective_mismatches(fresh, registry)
             ):
                 raise AgentEnvironmentError("environment_identity_conflict")
-            self._docker("container", "stop", "--time", "5", fresh.container_id)
+            stopped = self._docker("container", "stop", "--time", "5", fresh.container_id)
+            after = self._inspect(fresh.container_id)
+            if (
+                stopped.returncode != 0 or after.state == "running"
+                or after.labels.get(OWNER_LABEL) != registry["owner_key"]
+                or after.generation != registry["generation"]
+            ):
+                registry["state"] = "unhealthy"
+                registry["reason_code"] = "resource_stop_outcome_unknown"
+                _atomic_private(self.registry_path, registry)
+                raise AgentEnvironmentError("resource_stop_outcome_unknown")
+            self._mark_container_processes_gone(registry, fresh.container_id)
             registry["state"] = "resource_stopped"
             registry["reason_code"] = "host_free_reserve_breached"
             _atomic_private(self.registry_path, registry)
@@ -881,6 +1108,74 @@ class AgentEnvironment:
         except AgentEnvironmentError:
             return False
 
+    def _operation_payload(
+        self, tool_id: str, arguments: Mapping[str, object], facts: ContainerFacts,
+    ) -> tuple[bytes, str | None, str | None]:
+        data = dict(arguments)
+        if any(not isinstance(key, str) or key.startswith("_voice_agent_") for key in data):
+            raise AgentEnvironmentError("operation_arguments_invalid")
+        background = data.get("background", False)
+        if type(background) is not bool:
+            raise AgentEnvironmentError("background_mode_invalid")
+        process_receipt: str | None = None
+        process_action: str | None = None
+        if background:
+            if tool_id not in {"shell.exec", "execute_code"}:
+                raise AgentEnvironmentError("background_operation_unsupported")
+            process_receipt = uuid.uuid4().hex
+            data["_voice_agent_process_receipt"] = process_receipt
+            data["_voice_agent_owner"] = None  # filled from private custody below
+            data["_voice_agent_spec"] = self.spec
+            data["_voice_agent_generation"] = facts.generation
+        elif tool_id in {"process", "receipt"}:
+            process_action = str(data.get("action", "poll" if tool_id == "receipt" else ""))
+            if process_action not in {"poll", "logs", "wait", "write", "kill"}:
+                raise AgentEnvironmentError("process_action_invalid")
+            process_receipt = data.get("receipt") if isinstance(data.get("receipt"), str) else None
+            if process_receipt is None or not PROCESS_RECEIPT.fullmatch(process_receipt):
+                raise AgentEnvironmentError("process_receipt_invalid")
+            with self._locked(create=True):
+                registry = self._registry(create=False)
+                claim = registry["processes"].get(process_receipt)
+                if not isinstance(claim, dict):
+                    raise AgentEnvironmentError("process_receipt_unknown")
+                if (
+                    claim.get("container_id") != facts.container_id
+                    or claim.get("generation") != facts.generation
+                    or claim.get("spec") != self.spec
+                    or claim.get("owner") != registry.get("owner_key")
+                    or not isinstance(claim.get("identity"), dict)
+                ):
+                    raise AgentEnvironmentError("process_identity_unknown")
+                data["_voice_agent_owner"] = registry["owner_key"]
+                data["_voice_agent_spec"] = self.spec
+                data["_voice_agent_generation"] = facts.generation
+                data["_voice_agent_expected_identity"] = claim["identity"]
+            wait_seconds = data.get("timeout_seconds", 0)
+            if type(wait_seconds) not in {int, float} or not 0 <= float(wait_seconds) <= MAX_PROCESS_WAIT_SECONDS:
+                raise AgentEnvironmentError("process_wait_out_of_bounds")
+            if process_action == "write":
+                encoded = data.get("data_base64", "")
+                if not isinstance(encoded, str):
+                    raise AgentEnvironmentError("process_write_invalid")
+                try:
+                    written = base64.b64decode(encoded, validate=True)
+                except ValueError as error:
+                    raise AgentEnvironmentError("process_write_invalid") from error
+                if len(written) > MAX_PROCESS_WRITE_BYTES:
+                    raise AgentEnvironmentError("process_write_out_of_bounds")
+            if process_action == "logs":
+                maximum = data.get("maximum_bytes", MAX_PROCESS_LOG_BYTES)
+                if type(maximum) is not int or not 1 <= maximum <= MAX_PROCESS_LOG_BYTES:
+                    raise AgentEnvironmentError("process_logs_out_of_bounds")
+        try:
+            payload = _canonical(data)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise AgentEnvironmentError("operation_arguments_invalid") from error
+        if len(payload) > 256 * 1024:
+            raise AgentEnvironmentError("operation_arguments_out_of_bounds")
+        return payload, process_receipt, process_action
+
     def execute(
         self,
         tool_id: str,
@@ -895,14 +1190,16 @@ class AgentEnvironment:
         identifier = call_id or uuid.uuid4().hex
         if not CALL_ID.fullmatch(identifier):
             raise AgentEnvironmentError("call_identity_invalid")
-        try:
-            payload = _canonical(dict(arguments))
-        except (TypeError, ValueError, RecursionError) as error:
-            raise AgentEnvironmentError("operation_arguments_invalid") from error
-        if len(payload) > 256 * 1024:
-            raise AgentEnvironmentError("operation_arguments_out_of_bounds")
         facts = self.ensure_running()
         self._free_reserve(facts)
+        payload, process_receipt, process_action = self._operation_payload(tool_id, arguments, facts)
+        if process_receipt is not None and arguments.get("background") is True:
+            # The helper checks this trusted owner value against its rootfs claim.
+            decoded = json.loads(payload)
+            with self._locked(create=True):
+                owner = self._registry(create=False)["owner_key"]
+            decoded["_voice_agent_owner"] = owner
+            payload = _canonical(decoded)
         with self._locked(create=True):
             registry = self._registry(create=False)
             if registry.get("selected_container_id") != facts.container_id:
@@ -925,6 +1222,17 @@ class AgentEnvironment:
                 except (KeyError, TypeError, ValueError) as error:
                     raise AgentEnvironmentError("execution_outcome_unknown") from error
             calls[identifier] = {"state": "dispatching"}
+            if process_receipt is not None and arguments.get("background") is True:
+                processes = registry["processes"]
+                assert isinstance(processes, dict)
+                if len(processes) >= MAX_BACKGROUND_PROCESSES:
+                    calls.pop(identifier, None)
+                    raise AgentEnvironmentError("background_process_limit_reached")
+                processes[process_receipt] = {
+                    "container_id": facts.container_id, "generation": facts.generation,
+                    "spec": self.spec, "owner": registry["owner_key"],
+                    "identity": None, "last_state": "dispatching",
+                }
             if len(calls) > 512:
                 removable = next((
                     key for key, value in calls.items()
@@ -938,7 +1246,7 @@ class AgentEnvironment:
         try:
             credential_arguments = self._exec_credential_arguments(identifier, facts)
         except AgentEnvironmentError:
-            self._forget_undispatched_call(identifier, facts.container_id)
+            self._forget_undispatched_call(identifier, facts.container_id, process_receipt)
             raise
         command = (
             "container", "exec", "-i", *credential_arguments, facts.container_id,
@@ -1001,6 +1309,33 @@ class AgentEnvironment:
             current["logical_cwd"] = next_cwd if len(next_cwd.encode()) <= 4096 else "/workspace"
             current_calls = current["calls"]
             assert isinstance(current_calls, dict)
+            details = metadata.get("details", {})
+            if process_receipt is not None and isinstance(details, dict):
+                internal_identity = details.pop("_voice_agent_identity", None)
+                if arguments.get("background") is True:
+                    processes = current["processes"]
+                    assert isinstance(processes, dict)
+                    if status != "completed":
+                        # The fixed helper kills any child for which it cannot
+                        # durably issue an identity receipt; no authority remains.
+                        processes.pop(process_receipt, None)
+                    elif (
+                        not isinstance(internal_identity, dict)
+                        or set(internal_identity) != {"pid", "pgid", "start_time", "executable", "init_start_time"}
+                        or any(type(internal_identity[key]) is not int for key in ("pid", "pgid", "start_time", "init_start_time"))
+                        or not isinstance(internal_identity["executable"], str)
+                    ):
+                        raise AgentEnvironmentError("process_receipt_invalid")
+                    else:
+                        processes[process_receipt] = {
+                            "container_id": facts.container_id, "generation": facts.generation,
+                            "spec": self.spec, "owner": current["owner_key"],
+                            "identity": internal_identity, "last_state": "running",
+                        }
+                elif process_action is not None:
+                    state = details.get("state")
+                    if isinstance(state, str):
+                        current["processes"][process_receipt]["last_state"] = state
             if len(output) <= 4096 and len(error_output) <= 4096:
                 current_calls[identifier] = {
                     "state": "completed",
@@ -1169,7 +1504,9 @@ class AgentEnvironment:
             receipt.byte_count, receipt.sha256, outcome, exact, target,
         )
 
-    def _forget_undispatched_call(self, call_id: str, container_id: str) -> None:
+    def _forget_undispatched_call(
+        self, call_id: str, container_id: str, process_receipt: str | None = None,
+    ) -> None:
         try:
             with self._locked(create=True):
                 registry = self._registry(create=False)
@@ -1177,6 +1514,11 @@ class AgentEnvironment:
                 if registry.get("selected_container_id") == container_id and isinstance(calls, dict):
                     if calls.get(call_id) == {"state": "dispatching"}:
                         calls.pop(call_id)
+                        processes = registry.get("processes")
+                        if process_receipt is not None and isinstance(processes, dict):
+                            claim = processes.get(process_receipt)
+                            if isinstance(claim, dict) and claim.get("identity") is None:
+                                processes.pop(process_receipt, None)
                         _atomic_private(self.registry_path, registry)
         except AgentEnvironmentError:
             pass
@@ -1194,22 +1536,23 @@ class AgentEnvironment:
         except AgentEnvironmentError:
             pass
 
-    def cancel_call(self, call_id: str, container_id: str | None = None) -> None:
+    def cancel_call(self, call_id: str, container_id: str | None = None) -> bool:
         if not CALL_ID.fullmatch(call_id):
-            return
+            return False
         with self._locked(create=True):
             registry = self._registry(create=False)
             self._endpoint(registry, pin=False)
             selected = str(registry.get("selected_container_id") or "")
             if container_id is not None and container_id != selected:
-                return
+                return False
             facts = self._inspect(selected)
             if facts.state != "running" or self._effective_mismatches(facts, registry):
-                return
-            self._docker(
+                return False
+            result = self._docker(
                 "container", "exec", facts.container_id,
                 "/usr/local/lib/voice-agent/agent-helper", "cancel-call", "--call-id", call_id,
             )
+            return result.returncode == 0 and result.stdout == b'{"outcome":"signalled"}'
 
     def status(self) -> dict[str, object]:
         if self._credential_initialization_error is not None:
@@ -1260,6 +1603,26 @@ class AgentEnvironment:
             )
             for name in names
         ]
+        processes = registry.get("processes", {}) if registry else {}
+        process_status = [
+            {
+                "receipt": receipt, "state": str(claim.get("last_state", "unknown")),
+                "observation": "last_reconciled",
+            }
+            for receipt, claim in sorted(processes.items())
+            if isinstance(receipt, str) and isinstance(claim, dict)
+        ][:MAX_BACKGROUND_PROCESSES]
+        retained = registry.get("retained", []) if registry else []
+        retained_status = [
+            {
+                "container_id_prefix": str(record.get("container_id", ""))[:12],
+                "generation": record.get("generation"),
+                "spec_prefix": str(record.get("spec", ""))[:12],
+                "selectable": False,
+                "last_inspected_state": str(record.get("state", "unknown")),
+            }
+            for record in retained if isinstance(record, dict)
+        ]
         return {
             "schema_version": STATUS_SCHEMA,
             "installation_prefix": str(registry.get("owner_key"))[:12] if registry else None,
@@ -1273,6 +1636,32 @@ class AgentEnvironment:
             "bounds": self.config.model.agent_environment.resources.model_dump(mode="json"),
             "network_egress_enabled": self.config.model.agent_environment.network.enabled,
             "published_ports": [],
+            "internal_listeners_may_conflict": True,
+            "additional_mounts": [
+                {"source": mount.source, "destination": mount.destination, "mode": mount.mode}
+                for mount in self._mounts
+            ],
+            "additional_mount_authority_warning": MOUNT_AUTHORITY_WARNING,
+            "unmounted_host_paths_sockets_devices_accessible": False,
+            "docker_socket_mounted": False,
+            "process_receipts": process_status,
+            "background_process_limit": MAX_BACKGROUND_PROCESSES,
+            "process_poll_required_for_fresh_running_truth": True,
+            "retained_generations": retained_status,
+            "lifecycle_selector_supported": False,
+            "destructive_confirmation_required": True,
+            "data_deletion_requires_separate_confirmation": True,
+            "reset_recreates_lazily_under_same_spec": True,
+            "rebuild_kills_old_processes": True,
+            "rebuild_retains_old_generation_by_default": True,
+            "remove_affects_only_current_container": True,
+            "retire_affects_only_recorded_noncurrent_generation": True,
+            "conflicts_are_not_automatically_resolved": True,
+            "visible_conflict_kinds": [
+                "process_state", "internal_port", "git_lock", "package_manager_lock",
+                "concurrent_writer", "stale_receipt", "stopped", "unhealthy",
+                "resource_stopped", "retained_generation",
+            ],
             "credential_configuration_count": 1,
             "credential_exposure": exposure,
             "credential_authority_warning": CREDENTIAL_AUTHORITY_WARNING,
@@ -1299,7 +1688,14 @@ class AgentEnvironment:
         if allow_stale:
             selected = str(registry.get("selected_container_id") or "")
             candidates = self._candidate_ids(registry)
-            if not selected or candidates.count(selected) != 1 or len(candidates) != 1:
+            retained_ids = {
+                str(record.get("container_id")) for record in registry.get("retained", [])
+                if isinstance(record, dict)
+            }
+            if (
+                not selected or candidates.count(selected) != 1
+                or set(candidates) != retained_ids | {selected}
+            ):
                 raise AgentEnvironmentError("environment_identity_conflict")
             facts = self._inspect(selected)
         else:
@@ -1308,7 +1704,13 @@ class AgentEnvironment:
                 raise AgentEnvironmentError("environment_absent")
         # Immediate second inspection is the destructive-action reinspection.
         fresh = self._inspect(facts.container_id)
-        if fresh.labels.get(OWNER_LABEL) != registry["owner_key"] or fresh.generation != registry["generation"]:
+        if (
+            fresh.labels.get(MANAGED_LABEL) != "1"
+            or fresh.labels.get(SCHEMA_LABEL) != "1"
+            or fresh.labels.get(OWNER_LABEL) != registry["owner_key"]
+            or fresh.generation != registry["generation"]
+            or fresh.container_id != registry.get("selected_container_id")
+        ):
             raise AgentEnvironmentError("environment_identity_conflict")
         return fresh
 
@@ -1328,16 +1730,34 @@ class AgentEnvironment:
                 if not retained:
                     raise AgentEnvironmentError("retained_generation_absent")
                 record = retained[0]
-                facts = self._inspect(str(record["container_id"]))
                 self._endpoint(registry, pin=False)
-                if facts.labels.get(OWNER_LABEL) != registry["owner_key"] or facts.generation != record["generation"]:
+                recorded_id = str(record.get("container_id", ""))
+                candidates = self._candidate_ids(registry)
+                if candidates.count(recorded_id) != 1 or recorded_id == registry.get("selected_container_id"):
+                    raise AgentEnvironmentError("environment_identity_conflict")
+                facts = self._inspect(recorded_id)
+                expected = (
+                    facts.labels.get(MANAGED_LABEL) == "1"
+                    and facts.labels.get(SCHEMA_LABEL) == "1"
+                    and facts.labels.get(OWNER_LABEL) == registry["owner_key"]
+                    and facts.generation == record.get("generation")
+                    and facts.spec == record.get("spec")
+                )
+                if not expected:
                     raise AgentEnvironmentError("environment_identity_conflict")
                 if facts.state == "running":
-                    self._docker("container", "stop", "--time", "10", facts.container_id)
+                    stopped = self._docker("container", "stop", "--time", "10", facts.container_id)
+                    if stopped.returncode != 0:
+                        raise AgentEnvironmentError("lifecycle_action_failed")
                     facts = self._inspect(facts.container_id)
-                if (
-                    facts.labels.get(OWNER_LABEL) != registry["owner_key"]
-                    or facts.generation != record["generation"]
+                # Immediate fresh reinspection after any stop and before rm.
+                facts = self._inspect(facts.container_id)
+                if not (
+                    facts.labels.get(MANAGED_LABEL) == "1"
+                    and facts.labels.get(SCHEMA_LABEL) == "1"
+                    and facts.labels.get(OWNER_LABEL) == registry["owner_key"]
+                    and facts.generation == record.get("generation")
+                    and facts.spec == record.get("spec")
                 ):
                     raise AgentEnvironmentError("environment_identity_conflict")
                 result = self._docker("container", "rm", facts.container_id)
@@ -1350,23 +1770,50 @@ class AgentEnvironment:
                     state=str(registry.get("state", "absent")),
                     reason=registry.get("reason_code"),
                 )
-            facts = self._exact_current(registry, allow_stale=action == "rebuild")
+            facts = self._exact_current(registry, allow_stale=True)
             if action == "rebuild":
                 if facts.state == "running":
-                    self._docker("container", "stop", "--time", "10", facts.container_id)
+                    stopped = self._docker("container", "stop", "--time", "10", facts.container_id)
+                    if stopped.returncode != 0:
+                        raise AgentEnvironmentError("lifecycle_action_failed")
                     facts = self._inspect(facts.container_id)
-                registry["retained"].append({"container_id": facts.container_id, "generation": facts.generation, "spec": facts.spec})
-                registry["selected_container_id"] = None
-                registry["state"] = "retired"
+                self._mark_container_processes_gone(registry, facts.container_id)
+                next_generation = max(
+                    [int(registry["generation"]), *[
+                        int(record.get("generation", 0)) for record in registry["retained"]
+                        if isinstance(record, dict)
+                    ]]
+                ) + 1
+                next_facts = self._create_unselected_rebuild(registry, next_generation)
+                # One fsynced replacement is the only selection boundary. The
+                # old stopped generation becomes nonselectable recovery material.
+                registry["retained"].append({
+                    "container_id": facts.container_id, "generation": facts.generation,
+                    "spec": facts.spec, "state": facts.state,
+                })
+                registry["selected_container_id"] = next_facts.container_id
+                registry["generation"] = next_generation
+                registry["spec"] = self.spec
+                registry["state"] = "running"
+                registry["reason_code"] = None
                 _atomic_private(self.registry_path, registry)
-                self._create(registry)
                 return self._status_document(registry, state="running", reason=None)
+            original_spec = facts.spec
             if facts.state == "running":
-                self._docker("container", "stop", "--time", "10", facts.container_id)
+                stopped = self._docker("container", "stop", "--time", "10", facts.container_id)
+                if stopped.returncode != 0:
+                    raise AgentEnvironmentError("lifecycle_action_failed")
                 facts = self._inspect(facts.container_id)
+            # Immediate fresh reinspection after any stop and before rm.
+            facts = self._inspect(facts.container_id)
+            self._mark_container_processes_gone(registry, facts.container_id)
             if (
-                facts.labels.get(OWNER_LABEL) != registry["owner_key"]
+                facts.labels.get(MANAGED_LABEL) != "1"
+                or facts.labels.get(SCHEMA_LABEL) != "1"
+                or facts.labels.get(OWNER_LABEL) != registry["owner_key"]
                 or facts.generation != registry["generation"]
+                or facts.spec != original_spec
+                or facts.container_id != registry.get("selected_container_id")
             ):
                 raise AgentEnvironmentError("environment_identity_conflict")
             result = self._docker("container", "rm", facts.container_id)

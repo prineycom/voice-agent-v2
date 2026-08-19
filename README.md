@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**E3.2 extends the same single persistent Docker AgentEnvironment with normal container egress, exactly one fixed credential declaration, bounded binary controller streams, and remote Git.** Synthetic fake-Docker/network/transport PR evidence remains separate from Linux Engine, Docker Desktop/macOS, exact-model/live-network, reboot, and physical acceptance. Credentials have broad open-sandbox authority; there is no domain/payload binding, DLP, confidentiality-from-the-agent, or rollback claim. Rootfs/workspace/cache, tmpfs/process, shell-local, and logical-cwd persistence facts remain explicit. The exact local LFM2.5 and Silero/Kseniya paths remain unchanged, with no provider/model/TTS/avatar/runtime fallback, selectable environment, published container service, implicit cleanup, wake, kiosk, or application-managed public exposure.
+**E3.3 adds bounded persistent background-process receipts, restart-pinned typed RO/RW additional mounts, and complete selector-free lifecycle UX to the same single Docker AgentEnvironment.** Synthetic fake-Docker/disposable-process PR evidence remains separate from Linux Engine, Docker Desktop/macOS, exact-model/live-network, real stop/daemon/Desktop, reboot, and physical acceptance. Processes survive controller/turn/session events only while the exact container runs; a real stop loses them without losing same-ID rootfs/workspace/cache. RO mounts are readable/exfiltratable and RW mounts may be changed/deleted/encrypted. The exact local LFM2.5 and Silero/Kseniya paths remain unchanged, with no automatic job restart, scheduler, provider/model/TTS/avatar/runtime fallback, selectable environment, model-selected mount/lifecycle target, published host port, implicit cleanup, wake, kiosk, or application-managed public exposure.
 
 Silero is licensed CC BY-NC-SA 4.0. This branch authorizes only private local noncommercial evaluation; it is not a production/commercial recommendation or authorization. Separate licensing and legal review are mandatory before any merge, production, or commercial use. Historical DeepSeek/Qwen evidence and contracts remain factual and inactive.
 
@@ -99,7 +99,7 @@ Default metadata diagnostics contain no conversation/media content, secrets, exc
 
 ### Agent configuration and persistent Docker environment
 
-Active configuration is strict [`voice-agent.config.v2`](contracts/agent-config.v2.schema.json), illustrated by [`config/agent-config-v2.example.yaml`](config/agent-config-v2.example.yaml). It pins one AgentRun decision budget, fixed tools, one OCI image, network policy, transfer/resource bounds, and exactly one credential object containing exposed names and modes only. It contains no selectable identity, execution backend, environment alias/profile, raw credential value/source, persistence choice, task override, or raw Docker arguments. Historical E1 V1 input can be inspected and upgraded once; the upgrade carries no former identity:
+Active configuration is strict [`voice-agent.config.v2`](contracts/agent-config.v2.schema.json), illustrated by [`config/agent-config-v2.example.yaml`](config/agent-config-v2.example.yaml). It pins one AgentRun decision budget, fixed tools, one OCI image, network policy, transfer/resource bounds, exactly one credential object containing exposed names and modes only, and one typed `additional_mounts` list. Every extra mount has an absolute precreated user-owned non-symlink source, fixed container destination, and explicit `read_only`/`read_write` mode; custody and effective Docker facts enter spec compatibility. It contains no selectable identity, execution backend, environment alias/profile, raw credential value/source, persistence choice, task override, model path, or raw Docker arguments. Historical E1 V1 input can be inspected and upgraded once; the upgrade carries no former identity:
 
 ```sh
 ./voice-agent-ops agent-config upgrade-v2 --json
@@ -112,7 +112,9 @@ Normal configuration uses Docker bridge egress and publishes no host port. A dec
 
 Gateway/controller byte entrypoints accept only bounded bytes plus controller-chosen `workspace`/`cache` destinations. Fixed helpers validate length/SHA-256, fsync a `0600` temporary, atomically rename inbound data, and return outbound data only through Docker-exec stdout. Container paths are never host paths. A delivery becomes `sent` only after exact target/length/hash acknowledgement; uncertainty is `unknown` and invokes no automatic repeat. Redaction creates display/log/support copies only: raw shell/model/file/header/body/multipart/Git/stream bytes are unchanged. See [`docs/architecture.md` §9.9](docs/architecture.md#99-e32-network-one-credential-configuration-streams-and-remote-git).
 
-Turn/session completion, cancellation, `/quit`, idle expiry, gateway restart, shutdown, and controller death do not stop or remove the environment. An explicitly stopped compatible container is started with the same ID: files/rootfs persist, old processes and sockets do not. Operator lifecycle is selector-free and destructive actions require confirmation; workspace/cache remain by default:
+A shell/code operation with `background=true` returns an opaque receipt promptly. The fixed `process`/`receipt` route can later `poll`, read bounded `logs`, bounded `wait`, `write` bounded base64 stdin, or bounded TERM→KILL. Every observation/signal reconciles the private controller claim, persistent rootfs claim, and fresh `/proc` PID/start/executable/process-group plus PID 1 start identity; a missing/tampered/stale/PID-reused claim never authorizes a signal. Receipts contain no PID or container selector. Foreground cancellation validates its own separate call group and leaves unrelated background receipts alive. Internal listeners can conflict, but no host port is published.
+
+Turn/session completion, cancellation, `/quit`, idle expiry, gateway restart, shutdown, and controller death do not stop or remove the environment. An explicitly stopped compatible container is started with the same ID: files/rootfs persist, old processes and sockets do not. Operator lifecycle accepts no selector; `status` is inspect-only, every destructive action requires confirmation/fresh exact custody, rebuild validates before atomic selection and retains the old stopped generation, and all host binds remain by default:
 
 ```sh
 ./voice-agent-ops agent-environment reset --confirm
@@ -121,7 +123,7 @@ Turn/session completion, cancellation, `/quit`, idle expiry, gateway restart, sh
 ./voice-agent-ops agent-environment retire --confirm
 ```
 
-There is no prune, wildcard cleanup, runtime image pull, Docker installation/configuration, or normal-event destruction. See [`docs/architecture.md` §9.7](docs/architecture.md#97-e24-production-agentrun-and-agentenvironment) for identity, locking, state, receipt, persistence, cancellation, security, resource, and evidence boundaries.
+Data deletion is a separate authority not implemented by these commands. There is no prune, wildcard/prefix/age cleanup, automatic conflict repair, runtime image pull, Docker installation/configuration, or normal-event destruction. See [`docs/architecture.md` §9.10](docs/architecture.md#910-e33-background-processes-explicit-mounts-and-lifecycle-ux) for process, mount, lifecycle, persistence, conflict, and evidence boundaries.
 
 ### Slice 9 single-host operations
 

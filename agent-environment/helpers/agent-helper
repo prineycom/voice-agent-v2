@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import signal
 import stat
@@ -23,9 +24,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 LEDGER = Path(os.environ.get("VOICE_AGENT_LEDGER", "/var/lib/voice-agent/exec-ledger"))
 STREAM_LEDGER = Path(os.environ.get("VOICE_AGENT_STREAM_LEDGER", "/var/lib/voice-agent/stream-ledger"))
+PROCESS_LEDGER = Path(os.environ.get("VOICE_AGENT_PROCESS_LEDGER", "/var/lib/voice-agent/process-ledger"))
+PROCESS_RUNTIME = Path(os.environ.get("VOICE_AGENT_PROCESS_RUNTIME", "/run/voice-agent-processes"))
 MAX_LEDGER = 4096
 MAX_INPUT = 256 * 1024
 MAX_STREAM_BYTES = 1024 * 1024
@@ -34,6 +38,11 @@ MAX_STREAM_BYTES = 1024 * 1024
 MAX_OUTPUT = 128 * 1024
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_SEARCH_MATCHES = 256
+MAX_PROCESS_LOG_BYTES = 256 * 1024
+MAX_PROCESS_WRITE_BYTES = 64 * 1024
+MAX_PROCESS_WAIT_SECONDS = 30.0
+MAX_PROCESS_RECEIPTS = 64
+PROCESS_RECEIPT = re.compile(r"^[a-f0-9]{32}$")
 CALL_ID = re.compile(r"^[a-f0-9]{32}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 CREDENTIAL_NAME = re.compile(r"^(?!VOICE_AGENT_)[A-Z_][A-Z0-9_]{0,63}$")
@@ -366,11 +375,20 @@ def _drain(stream, result: Captured) -> None:
 
 
 def _run_process(command: list[str], *, cwd: str, stdin: bytes, call: Path) -> tuple[int | None, Captured, Captured, bool]:
+    environment = _tool_environment()
+    environment["VOICE_AGENT_INTERNAL_CALL_ID"] = call.name
     process = subprocess.Popen(
         command, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, env=_tool_environment(),
+        start_new_session=True, env=environment,
     )
-    (call / "pgid").write_text(str(process.pid), encoding="ascii")
+    identity = _proc_identity(process.pid)
+    if identity is None or identity["pgid"] != process.pid:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        raise ValueError("foreground_process_identity_unknown")
+    atomic_json(call / "foreground-process.json", {"schema": 1, "identity": identity})
     stdout, stderr = Captured(), Captured()
     stdout_thread = threading.Thread(target=_drain, args=(process.stdout, stdout), daemon=True)
     stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr), daemon=True)
@@ -425,6 +443,226 @@ def _execute_code(data: dict[str, object], cwd: str, call: Path) -> dict[str, ob
     complete = not stdout.truncated and not stderr.truncated
     return receipt("completed" if returncode == 0 and complete else "failed", returncode if complete else 75, stdout, stderr, cwd,
                    details={"kind": "execute_code", "output_complete": complete})
+
+
+def _proc_identity(pid: int) -> dict[str, object] | None:
+    """Read fresh Linux identity; a PID without all fields is never signal authority."""
+    if pid <= 1:
+        return None
+    try:
+        stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        suffix = stat_line.rsplit(")", 1)[1].split()
+        state = suffix[0]
+        pgid = int(suffix[2])
+        start_time = int(suffix[19])
+        init_line = Path("/proc/1/stat").read_text(encoding="ascii")
+        init_start_time = int(init_line.rsplit(")", 1)[1].split()[19])
+        executable = os.readlink(f"/proc/{pid}/exe")
+    except (OSError, ValueError, IndexError):
+        return None
+    if state == "Z":
+        return None
+    return {
+        "pid": pid, "pgid": pgid, "start_time": start_time,
+        "executable": executable, "init_start_time": init_start_time,
+    }
+
+
+def _background_preexec() -> None:
+    os.setsid()
+    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_PROCESS_LOG_BYTES, MAX_PROCESS_LOG_BYTES))
+
+
+def _background(data: dict[str, object], cwd: str, *, tool: str) -> dict[str, object]:
+    process_receipt = data.get("_voice_agent_process_receipt")
+    owner = data.get("_voice_agent_owner")
+    spec = data.get("_voice_agent_spec")
+    generation = data.get("_voice_agent_generation")
+    if (
+        not isinstance(process_receipt, str) or not PROCESS_RECEIPT.fullmatch(process_receipt)
+        or not isinstance(owner, str) or not owner or not isinstance(spec, str) or not spec
+        or type(generation) is not int or generation < 1
+    ):
+        raise ValueError("background_identity_invalid")
+    PROCESS_LEDGER.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if sum(1 for item in PROCESS_LEDGER.iterdir() if item.is_dir()) >= MAX_PROCESS_RECEIPTS:
+        raise ValueError("background_process_limit_reached")
+    claim = PROCESS_LEDGER / process_receipt
+    try:
+        claim.mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise ValueError("background_receipt_conflict") from error
+    PROCESS_RUNTIME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fifo = PROCESS_RUNTIME / f"{process_receipt}.stdin"
+    stdout_path = claim / "stdout.log"
+    stderr_path = claim / "stderr.log"
+    code_path: Path | None = None
+    try:
+        os.mkfifo(fifo, 0o600)
+        fifo_descriptor = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+        os.set_blocking(fifo_descriptor, True)
+        stdout_file = stdout_path.open("wb", buffering=0)
+        stderr_file = stderr_path.open("wb", buffering=0)
+        if tool == "shell-exec":
+            command = data.get("command", "")
+            if not isinstance(command, str) or len(command.encode("utf-8")) > MAX_INPUT:
+                raise ValueError("command_invalid")
+            # The fixed footer prevents the shell from exec-optimising its last
+            # child, so the freshly reconciled executable remains stable.
+            argv = ["/bin/sh", "-c", 'eval "$1"; code=$?; :; exit "$code"', "background", command]
+        else:
+            language = data.get("language", "python")
+            code = data.get("code", "")
+            interpreters = {"python": "/usr/bin/python3", "sh": "/bin/sh"}
+            if language not in interpreters or not isinstance(code, str) or len(code.encode("utf-8")) > MAX_INPUT:
+                raise ValueError("code_invalid")
+            code_path = claim / ("program.py" if language == "python" else "program.sh")
+            descriptor = os.open(code_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(code.encode("utf-8"))
+            argv = [interpreters[language], str(code_path)]
+        process = subprocess.Popen(
+            argv, cwd=cwd, stdin=fifo_descriptor, stdout=stdout_file, stderr=stderr_file,
+            close_fds=True, env=_tool_environment(), preexec_fn=_background_preexec,
+        )
+        os.close(fifo_descriptor)
+        stdout_file.close(); stderr_file.close()
+        identity = _proc_identity(process.pid)
+        if identity is None or identity["pgid"] != process.pid:
+            raise ValueError("background_process_exited_before_receipt")
+        document = {
+            "schema": 1, "receipt": process_receipt, "owner": owner, "spec": spec,
+            "generation": generation, "identity": identity, "state": "running",
+        }
+        atomic_json(claim / "process.json", document)
+        return receipt(
+            "completed", 0, captured(b""), captured(b""), cwd,
+            details={
+                "schema_version": "voice-agent.process-receipt.v1",
+                "kind": "background_process", "process_receipt": process_receipt,
+                "state": "running", "writable_stdin": True,
+                "operations": ["poll", "logs", "wait", "write", "kill"],
+                "_voice_agent_identity": identity,
+            },
+        )
+    except Exception:
+        # A process that escaped receipt creation must not be left unowned.
+        candidate = locals().get("process")
+        if isinstance(candidate, subprocess.Popen) and candidate.poll() is None:
+            try:
+                os.killpg(candidate.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        shutil.rmtree(claim, ignore_errors=True)
+        fifo.unlink(missing_ok=True)
+        raise
+
+
+def _validated_process(data: dict[str, object]) -> tuple[Path, dict[str, object], dict[str, object] | None]:
+    process_receipt = data.get("receipt")
+    expected = data.get("_voice_agent_expected_identity")
+    claim_path = PROCESS_LEDGER / str(process_receipt)
+    try:
+        document = json.loads((claim_path / "process.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        raise ValueError("process_identity_unknown") from error
+    exact = {
+        "schema": 1, "receipt": process_receipt, "owner": data.get("_voice_agent_owner"),
+        "spec": data.get("_voice_agent_spec"), "generation": data.get("_voice_agent_generation"),
+        "identity": expected, "state": document.get("state"),
+    }
+    if (
+        not isinstance(process_receipt, str) or not PROCESS_RECEIPT.fullmatch(process_receipt)
+        or not isinstance(expected, dict) or document != exact
+    ):
+        raise ValueError("process_identity_unknown")
+    pid = expected.get("pid")
+    fresh = _proc_identity(pid) if type(pid) is int else None
+    if fresh != expected:
+        return claim_path, document, None
+    return claim_path, document, fresh
+
+
+def _process_operation(data: dict[str, object], cwd: str) -> dict[str, object]:
+    action = data.get("action", "poll")
+    if action not in {"poll", "logs", "wait", "write", "kill"}:
+        raise ValueError("process_action_invalid")
+    claim, document, fresh = _validated_process(data)
+    timeout = data.get("timeout_seconds", 0)
+    if type(timeout) not in {int, float} or not 0 <= float(timeout) <= MAX_PROCESS_WAIT_SECONDS:
+        raise ValueError("process_wait_out_of_bounds")
+    if action == "wait" and fresh is not None:
+        deadline = time.monotonic() + float(timeout)
+        while fresh is not None and time.monotonic() < deadline:
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            fresh = _proc_identity(int(document["identity"]["pid"]))
+            if fresh != document["identity"]:
+                fresh = None
+    if action == "kill" and fresh is not None:
+        identity = document["identity"]
+        os.killpg(int(identity["pgid"]), signal.SIGTERM)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and _proc_identity(int(identity["pid"])) == identity:
+            time.sleep(0.05)
+        latest = _proc_identity(int(identity["pid"]))
+        if latest == identity:
+            # Revalidation immediately before KILL is the PID-reuse defence.
+            os.killpg(int(identity["pgid"]), signal.SIGKILL)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and _proc_identity(int(identity["pid"])) == identity:
+                time.sleep(0.02)
+        fresh = _proc_identity(int(identity["pid"]))
+        if fresh not in (None, identity):
+            raise ValueError("process_identity_unknown")
+        fresh = None
+        document["state"] = "killed"
+        atomic_json(claim / "process.json", document)
+    state = "running" if fresh is not None else str(document.get("state", "gone"))
+    if fresh is None and state == "running":
+        state = "gone"
+        document["state"] = state
+        atomic_json(claim / "process.json", document)
+    if action == "write":
+        if fresh is None:
+            return error_result("process_gone", cwd, details={"kind": "process", "state": state})
+        try:
+            value = base64.b64decode(str(data.get("data_base64", "")), validate=True)
+        except ValueError as error:
+            raise ValueError("process_write_invalid") from error
+        if len(value) > MAX_PROCESS_WRITE_BYTES:
+            raise ValueError("process_write_out_of_bounds")
+        try:
+            descriptor = os.open(PROCESS_RUNTIME / f"{data['receipt']}.stdin", os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                written = os.write(descriptor, value)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            return error_result("process_write_unsupported", cwd, details={"kind": "process", "state": state})
+        return receipt("completed", 0, captured(b""), captured(b""), cwd,
+                       details={"kind": "process", "state": state, "written_bytes": written})
+    stdout = captured(b""); stderr = captured(b"")
+    if action == "logs":
+        offset = data.get("offset", 0)
+        maximum = data.get("maximum_bytes", MAX_OUTPUT)
+        if type(offset) is not int or offset < 0 or type(maximum) is not int or not 1 <= maximum <= MAX_OUTPUT:
+            raise ValueError("process_logs_out_of_bounds")
+        for path, output in ((claim / "stdout.log", stdout), (claim / "stderr.log", stderr)):
+            try:
+                with path.open("rb") as source:
+                    source.seek(offset)
+                    output.add(source.read(maximum))
+            except OSError:
+                pass
+    return receipt(
+        "completed", 0, stdout, stderr, cwd,
+        details={
+            "kind": "process", "process_receipt": data.get("receipt"), "action": action,
+            "state": state, "timed_out": action == "wait" and fresh is not None,
+            "stdout_next_offset": (data.get("offset", 0) + len(stdout.data)) if action == "logs" else 0,
+            "stderr_next_offset": (data.get("offset", 0) + len(stderr.data)) if action == "logs" else 0,
+        },
+    )
 
 
 def _creation_file_material() -> list[tuple[str, bytes]]:
@@ -609,6 +847,8 @@ def stream_out(arguments: argparse.Namespace) -> int:
 
 def execute(tool: str, data: dict[str, object], cwd: str, call: Path) -> dict[str, object]:
     current = safe_cwd(cwd)
+    if data.get("background") is True and tool in {"shell-exec", "execute-code"}:
+        return _background(data, current, tool=tool)
     if tool == "shell-exec":
         return _shell(data, current, call)
     if tool == "file-read":
@@ -624,8 +864,7 @@ def execute(tool: str, data: dict[str, object], cwd: str, call: Path) -> dict[st
     if tool == "execute-code":
         return _execute_code(data, current, call)
     if tool in {"process", "receipt"}:
-        return receipt("failed", 2, captured(b""), captured(b"unsupported_in_e3_1"), current,
-                       details={"kind": tool, "supported": False})
+        return _process_operation(data, current)
     raise ValueError("tool_invalid")
 
 
@@ -660,9 +899,18 @@ def claim_execute(arguments: argparse.Namespace) -> int:
             "expected_bytes_mismatch", "expected_sha256_invalid", "expected_sha256_mismatch",
             "expected_current_sha256_invalid", "expected_current_sha256_mismatch",
             "edit_invalid", "edit_expected_text_not_unique", "patch_invalid", "command_invalid",
-            "code_invalid", "tool_invalid",
+            "code_invalid", "tool_invalid", "background_identity_invalid",
+            "background_receipt_conflict", "background_process_exited_before_receipt",
+            "background_process_limit_reached",
+            "process_identity_unknown", "process_action_invalid", "process_wait_out_of_bounds",
+            "process_write_invalid", "process_write_out_of_bounds", "process_logs_out_of_bounds",
         }
-        value = error_result(code if code in allowed else "helper_rejected_operation", safe_cwd(arguments.cwd))
+        stable = code if code in allowed else "helper_rejected_operation"
+        details = (
+            {"kind": "process", "state": "unknown"}
+            if arguments.tool in {"process", "receipt"} else None
+        )
+        value = error_result(stable, safe_cwd(arguments.cwd), details=details)
     atomic_json(receipt_path, value)
     emit(value)
     claims = sorted((item for item in LEDGER.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime_ns)
@@ -686,10 +934,28 @@ def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "cancel-call":
         identifier = sys.argv[-1]
         try:
-            pgid = int((LEDGER / identifier / "pgid").read_text(encoding="ascii"))
-            os.killpg(pgid, signal.SIGTERM)
-        except (OSError, ValueError):
-            pass
+            document = json.loads(
+                (LEDGER / identifier / "foreground-process.json").read_text(encoding="utf-8")
+            )
+            identity = document["identity"]
+            pid = identity["pid"]
+            marker = f"VOICE_AGENT_INTERNAL_CALL_ID={identifier}".encode("ascii")
+            environment = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            if (
+                document.get("schema") != 1 or type(pid) is not int
+                or _proc_identity(pid) != identity or marker not in environment
+                or identity.get("pgid") != pid
+            ):
+                raise ValueError("identity_mismatch")
+            os.killpg(int(identity["pgid"]), signal.SIGTERM)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and _proc_identity(pid) == identity:
+                time.sleep(0.05)
+            if _proc_identity(pid) == identity:
+                os.killpg(int(identity["pgid"]), signal.SIGKILL)
+            emit({"outcome": "signalled"})
+        except (KeyError, OSError, TypeError, ValueError):
+            emit({"outcome": "identity_unknown"})
         return 0
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)

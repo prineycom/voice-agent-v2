@@ -19,7 +19,7 @@
     },
     "agent_environment": {
       "type": "object", "additionalProperties": false,
-      "required": ["image", "lifecycle", "network", "credentials", "resources"],
+      "required": ["image", "lifecycle", "additional_mounts", "network", "credentials", "resources"],
       "properties": {
         "image": {
           "type": "object", "additionalProperties": false,
@@ -37,6 +37,18 @@
             "restart_policy": {"const": "no"}, "idle_action": {"const": "none"},
             "command_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
             "command_timeout_grace_seconds": {"type": "integer", "minimum": 1, "maximum": 30}
+          }
+        },
+        "additional_mounts": {
+          "type": "array", "maxItems": 16,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["source", "destination", "mode"],
+            "properties": {
+              "source": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).*(?<!/)$"},
+              "destination": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).*(?<!/)$"},
+              "mode": {"enum": ["read_only", "read_write"]}
+            }
           }
         },
         "network": {
