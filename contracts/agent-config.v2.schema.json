@@ -19,7 +19,7 @@
     },
     "agent_environment": {
       "type": "object", "additionalProperties": false,
-      "required": ["image", "lifecycle", "resources"],
+      "required": ["image", "lifecycle", "network", "credentials", "resources"],
       "properties": {
         "image": {
           "type": "object", "additionalProperties": false,
@@ -37,6 +37,21 @@
             "restart_policy": {"const": "no"}, "idle_action": {"const": "none"},
             "command_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
             "command_timeout_grace_seconds": {"type": "integer", "minimum": 1, "maximum": 30}
+          }
+        },
+        "network": {
+          "type": "object", "additionalProperties": false,
+          "required": ["enabled", "publish_ports"],
+          "properties": {"enabled": {"const": true}, "publish_ports": {"const": []}}
+        },
+        "credentials": {
+          "type": "object", "additionalProperties": false,
+          "required": ["creation_environment_names", "creation_file_names", "exec_environment_names", "exec_file_names"],
+          "properties": {
+            "creation_environment_names": {"const": []},
+            "creation_file_names": {"const": []},
+            "exec_environment_names": {"const": []},
+            "exec_file_names": {"const": []}
           }
         },
         "resources": {

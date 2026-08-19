@@ -761,7 +761,9 @@ def _agent_environment_manager():
     from .agent_environment_config import load_agent_config_v2
 
     context = AgentUserContext.effective()
-    config = load_agent_config_v2(context.profile_root / "config.yaml")
+    config = load_agent_config_v2(
+        context.profile_root / "config.yaml", context=context
+    )
     root = context.home / ".cache" / "voice-agent-v2" / "agent-environment"
     return AgentEnvironment(
         config,

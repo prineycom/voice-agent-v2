@@ -24,6 +24,14 @@ agent_environment:
     idle_action: none
     command_timeout_seconds: 120
     command_timeout_grace_seconds: 5
+  network:
+    enabled: true
+    publish_ports: []
+  credentials:
+    creation_environment_names: []
+    creation_file_names: []
+    exec_environment_names: []
+    exec_file_names: []
   resources:
     cpus: 2
     memory_mib: 4096

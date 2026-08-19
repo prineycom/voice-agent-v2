@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -88,7 +89,17 @@ class DockerRunner(Protocol):
 class DockerCLI:
     """Fixed Docker CLI transport.  It never invokes a shell or inherits secrets."""
 
-    binary = "/usr/bin/docker"
+    _RELEASE_PATHS = (
+        "/usr/bin/docker",
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+    )
+
+    def __init__(self) -> None:
+        self.binary = next(
+            (path for path in self._RELEASE_PATHS if Path(path).is_file() and os.access(path, os.X_OK)),
+            self._RELEASE_PATHS[0],
+        )
 
     def run(
         self, arguments: tuple[str, ...], *, stdin: bytes = b"", timeout: float = DOCKER_TIMEOUT
@@ -226,8 +237,8 @@ class AgentEnvironment:
             "workspace": str(self.workspace),
             "cache": str(self.cache),
             "mounts": {"/workspace": "rw", "/cache": "rw"},
-            "network": "bridge",
-            "published_ports": [],
+            "network": model.agent_environment.network.model_dump(mode="json"),
+            "credentials": model.agent_environment.credentials.model_dump(mode="json"),
             "user": "1000:1000",
             "restart": "no",
             "cap_drop": ["ALL"],
@@ -238,14 +249,27 @@ class AgentEnvironment:
         }
         return base64.b32encode(hashlib.sha256(_canonical(document)).digest()).decode("ascii").lower().rstrip("=")
 
+    @staticmethod
+    def _verify_private_directory(path: Path) -> None:
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise AgentEnvironmentError("environment_state_unsafe") from error
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise AgentEnvironmentError("environment_state_unsafe")
+
     @contextmanager
     def _locked(self, *, create: bool) -> Iterator[None]:
         with self._thread_lock:
-            if create:
-                self.state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-                os.chmod(self.state_root, 0o700)
-            if not self.state_root.is_dir():
+            if create and not self.state_root.exists():
+                self.state_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+            if not self.state_root.exists():
                 raise AgentEnvironmentError("environment_absent")
+            self._verify_private_directory(self.state_root)
             flags = os.O_RDWR | (os.O_CREAT if create else 0) | getattr(os, "O_CLOEXEC", 0)
             try:
                 descriptor = os.open(self.lock_path, flags, 0o600)
@@ -253,6 +277,13 @@ class AgentEnvironment:
                 raise AgentEnvironmentError("environment_absent") from error
             try:
                 os.fchmod(descriptor, 0o600)
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_nlink != 1
+                ):
+                    raise AgentEnvironmentError("environment_state_unsafe")
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
                 yield
             finally:
@@ -284,7 +315,7 @@ class AgentEnvironment:
             _atomic_private(self.registry_path, registry)
             return registry
         try:
-            metadata = self.registry_path.stat()
+            metadata = self.registry_path.lstat()
             document = json.loads(self.registry_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as error:
             raise AgentEnvironmentError("environment_registry_invalid") from error
@@ -297,7 +328,10 @@ class AgentEnvironment:
             not isinstance(document, dict)
             or set(document) != required
             or document.get("schema_version") != REGISTRY_SCHEMA
-            or metadata.st_mode & 0o077
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
             or document.get("owner_key") != owner_key(str(document.get("installation_uuid")))
             or not isinstance(document.get("retained"), list)
             or not isinstance(document.get("calls"), dict)
@@ -316,7 +350,16 @@ class AgentEnvironment:
         server = self._docker("version", "--format", "{{json .Server}}")
         if context.returncode != 0 or server.returncode != 0 or not context.stdout.strip() or not server.stdout.strip():
             raise AgentEnvironmentError("docker_runtime_unavailable")
-        fingerprint = hashlib.sha256(context.stdout.strip() + b"\0" + server.stdout.strip()).hexdigest()
+        try:
+            server_identity = json.loads(server.stdout)
+            engine_id = server_identity["ID"]
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise AgentEnvironmentError("docker_runtime_unavailable") from error
+        if not isinstance(engine_id, str) or not engine_id or len(engine_id.encode("utf-8")) > 256:
+            raise AgentEnvironmentError("docker_runtime_unavailable")
+        fingerprint = hashlib.sha256(
+            context.stdout.strip() + b"\0" + engine_id.encode("utf-8")
+        ).hexdigest()
         pinned = registry.get("endpoint_fingerprint")
         if pinned is None and pin:
             registry["endpoint_fingerprint"] = fingerprint
@@ -564,7 +607,10 @@ class AgentEnvironment:
             registry = self._registry(create=False)
             self._endpoint(registry, pin=False)
             fresh = self._inspect(facts.container_id)
-            if fresh.container_id != registry.get("selected_container_id"):
+            if (
+                fresh.container_id != registry.get("selected_container_id")
+                or self._effective_mismatches(fresh, registry)
+            ):
                 raise AgentEnvironmentError("environment_identity_conflict")
             self._docker("container", "stop", "--time", "5", fresh.container_id)
             registry["state"] = "resource_stopped"
@@ -616,7 +662,7 @@ class AgentEnvironment:
                 except (KeyError, TypeError, ValueError) as error:
                     raise AgentEnvironmentError("execution_outcome_unknown") from error
             calls[identifier] = {"state": "dispatching"}
-            if len(calls) > 4096:
+            if len(calls) > 512:
                 removable = next((
                     key for key, value in calls.items()
                     if key != identifier and isinstance(value, dict)
@@ -677,16 +723,23 @@ class AgentEnvironment:
             current["logical_cwd"] = next_cwd if len(next_cwd.encode()) <= 4096 else "/workspace"
             current_calls = current["calls"]
             assert isinstance(current_calls, dict)
-            current_calls[identifier] = {
-                "state": "completed",
-                "receipt": {
-                    "status": status,
-                    "exit_code": exit_code,
-                    "stdout_base64": base64.b64encode(output).decode("ascii"),
-                    "stderr_base64": base64.b64encode(error_output).decode("ascii"),
-                    "cwd": next_cwd,
-                },
-            }
+            if len(output) <= 4096 and len(error_output) <= 4096:
+                current_calls[identifier] = {
+                    "state": "completed",
+                    "receipt": {
+                        "status": status,
+                        "exit_code": exit_code,
+                        "stdout_base64": base64.b64encode(output).decode("ascii"),
+                        "stderr_base64": base64.b64encode(error_output).decode("ascii"),
+                        "cwd": next_cwd,
+                    },
+                }
+            else:
+                current_calls[identifier] = {
+                    "state": "completed_unrecoverable",
+                    "stdout_sha256": hashlib.sha256(output).hexdigest(),
+                    "stderr_sha256": hashlib.sha256(error_output).hexdigest(),
+                }
             _atomic_private(self.registry_path, current)
         return CallReceipt(identifier, facts.container_id, facts.generation, status, exit_code, output, error_output, next_cwd, replayed)
 
@@ -747,6 +800,13 @@ class AgentEnvironment:
         mismatch: tuple[str, ...] = (),
     ) -> dict[str, object]:
         selected = registry.get("selected_container_id") if registry else None
+        known_present = {
+            "creating", "running", "stopped", "exited", "starting", "restarting",
+            "stale_spec", "unhealthy", "resource_stopped", "retiring", "retired",
+        }
+        persistence: bool | None = (
+            False if state == "absent" else True if state in known_present else None
+        )
         return {
             "schema_version": STATUS_SCHEMA,
             "installation_prefix": str(registry.get("owner_key"))[:12] if registry else None,
@@ -758,7 +818,7 @@ class AgentEnvironment:
             "reason_code": reason if isinstance(reason, str) else None,
             "mismatch_fields": list(mismatch),
             "bounds": self.config.model.agent_environment.resources.model_dump(mode="json"),
-            "rootfs_and_files_persist": state not in {"absent"},
+            "rootfs_and_files_persist": persistence,
             "processes_survive_controller_events_only_while_container_running": True,
             "processes_survive_container_stop": False,
             "workspace_and_cache_preserved_by_default": True,
@@ -796,6 +856,11 @@ class AgentEnvironment:
                 if facts.state == "running":
                     self._docker("container", "stop", "--time", "10", facts.container_id)
                     facts = self._inspect(facts.container_id)
+                if (
+                    facts.labels.get(OWNER_LABEL) != registry["owner_key"]
+                    or facts.generation != record["generation"]
+                ):
+                    raise AgentEnvironmentError("environment_identity_conflict")
                 result = self._docker("container", "rm", facts.container_id)
                 if result.returncode != 0:
                     raise AgentEnvironmentError("lifecycle_action_failed")
@@ -820,6 +885,11 @@ class AgentEnvironment:
             if facts.state == "running":
                 self._docker("container", "stop", "--time", "10", facts.container_id)
                 facts = self._inspect(facts.container_id)
+            if (
+                facts.labels.get(OWNER_LABEL) != registry["owner_key"]
+                or facts.generation != registry["generation"]
+            ):
+                raise AgentEnvironmentError("environment_identity_conflict")
             result = self._docker("container", "rm", facts.container_id)
             if result.returncode != 0:
                 raise AgentEnvironmentError("lifecycle_action_failed")

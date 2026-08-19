@@ -18,6 +18,7 @@ from voice_agent_v2.agent_environment_config import (
 )
 from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
+from voice_agent_v2.schema import validate as validate_schema
 from voice_agent_v2.tracer import CancellationToken
 
 Disk = namedtuple("Disk", "total used free")
@@ -200,6 +201,18 @@ class ConfigV2Tests(unittest.TestCase):
         self.assertNotIn(b"private-name", upgraded)
         self.assertNotIn(b"profile_id", upgraded)
         self.assertEqual(parse_agent_config_v2(upgraded).semantic_revision, parsed.semantic_revision)
+        root = Path(__file__).resolve().parents[1]
+        validate_schema(
+            parsed.model.model_dump(mode="json"),
+            json.loads((root / "contracts/agent-config.v2.schema.json").read_text()),
+        )
+        public = json.loads(
+            (root / "contracts/fixtures/public-operational-status.v2.json").read_text()
+        )
+        validate_schema(
+            public,
+            json.loads((root / "contracts/public-operational-status.v2.schema.json").read_text()),
+        )
 
 
 from voice_agent_v2.agent_config import AgentConfigError
@@ -224,6 +237,17 @@ class AgentEnvironmentTests(unittest.TestCase):
         second = self.fixture.manager.execute("shell.exec", {"command": "get rootfs"})
         self.assertEqual(second.stdout, b"kept")
         self.assertEqual(first.container_id, second.container_id)
+        restarted_controller = AgentEnvironment(
+            self.fixture.manager.config,
+            state_root=self.fixture.manager.state_root,
+            workspace=self.fixture.manager.workspace,
+            cache=self.fixture.manager.cache,
+            runner=self.fixture.docker,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        later = restarted_controller.execute("shell.exec", {"command": "get rootfs"})
+        self.assertEqual(later.container_id, first.container_id)
+        self.assertEqual(later.stdout, b"kept")
 
     def test_stop_starts_same_id_but_normal_events_issue_no_teardown(self) -> None:
         facts = self.fixture.manager.ensure_running()
@@ -281,6 +305,10 @@ class AgentEnvironmentTests(unittest.TestCase):
         with self.assertRaises(AgentEnvironmentError) as caught:
             self.fixture.manager.execute("shell.exec", {"command": "set ambiguous=yes"}, call_id=unknown)
         self.assertEqual(caught.exception.code, "execution_outcome_unknown")
+        self.assertEqual(self.fixture.docker.dispatch_count[unknown], 1)
+        with self.assertRaises(AgentEnvironmentError) as repeated_unknown:
+            self.fixture.manager.execute("shell.exec", {"command": "set ambiguous=no"}, call_id=unknown)
+        self.assertEqual(repeated_unknown.exception.code, "execution_outcome_unknown")
         self.assertEqual(self.fixture.docker.dispatch_count[unknown], 1)
         retry = "3" * 32
         self.fixture.docker.reject_stopped_once = True
@@ -354,7 +382,52 @@ class FakeModel:
     def cancel(self) -> None: pass
 
 
+class BlockingModel(FakeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.cancelled = False
+    def decide(self, request: str, cancellation: CancellationToken):
+        self.entered.set()
+        self.release.wait(1)
+        return {"kind": "final", "answer": "late output"}
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
 class AgentRunTests(unittest.TestCase):
+    def test_cancellation_drops_noncooperative_late_model_output(self) -> None:
+        fixture = Fixture()
+        try:
+            model = BlockingModel()
+            run = AgentRun(fixture.manager, model=model)
+            errors: list[BaseException] = []
+            thread = threading.Thread(
+                target=lambda: self._capture_run_error(run, errors), daemon=True
+            )
+            thread.start()
+            self.assertTrue(model.entered.wait(0.5))
+            run.cancel()
+            model.release.set()
+            thread.join(1)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(model.cancelled)
+            self.assertEqual(getattr(errors[0], "code", None), "selected_provider_cancelled")
+            self.assertEqual(fixture.docker.containers, {})
+        finally:
+            fixture.close()
+
+    @staticmethod
+    def _capture_run_error(run: AgentRun, errors: list[BaseException]) -> None:
+        try:
+            run.run(
+                transcript="cancel this",
+                identity=AgentRealtimeIdentity("session-cancel", 1, "turn-cancel", "request-cancel", 1),
+            )
+        except BaseException as error:
+            errors.append(error)
+
     def test_natural_multistep_run_uses_exact_model_identity_and_persistent_container(self) -> None:
         fixture = Fixture()
         try:

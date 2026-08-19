@@ -19,9 +19,13 @@ class AgentRuntime:
 
     @classmethod
     def startup(cls, path: Path | None = None) -> "AgentRuntime":
-        config_path = path or (AgentUserContext.effective().profile_root / "config.yaml")
+        context = AgentUserContext.effective()
+        config_path = path or (context.profile_root / "config.yaml")
         try:
-            config = load_agent_config_v2(config_path)
+            config = load_agent_config_v2(
+                config_path,
+                context=context if path is None else None,
+            )
         except AgentConfigError as error:
             return cls(None, "degraded", error.code)
         except Exception:

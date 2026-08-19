@@ -8,7 +8,7 @@ from typing import Callable
 from .agent_environment import AgentEnvironment
 from .agent_environment_config import AgentConfigV2Snapshot
 from .agent_run import AgentRealtimeIdentity, AgentRun, ExactLocalLFMAgentAdapter
-from .contracts import LLM_VERSION
+from .contracts import LLM_VERSION, StageFailure
 from .local_lfm import LocalLFMProvider, MODEL_ALIAS, PROVIDER_IDENTITY
 from .tracer import CancellationToken
 
@@ -84,6 +84,8 @@ class AgentRunProvider:
             ),
             cancellation=cancellation,
         )
+        if cancellation is not None and cancellation.cancelled:
+            raise StageFailure("llm_provider", "selected_provider_cancelled")
         if on_visible_sentence is not None:
             on_visible_sentence(result.answer)
         on_sentence(result.answer)

@@ -52,7 +52,14 @@
       "type": "object"
     },
     "rootfs_and_files_persist": {
-      "type": "boolean"
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "processes_survive_controller_events_only_while_container_running": {
       "type": "boolean"

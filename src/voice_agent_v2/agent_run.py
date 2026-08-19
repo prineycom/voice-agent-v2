@@ -7,6 +7,8 @@ result custody.  It never owns AgentEnvironment lifecycle.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
+import hashlib
 import json
 import threading
 import time
@@ -247,6 +249,8 @@ class AgentRun:
                     raise StageFailure("llm_provider", "agent_run_timeout")
                 request = self._request(transcript.strip(), history, identity, run_id)
                 decision = AgentDecision.parse(self.model.decide(request, token))
+                if not self._live(identity, token):
+                    raise StageFailure("llm_provider", "selected_provider_cancelled")
                 if decision.kind == "final":
                     assert decision.answer is not None
                     if self.observation is not None:
@@ -277,11 +281,33 @@ class AgentRun:
                 if not self._live(identity, token):
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 operations += 1
+                def bounded_result(data: bytes) -> dict[str, object]:
+                    visible = data[:1024]
+                    return {
+                        "data_base64": base64.b64encode(visible).decode("ascii"),
+                        "byte_count": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "truncated": len(data) > len(visible),
+                    }
+
                 history.append({
                     "decision": {"schema_version": DECISION_VERSION, "kind": "operation", "tool": decision.tool},
                     "operation": {"schema_version": OPERATION_VERSION, "call_id": call_id, "tool": decision.tool},
-                    "result": {"schema_version": RESULT_VERSION, "receipt": receipt.document()},
+                    "result": {
+                        "schema_version": RESULT_VERSION,
+                        "receipt": {
+                            "schema_version": "voice-agent.agent-call-receipt.v1",
+                            "call_id": receipt.call_id,
+                            "status": receipt.status,
+                            "exit_code": receipt.exit_code,
+                            "cwd": receipt.cwd,
+                            "replayed": receipt.replayed,
+                            "stdout": bounded_result(receipt.stdout),
+                            "stderr": bounded_result(receipt.stderr),
+                        },
+                    },
                 })
+                history = history[-4:]
             raise StageFailure("llm_provider", "agent_decision_budget_exhausted")
         finally:
             unregister()

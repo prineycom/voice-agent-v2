@@ -9,13 +9,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 import yaml
 
-from .agent_config import AgentConfigError, AgentConfigV1, _decode_config, _parse_yaml, _typed_model
+from .agent_config import (
+    AgentConfigError,
+    AgentConfigService,
+    AgentConfigV1,
+    AgentUserContext,
+    _decode_config,
+    _open_candidate,
+    _parse_yaml,
+    _read_bounded,
+    _typed_model,
+)
 
 CONFIG_SCHEMA = "voice-agent.config.v2"
 CONFIG_STATUS_SCHEMA = "voice-agent.agent-config-status.v2"
@@ -78,10 +89,40 @@ class ResourceV2(BaseModel):
     maximum_output_bytes: int = Field(ge=1024, le=1048576)
 
 
+class NetworkV2(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    enabled: Literal[True]
+    publish_ports: tuple[()]
+
+    @field_validator("publish_ports", mode="before")
+    @classmethod
+    def no_published_ports(cls, value: object) -> tuple[()]:
+        if value not in ([], ()):
+            raise ValueError("published ports are forbidden")
+        return ()
+
+
+class CredentialsV2(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    creation_environment_names: tuple[()]
+    creation_file_names: tuple[()]
+    exec_environment_names: tuple[()]
+    exec_file_names: tuple[()]
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def empty_e2_4_credentials(cls, value: object) -> tuple[()]:
+        if value not in ([], ()):
+            raise ValueError("live credentials are outside E2.4")
+        return ()
+
+
 class AgentEnvironmentV2(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     image: ImageV2
     lifecycle: LifecycleV2
+    network: NetworkV2
+    credentials: CredentialsV2
     resources: ResourceV2
 
 
@@ -109,6 +150,13 @@ DEFAULT_DOCUMENT: dict[str, object] = {
             "idle_action": "none",
             "command_timeout_seconds": 120,
             "command_timeout_grace_seconds": 5,
+        },
+        "network": {"enabled": True, "publish_ports": []},
+        "credentials": {
+            "creation_environment_names": [],
+            "creation_file_names": [],
+            "exec_environment_names": [],
+            "exec_file_names": [],
         },
         "resources": {
             "cpus": 2,
@@ -179,10 +227,25 @@ def upgrade_v1_to_v2(source: bytes) -> bytes:
     return DEFAULT_CONFIG_BYTES
 
 
-def load_agent_config_v2(path: Path) -> AgentConfigV2Snapshot:
+class AgentConfigV2Service(AgentConfigService):
+    """Reuse the landed no-follow owner/mode/tree custody for active V2."""
+
+    def _load_profile_descriptor(self, descriptor: int) -> AgentConfigV2Snapshot:
+        return parse_agent_config_v2(_read_bounded(descriptor))
+
+
+def load_agent_config_v2(
+    path: Path,
+    *,
+    context: AgentUserContext | None = None,
+) -> AgentConfigV2Snapshot:
+    """Securely load an explicit candidate or the complete managed source tree."""
+    service = AgentConfigV2Service(context=context)
+    if context is not None and path == context.profile_root / "config.yaml":
+        return service.status()
+    uid = (context or AgentUserContext.effective()).uid
+    descriptor = _open_candidate(path, uid)
     try:
-        return parse_agent_config_v2(path.read_bytes())
-    except AgentConfigError:
-        raise
-    except OSError as error:
-        raise AgentConfigError("config_missing") from error
+        return parse_agent_config_v2(_read_bounded(descriptor))
+    finally:
+        os.close(descriptor)
