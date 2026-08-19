@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 product delivery
 >
-> **Last updated:** 2026-08-20
+> **Last updated:** 2026-08-21
 
 This roadmap is a sequence of independently deliverable vertical slices. It contains no calendar estimates. A slice starts only when its dependencies and incoming evidence gate are satisfied; it finishes only with the stated user-visible behavior and evidence.
 
@@ -73,13 +73,38 @@ Production signing-key provisioning, publication or downloads; install/update/ro
 
 ### Remaining installation order
 
-1. **I2 fresh Linux install:** generate private XDG roots/default configuration and user systemd/linger, acquire exact assets, start once and prove five-component readiness.
-2. **I3 transactional update/rollback:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection.
+1. **I2 fresh Linux install — implemented deterministically:** private XDG roots/default configuration, exact asset proof, user systemd/linger, one start and five-component readiness; physical publication/host evidence remains I8.
+2. **I3 transactional update/rollback — next:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection.
 3. **I4 legacy adoption:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success.
 4. **I5 AgentEnvironment/config preservation:** move durable environment state out of cache classification and prove same ID/rootfs/workspace across application update; stale spec degrades agent tools only.
 5. **I6 assets/cache/offline:** resumable exact downloads, signed content-addressed assets, cached metadata policy and genuine-space-only refusal.
 6. **I7 rollback/uninstall/support bundle:** complete user surfaces, exact destructive confirmation and privacy scanner.
 7. **I8 acceptance:** disposable real-host install, VM phase/power loss, reboot, update/rollback voice turn and physical/full-stack gates before stable publication. macOS native support remains later.
+
+## Installation evolution I2 — Fresh supported-Linux install
+
+> **Implemented contract:** `voice-agent install` owns only a pristine per-user Linux `x86_64` systemd/NVIDIA installation. The legacy stand and I3 update transaction remain outside this slice.
+
+### User-visible outcome
+
+One command verifies an exact signed stable release and supported host, creates canonical private XDG state with local-only safe defaults, enables one generated user service, starts once, and returns success only for exact release/build plus five unique ready voice components, admission and loopback listener custody. Repeating the identical command re-probes and reports already healthy. Missing AgentEnvironment/Docker/Telegram is an after-success optional degradation.
+
+### Included scope
+
+- Pre-mutation kernel/architecture/systemd/user, NVIDIA driver/GPU/VRAM/devices, exact model/runtime descriptor, compatibility and free-space-reserve gates.
+- Existing protocol-1 signed channel/artifact/manifest/archive authority, with launcher-owned exact entry extraction and complete post-extraction inventory.
+- Fixed per-user XDG roots, no-follow owner/mode custody, mode-`0600` config/private records, immutable release payload and reconstruction/durable class separation.
+- Random private local service material; loopback-only/local-provider/no-fallback/no-content-capture defaults; disabled AgentRun, Telegram, credentials and mounts.
+- Generated user-systemd unit and the single announced `sudo -n loginctl enable-linger <user>` production privilege boundary.
+- Minimal `voice-agent.install-transaction.v1` durable phase recovery, healthy installation/release records, exact readiness, failed-candidate stop/disable/no-selection and conflicting-state doctor routing.
+
+### Excluded scope
+
+Production signing-key provisioning or release publication; arbitrary roots; current legacy import; general update/rollback/GC; launcher self-update; migrations; uninstall; Docker/driver installation or group/root authority; AgentEnvironment creation; Telegram send; macOS runtime; real network/model/systemd mutation; live stand changes; reboot/physical/full-stack acceptance.
+
+### Acceptance and evidence
+
+The launcher phase in `./verify` uses generated signing keys, bounded in-memory artifact entries, disposable XDG roots and deterministic host/service/readiness fixtures. It covers pristine success, permissions/defaults, exact unit/readiness, optional degradation, unsupported host, missing linger privilege, signature/archive/incomplete/space failure, durable-phase interruption/retry, identical reconciliation, partial/foreign/symlinked preservation and secret-free output/records. [`fresh-linux-install.md`](evidence/fresh-linux-install.md) records exact deterministic evidence and nonclaims. Physical platform acceptance remains I8.
 
 ## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
 

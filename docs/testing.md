@@ -19,7 +19,7 @@ Then run the only PR command:
 `./verify` owns a 90-second monotonic deadline and runs these phases in order:
 
 1. the deterministic zero-secret tracer;
-2. the Node.js 26 signed-release/launcher phase: canonical Ed25519 channel freshness and sequence, artifact/manifest/platform/protocol binding, unsafe archive denial, exact legacy selected/running custody, missing rollback, invalid/unowned/unrelated rejection, content-free zero-mutation status/doctor, and two byte-identical executable SEA builds that run without another host runtime;
+2. the Node.js 26 signed-release/launcher phase: canonical Ed25519 channel freshness and sequence, artifact/manifest/platform/protocol binding, unsafe archive denial, exact legacy selected/running custody, content-free zero-mutation status/doctor, two byte-identical executable SEA builds, and the deterministic fresh-install matrix for host/asset/space preflight, private XDG defaults, user service/linger, exact 5/5 readiness, optional degradation, failure cleanup, interruption/retry, idempotence, custody/preservation and zero leakage;
 3. the sole historical E2.2/E2.3 operation custody/failure matrix under IP-network denial, with its own 8-second bound;
 4. the explicit current Python behavior manifest under IP-network denial, including strict V2/no-selector and V1 one-way-upgrade tests plus deterministic fake-Docker/network/transport/disposable-root evidence for locking, lazy single creation, exact reuse/start, ordinary binary/range/hash/atomic-file semantics, logical-cwd persistence/fallback, one credential declaration and private custody, create/per-exec rotation, no ambient inheritance, normal/disabled network transcripts, HTTP/download/upload/multipart/remote-Git transcripts, exact binary controller streams, acknowledgement/unknown/no-retry, display-only redaction, opaque background receipts, bounded poll/log/wait/write/kill, rootfs+fresh-`/proc` PID-reuse defence, foreground/background cancellation separation, typed mount custody/RO-RW/spec drift, precise survival truth, stale/duplicate/uncertain failure, exec-only routing, at-most-once receipts, resources, selector-free confirmation, atomic rebuild selection/retained nonselection, conflict disclosure, exact lifecycle reinspection, E4.1 frozen outcome/refinement/multi-source/citation/redirect/truncation/cache/error/persistence/hostile-authority/containment/raw-byte-redaction evidence, E4.2 fake-Telegram atomic save-before-send, exact document/network hashes, fixed target/credential authority, text/caption bounds, acknowledged/failed/unknown/no-auto-resend, persistence/reconciliation and explicit restart-resend evidence, plus E4.3 trusted later resolution, zero-network local summary, expected-revision/hash atomic update/conflict, explicit fresh-receipt refresh, current-byte resend, closed admission, accepted synthetic RW/credential egress, denied unmounted-host/lifecycle/selection authority, raw-byte redaction and clean-next-voice evidence (the historical matrix is not selected again);
 5. the bounded local-socket readiness/VAD phase;
@@ -32,7 +32,7 @@ Every phase is a separate process group. The owner sends `TERM`, waits at most 1
 
 `./verify --tracer-only` remains the narrow immutable-release recovery check. It does not run the PR suite and requires only Python 3.11+.
 
-The launcher phase receives no production key, network, Docker daemon, service mutation or live install root. It uses only a committed public fixture key/pre-signed bytes, disposable roots, an injected service probe and Node.js built-ins. GitHub records an isolated Node.js 26 executable for direct SEA construction while retaining the established Node.js 22 application/browser toolchain on `PATH`; the canonical host similarly injects its system Node 26 only into the launcher phase.
+The launcher phase receives no production key, network, Docker daemon, live service mutation or live install root. Foundation cases use the committed public fixture key/pre-signed bytes; install cases generate an ephemeral test key and use bounded artifact entry bytes, disposable XDG roots, deterministic host/space/assets, fake `sudo -n loginctl`/user-systemd and fake readiness/listener ownership. No fixture accepts a production root. GitHub records an isolated Node.js 26 executable for direct SEA construction while retaining the established Node.js 22 application/browser toolchain on `PATH`; the canonical host similarly injects its system Node 26 only into the launcher phase.
 
 ### Direct pull-request path
 
@@ -48,9 +48,9 @@ This command has a 600-second outer deadline and owns the longer mute/unmute, re
 
 ## Installation/update platform tiers
 
-The launcher deterministic phase is not install/update evidence. Later installation slices require separate authorized tiers:
+The launcher deterministic phase is executable install-contract evidence but not physical platform/reboot evidence. Separate authorized tiers remain required:
 
-- **Disposable Linux install root/user service:** exact signed artifact install, private XDG custody, user systemd/linger, exact readiness and no shared/project service mutation.
+- **Disposable real Linux user service:** published exact signed artifact install, real private XDG custody, user systemd/linger, NVIDIA/model/runtime startup, exact readiness and no shared/project service mutation.
 - **Transaction interruption/VM power loss:** kill or reboot at every durable journal, download, extraction, migration, stop, pointer, readiness, restoration, GC and launcher-replacement phase; next invocation converges to candidate healthy or prior healthy.
 - **Legacy migration:** exact current selected/running split fixture and then one separately authorized live migration only after automatic restoration is complete; no manual pointer repair.
 - **Upgrade/downgrade:** every supported N-1→N, candidate failure→exact N-1, schema migration/restore, expired/cached/offline metadata and bridge-launcher floor.
@@ -135,5 +135,6 @@ The operator procedure remains in [`evidence/silero-kseniya-48k-private-evaluati
 | Forged/expired/sequence-rollback channel or artifact size/hash/platform/protocol mismatch is accepted | Node.js launcher contract phase in `./verify` |
 | Archive traversal, absolute/duplicate/device/escaping-link/undeclared output is admitted | platform-manifest/archive index cases in the launcher phase |
 | Status/doctor writes, infers health from a pointer, hides selected-new/running-old, adopts an unowned release, or exposes content/path/argv | disposable legacy/status/doctor zero-mutation and privacy cases in the launcher phase |
+| Fresh install mutates before host/signature/archive/space proof, exposes roots/secrets, weakens service policy, claims optional tools as voice failure, starts twice, or commits before exact 5/5 loopback readiness | deterministic injected install cases in the launcher phase |
 | Gateway dies while adapter descendant survives | real adapter parent-death and startup descendant cleanup owners |
 | Alive nonresponsive LiveKit/LFM remains ready | bounded local-socket Slice 9 and backend-readiness owners |

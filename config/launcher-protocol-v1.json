@@ -1,15 +1,17 @@
 {
   "schema": "voice-agent.launcher-protocol.v1",
-  "launcher_version": "0.1.0",
+  "launcher_version": "0.2.0",
   "protocol": 1,
   "channels": ["stable"],
   "platforms": ["linux-x86_64-nvidia"],
   "channel_schema": "voice-agent.channel.v1",
   "artifact_manifest_schema": "voice-agent.platform-artifact-manifest.v1",
   "release_record_schema": "voice-agent.release-record.v1",
+  "install_transaction_schema": "voice-agent.install-transaction.v1",
+  "installation_schema": "voice-agent.installation.v1",
   "status_schema": "voice-agent.launcher-status.v1",
   "doctor_schema": "voice-agent.launcher-doctor.v1",
   "legacy_discovery_schema": "voice-agent.legacy-discovery.v1",
   "read_only_commands": ["status", "doctor"],
-  "mutation_commands": []
+  "mutation_commands": ["install"]
 }

@@ -107,7 +107,11 @@ def main() -> int:
 
         owner.run(
             "signed release and read-only launcher behaviors",
-            [str(ROOT / "launcher/test/run"), str(ROOT / "launcher/test/launcher.test.cjs")],
+            [
+                str(ROOT / "launcher/test/run"),
+                str(ROOT / "launcher/test/launcher.test.cjs"),
+                str(ROOT / "launcher/test/install.test.cjs"),
+            ],
             cwd=ROOT,
             environment=environment,
             deadline=deadline,

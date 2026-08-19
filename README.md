@@ -6,7 +6,7 @@ The MVP visual is an original deterministic animated AI eye, not a Live2D-first 
 
 ## Status
 
-**The accepted installation/update redesign now has its first read-only vertical slice.** A separately versioned Node.js 26 SEA `voice-agent` launcher verifies the canonical signed stable-channel/platform contracts and exposes privacy-safe `status` and `doctor`. It distinguishes selected, running, exact-ready, rollback, transaction, optional AgentEnvironment and rootless Docker truth, including the known selected-new/running-old/no-previous legacy shape. This slice does not install, update, repair, restart, migrate, download, activate, garbage-collect, self-replace, or touch the live stand. ADR-0014 and [`docs/architecture.md` §6.7](docs/architecture.md#67-launcher-owned-installation-and-update-boundary) own the target transaction and XDG boundary; ADR-0013 remains the current legacy runtime lifecycle until migration.
+**The accepted simple lifecycle now includes deterministic fresh Linux installation.** The separately versioned Node.js 26 SEA `voice-agent` launcher retains signed read-only `status`/`doctor` and adds `install` for a pristine Linux `x86_64` systemd/NVIDIA host. The internal fixture boundary proves signed exact extraction, canonical private XDG state, safe local-only defaults, user-systemd/linger, one start and exact 5/5 readiness; optional AgentEnvironment/Telegram remain independently unconfigured. Production signing-key/channel/artifact publication and real-host/reboot/physical acceptance remain pending, so the repository build refuses missing production authority before mutation. Update/rollback/GC/legacy adoption/uninstall/self-update remain absent, and this slice does not touch the live stand. ADR-0014 and [`docs/architecture.md` §6.7](docs/architecture.md#67-launcher-owned-installation-and-update-boundary) remain authoritative; ADR-0013 still owns the unmigrated live runtime.
 
 **E4.3 completes later report retrieval, revisioned update, optional bounded refresh, and current-byte exact-Pasha resend in the same single Docker AgentEnvironment.** `report.artifact` resolves only a trusted opaque artifact receipt or an exact bounded `reports/…` index match. `local_summary` returns existing container bytes with zero external calls; `local_update` performs expected-revision/SHA-256 atomic replacement; `bounded_refresh` accepts only actual new successful fetch receipts. Every commit records current bytes/hash/revision and a prior-receipt link. A concurrent writer mismatch is visible and unexpected current bytes are not silently replaced. `report.deliver` rereads the current committed revision through Docker-exec; resend does not research unless the chosen plan separately did so.
 
@@ -52,13 +52,14 @@ The source entry is `launcher/voice-agent.cjs`; Node.js 26 can package it determ
 
 ```sh
 ./launcher/build ./dist/voice-agent
+./dist/voice-agent install
 ./dist/voice-agent status
 ./dist/voice-agent status --json
 ./dist/voice-agent doctor
 ./dist/voice-agent doctor --json
 ```
 
-`status` and `doctor` are strictly read-only. Internal install-root/service-probe injection exists for deterministic fixtures; it grants no repair or alternate adoption authority. The repository commits only a public Ed25519 fixture key and pre-signed bounded fixtures. `launcher/tools/sign-fixture.cjs` requires an explicitly supplied external test key; production signing-key provisioning/publication is not implemented here. The future installed path is `~/.local/bin/voice-agent`, with immutable/durable/config/cache/state/runtime ownership split under the standard XDG roots documented in the architecture.
+`status` and `doctor` remain strictly read-only. `install` accepts no root/user/platform/channel selector: production layout derives only from the invoking user's XDG identity. Deterministic tests inject isolated roots plus fake host/archive/linger/service/readiness owners and never mutate live systemd, network, Docker or the stand. The command stops before managed-path creation when production release authority is unavailable, or when host/signature/archive/space/asset preflight fails. A successful published build will create the documented `~/.local/bin`/XDG layout, announce the sole `sudo -n loginctl enable-linger <user>` effect, and succeed only on exact 5/5 loopback readiness. The repository still carries only the public fixture key and pre-signed bounded foundation fixtures; production signing-key provisioning/publication is intentionally not claimed.
 
 ## Slice 6 Silero/Kseniya development application
 
