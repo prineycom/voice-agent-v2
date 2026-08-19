@@ -14,6 +14,7 @@
 | Important | Initial production Docker evidence derived a claimed daemon UID from socket ownership | Socket owner alone is not daemon/rootless identity | Require explicit-host query, rootless security option and owner/canonical user Docker data-root proof separately | Fixed |
 | Important | Initial user-unit preparation wrote/reloaded but did not enable the unit | Successful adoption would not preserve boot lifecycle | Enable without starting while the old system service remains authoritative; make retry inspect exact unit+enablement | Fixed |
 | Important | Initial adoption host preflight did not compare inspected user identity with the canonical layout identity | Could bind an injected/misreported host user to another layout | Reuse full installer host preflight and exact uid/name/home equality | Fixed |
+| Important | First exact-head CI exhausted its bounded tmpfs because every adoption harness copied the full Node 26 executable | Deterministic acceptance failed only on the hosted resource boundary | Reuse the already immutable/owned `process.execPath` as fixture executable; copy no runtime bytes per harness | Fixed |
 
 ## Fixed issues
 
@@ -23,6 +24,7 @@
 | Root/import/path custody | `launcher/adopt.cjs`, `launcher/update.cjs`, tests | Exact owner/mode root checks; imported payload rejects historical record/path bytes; later GC revalidates inventory/unit |
 | Quiesce and Docker proof | `launcher/voice-agent.cjs`, `launcher/adopt.cjs`, launcher fixtures | MainPID/cgroup/listener generation proof; explicit socket + rootless data-root identity |
 | User service/host lifecycle | `launcher/install.cjs`, `launcher/adopt.cjs`, tests | Full host identity preflight; enable-without-start and idempotent prepared-state inspection |
+| Hosted fixture storage | `launcher/test/adopt.test.cjs` | No per-harness Node executable copy; local canonical gate passes with the same executable custody assertion |
 
 ## Skipped issues
 

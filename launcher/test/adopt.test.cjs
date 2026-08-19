@@ -95,7 +95,7 @@ function harness(options = {}) {
   const selected = makeLegacyRelease(releases, 'a', unit, configPath, options.operations);
   fs.symlinkSync(`releases/${selected.document.release_id}`, path.join(legacyRoot, 'current'));
   const serviceUnitPath = path.join(parent, 'voice-agent-v2.service'); fs.writeFileSync(serviceUnitPath, unit, { mode: 0o644 });
-  const runtime = path.join(parent, 'python'); fs.copyFileSync(process.execPath, runtime); fs.chmodSync(runtime, 0o755);
+  const runtime = process.execPath;
   const artifact = candidateArtifact(); const calls = []; const lines = []; let oldActive = true; let candidateActive = false; let candidateEnabled = false; let retired = false; let monotonic = 0;
   function legacySnapshot() {
     const docker = options.noDocker ? null : {
