@@ -18,8 +18,8 @@ Then run the only PR command:
 
 `./verify` owns a 90-second monotonic deadline and runs these phases in order:
 
-1. the sole E2 operation custody/failure matrix under IP-network denial, with its own 8-second bound;
-2. the explicit current Python behavior manifest under IP-network denial, including the disposable-root strict agent-profile parser/custody/CLI matrix and restart-only startup/degraded-voice regression matrix (the E2 matrix is not selected again);
+1. the sole historical E2.2/E2.3 operation custody/failure matrix under IP-network denial, with its own 8-second bound;
+2. the explicit current Python behavior manifest under IP-network denial, including strict V2/no-selector and V1 one-way-upgrade tests plus a deterministic fake-Docker transcript for locking, lazy single creation, exact reuse/start, persistence truth, stale/duplicate/uncertain failure, exec-only routing, at-most-once receipts, resources, and exact lifecycle reinspection (the historical matrix is not selected again);
 3. the bounded local-socket readiness/VAD phase;
 4. the installed SDK, capability, and active-composition contract;
 5. the complete Vitest surface once;
@@ -41,6 +41,17 @@ Run `./verify` locally once, push the feature branch, then open or update the pu
 ```
 
 This command has a 600-second outer deadline and owns the longer mute/unmute, reconnect, diagnostics-download, production/review isolation, detached guardian, and repeated interruption scenarios. It uses deterministic inference over actual Firefox and local LiveKit; it does not claim hardware acceptance.
+
+## E2.4 platform and production-evidence tiers
+
+These are separate authorized evidence activities, not part of the deterministic PR and not interchangeable:
+
+- **Linux Docker Engine:** exact client/server/context, rootless-or-rootful authority, native digest, cgroups/effective limits, storage, mounts/namespaces/security, lock/duplicate behavior, lazy create and same-ID reuse, controller death, explicit stop→same-ID start with process loss, daemon restart, stale spec, exec ambiguity, reserve pressure, and explicit fixture cleanup.
+- **Docker Desktop/macOS:** native Desktop/VMM/server/digest/VM resources, shared-root semantics, lazy reuse and controller-event process survival, Desktop quit/start with same files/ID and lost processes, unavailable/no-fallback behavior, upgrade/VMM revalidation, disk-image reserve, and explicit fixture cleanup. Linux results prove none of these Mac facts.
+- **Exact model/network:** natural RU/EN multi-step tasks against the exact pinned model and separately authorized synthetic network endpoints. This is not an E2.1 rerun and does not enter live credentials or Telegram scope.
+- **Physical/reboot:** host reboot, real microphone/audible Kseniya, rapid barge-in, full-stack soak and physical resource truth. Synthetic Docker/model/browser evidence cannot close it.
+
+Runtime code never installs or configures Docker, daemon access, rootless/cgroup prerequisites, Desktop resources/file sharing, images, or backups to make a tier pass.
 
 ## Canonical-host extended tier
 
@@ -101,7 +112,9 @@ The operator procedure remains in [`evidence/silero-kseniya-48k-private-evaluati
 | Transcript/audio/secret reaches diagnostics | observability, diagnostics, run-voice-turn, and browser diagnostics owners |
 | Config/release symlink or pointer race is accepted | operations release/configuration owners |
 | Agent profile parser ambiguity, unsafe custody, content-bearing CLI output, or non-empty production capability registry | `tests.test_agent_config` in the hermetic behavior manifest |
-| Agent profile startup reloads live, repairs input, leaks content, admits authority, or degrades the bounded voice path | `tests.test_agent_profile_runtime` in the hermetic behavior manifest |
+| Historical V1 startup reloads live, repairs input, leaks content, or degrades the bounded voice path | `tests.test_agent_profile_runtime` retained as historical compatibility coverage |
+| V2 admits a selectable identity/backend/raw Docker argument or carries V1 identity forward | `tests.test_agent_environment.ConfigV2Tests` in the hermetic behavior manifest |
+| Concurrent first use duplicates an environment; stale/uncertain Docker truth creates; tools reach host execution; ambiguous exec repeats; normal events tear down state | deterministic `FakeDocker` cases in `tests.test_agent_environment` |
 | Proposal corpus/order/schema drift, unsafe envelope parsing, mutable thresholds, test capability leakage, or evidence relabelling | `tests.test_tool_proposals_benchmark` in the hermetic behavior manifest; exact-model outcome remains a separate canonical-host fact |
 | Corrupt/incompatible prior release moves pointers | operations rollback owners |
 | Gateway dies while adapter descendant survives | real adapter parent-death and startup descendant cleanup owners |

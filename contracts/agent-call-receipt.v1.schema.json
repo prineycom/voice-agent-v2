@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-call-receipt.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "call_id",
+    "container_id_prefix",
+    "generation",
+    "status",
+    "exit_code",
+    "stdout_base64",
+    "stderr_base64",
+    "cwd",
+    "replayed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "voice-agent.agent-call-receipt.v1"
+    },
+    "call_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "container_id_prefix": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{12}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "exit_code": {
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stdout_base64": {
+      "type": "string"
+    },
+    "stderr_base64": {
+      "type": "string"
+    },
+    "cwd": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "replayed": {
+      "type": "boolean"
+    }
+  }
+}

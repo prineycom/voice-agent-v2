@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-decision.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "voice-agent.agent-decision.v1"
+    },
+    "kind": {
+      "enum": [
+        "operation",
+        "final"
+      ]
+    },
+    "tool": {
+      "type": "string"
+    },
+    "arguments": {
+      "type": "object"
+    },
+    "answer": {
+      "type": "string"
+    }
+  }
+}

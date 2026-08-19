@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-environment-status.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "config_revision_prefix",
+    "spec_prefix",
+    "generation",
+    "reason_code"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "voice-agent.agent-environment-status.v1"
+    },
+    "state": {
+      "enum": [
+        "absent",
+        "creating",
+        "running",
+        "stopped",
+        "exited",
+        "starting",
+        "restarting",
+        "stale_spec",
+        "unhealthy",
+        "resource_stopped",
+        "retiring",
+        "retired",
+        "unavailable",
+        "environment_identity_conflict"
+      ]
+    },
+    "config_revision_prefix": {
+      "type": "string"
+    },
+    "spec_prefix": {
+      "type": "string"
+    },
+    "generation": {
+      "type": "integer"
+    },
+    "reason_code": {},
+    "installation_prefix": {},
+    "container_id_prefix": {},
+    "mismatch_fields": {
+      "type": "array"
+    },
+    "bounds": {
+      "type": "object"
+    },
+    "rootfs_and_files_persist": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "processes_survive_controller_events_only_while_container_running": {
+      "type": "boolean"
+    },
+    "processes_survive_container_stop": {
+      "const": false
+    },
+    "workspace_and_cache_preserved_by_default": {
+      "const": true
+    }
+  }
+}

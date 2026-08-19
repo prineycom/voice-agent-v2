@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Fixed in-container helper and persistent at-most-once receipt ledger."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+
+LEDGER = Path("/var/lib/voice-agent/exec-ledger")
+MAX_LEDGER = 4096
+MAX_INPUT = 256 * 1024
+MAX_OUTPUT = 256 * 1024
+CALL_ID = re.compile(r"^[a-f0-9]{32}$")
+
+
+def emit(value: dict[str, object]) -> None:
+    sys.stdout.write(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def input_document() -> dict[str, object]:
+    raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+    if len(raw) > MAX_INPUT:
+        raise ValueError("input_out_of_bounds")
+    value = json.loads(raw or b"{}")
+    if not isinstance(value, dict):
+        raise ValueError("input_invalid")
+    return value
+
+
+def bounded(data: bytes) -> bytes:
+    return data[:MAX_OUTPUT]
+
+
+def atomic_json(path: Path, value: dict[str, object]) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=".receipt-", dir=path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(value, output, sort_keys=True, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def receipt(status: str, exit_code: int | None, stdout: bytes, stderr: bytes, cwd: str, *, replayed: bool = False) -> dict[str, object]:
+    return {
+        "status": status,
+        "exit_code": exit_code,
+        "stdout_base64": base64.b64encode(bounded(stdout)).decode("ascii"),
+        "stderr_base64": base64.b64encode(bounded(stderr)).decode("ascii"),
+        "cwd": cwd,
+        "replayed": replayed,
+    }
+
+
+def safe_cwd(value: str) -> str:
+    path = Path(value)
+    if not path.is_absolute() or not path.is_dir():
+        return "/workspace"
+    return str(path)
+
+
+def execute(tool: str, data: dict[str, object], cwd: str, call: Path) -> dict[str, object]:
+    command: list[str]
+    stdin = b""
+    if tool == "shell-exec":
+        command = ["/bin/sh", "-lc", str(data.get("command", ""))]
+    elif tool == "file-read":
+        command = ["/usr/bin/python3", __file__, "internal-read", str(data.get("path", ""))]
+    elif tool == "file-search":
+        command = ["/usr/bin/python3", __file__, "internal-search", str(data.get("path", cwd)), str(data.get("query", ""))]
+    elif tool == "file-write":
+        command = ["/usr/bin/python3", __file__, "internal-write", str(data.get("path", ""))]
+        stdin = base64.b64decode(str(data.get("data_base64", "")), validate=True)
+    elif tool in {"file-edit", "file-patch"}:
+        command = ["/usr/bin/python3", __file__, "internal-patch", str(data.get("path", ""))]
+        stdin = str(data.get("patch", "")).encode("utf-8")
+    elif tool == "execute-code":
+        language = str(data.get("language", "python"))
+        interpreters = {"python": "/usr/bin/python3", "sh": "/bin/sh"}
+        command = [interpreters[language], "-"]
+        stdin = str(data.get("code", "")).encode("utf-8")
+    elif tool == "process":
+        command = ["/usr/bin/python3", __file__, "internal-process", str(data.get("action", "poll")), str(data.get("process_id", ""))]
+    elif tool == "receipt":
+        command = ["/usr/bin/python3", __file__, "internal-receipt", str(data.get("call_id", ""))]
+    else:
+        raise ValueError("tool_invalid")
+    process = subprocess.Popen(
+        command, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True, env={"HOME": "/workspace", "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+    )
+    (call / "pgid").write_text(str(process.pid), encoding="ascii")
+    try:
+        stdout, stderr = process.communicate(stdin, timeout=600)
+        next_cwd = safe_cwd(str(data.get("cwd", cwd)))
+        return receipt("completed" if process.returncode == 0 else "failed", process.returncode, stdout, stderr, next_cwd)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+        return receipt("cancelled", None, stdout, stderr, cwd)
+
+
+def claim_execute(arguments: argparse.Namespace) -> int:
+    if not CALL_ID.fullmatch(arguments.call_id):
+        return 2
+    LEDGER.mkdir(mode=0o700, parents=True, exist_ok=True)
+    call = LEDGER / arguments.call_id
+    try:
+        call.mkdir(mode=0o700)
+        claimed = True
+    except FileExistsError:
+        claimed = False
+    receipt_path = call / "receipt.json"
+    if not claimed:
+        try:
+            prior = json.loads(receipt_path.read_text(encoding="utf-8"))
+            prior["replayed"] = True
+            emit(prior)
+            return 0
+        except (OSError, ValueError, TypeError):
+            emit(receipt("failed", None, b"", b"execution outcome unknown", "/workspace", replayed=True))
+            return 3
+    try:
+        value = execute(arguments.tool, input_document(), safe_cwd(arguments.cwd), call)
+    except Exception:
+        value = receipt("failed", 2, b"", b"helper rejected operation", safe_cwd(arguments.cwd))
+    atomic_json(receipt_path, value)
+    emit(value)
+    # Bounded eviction removes receipts only after MAX_LEDGER newer claims exist;
+    # loss never grants replay because a caller may not choose a prior call ID.
+    claims = sorted((item for item in LEDGER.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime_ns)
+    for old in claims[:-MAX_LEDGER]:
+        shutil.rmtree(old)
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "readiness":
+        emit({"ready": True, "schema": 1})
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == "cancel-call":
+        identifier = sys.argv[-1]
+        try:
+            pgid = int((LEDGER / identifier / "pgid").read_text(encoding="ascii"))
+            os.killpg(pgid, signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == "internal-read":
+        sys.stdout.buffer.write(Path(sys.argv[2]).read_bytes()[:MAX_OUTPUT])
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == "internal-search":
+        root, query = Path(sys.argv[2]), sys.argv[3]
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and query in path.name:
+                print(path)
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == "internal-write":
+        target = Path(sys.argv[2]); target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        with os.fdopen(descriptor, "wb") as output: output.write(sys.stdin.buffer.read(MAX_INPUT)); output.flush(); os.fsync(output.fileno())
+        os.replace(name, target)
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == "internal-patch":
+        result = subprocess.run(["/usr/bin/patch", "--batch", "--forward", sys.argv[2]], input=sys.stdin.buffer.read(MAX_INPUT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        sys.stdout.buffer.write(result.stdout); sys.stderr.buffer.write(result.stderr); return result.returncode
+    if len(sys.argv) >= 2 and sys.argv[1] in {"internal-process", "internal-receipt"}:
+        emit({"status": "unsupported_in_e2_4"}); return 0
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=("claim-execute",))
+    parser.add_argument("--call-id", required=True)
+    parser.add_argument("--tool", required=True)
+    parser.add_argument("--cwd", required=True)
+    return claim_execute(parser.parse_args())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -37,6 +37,16 @@ The architecture and contract ownership are defined in [`architecture.md`](archi
                            └─ 10 Optional wake activation
 ```
 
+## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
+
+> **Implemented contract:** E2.1's sole proposal attempt remains consumed as `model_operation_proposals_unavailable`; E2.2/E2.3 remain synthetic one-operation evidence. E2.4 is a separately versioned production path.
+
+A natural Russian or English request may now enter one bounded AgentRun through only exact pinned local LFM2.5 Q4_K_M/llama.cpp. Several fixed terminal/file/search/write/edit/patch/code/process/receipt operations execute only through Docker exec in the installation's sole persistent AgentEnvironment before one final voice answer. First use lazily creates it; calls and later runs reuse its exact selected container and rootfs/workspace/cache state.
+
+The vertical slice includes strict selector-free `voice-agent.config.v2` and one-way V1 upgrade, full realtime/budget/cancellation contracts, installation UUID/owner/spec/generation/endpoint registry, cross-process locking, duplicate/stale/uncertain fail-closed resolution, at-most-once rootfs receipts, cwd persistence, exact effective security/resource inspection, no ordinary-event teardown, same-ID stopped recovery, and confirmed exact-ID operator lifecycle. It includes no runtime installation, runtime/image selection, host execution, alternate-runtime fallback, live credentials/network/Telegram work, implicit cleanup, or platform/physical claims.
+
+PR acceptance is deterministic fake-Docker evidence in `./verify`. Linux Docker Engine, Docker Desktop/macOS, exact-model/network, daemon/Desktop/reboot, write-pressure, and physical voice acceptance are independent later tiers; a missing platform prerequisite is unavailable evidence, never permission to substitute another execution path.
+
 ## Slice 1 — Deterministic zero-secret voice-turn tracer
 
 ### User-visible outcome

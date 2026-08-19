@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/agent-budget.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "maximum_decisions",
+    "active_deadline_seconds",
+    "maximum_operation_seconds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "voice-agent.agent-budget.v1"
+    },
+    "maximum_decisions": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 24
+    },
+    "active_deadline_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600
+    },
+    "maximum_operation_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600
+    }
+  }
+}

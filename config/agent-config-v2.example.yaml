@@ -1,0 +1,45 @@
+schema_version: voice-agent.config.v2
+agent:
+  enabled: true
+  max_decisions: 24
+  active_deadline_seconds: 600
+  tools:
+    - shell.exec
+    - file.read
+    - file.search
+    - file.write
+    - file.edit
+    - file.patch
+    - execute_code
+    - process
+    - receipt
+agent_environment:
+  image:
+    reference: ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421
+    pull_at_runtime: false
+  lifecycle:
+    lazy_create: true
+    persistent: true
+    restart_policy: "no"
+    idle_action: none
+    command_timeout_seconds: 120
+    command_timeout_grace_seconds: 5
+  network:
+    enabled: true
+    publish_ports: []
+  credentials:
+    creation_environment_names: []
+    creation_file_names: []
+    exec_environment_names: []
+    exec_file_names: []
+  resources:
+    cpus: 2
+    memory_mib: 4096
+    pids: 128
+    shm_mib: 1024
+    rootfs_target_mib: 4096
+    workspace_target_mib: 5120
+    cache_target_mib: 2048
+    host_free_reserve_mib: 8192
+    watchdog_interval_seconds: 2
+    maximum_output_bytes: 262144

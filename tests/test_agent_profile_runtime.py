@@ -256,10 +256,21 @@ class AgentProfileDegradedVoiceRegressionTests(unittest.TestCase):
                     self.assertEqual(runtime.snapshot.effective_capability_ids, ())
                     self.assertFalse(runtime.snapshot.agent_capabilities_admitted)
 
+                    active_status = {
+                        "schema_version": "voice-agent.agent-runtime-status.v2",
+                        "status": "degraded",
+                        "reason_code": reason,
+                        "config_revision": None,
+                        "agent_enabled": False,
+                        "agent_tools_admitted": False,
+                        "environment_count": 1,
+                        "provider_mode": "local",
+                        "automatic_fallback": False,
+                    }
                     registry = SimpleNamespace(
                         accepting=True,
                         active_count=0,
-                        agent_profile=runtime,
+                        agent_runtime=SimpleNamespace(status_document=lambda: active_status),
                         operational_health=lambda: {"overall_readiness": "ready"},
                     )
                     settings = SimpleNamespace(build_id="development", release_id="development")
@@ -267,7 +278,7 @@ class AgentProfileDegradedVoiceRegressionTests(unittest.TestCase):
                     self.assertTrue(public["available"])
                     self.assertTrue(public["accepting"])
                     self.assertEqual(public["health"]["overall_readiness"], "ready")
-                    self.assertEqual(public["agent_profile"], runtime.status_document())
+                    self.assertEqual(public["agent_runtime"], active_status)
 
                     turn = run_bounded_voice_turn(f"profile-{index}")
                     self.assertEqual(turn.terminal_event["type"], "turn.completed")
