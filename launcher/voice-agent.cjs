@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const LAUNCHER_VERSION = '0.1.0';
+const LAUNCHER_VERSION = '0.2.0';
 const LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';
@@ -353,7 +353,7 @@ function readOwnedRegular(filename, uid, modes = null, maximumBytes = 4 * 1024 *
   }
 }
 
-function safePointer(root, name, idPattern, uid) {
+function safePointer(root, name, idPattern, uid, releaseMode = 0o700) {
   const pointer = path.join(root, name);
   let metadata;
   try { metadata = fs.lstatSync(pointer); } catch (error) {
@@ -365,7 +365,7 @@ function safePointer(root, name, idPattern, uid) {
   const parts = target.split('/');
   if (parts.length !== 2 || parts[0] !== 'releases' || !idPattern.test(parts[1])) fail('pointer_invalid', 'release pointer target is invalid');
   const release = path.join(root, 'releases', parts[1]);
-  ownedDirectory(release, uid, 0o700);
+  ownedDirectory(release, uid, releaseMode);
   if (fs.readlinkSync(pointer) !== target) fail('pointer_invalid', 'release pointer changed while reading');
   return release;
 }
@@ -578,7 +578,7 @@ function validateReleaseRecord(record) {
 }
 
 function readCanonicalRelease(root, pointer, uid) {
-  const releaseRoot = safePointer(root, pointer, RELEASE_ID, uid);
+  const releaseRoot = safePointer(root, pointer, RELEASE_ID, uid, 0o500);
   if (!releaseRoot) return null;
   const record = validateReleaseRecord(JSON.parse(readOwnedRegular(path.join(releaseRoot, 'release-record.json'), uid, [0o400, 0o600], 256 * 1024).toString('utf8')));
   if (record.release_id !== path.basename(releaseRoot)) fail('release_record_invalid', 'release record directory differs');
@@ -618,6 +618,33 @@ function canonicalState(installRoot, uid) {
 }
 
 class SystemServiceProbe {
+  async inspectCanonical({ uid }) {
+    const result = spawnSync('systemctl', ['--user', 'show', 'voice-agent.service', '--property=LoadState,ActiveState,SubState,MainPID,ControlGroup'], {
+      encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }, maxBuffer: 65536,
+    });
+    const values = {};
+    if (result.status === 0) for (const line of result.stdout.split('\n')) if (line.includes('=')) values[line.slice(0, line.indexOf('='))] = line.slice(line.indexOf('=') + 1);
+    const enabled = spawnSync('systemctl', ['--user', 'is-enabled', 'voice-agent.service'], { encoding: 'utf8', timeout: 3000, env: { PATH: '/usr/bin:/bin' } });
+    const servicePids = new Set();
+    function collectPids(directory) {
+      try {
+        for (const line of fs.readFileSync(path.join(directory, 'cgroup.procs'), 'utf8').split('\n')) if (/^[1-9][0-9]*$/.test(line)) servicePids.add(Number(line));
+        for (const name of fs.readdirSync(directory)) { const child = path.join(directory, name); if (fs.lstatSync(child).isDirectory()) collectPids(child); }
+      } catch {}
+    }
+    if (typeof values.ControlGroup === 'string' && values.ControlGroup.startsWith('/')) collectPids(path.join('/sys/fs/cgroup', values.ControlGroup));
+    const socket = spawnSync('ss', ['-H', '-ltnp', 'sport = :8000'], { encoding: 'utf8', timeout: 3000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } });
+    const loopback = socket.status === 0 && socket.stdout.split('\n').find((line) => /127\.0\.0\.1:8000\b/.test(line));
+    const listenerPid = loopback && /pid=([1-9][0-9]*)/.exec(loopback);
+    const listenerOwned = Boolean(listenerPid && servicePids.has(Number(listenerPid[1])));
+    return {
+      service_active: values.ActiveState === 'active', service_enabled: enabled.status === 0,
+      process_uid: Number(values.MainPID || 0) > 0 ? (() => { try { return fs.lstatSync(`/proc/${values.MainPID}`).uid; } catch { return null; } })() : null,
+      runtime: await this.#runtime(),
+      listener: { host: loopback ? '127.0.0.1' : null, port: loopback ? 8000 : null, owner_uid: listenerOwned ? uid : null, owner: listenerOwned ? 'service' : 'unknown' },
+    };
+  }
+
   async inspectLegacy({ uid }) {
     const result = spawnSync('systemctl', ['show', SERVICE_NAME, '--property=FragmentPath,LoadState,ActiveState,SubState,MainPID'], {
       encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }, maxBuffer: 65536,
@@ -668,6 +695,19 @@ class SystemServiceProbe {
   }
 }
 
+function canonicalSnapshotReady(snapshot, record, uid) {
+  const health = snapshot && snapshot.runtime && snapshot.runtime.health;
+  const components = health && health.components;
+  const required = new Set(['livekit', 'controller', 'stt', 'selected_llm', 'tts']);
+  return Boolean(snapshot && snapshot.service_active === true && snapshot.service_enabled === true && snapshot.process_uid === uid
+    && snapshot.runtime.release_id === record.release_id && snapshot.runtime.build_id === record.build_id
+    && snapshot.runtime.accepting === true && Array.isArray(components) && components.length === 5
+    && new Set(components.map((item) => item.component)).size === 5
+    && components.every((item) => required.has(item.component) && item.liveness === 'alive' && item.readiness === 'ready' && item.compatible === true)
+    && snapshot.listener && snapshot.listener.host === '127.0.0.1' && snapshot.listener.port === 8000
+    && snapshot.listener.owner_uid === uid && snapshot.listener.owner === 'service');
+}
+
 function identity(record, source, ready = false) {
   if (!record) return { state: 'absent', release_id: null, version: null, build_id: null, source, ready: false };
   return {
@@ -688,15 +728,23 @@ async function collectStatus(options = {}) {
     legacyRoot, expectedUid: uid, serviceUnitPath, serviceProbe, home,
     serviceUnitOwner: options.serviceUnitOwner, expectedPythonPath: options.expectedPythonPath,
   });
+  let canonicalSnapshot = null;
+  let canonicalReady = false;
+  if (canonical.selected && typeof serviceProbe.inspectCanonical === 'function') {
+    try {
+      canonicalSnapshot = await serviceProbe.inspectCanonical({ uid, release: canonical.selected });
+      canonicalReady = canonicalSnapshotReady(canonicalSnapshot, canonical.selected, uid);
+    } catch { canonicalSnapshot = null; }
+  }
   let selected = identity(canonical.selected, 'canonical');
-  let running = identity(null, 'service');
+  let running = canonicalReady ? identity(canonical.selected, 'canonical_service', true) : identity(null, 'service');
   let rollback = canonical.rollback ? { state: 'verified', release_id: canonical.rollback.release_id, version: canonical.rollback.version, build_id: canonical.rollback.build_id } : { state: 'missing', release_id: null, version: null, build_id: null };
   let installationState = canonical.state;
   if (!canonical.selected && legacy.selected) {
     selected = identity(legacy.selected, 'legacy');
     installationState = legacy.state;
   }
-  if (legacy.running) running = identity(legacy.running, 'legacy_service', true);
+  if (!canonicalReady && legacy.running) running = identity(legacy.running, 'legacy_service', true);
   if (!canonical.rollback && legacy.rollback.state === 'verified') rollback = { state: 'verified_legacy', release_id: legacy.rollback.release_id, version: null, build_id: null };
   let alignment = 'unknown';
   if (selected.release_id && running.release_id) {
@@ -714,10 +762,10 @@ async function collectStatus(options = {}) {
     rollback,
     transaction: canonical.transaction,
     service: {
-      state: legacy.running ? 'active' : legacy.service_custody === 'unavailable' ? 'unavailable' : 'inactive',
-      enabled: null,
-      main_pid_present: Boolean(legacy.running),
-      custody: legacy.service_custody,
+      state: canonicalReady || legacy.running ? 'active' : canonicalSnapshot ? 'inactive' : legacy.service_custody === 'unavailable' ? 'unavailable' : 'inactive',
+      enabled: canonicalSnapshot ? Boolean(canonicalSnapshot.service_enabled) : null,
+      main_pid_present: Boolean(canonicalReady || legacy.running),
+      custody: canonicalReady ? 'verified' : legacy.service_custody,
     },
     agent_environment: canonical.agent_environment,
     docker: legacy.docker,
@@ -764,38 +812,46 @@ function humanDoctor(doctor) {
 }
 
 function parseCli(argv) {
-  if (argv.length < 1 || !['status', 'doctor'].includes(argv[0])) fail('usage', 'expected status or doctor');
+  if (argv.length < 1 || !['install', 'status', 'doctor'].includes(argv[0])) fail('usage', 'expected install, status, or doctor');
   const result = { command: argv[0], json: false };
   for (let index = 1; index < argv.length; index += 1) {
     const item = argv[index];
-    if (item === '--json') result.json = true;
-    else if (['--install-root', '--legacy-root', '--service-unit'].includes(item) && argv[index + 1]) {
-      const key = item === '--install-root' ? 'installRoot' : item === '--legacy-root' ? 'legacyRoot' : 'serviceUnitPath';
-      result[key] = argv[++index];
-    } else fail('usage', 'unknown or incomplete option');
+    if (item === '--json' && result.command !== 'install') result.json = true;
+    else fail('usage', 'unknown option; production installation roots are fixed by XDG');
   }
   return result;
+}
+
+function loadInstaller() {
+  if (!require('node:sea').isSea()) return require('./install.cjs')(module.exports);
+  const source = require('node:sea').getAsset('install.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports);
 }
 
 async function main(argv = process.argv.slice(2)) {
   try {
     const arguments_ = parseCli(argv);
-    const options = { installRoot: arguments_.installRoot, legacyRoot: arguments_.legacyRoot, serviceUnitPath: arguments_.serviceUnitPath };
-    Object.keys(options).forEach((key) => options[key] === undefined && delete options[key]);
-    const document = arguments_.command === 'status' ? await collectStatus(options) : await collectDoctor(options);
+    if (arguments_.command === 'install') {
+      await loadInstaller().installVoiceAgent();
+      return 0;
+    }
+    const document = arguments_.command === 'status' ? await collectStatus() : await collectDoctor();
     process.stdout.write(arguments_.json ? `${JSON.stringify(document, null, 2)}\n` : `${arguments_.command === 'status' ? humanStatus(document) : humanDoctor(document)}\n`);
     return 0;
   } catch (error) {
     const code = error instanceof LauncherError ? error.code : 'launcher_failed';
-    process.stderr.write(`${code}: command failed safely\n`);
+    const actionable = argv[0] === 'install' && ['host_unsupported', 'linger_privilege_unavailable', 'release_authority_unprovisioned'].includes(code);
+    process.stderr.write(actionable ? `${error.message}\n` : `${code}: command failed safely; no healthy installation was claimed\n`);
     return 2;
   }
 }
 
 module.exports = {
-  LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError,
+  LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError, SystemServiceProbe,
   canonicalJson, collectDoctor, collectStatus, discoverLegacy, humanDoctor, humanStatus,
-  legacyReleaseId, legacyTreeDigest, main, parseCanonicalJson, signCanonicalFixture,
+  legacyReleaseId, legacyTreeDigest, loadInstaller, main, parseCanonicalJson, parseCli, signCanonicalFixture,
   validateArchiveEntries, validateArtifactManifest, validateChannel, validateReleaseRecord,
   verifyPlatformArtifact, verifySignedChannel,
 };

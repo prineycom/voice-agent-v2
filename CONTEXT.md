@@ -1,6 +1,7 @@
 # Domain glossary
 
-- **Voice Agent launcher** — The separately versioned `voice-agent` installation manager. It owns signed release interpretation and the later installation/update transaction, but contains no voice runtime, credentials, mutable product checkout, or updater daemon.
+- **Voice Agent launcher** — The separately versioned `voice-agent` installation manager. It owns signed release interpretation, the supported fresh-install transaction and the later update transaction, but contains no voice runtime, credentials, mutable product checkout, or updater daemon.
+- **Fresh installation** — The pristine-host `voice-agent install` transaction: exact signed Linux artifact plus host/assets/space proof, private canonical XDG defaults, one user-systemd start, and commit only after exact five-component loopback readiness. A failed, partial, foreign or legacy state is recovery/doctor input rather than overwrite permission.
 - **Signed channel** — The canonical detached-Ed25519 `voice-agent.channel.v1` document that authorizes only stable-channel platform artifacts within a monotonic sequence and expiry window.
 - **Platform artifact manifest** — The closed `voice-agent.platform-artifact-manifest.v1` inventory for one immutable version/build/platform payload, including every permitted archive path, type, mode, size, hash, internal link, and protocol/schema range.
 - **Release record** — The stable launcher-owned `voice-agent.release-record.v1` receipt that binds an installed immutable release to its signed artifact/manifest/channel identity and readiness custody without requiring later launchers to parse every historical application manifest.

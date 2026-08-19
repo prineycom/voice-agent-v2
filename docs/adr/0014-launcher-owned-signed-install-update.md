@@ -20,7 +20,9 @@ Use the XDG layout defined once in [`architecture.md` §6.7](../architecture.md#
 
 `status` and `doctor` are read-only by default and report selected, running, exact-ready, rollback, transaction, optional AgentEnvironment, and explicit rootless Docker truth separately. A pointer never implies health. Legacy discovery can retain the exact running ready release as future rollback custody only after canonical-root/owner/inventory, regular-file/no-follow, installed-unit, MainPID/cwd/executable/argv, runtime release/build/readiness, and Docker endpoint evidence agree. An incompatible historical application manifest is reported as legacy/unsupported; no unrelated or unowned release is adopted.
 
-Later install/update slices must use one durable journal and keep the prior exact running healthy release before quiescing. Success means selected == running == exact-ready. Failure after quiesce restores and proves the prior release; a double failure remains explicit. Reachability-based collection keeps active plus one verified rollback and transaction references, never deletes user data or AgentEnvironment state, and has no fixed release-count admission deadlock.
+Fresh-install evolution I2 implements the pristine-host prefix of that decision: pre-mutation signed artifact plus Linux/systemd/NVIDIA/assets/space proof; fixed private per-user XDG state and safe disabled optional capabilities; one announced noninteractive linger action; a generated user unit; minimal durable install phases; and commit only after exact release/build, five-component admission and loopback listener custody. Failure leaves no selected healthy install, and identical healthy retry only reconciles. The deterministic adapter boundary may substitute host/archive/privilege/service/network facts only under isolated test roots; production accepts neither an arbitrary root nor another user.
+
+Later update slices use the separate general update journal and keep the prior exact running healthy release before quiescing. Success means selected == running == exact-ready. Failure after quiesce restores and proves the prior release; a double failure remains explicit. Reachability-based collection keeps active plus one verified rollback and transaction references, never deletes user data or AgentEnvironment state, and has no fixed release-count admission deadlock.
 
 This ADR supersedes ADR-0013 only for installation/update provenance, layout, service-install ownership, release retention, rollback custody, and activation transaction semantics. ADR-0013 remains the current legacy application's bounded foreground/systemd lifecycle until migration. Machine fields are owned by [`contracts/`](../../contracts/README.md) and `config/launcher-protocol-v1.json`; this ADR does not duplicate them.
 
@@ -38,8 +40,8 @@ This ADR supersedes ADR-0013 only for installation/update provenance, layout, se
 
 - Release maintainers need offline-root/online-key custody and signed publication procedures before production release.
 - A bridge launcher is required when a channel's minimum protocol exceeds the installed protocol.
-- This first slice proves contracts, packaging, and read-only discovery only. It does not install, download, migrate, activate, restart, repair, self-replace, or touch the live stand.
-- Linux x86_64 NVIDIA/systemd is the first product platform. macOS runtime support remains unclaimed.
+- I1 proves contracts, packaging, and read-only discovery; I2 adds deterministic fresh install without migrating or touching the live stand. Production key/channel/artifact publication, real service mutation, reboot and physical voice acceptance remain separately gated.
+- Linux x86_64 NVIDIA/systemd is the first product platform. macOS runtime support remains unclaimed; install stops before mutation there.
 
 ## Alternatives considered
 
