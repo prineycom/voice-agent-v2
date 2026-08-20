@@ -28,7 +28,7 @@ from voice_agent_v2.stand_doctor import main as doctor_main  # noqa: E402
 
 
 def usage() -> int:
-    print("usage: stand doctor | init | deploy <main|dev> <remote-branch|tag|sha> | deploy <main|dev> --local <repo> <committed-sha> | status <main|dev> | logs <main|dev>")
+    print("usage: stand doctor | init | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | status <main|dev> | logs <main|dev>")
     return 2
 
 
@@ -48,8 +48,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             print("stand init: complete")
             return 0
-        if len(arguments) == 5 and arguments[0] == "deploy" and arguments[1] in {"main", "dev"} and arguments[2] == "--local":
-            instance = arguments[1]
+        if len(arguments) == 5 and arguments[0:3] == ("deploy", "dev", "--local"):
+            instance = "dev"
             commit = deploy_local(
                 state_root=root, instance=instance, repository=Path(arguments[3]),
                 commit=arguments[4], command=command,

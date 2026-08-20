@@ -51,10 +51,9 @@ Initialize the operator-owned state once. It creates external mutable state unde
 
 ```sh
 ./stand init
-./stand deploy main <remote-branch|tag|40-lowercase-sha>
+./stand deploy main <vMAJOR.MINOR.PATCH>
 ./stand deploy dev <remote-branch|tag|40-lowercase-sha>
-# The exact local committed-SHA path is available for either instance:
-./stand deploy main --local /path/to/voice-agent-v2 <40-lowercase-committed-sha>
+# The exact local committed-SHA path remains development-only:
 ./stand deploy dev --local /path/to/voice-agent-v2 <40-lowercase-committed-sha>
 ./stand status main
 ./stand status dev
@@ -62,9 +61,9 @@ Initialize the operator-owned state once. It creates external mutable state unde
 ./stand logs dev
 ```
 
-Remote deployment fetches one permitted branch, tag, or full SHA and resolves it to one full commit SHA before construction or selection. Both paths build only that commit's `git archive` snapshot, with no `.git`; the temporary release contains the production frontend build, a per-release Python environment from `requirements-stand-production.lock`, and a manifest before atomic promotion. A completed release for the same SHA is reused. Frontend `node_modules` are removed after a successful build and releases are never deleted automatically. A fetch, resolution, build, or manifest failure leaves completed releases and the target instance's `current` pointer unchanged.
+Main deployment accepts only one explicit exact tag matching `vMAJOR.MINOR.PATCH`; it never accepts a branch, SHA, malformed/tag-qualified ref, omitted version, or implicit latest selection. The remote tag is peeled to one full commit SHA and its first observed target is stored durably outside Git. A later different target for that tag is refused. Dev remote deployment continues to accept one explicit permitted branch, tag, or full SHA. Both paths build only the resolved commit's `git archive` snapshot, with no `.git`; the temporary release contains the production frontend build, a per-release Python environment from `requirements-stand-production.lock`, and a manifest before atomic promotion. A completed release for the same SHA is reused. Frontend `node_modules` are removed after a successful build and releases are never deleted automatically. A fetch, resolution, build, or manifest failure leaves completed releases and the target instance's `current` pointer unchanged.
 
-Deployment starts only `voice-agent-v2@<instance>.service`; a setup/readiness failure leaves that instance's selected SHA visible as `not-ready` for diagnosis rather than claiming it started. Status and logs include the requested instance and exact selected commit and query only its systemd unit. The launcher exports `VOICE_AGENT_INSTANCE_ROOT` and fail-closed explicit listener/path values before starting a complete LLM, LiveKit, gateway, STT, and two-worker TTS stack. Runtime process-tree RSS/count measurements are written to that unit's journal with `shared_inference=false`. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell. SemVer-only main admission, rollback, and later lifecycle completion remain separately scoped.
+Before activation, deployment validates the target release, strict external configuration, isolated listener/credential contract, and exact launcher environment; failure preserves the prior `current` pointer. It then explicitly switches only that instance and starts only `voice-agent-v2@<instance>.service`. A post-switch readiness failure intentionally leaves the bad SHA selected and visible as `not-ready` for diagnosis. Main rollback is the same deliberate command with an older already accepted tag, for example `./stand deploy main v1.2.3`; there is no automatic latest selection, automatic rollback, or hidden pointer restoration. Status and logs include the requested instance and exact selected commit and query only its systemd unit. The launcher exports `VOICE_AGENT_INSTANCE_ROOT` and fail-closed explicit listener/path values before starting a complete LLM, LiveKit, gateway, STT, and two-worker TTS stack. Runtime process-tree RSS/count measurements are written to that unit's journal with `shared_inference=false`. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell. Later lifecycle completion remains separately scoped.
 
 The narrow immutable-release check remains available without the test runtime:
 

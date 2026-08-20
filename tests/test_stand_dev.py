@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from scripts import stand as stand_cli
 from voice_agent_v2.stand_dev import (
     CommandResult,
     PRODUCTION_LOCK,
@@ -16,6 +17,7 @@ from voice_agent_v2.stand_dev import (
     StandError,
     config_path,
     controller_source_path,
+    deploy_local,
     deploy_local_dev,
     deploy_remote,
     deploy_remote_dev,
@@ -36,13 +38,14 @@ class RecordingCommand:
         self.fail_fetch_ref: str | None = None
         self.fail_build = False
         self.before_build = None
+        self.ready = True
 
     def run(self, arguments, *, cwd: Path | None = None) -> CommandResult:
         command = tuple(arguments)
         self.calls.append(command)
         if command[:2] == ("systemctl", "--user"):
             if command[2] == "is-active":
-                return CommandResult(0, "active\n")
+                return CommandResult(0, "active\n") if self.ready else CommandResult(3, "inactive\n")
             return CommandResult(0)
         if command[:1] == ("journalctl",):
             return CommandResult(0, "dev launcher record\n")
@@ -102,7 +105,8 @@ class StandDevTests(unittest.TestCase):
         git(repository, "remote", "add", "origin", str(remote))
         git(repository, "push", "-qu", "origin", "main")
         git(repository, "tag", "remote-tag")
-        git(repository, "push", "-q", "origin", "remote-tag")
+        git(repository, "tag", "-a", "v1.0.0", "-m", "release v1.0.0")
+        git(repository, "push", "-q", "origin", "remote-tag", "v1.0.0")
         return repository, commit
 
     def commit_remote_revision(self, repository: Path, name: str) -> str:
@@ -111,6 +115,10 @@ class StandDevTests(unittest.TestCase):
         git(repository, "commit", "-qm", name)
         git(repository, "push", "-q", "origin", "main")
         return git(repository, "rev-parse", "HEAD")
+
+    def tag_remote_release(self, repository: Path, tag: str) -> None:
+        git(repository, "tag", "-a", tag, "-m", f"release {tag}")
+        git(repository, "push", "-q", "origin", tag)
 
     def initialize_state(self, root: Path, controller: Path, command: RecordingCommand) -> tuple[Path, Path]:
         state = root / "outside-controller-state"
@@ -227,6 +235,128 @@ class StandDevTests(unittest.TestCase):
             self.assertFalse(any(path.name.startswith(".") for path in (state / "releases").iterdir()))
             self.assertEqual(selected_release(state, "dev")[0], commit)
 
+    def test_main_admits_only_exact_semver_tags_and_resolves_annotated_tag_to_full_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+
+            for refused in (
+                "", "latest", "main", commit, "remote-tag", "refs/tags/v1.0.0",
+                "v1", "v1.2", "v1.2.3.4", "v01.2.3", "v1.02.3", "v1.2.03",
+                "1.2.3", "v1.2.3-rc.1", "v1.2.3+build",
+            ):
+                with self.subTest(ref=refused):
+                    with self.assertRaisesRegex(StandError, "exact vMAJOR.MINOR.PATCH"):
+                        deploy_remote(state_root=state, instance="main", ref=refused, command=command)
+            with self.assertRaisesRegex(StandError, "exact vMAJOR.MINOR.PATCH"):
+                deploy_local(
+                    state_root=state, instance="main", repository=controller,
+                    commit=commit, command=command,
+                )
+            git(controller, "branch", "v9.9.9")
+            git(controller, "push", "-q", "origin", "v9.9.9")
+            with self.assertRaisesRegex(StandError, "tag is unresolved"):
+                deploy_remote(state_root=state, instance="main", ref="v9.9.9", command=command)
+            with patch.dict(os.environ, {"VOICE_AGENT_STAND_STATE_ROOT": str(state)}), patch("builtins.print") as output:
+                self.assertEqual(stand_cli.main(("deploy", "main")), 2)
+            self.assertIn("deploy main <vMAJOR.MINOR.PATCH>", output.call_args.args[0])
+
+            deployed = deploy_remote(state_root=state, instance="main", ref="v1.0.0", command=command)
+            advertised_tag_object = git(
+                controller, "ls-remote", "--refs", "origin", "refs/tags/v1.0.0",
+            ).split()[0]
+            self.assertNotEqual(advertised_tag_object, commit)
+            self.assertEqual(deployed, commit)
+            self.assertEqual(len(deployed), 40)
+            self.assertEqual(selected_release(state, "main")[0], commit)
+            self.assertIn(("git", "fetch", "--no-tags", "origin", "refs/tags/v1.0.0"), command.calls)
+            record = json.loads((state / "instances/main/tag-targets/v1.0.0.json").read_text())
+            self.assertEqual(record["tag"], "v1.0.0")
+            self.assertEqual(record["commit"], commit)
+
+    def test_main_refuses_a_moved_previously_observed_tag_durably(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, first_commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            self.assertEqual(
+                deploy_remote(state_root=state, instance="main", ref="v1.0.0", command=command),
+                first_commit,
+            )
+            before = os.readlink(state / "instances/main/current")
+
+            moved_commit = self.commit_remote_revision(controller, "moved tag target")
+            git(controller, "tag", "-f", "v1.0.0", moved_commit)
+            git(controller, "push", "-q", "--force", "origin", "refs/tags/v1.0.0")
+            with self.assertRaisesRegex(StandError, "tag v1.0.0 moved"):
+                deploy_remote(state_root=state, instance="main", ref="v1.0.0", command=command)
+
+            self.assertNotEqual(moved_commit, first_commit)
+            self.assertEqual(os.readlink(state / "instances/main/current"), before)
+            self.assertEqual(selected_release(state, "main")[0], first_commit)
+            record = json.loads((state / "instances/main/tag-targets/v1.0.0.json").read_text())
+            self.assertEqual(record["commit"], first_commit)
+
+    def test_main_validates_target_external_configuration_before_switching(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, first_commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            deploy_remote(state_root=state, instance="main", ref="v1.0.0", command=command)
+            before = os.readlink(state / "instances/main/current")
+            second_commit = self.commit_remote_revision(controller, "second release")
+            self.tag_remote_release(controller, "v2.0.0")
+            main_config = config_path(state, "main")
+            main_config.write_text(
+                main_config.read_text(encoding="utf-8").replace("STAND_NAME=main", "STAND_NAME=dev"),
+                encoding="utf-8",
+            )
+            os.chmod(main_config, 0o600)
+
+            with self.assertRaisesRegex(StandError, "assigned to the wrong instance"):
+                deploy_remote(state_root=state, instance="main", ref="v2.0.0", command=command)
+
+            self.assertTrue((state / "releases" / second_commit).is_dir())
+            self.assertEqual(os.readlink(state / "instances/main/current"), before)
+            self.assertEqual(selected_release(state, "main")[0], first_commit)
+            self.assertEqual(
+                json.loads((state / "instances/main/tag-targets/v2.0.0.json").read_text())["commit"],
+                second_commit,
+            )
+
+    def test_failed_readiness_stays_selected_until_explicit_older_tag_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, first_commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            self.assertEqual(
+                deploy_remote(state_root=state, instance="main", ref="v1.0.0", command=command),
+                first_commit,
+            )
+            second_commit = self.commit_remote_revision(controller, "second release")
+            self.tag_remote_release(controller, "v2.0.0")
+
+            command.ready = False
+            with self.assertRaisesRegex(StandError, "release selected but readiness failed"):
+                deploy_remote(state_root=state, instance="main", ref="v2.0.0", command=command)
+            self.assertEqual(selected_release(state, "main")[0], second_commit)
+            failed_status = status(state_root=state, instance="main", command=command)
+            self.assertIn(f"version: {second_commit}", failed_status)
+            self.assertIn("readiness: not-ready", failed_status)
+
+            command.ready = True
+            rolled_back = deploy_remote(
+                state_root=state, instance="main", ref="v1.0.0", command=command,
+            )
+            self.assertEqual(rolled_back, first_commit)
+            self.assertEqual(selected_release(state, "main")[0], first_commit)
+            self.assertEqual(sum(call[:2] == ("npm", "ci") for call in command.calls), 2)
+
     def test_local_committed_sha_path_remains_available(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -254,7 +384,7 @@ class StandDevTests(unittest.TestCase):
             second_commit = self.commit_remote_revision(controller, "second release")
 
             self.assertEqual(
-                deploy_remote(state_root=state, instance="main", ref="remote-tag", command=command),
+                deploy_remote(state_root=state, instance="main", ref="v1.0.0", command=command),
                 first_commit,
             )
             self.assertEqual(

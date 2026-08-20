@@ -1,8 +1,8 @@
-"""Local immutable development stand lifecycle with explicit host-command seams.
+"""Immutable main/dev stand deployment with explicit host-command seams.
 
-This module owns the local-commit and ordinary-private-remote dev paths. It does
-not select main releases or manage the host beyond the requested user-systemd
-commands.
+Dev owns local-commit and ordinary-private-remote paths. Main owns only exact,
+immutably observed SemVer tags. Host changes remain limited to requested
+user-systemd commands.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import secrets
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 from typing import Mapping, Protocol, Sequence
 import uuid
@@ -30,6 +29,8 @@ CONFIG_NAME = "private.env"
 UNIT_NAME = "voice-agent-v2@.service"
 SHA256_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 REMOTE_REF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+MAIN_SEMVER_TAG = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+MAIN_TAG_TARGET_SCHEMA = "voice-agent-main-tag-target.v1"
 RELEASE_SCHEMA = "voice-agent-stand-release.v2"
 PRODUCTION_LOCK = "requirements-stand-production.lock"
 CONFIG_LINE = re.compile(r"([A-Z][A-Z0-9_]*)=([A-Za-z0-9._:/-]+)\Z")
@@ -238,6 +239,7 @@ def initialize(
         ):
             _mkdir_private(root / relative)
         _write_private_config(config_path(state_root, instance), _config_values(instance))
+    _mkdir_private(instance_root(state_root, "main") / "tag-targets")
     validate_instance_isolation(state_root)
     if controller_repository is not None:
         if command is None:
@@ -367,6 +369,90 @@ def resolve_remote_dev_ref(*, state_root: Path, ref: str, command: CommandRunner
     if SHA256_COMMIT.fullmatch(observed) is None:
         raise StandError("remote ref did not resolve to one full lowercase commit SHA")
     return observed
+
+
+def _main_tag_target_path(state_root: Path, tag: str) -> Path:
+    return instance_root(state_root, "main") / "tag-targets" / f"{tag}.json"
+
+
+def _read_main_tag_target(path: Path, tag: str) -> str:
+    try:
+        metadata = path.stat(follow_symlinks=False)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StandError("recorded main tag target is unreadable") from error
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or _mode(path) != 0o600:
+        raise StandError("recorded main tag target must be a regular mode-0600 file")
+    if not isinstance(payload, dict) or set(payload) != {"schema", "tag", "commit"} or not (
+        payload.get("schema") == MAIN_TAG_TARGET_SCHEMA
+        and payload.get("tag") == tag
+        and isinstance(payload.get("commit"), str)
+        and SHA256_COMMIT.fullmatch(str(payload["commit"]))
+    ):
+        raise StandError("recorded main tag target is invalid")
+    return str(payload["commit"])
+
+
+def _remember_main_tag_target(*, state_root: Path, tag: str, commit: str) -> None:
+    """Persist the first resolved commit for a tag; later movement always fails closed."""
+    directory = instance_root(state_root, "main") / "tag-targets"
+    _mkdir_private(directory)
+    path = _main_tag_target_path(state_root, tag)
+    body = json.dumps({
+        "schema": MAIN_TAG_TARGET_SCHEMA, "tag": tag, "commit": commit,
+    }, sort_keys=True) + "\n"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        recorded = _read_main_tag_target(path, tag)
+        if recorded != commit:
+            raise StandError(f"main tag {tag} moved from its recorded commit and is refused")
+        return
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as destination:
+            destination.write(body)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(path, 0o600)
+        directory_descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def resolve_remote_main_tag(*, state_root: Path, tag: str, command: CommandRunner) -> str:
+    """Resolve one exact release tag to a commit and pin its first observed target."""
+    if MAIN_SEMVER_TAG.fullmatch(tag) is None:
+        raise StandError("main deployment requires one exact vMAJOR.MINOR.PATCH tag")
+    source = controller_source_path(state_root)
+    _checked(command, ("git", "rev-parse", "--is-inside-work-tree"), cwd=source,
+             failure="controller source clone is unavailable")
+    remote_name = f"refs/tags/{tag}"
+    advertised = _checked(
+        command, ("git", "ls-remote", "--refs", "origin", remote_name), cwd=source,
+        failure="main release tag cannot be inspected",
+    ).stdout.splitlines()
+    matches = []
+    for line in advertised:
+        identity, separator, name = line.partition("\t")
+        if separator and SHA256_COMMIT.fullmatch(identity) and name == remote_name:
+            matches.append(identity)
+    if len(matches) != 1:
+        raise StandError("main release tag is unresolved")
+    _checked(command, ("git", "fetch", "--no-tags", "origin", remote_name), cwd=source,
+             failure="main release tag fetch failed")
+    commit = _checked(
+        command, ("git", "rev-parse", "--verify", "FETCH_HEAD^{commit}"), cwd=source,
+        failure="main release tag did not resolve to a commit",
+    ).stdout.strip()
+    if SHA256_COMMIT.fullmatch(commit) is None:
+        raise StandError("main release tag did not resolve to one full lowercase commit SHA")
+    _remember_main_tag_target(state_root=state_root, tag=tag, commit=commit)
+    return commit
 
 
 def _build_release_payload(*, stage: Path, source: Path, command: CommandRunner) -> str:
@@ -533,14 +619,28 @@ def logs(*, state_root: Path, instance: str, command: CommandRunner) -> str:
     return f"{header}\n{records}" if records else header
 
 
+def validate_release_external_configuration(
+    *, state_root: Path, instance: str, release: Path,
+) -> None:
+    """Validate external instance data against the target before pointer activation."""
+    manifest = _release_manifest(release)
+    commit = manifest.get("commit")
+    if not isinstance(commit, str) or release.name != commit:
+        raise StandError("target release identity is invalid")
+    _launcher_environment_for_release(
+        state_root=state_root, instance=instance, commit=commit, release=release,
+        environment={},
+    )
+
+
 def _deploy_instance_release(
     *, state_root: Path, instance: str, repository: Path, commit: str,
     command: CommandRunner,
 ) -> str:
-    values = parse_private_config(config_path(state_root, instance))
-    if values["STAND_NAME"] != instance:
-        raise StandError("instance configuration identifies another stand")
     release = build_release(state_root=state_root, repository=repository, commit=commit, command=command)
+    validate_release_external_configuration(
+        state_root=state_root, instance=instance, release=release,
+    )
     select_release(state_root=state_root, instance=instance, release=release)
     try:
         start(instance=instance, command=command)
@@ -554,7 +654,9 @@ def deploy_local(
     *, state_root: Path, instance: str, repository: Path, commit: str,
     command: CommandRunner,
 ) -> str:
-    """Select an exact local commit for either isolated instance."""
+    """Select an exact local commit for dev; main is tag-only."""
+    if instance != "dev":
+        raise StandError("main deployment requires one exact vMAJOR.MINOR.PATCH tag")
     values = parse_private_config(config_path(state_root, instance))
     if values["STAND_NAME"] != instance:
         raise StandError("instance configuration identifies another stand")
@@ -576,11 +678,13 @@ def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command
 
 
 def deploy_remote(*, state_root: Path, instance: str, ref: str, command: CommandRunner) -> str:
-    """Resolve remote Git state before any release construction or selection."""
-    values = parse_private_config(config_path(state_root, instance))
-    if values["STAND_NAME"] != instance:
-        raise StandError("instance configuration identifies another stand")
-    commit = resolve_remote_dev_ref(state_root=state_root, ref=ref, command=command)
+    """Apply the strict main-tag or permissive explicit dev remote policy."""
+    if instance == "main":
+        commit = resolve_remote_main_tag(state_root=state_root, tag=ref, command=command)
+    elif instance == "dev":
+        commit = resolve_remote_dev_ref(state_root=state_root, ref=ref, command=command)
+    else:
+        raise StandError("only the declared stand instance is accepted")
     return _deploy_instance_release(
         state_root=state_root, instance=instance,
         repository=controller_source_path(state_root), commit=commit, command=command,
@@ -591,14 +695,11 @@ def deploy_remote_dev(*, state_root: Path, ref: str, command: CommandRunner) -> 
     return deploy_remote(state_root=state_root, instance="dev", ref=ref, command=command)
 
 
-def launcher_environment(
-    *, state_root: Path, instance: str, environment: Mapping[str, str] | None = None,
+def _launcher_environment_for_release(
+    *, state_root: Path, instance: str, commit: str, release: Path,
+    environment: Mapping[str, str],
 ) -> tuple[Path, tuple[str, ...], dict[str, str]]:
-    """Build the fail-closed exact-release environment for one foreground stack."""
-    selected = selected_release(state_root, instance)
-    if selected is None:
-        raise StandError("launcher has no selected immutable release")
-    commit, release = selected
+    """Construct and validate one target release's external launch contract."""
     validate_instance_isolation(state_root)
     values = parse_private_config(config_path(state_root, instance))
     if values["STAND_NAME"] != instance:
@@ -619,7 +720,7 @@ def launcher_environment(
     python = release / "python" / "bin" / "python"
     if not launcher.is_file() or not python.is_file():
         raise StandError("selected release lacks its foreground runtime")
-    result = dict(os.environ if environment is None else environment)
+    result = dict(environment)
     shared_cache = Path(
         result.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))
     ).expanduser() / "voice-agent-v2"
@@ -638,6 +739,20 @@ def launcher_environment(
         "PYTHONPYCACHEPREFIX": str(root / "cache" / "pycache"),
     })
     return python, (str(python), "-B", str(launcher)), result
+
+
+def launcher_environment(
+    *, state_root: Path, instance: str, environment: Mapping[str, str] | None = None,
+) -> tuple[Path, tuple[str, ...], dict[str, str]]:
+    """Build the fail-closed exact-selected-release environment for one stack."""
+    selected = selected_release(state_root, instance)
+    if selected is None:
+        raise StandError("launcher has no selected immutable release")
+    commit, release = selected
+    return _launcher_environment_for_release(
+        state_root=state_root, instance=instance, commit=commit, release=release,
+        environment=os.environ if environment is None else environment,
+    )
 
 
 def exec_launcher(*, state_root: Path, instance: str) -> None:
