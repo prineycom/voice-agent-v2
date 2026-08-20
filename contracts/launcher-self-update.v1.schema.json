@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/launcher-self-update.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "id", "application_release", "live_path_hash", "old_sha256", "new_sha256", "phase"],
+  "properties": {
+    "schema": {"const": "voice-agent.launcher-self-update.v1"},
+    "id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "application_release": {"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"},
+    "live_path_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "old_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "new_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "phase": {"enum": ["staged", "old_renamed", "live_renamed", "exec_requested", "validated"]}
+  }
+}

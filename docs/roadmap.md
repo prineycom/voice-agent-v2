@@ -77,7 +77,7 @@ Production signing-key provisioning, publication or downloads; install/update/ro
 2. **I3 transactional update/rollback — implemented deterministically:** one flock/journal, staging, migration, quiesce, activation, exact readiness, automatic restoration and active+rollback reachability GC with interruption injection; real-host evidence remains I8.
 3. **I4 legacy adoption — implemented deterministically:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success; real-host execution remains I8.
 4. **I5 AgentEnvironment/config preservation — implemented deterministically:** durable XDG-data migration, explicit owner-only rootless authority, content-free exact inventory and before/after identity proof across install/update/rollback/recovery/adoption; real Docker/host evidence remains I8.
-5. **I6 assets/cache/offline:** resumable exact downloads, signed content-addressed assets, cached metadata policy and genuine-space-only refusal.
+5. **I6 assets/cache/offline/self-update — implemented deterministically:** resumable exact downloads, signed content-addressed dependencies, verified cached-only policy, genuine-space-only refusal and application-health-gated launcher replacement; real network/filesystem power-loss evidence remains I8.
 6. **I7 rollback/uninstall/support bundle:** complete user surfaces, exact destructive confirmation and privacy scanner.
 7. **I8 acceptance:** disposable real-host install, VM phase/power loss, reboot, update/rollback voice turn and physical/full-stack gates before stable publication. macOS native support remains later.
 
@@ -181,6 +181,32 @@ Creating, adopting, starting, stopping, removing, retiring, pruning, rebuilding 
 ### Acceptance and evidence
 
 The launcher phase of `./verify` uses disposable XDG trees and injected Docker/service states. It covers exact authority rejection, production-inspect parsing, disabled/ready/endpoint/container/stopped/unhealthy/stale states, same identity through candidate success/failure restoration/recovery/adoption, replacement detection, both migration methods, pre-I5 journal compatibility, release/asset GC exclusion and privacy-safe status/journals. Python behavior tests keep active V2 runtime configuration schema-valid and prove V1 upgrade becomes disabled. [`agent-environment-preservation.md`](evidence/agent-environment-preservation.md) records deterministic evidence and the unchanged real-host/nonclaims.
+
+## Installation evolution I6 — Reconstructible assets, verified offline cache, disk pressure and launcher self-update
+
+> **Implemented contract:** normal install/update/adoption may acquire only exact signed/digest-pinned program dependencies; a launcher replacement is allowed only after terminal application health.
+
+### User-visible outcome
+
+`voice-agent update` stages exact required local model/runtime bytes before service quiesce, automatically reclaims only unreferenced reconstructible owned bytes, and blocks only for a genuine remaining byte shortage. `update --offline` reconciles exact cached material while stating that latest is unknown. Optional AgentEnvironment image mismatch degrades tools without pull/rebuild/stop. A required signed launcher replaces itself only after the application is durably healthy, with exact old-launcher restoration on replacement failure.
+
+### Included scope
+
+- Closed signed-channel asset/launcher descriptors with exact authority, kind/platform/license, size/hash/digest/reserve, compatibility and reachability facts; no redirect, mutable tag, filename or ambient registry authority.
+- Validator/range-exact resume, declared-size ceiling, owner-only unique partial, fsync/hash verification and atomic content-addressed promotion; invalid/interrupted bytes are never selectable.
+- Pre/post lock-held reachability GC for release, journal, selected assets, launcher and AgentEnvironment custody; LRU only among equally unreferenced reconstructible runtime/launcher bytes and no broad cache/Docker/data authority.
+- Post-GC byte preflight covering candidate/rollback reserve, extraction peak, snapshots, required assets and launcher backup with one required/available/reclaimable result.
+- Non-expired locally authorized cached channel receipt plus exact cached bytes for offline mode; unchanged signature/sequence/expiry/hash/platform/protocol checks.
+- Receipt-bound `.new`/`.old` launcher swap, fsync/post-exec validation, exact-hash recovery and old-launcher restoration without disturbing a healthy application.
+- Privacy-safe asset/offline/space/self-update status, doctor, journal and last-result fields plus stable errors.
+
+### Excluded scope
+
+Production signing keys/channel/artifact/model/image publication; real downloads/provider spend; real Docker image pull or AgentEnvironment lifecycle; explicit rollback/uninstall/support commands; manual version import; live migration/deployment; VM power-loss/reboot/physical acceptance; and macOS runtime support.
+
+### Acceptance and evidence
+
+The Node.js launcher phase in `./verify` uses injected network/filesystem/service/process facts and covers complete/resumed/range-reset/oversize/hash/signature/redirect failures, offline complete/insufficient/expired/rollback metadata, active/rollback/journal reachability, 0/1/2/3/100 inventories, partial/LRU/foreign-symlink boundaries, genuine space success/shortage, candidate failed-safe preservation, unchanged AgentEnvironment identity, launcher success and interruption after every receipt/rename/fsync/exec/validation phase, wrong-hash/backup ambiguity, idempotent recovery and privacy. [`assets-offline-self-update.md`](evidence/assets-offline-self-update.md) owns deterministic evidence and nonclaims.
 
 ## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
 

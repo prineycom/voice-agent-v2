@@ -1,6 +1,7 @@
 'use strict';
 
 module.exports = function createInstaller(core) {
+  let api;
   const crypto = require('node:crypto');
   const fs = require('node:fs');
   const os = require('node:os');
@@ -143,10 +144,10 @@ agent_environment:
       releases: path.join(data, 'releases'), transactions: path.join(data, 'transactions'), migrations: path.join(data, 'migrations'),
       appData: path.join(data, 'data'), agent: path.join(data, 'agent-environment'), agentRootfs: path.join(data, 'agent-environment', 'rootfs-storage'),
       private: path.join(config, 'private'), downloads: path.join(cache, 'downloads'), models: path.join(cache, 'models', 'sha256'), runtimes: path.join(cache, 'runtimes', 'sha256'),
-      logs: path.join(state, 'logs'), diagnostics: path.join(state, 'diagnostics'), serviceRuntime: path.join(runtime, 'service'),
+      launchers: path.join(cache, 'launchers', 'sha256'), logs: path.join(state, 'logs'), diagnostics: path.join(state, 'diagnostics'), serviceRuntime: path.join(runtime, 'service'),
       unit: path.join(value.configHome, 'systemd', 'user', SERVICE_UNIT), journal: path.join(data, 'transactions', 'install.json'),
-      updateJournal: path.join(data, 'transactions', 'update.json'), updateLock: path.join(runtime, 'update.lock'),
-      installRecord: path.join(data, 'install.json'), current: path.join(data, 'current'), rollback: path.join(data, 'rollback'),
+      updateJournal: path.join(data, 'transactions', 'update.json'), selfUpdateJournal: path.join(data, 'transactions', 'launcher-update.json'), updateResult: path.join(state, 'last-update.json'), updateLock: path.join(runtime, 'update.lock'),
+      launcher: path.join(value.home, '.local', 'bin', 'voice-agent'), channelReceipt: path.join(cache, 'channel-stable.json'), installRecord: path.join(data, 'install.json'), current: path.join(data, 'current'), rollback: path.join(data, 'rollback'),
     };
   }
 
@@ -340,7 +341,7 @@ agent_environment:
     for (const directory of [layout.data, layout.releases, layout.transactions, layout.migrations, layout.appData,
       layout.agent, path.join(layout.agent, 'private'), path.join(layout.agent, 'workspace'), path.join(layout.agent, 'cache'), layout.agentRootfs,
       layout.config, layout.private, layout.cache, layout.downloads, path.dirname(layout.models), layout.models, path.dirname(layout.runtimes), layout.runtimes,
-      layout.state, layout.logs, layout.diagnostics, layout.runtime, layout.serviceRuntime, path.dirname(layout.unit)]) ensurePrivateDirectory(directory, uid);
+      path.dirname(layout.launchers), layout.launchers, layout.state, layout.logs, layout.diagnostics, layout.runtime, layout.serviceRuntime, path.dirname(layout.unit)]) ensurePrivateDirectory(directory, uid);
   }
 
   function renderUnit(layout, releaseRoot) {
@@ -415,11 +416,14 @@ agent_environment:
     if (!exists(layout.installRecord) || !exists(layout.current)) return null;
     const record = readPrivateJson(layout.installRecord, uid);
     const releaseId = `${release.version}-${release.artifact_sha256.slice(0, 12)}`;
-    const keys = ['artifact_sha256', 'build_id', 'channel', 'channel_sequence', 'healthy_release', 'installation_id', 'installed_at', 'launcher_protocol', 'release_id', 'rollback_release', 'schema', 'version'];
+    const oldKeys = ['artifact_sha256', 'build_id', 'channel', 'channel_sequence', 'healthy_release', 'installation_id', 'installed_at', 'launcher_protocol', 'release_id', 'rollback_release', 'schema', 'version'];
+    if (Object.keys(record).sort().join('\0') === oldKeys.sort().join('\0')) record.channel_authority_sha256 = null;
+    const keys = [...oldKeys, 'channel_authority_sha256'];
     if (Object.keys(record).sort().join('\0') !== keys.sort().join('\0') || record.schema !== 'voice-agent.installation.v1'
         || !/^[0-9a-f]{32}$/.test(record.installation_id) || !Number.isSafeInteger(record.channel_sequence) || record.channel_sequence < 1
         || record.launcher_protocol !== core.LAUNCHER_PROTOCOL || record.release_id !== releaseId || record.healthy_release !== releaseId
         || (record.rollback_release !== null && !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$/.test(record.rollback_release))
+        || (record.channel_authority_sha256 !== null && !/^[0-9a-f]{64}$/.test(record.channel_authority_sha256))
         || record.version !== release.version || record.build_id !== release.build_id
         || record.artifact_sha256 !== release.artifact_sha256 || record.channel !== 'stable' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(record.installed_at)) {
       error('existing_install_requires_doctor', 'an existing installation differs or is partial; run voice-agent doctor');
@@ -459,14 +463,20 @@ agent_environment:
       if (exists(layout.installRecord)) { try { trustedSequence = readPrivateJson(layout.installRecord, layout.identity.uid).channel_sequence || 0; } catch { error('existing_install_requires_doctor', 'existing installation metadata is invalid; run voice-agent doctor'); } }
       else if (exists(layout.journal)) { trustedSequence = readPrivateJson(layout.journal, layout.identity.uid).channel_sequence || 0; }
       const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, signed.publicKeyPem, { now: dependencies.clock.now(), trustedSequence });
+      const channelAuthority = digest(Buffer.from(signed.publicKeyPem));
       const release = selectRelease(channel);
       const acquired = await dependencies.source.acquireArtifact(release);
       if (!acquired || !acquired.artifactBytes || !acquired.manifestBytes || !acquired.archiveEntries || typeof acquired.readEntry !== 'function') error('artifact_unavailable', 'the authorized platform artifact is unavailable');
+      if (acquired.redirected === true || (acquired.url && acquired.url !== release.artifact_url)) error('artifact_redirect_refused', 'program artifact redirect or changed authority was refused');
       const manifest = core.verifyPlatformArtifact(acquired.artifactBytes, acquired.manifestBytes, release);
       const requirements = artifactPreflight(manifest, release, acquired.archiveEntries, acquired.manifestBytes);
       const payloadBytes = manifest.entries.reduce((total, entry) => total + (entry.type === 'file' ? entry.size : 0), 0);
       const facts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout });
-      compatibilityPreflight(facts, requirements, FREE_SPACE_RESERVE + release.artifact_bytes + payloadBytes);
+      const assetManager = core.loadAssetCache(api);
+      const descriptors = assetManager.validateDescriptors(release.assets);
+      const requiredAssetBytes = descriptors.filter((item) => item.reachability === 'required' && item.kind !== 'agent_environment_image').reduce((sum, item) => sum + item.size, 0);
+      const descriptorReserve = Math.max(0, ...descriptors.map((item) => item.required_free_space_reserve), release.launcher ? release.launcher.required_free_space_reserve : 0);
+      compatibilityPreflight(facts, requirements, FREE_SPACE_RESERVE + descriptorReserve + (release.artifact_bytes * 2) + payloadBytes + requiredAssetBytes + (release.launcher ? release.launcher.size * 2 : 0) + 4 * 1024 * 1024);
 
       if (anyManagedState(layout)) {
         if (exists(layout.journal)) {
@@ -493,6 +503,20 @@ agent_environment:
         installDirectories(layout);
         writeJournal(layout, journalBase, 'layout_created', dependencies);
       } else installDirectories(layout);
+      writeJson(layout.channelReceipt, { schema: 'voice-agent.cached-channel.v1', channel_base64: Buffer.from(signed.channelBytes).toString('base64'), signature_base64: Buffer.from(signed.signatureBytes).toString('base64'), public_key_base64: Buffer.from(signed.publicKeyPem).toString('base64'), authority_sha256: channelAuthority, sequence: channel.sequence, expires_at: channel.expires_at, verified_at: timestamp(dependencies.clock) }, layout.identity.uid);
+      const assetOutcome = await assetManager.reconcile(layout, descriptors, journalBase.id, dependencies.source, {
+        offline: false, applicationProtocol: manifest.application_protocol.minimum,
+        imageInspector: dependencies.host.inspectAgentImage ? (descriptor) => dependencies.host.inspectAgentImage(descriptor) : null,
+      });
+      if (assetOutcome.outcomes.some((item) => ['optional_unavailable', 'stale_spec'].includes(item.state))) output.info('Optional AgentEnvironment image/spec is stale or unavailable; persistent environment state was not pulled, rebuilt, or stopped.');
+      if (release.launcher) {
+        let launcherOutcome;
+        do { launcherOutcome = await assetManager.acquire(layout, release.launcher, journalBase.id, dependencies.source, { applicationProtocol: manifest.application_protocol.minimum }); } while (launcherOutcome.state === 'partial');
+      }
+      const programDescriptor = assetManager.programDescriptor(release);
+      let programOutcome;
+      do { programOutcome = await assetManager.acquire(layout, programDescriptor, journalBase.id, dependencies.source, { applicationProtocol: 1 }); } while (programOutcome.state === 'partial');
+      if (digest(core.readOwnedRegular(assetManager.cachePath(layout, programDescriptor), layout.identity.uid, [0o400], release.artifact_bytes)) !== release.artifact_sha256) error('artifact_cache_invalid', 'cached program artifact digest differs');
       let phase = readPrivateJson(layout.journal, layout.identity.uid).phase;
       if (['linger_enabled', 'unit_installed', 'service_started', 'ready_verified', 'healthy'].includes(phase)) serviceMutated = true;
 
@@ -519,6 +543,7 @@ agent_environment:
           platform: release.platform, channel: 'stable', channel_sequence: journalBase.channel_sequence, artifact_sha256: release.artifact_sha256,
           artifact_bytes: release.artifact_bytes, manifest_sha256: release.manifest_sha256, launcher_protocol: core.LAUNCHER_PROTOCOL,
           application_protocol: manifest.application_protocol, data_schema: manifest.data_schema, service_template_sha256: manifest.service_template_sha256,
+          asset_digests: descriptors.map((item) => item.sha256).sort(), launcher_sha256: release.launcher ? release.launcher.sha256 : null,
           verified_at: timestamp(dependencies.clock), readiness: { state: 'not_verified', checked_at: null },
         };
         atomicWrite(path.join(stage, 'release-record.json'), Buffer.from(core.canonicalJson(releaseRecord)), 0o600, layout.identity.uid);
@@ -571,7 +596,7 @@ agent_environment:
         fs.symlinkSync(`releases/${releaseId}`, pointerTemp); fs.renameSync(pointerTemp, layout.current); syncDirectory(layout.data);
         writeJson(layout.installRecord, {
           schema: 'voice-agent.installation.v1', installation_id: journalBase.id, channel: 'stable', channel_sequence: journalBase.channel_sequence,
-          launcher_protocol: core.LAUNCHER_PROTOCOL, release_id: releaseId, healthy_release: releaseId, rollback_release: null,
+          launcher_protocol: core.LAUNCHER_PROTOCOL, channel_authority_sha256: channelAuthority, release_id: releaseId, healthy_release: releaseId, rollback_release: null,
           version: release.version, build_id: release.build_id, artifact_sha256: release.artifact_sha256, installed_at: timestamp(dependencies.clock),
         }, layout.identity.uid);
         phase = writeJournal(layout, journalBase, 'healthy', dependencies).phase;
@@ -581,6 +606,10 @@ agent_environment:
         const finalReady = await dependencies.service.probe({ release_id: releaseId, build_id: release.build_id, deadline_ms: 0 });
         if (!validateReadiness(finalReady, release, layout.identity.uid)) error('candidate_not_ready', 'the committed candidate is not exact-ready; run voice-agent doctor');
         fs.unlinkSync(layout.journal); syncDirectory(layout.transactions);
+      }
+      if (release.launcher) {
+        const replacement = core.loadSelfUpdater().replace(layout, release.launcher, journalBase.id, releaseId, dependencies.selfUpdate || {});
+        if (replacement.state === 'old_launcher_restored') error('launcher_update_failed_safe', 'application install is durably healthy but launcher replacement failed and exact old launcher was restored');
       }
 
       output.info(`Voice Agent ${release.version} is installed, running, accepting admission, and five-component ready on http://127.0.0.1:8000.`);
@@ -681,11 +710,12 @@ agent_environment:
 
   function installContractSchemaNames() { return ['install-transaction.v1.schema.json', 'installation.v1.schema.json']; }
 
-  return {
+  api = {
     AGENT_CONFIG, AGENT_IMAGE, AGENT_SPEC_DIGEST, FREE_SPACE_RESERVE, MINIMUM_VRAM, REQUIRED_COMPONENTS, SERVICE_UNIT, STARTUP_DEADLINE_MS,
     UNIT_CONTRACT, UNIT_CONTRACT_SHA256, artifactPreflight, atomicWrite, compatibilityPreflight, defaultDependencies,
     ensurePrivateDirectory, extractVerifiedArchive, hostPreflight, installContractSchemaNames, installDirectories,
     installVoiceAgent, inspectManagedPath, layoutFor, readPrivateJson, renderAgentConfig, renderUnit, safeDefaults, syncDirectory,
     validateReadiness, verifyExtractedTree, writeJson,
   };
+  return api;
 };

@@ -238,14 +238,16 @@ module.exports = function createAdopter(core, installer, updater) {
     if (base.user.uid !== layout.identity.uid || base.user.name !== layout.identity.username || base.user.home !== layout.identity.home) error('host_user_invalid', 'host and invoking legacy service identities differ');
     const signed = await dependencies.source.acquireChannel();
     const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, signed.publicKeyPem, { now: dependencies.clock.now(), trustedSequence });
+    const authoritySha256 = digest(Buffer.from(signed.publicKeyPem));
     const release = selectRelease(channel);
     const acquired = await dependencies.source.acquireArtifact(release);
+    if (acquired.redirected === true || (acquired.url && acquired.url !== release.artifact_url)) error('artifact_redirect_refused', 'program artifact redirect or changed authority was refused');
     const manifest = core.verifyPlatformArtifact(acquired.artifactBytes, acquired.manifestBytes, release);
     const requirements = installer.artifactPreflight(manifest, release, acquired.archiveEntries, acquired.manifestBytes);
     const facts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout });
     const payload = manifest.entries.reduce((total, entry) => total + (entry.type === 'file' ? entry.size : 0), 0);
     installer.compatibilityPreflight(facts, requirements, installer.FREE_SPACE_RESERVE + release.artifact_bytes + payload);
-    return { channel, release, acquired, manifest };
+    return { channel, release, acquired, manifest, signed, authoritySha256 };
   }
 
   async function stageCandidate(layout, candidate, dependencies) {
@@ -262,8 +264,9 @@ module.exports = function createAdopter(core, installer, updater) {
       artifact_sha256: candidate.release.artifact_sha256, artifact_bytes: candidate.release.artifact_bytes,
       manifest_sha256: candidate.release.manifest_sha256, launcher_protocol: core.LAUNCHER_PROTOCOL,
       application_protocol: candidate.manifest.application_protocol, data_schema: candidate.manifest.data_schema,
-      service_template_sha256: candidate.manifest.service_template_sha256, verified_at: timestamp(dependencies.clock),
-      readiness: { state: 'not_verified', checked_at: null },
+      service_template_sha256: candidate.manifest.service_template_sha256,
+      asset_digests: candidate.release.assets.map((item) => item.sha256).sort(), launcher_sha256: candidate.release.launcher ? candidate.release.launcher.sha256 : null,
+      verified_at: timestamp(dependencies.clock), readiness: { state: 'not_verified', checked_at: null },
     })), 0o400, layout.identity.uid);
     fs.renameSync(stage, root); fs.chmodSync(root, 0o500); installer.syncDirectory(layout.releases);
     return updater.readRelease(layout, id);
@@ -398,7 +401,16 @@ module.exports = function createAdopter(core, installer, updater) {
       if (!journal.receipts.selected_imported) { importLegacyRelease(layout, evidence.selected, 'not_verified', dependencies); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { selected_imported: true } }); }
       if (!journal.receipts.config_committed) { preparePrivateConfig(layout, evidence, journal, dependencies); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { config_committed: true } }); }
       if (!journal.receipts.docker_recorded) { recordDocker(layout, evidence, dependencies); fault(dependencies, 'action', 'docker_recorded'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { docker_recorded: true } }); }
-      if (!candidate) { candidate = await stageCandidate(layout, acquired, dependencies); fault(dependencies, 'action', 'candidate_staged'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { candidate_staged: true } }); }
+      if (!candidate) {
+        const cache = core.loadAssetCache(installer);
+        installer.writeJson(layout.channelReceipt, { schema: 'voice-agent.cached-channel.v1', channel_base64: Buffer.from(acquired.signed.channelBytes).toString('base64'), signature_base64: Buffer.from(acquired.signed.signatureBytes).toString('base64'), public_key_base64: Buffer.from(acquired.signed.publicKeyPem).toString('base64'), authority_sha256: acquired.authoritySha256, sequence: acquired.channel.sequence, expires_at: acquired.channel.expires_at, verified_at: timestamp(dependencies.clock) }, layout.identity.uid);
+        await cache.reconcile(layout, acquired.release.assets, journal.id, dependencies.source, { applicationProtocol: acquired.manifest.application_protocol.minimum, imageInspector: dependencies.host.inspectAgentImage ? (descriptor) => dependencies.host.inspectAgentImage(descriptor) : null });
+        if (acquired.release.launcher) { let outcome; do { outcome = await cache.acquire(layout, acquired.release.launcher, journal.id, dependencies.source, { applicationProtocol: acquired.manifest.application_protocol.minimum }); } while (outcome.state === 'partial'); }
+        const programDescriptor = cache.programDescriptor(acquired.release); let programOutcome;
+        do { programOutcome = await cache.acquire(layout, programDescriptor, journal.id, dependencies.source, { applicationProtocol: 1 }); } while (programOutcome.state === 'partial');
+        if (digest(core.readOwnedRegular(cache.cachePath(layout, programDescriptor), layout.identity.uid, [0o400], acquired.release.artifact_bytes)) !== acquired.release.artifact_sha256) error('artifact_cache_invalid', 'cached program artifact digest differs');
+        candidate = await stageCandidate(layout, acquired, dependencies); fault(dependencies, 'action', 'candidate_staged'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { candidate_staged: true } });
+      }
       if (!journal.receipts.user_service_prepared) {
         const unitBytes = installer.renderUnit(layout, candidate.root);
         const unitExact = exists(layout.unit) && core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024).equals(unitBytes);
@@ -448,9 +460,11 @@ module.exports = function createAdopter(core, installer, updater) {
         journal = writeJournal(layout, journal, journal.phase, dependencies, { agent_environment: { ...journal.agent_environment, after }, receipts: { environment_after: true } });
       }
       markCandidateReady(layout, candidate, dependencies);
+      const channelAuthority = acquired ? acquired.authoritySha256 : installer.readPrivateJson(layout.channelReceipt, layout.identity.uid).authority_sha256;
+      if (!/^[0-9a-f]{64}$/.test(channelAuthority)) error('channel_authority_invalid', 'cached adoption channel authority is invalid');
       installer.writeJson(layout.installRecord, {
         schema: 'voice-agent.installation.v1', installation_id: journal.id, channel: 'stable', channel_sequence: candidate.record.channel_sequence,
-        launcher_protocol: core.LAUNCHER_PROTOCOL, release_id: candidate.id, healthy_release: candidate.id, rollback_release: journal.prior_healthy,
+        launcher_protocol: core.LAUNCHER_PROTOCOL, channel_authority_sha256: channelAuthority, release_id: candidate.id, healthy_release: candidate.id, rollback_release: journal.prior_healthy,
         version: candidate.record.version, build_id: candidate.record.build_id, artifact_sha256: candidate.record.artifact_sha256, installed_at: timestamp(dependencies.clock),
       }, layout.identity.uid);
       journal = writeJournal(layout, journal, 'committed', dependencies);
@@ -463,6 +477,19 @@ module.exports = function createAdopter(core, installer, updater) {
       const snapshotRoot = path.join(layout.migrations, journal.id);
       if (exists(snapshotRoot)) { fs.rmSync(snapshotRoot, { recursive: true }); installer.syncDirectory(layout.migrations); }
       fs.unlinkSync(layout.adoptionJournal); installer.syncDirectory(layout.transactions);
+      let launcherDescriptor = acquired && acquired.release.launcher;
+      if (!acquired && exists(layout.channelReceipt)) {
+        const receipt = installer.readPrivateJson(layout.channelReceipt, layout.identity.uid);
+        try {
+          const channel = core.verifySignedChannel(Buffer.from(receipt.channel_base64, 'base64'), Buffer.from(receipt.signature_base64, 'base64'), Buffer.from(receipt.public_key_base64, 'base64'), { now: dependencies.clock.now(), trustedSequence: candidate.record.channel_sequence });
+          const exactRelease = channel.releases.find((item) => item.artifact_sha256 === candidate.record.artifact_sha256);
+          launcherDescriptor = exactRelease && exactRelease.launcher;
+        } catch { error('channel_receipt_invalid', 'cached adoption channel receipt is invalid'); }
+      }
+      if (launcherDescriptor) {
+        const replacement = core.loadSelfUpdater().replace(layout, launcherDescriptor, journal.id, candidate.id, dependencies.selfUpdate || {});
+        if (replacement.state === 'old_launcher_restored') error('launcher_update_failed_safe', 'adopted application is durably healthy but launcher replacement failed and exact old launcher was restored');
+      }
       const output = dependencies.output || { info() {} };
       output.info(`Voice Agent ${candidate.record.version} adopted the exact legacy runtime as rollback custody and is five-component ready.`);
       output.info(`Agent tools: disabled; Docker endpoint: ${evidence.docker.state === 'available' ? 'verified rootless' : 'unavailable'}; Telegram: disabled.`);

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/asset-descriptor.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "platform", "url", "authority", "license", "size", "sha256", "digest", "required_free_space_reserve", "compatibility", "reachability"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+    "kind": {"enum": ["model", "runtime", "agent_environment_image", "launcher"]},
+    "platform": {"const": "linux-x86_64-nvidia"},
+    "url": {"type": "string", "maxLength": 2048, "pattern": "^https://"},
+    "authority": {
+      "type": "object", "additionalProperties": false, "required": ["origin", "path_prefix"],
+      "properties": {"origin": {"type": "string", "pattern": "^https://"}, "path_prefix": {"type": "string", "pattern": "^/"}}
+    },
+    "license": {
+      "type": "object", "additionalProperties": false, "required": ["id", "acceptance"],
+      "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 128}, "acceptance": {"enum": ["accepted", "not_required"]}}
+    },
+    "size": {"type": "integer", "minimum": 1},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "required_free_space_reserve": {"type": "integer", "minimum": 0},
+    "compatibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimum_launcher_protocol", "maximum_launcher_protocol", "minimum_application_protocol", "maximum_application_protocol"],
+      "properties": {
+        "minimum_launcher_protocol": {"type": "integer", "minimum": 1}, "maximum_launcher_protocol": {"type": "integer", "minimum": 1},
+        "minimum_application_protocol": {"type": "integer", "minimum": 1}, "maximum_application_protocol": {"type": "integer", "minimum": 1}
+      }
+    },
+    "reachability": {"enum": ["required", "optional"]}
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/cached-channel.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "channel_base64", "signature_base64", "public_key_base64", "authority_sha256", "sequence", "expires_at", "verified_at"],
+  "properties": {
+    "schema": {"const": "voice-agent.cached-channel.v1"},
+    "channel_base64": {"type": "string", "maxLength": 524288},
+    "signature_base64": {"type": "string", "maxLength": 1024},
+    "public_key_base64": {"type": "string", "maxLength": 16384},
+    "authority_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "expires_at": {"type": "string"}, "verified_at": {"type": "string"}
+  }
+}

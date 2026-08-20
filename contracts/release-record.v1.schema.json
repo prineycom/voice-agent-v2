@@ -3,7 +3,7 @@
   "$id": "https://voice-agent-v2.local/contracts/release-record.v1.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "release_id", "version", "build_id", "platform", "channel", "channel_sequence", "artifact_sha256", "artifact_bytes", "manifest_sha256", "launcher_protocol", "application_protocol", "data_schema", "service_template_sha256", "verified_at", "readiness"],
+  "required": ["schema", "release_id", "version", "build_id", "platform", "channel", "channel_sequence", "artifact_sha256", "artifact_bytes", "manifest_sha256", "launcher_protocol", "application_protocol", "data_schema", "service_template_sha256", "asset_digests", "launcher_sha256", "verified_at", "readiness"],
   "properties": {
     "schema": {"const": "voice-agent.release-record.v1"},
     "release_id": {"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"},
@@ -14,6 +14,8 @@
     "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "launcher_protocol": {"const": 1},
     "application_protocol": {"$ref": "#/$defs/range"}, "data_schema": {"$ref": "#/$defs/range"},
     "service_template_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "asset_digests": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "launcher_sha256": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
     "verified_at": {"type": "string"},
     "readiness": {
       "type": "object", "additionalProperties": false, "required": ["state", "checked_at"],
