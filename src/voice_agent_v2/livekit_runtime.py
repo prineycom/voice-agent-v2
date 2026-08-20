@@ -31,6 +31,7 @@ from .diagnostics import (
     PrivacySafeTrace,
     TraceIdentity,
 )
+from .instance_runtime import listener_port, mutable_path, selected_instance_root
 from .local_lfm import MODEL_ALIAS, LocalLFMProvider
 from .local_stt import WhisperSTT
 from .real_turn import RealTurnController
@@ -53,7 +54,10 @@ AUDIO_FRAME_BYTES = OUTPUT_FRAME_BYTES
 AUDIO_QUEUE_MS = 100
 BROWSER_CONTROL_QUEUE_SIZE = 32
 MAX_SESSION_OBSERVATIONS = 128
-TRACE_ROOT = Path.home() / ".cache/voice-agent-v2/slice-6/diagnostics"
+TRACE_ROOT = mutable_path(
+    "runtime/diagnostics",
+    legacy=Path.home() / ".cache/voice-agent-v2/slice-6/diagnostics",
+)
 OPERATIONAL_PROBE_TIMEOUT_SECONDS = 0.1
 OPERATIONAL_PROBE_BODY_LIMIT_BYTES = 4_096
 LOCAL_LFM_HOST = "127.0.0.1"
@@ -87,10 +91,11 @@ def livekit_endpoint_ready(url: str, timeout: float = OPERATIONAL_PROBE_TIMEOUT_
 
 def local_lfm_endpoint_health(
     host: str = LOCAL_LFM_HOST,
-    port: int = LOCAL_LFM_PORT,
+    port: int | None = None,
     timeout: float = OPERATIONAL_PROBE_TIMEOUT_SECONDS,
 ) -> str:
-    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    effective_port = listener_port("VOICE_AGENT_LLM_PORT", LOCAL_LFM_PORT) if port is None else port
+    connection = http.client.HTTPConnection(host, effective_port, timeout=timeout)
     try:
         connection.request("GET", "/health", headers={"Connection": "close"})
         response = connection.getresponse()
@@ -125,10 +130,20 @@ class LiveTurnRunner:
         del settings
         runtime = agent_runtime or AgentRuntime.startup()
         if runtime.config is not None and runtime.config.model.agent.enabled:
-            home = AgentUserContext.effective().home
+            selected_root = selected_instance_root()
+            if selected_root is None:
+                home = AgentUserContext.effective().home
+                installation_root = home / ".cache" / "voice-agent-v2" / "agent-environment"
+                credential_root = None
+            else:
+                installation_root = selected_root / "agent-environment"
+                credential_root = selected_root / "credentials"
             self.llm = AgentRunProvider(
                 runtime.config,
-                installation_root=home / ".cache" / "voice-agent-v2" / "agent-environment",
+                installation_root=installation_root,
+                credential_root=credential_root,
+                workspace_root=(selected_root / "workspace") if selected_root is not None else None,
+                cache_root=(selected_root / "cache" / "agent-environment") if selected_root is not None else None,
             )
         else:
             # Configuration failure disables tools only; ordinary voice stays on

@@ -17,10 +17,14 @@ from voice_agent_v2.stand_dev import (
     config_path,
     controller_source_path,
     deploy_local_dev,
+    deploy_remote,
     deploy_remote_dev,
     initialize,
+    launcher_environment,
+    logs,
     parse_private_config,
     selected_release,
+    status,
 )
 
 
@@ -235,6 +239,138 @@ class StandDevTests(unittest.TestCase):
             (controller / "dirty.txt").write_text("dirty\n", encoding="utf-8")
             with self.assertRaisesRegex(StandError, "dirty"):
                 deploy_local_dev(state_root=state, repository=controller, commit=commit, command=command)
+
+    def test_main_and_dev_have_independent_complete_loopback_stack_contracts(self) -> None:
+        from voice_agent_v2.agent_environment_config import DEFAULT_CONFIG_BYTES, parse_agent_config_v2
+        from voice_agent_v2.agent_run_provider import AgentRunProvider
+        from voice_agent_v2.local_lfm import LocalLFMProvider
+        from voice_agent_v2.slice6_config import Slice6Settings, livekit_server_config
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, first_commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            second_commit = self.commit_remote_revision(controller, "second release")
+
+            self.assertEqual(
+                deploy_remote(state_root=state, instance="main", ref="remote-tag", command=command),
+                first_commit,
+            )
+            self.assertEqual(
+                deploy_remote(state_root=state, instance="dev", ref="main", command=command),
+                second_commit,
+            )
+            main_selected = selected_release(state, "main")
+            dev_selected = selected_release(state, "dev")
+            assert main_selected is not None and dev_selected is not None
+            self.assertNotEqual(os.readlink(state / "instances/main/current"), os.readlink(state / "instances/dev/current"))
+            self.assertEqual(main_selected[0], first_commit)
+            self.assertEqual(dev_selected[0], second_commit)
+            self.assertEqual(main_selected[1].parent, dev_selected[1].parent)
+
+            environments: dict[str, dict[str, str]] = {}
+            for instance, commit in (("main", first_commit), ("dev", second_commit)):
+                python, arguments, environment = launcher_environment(
+                    state_root=state, instance=instance, environment={"XDG_CACHE_HOME": str(root / "shared")},
+                )
+                environments[instance] = environment
+                self.assertEqual(arguments[0], str(python))
+                self.assertEqual(environment["VOICE_AGENT_BUILD_ID"], commit)
+                self.assertEqual(environment["VOICE_AGENT_RELEASE_ID"], commit[:24])
+                self.assertEqual(environment["STAND_NAME"], instance)
+                self.assertEqual(environment["VOICE_AGENT_SHARED_CACHE_ROOT"], str(root / "shared/voice-agent-v2"))
+                instance_root = (state / "instances" / instance).resolve()
+                self.assertEqual(environment["VOICE_AGENT_INSTANCE_ROOT"], str(instance_root))
+                for name in (
+                    "VOICE_AGENT_DATA_ROOT", "VOICE_AGENT_MUTABLE_CACHE_ROOT",
+                    "VOICE_AGENT_TASK_RUNTIME_ROOT", "VOICE_AGENT_WORKSPACE_ROOT",
+                    "VOICE_AGENT_CREDENTIALS_ROOT", "VOICE_AGENT_AGENT_ENVIRONMENT_ROOT",
+                    "XDG_CACHE_HOME", "PYTHONPYCACHEPREFIX",
+                ):
+                    self.assertTrue(Path(environment[name]).is_relative_to(instance_root), name)
+                settings = Slice6Settings.from_environment(environment, project_root=main_selected[1] / "source")
+                self.assertEqual(settings.livekit_internal_url, environment["LIVEKIT_INTERNAL_URL"])
+                server = json.loads(livekit_server_config(environment))
+                self.assertEqual(server["bind_addresses"], ["127.0.0.1"])
+                self.assertEqual(server["rtc"]["node_ip"], "127.0.0.1")
+                self.assertEqual(server["port"], int(environment["VOICE_AGENT_LIVEKIT_PORT"]))
+                self.assertEqual(server["rtc"]["udp_port"], int(environment["VOICE_AGENT_RTC_UDP_PORT"]))
+                with patch.dict(os.environ, environment, clear=True):
+                    provider = LocalLFMProvider()
+                self.assertEqual(provider._host, "127.0.0.1")
+                self.assertEqual(provider._port, int(environment["VOICE_AGENT_LLM_PORT"]))
+
+                agent_provider = AgentRunProvider(
+                    parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
+                    installation_root=Path(environment["VOICE_AGENT_AGENT_ENVIRONMENT_ROOT"]),
+                    credential_root=Path(environment["VOICE_AGENT_CREDENTIALS_ROOT"]),
+                    workspace_root=Path(environment["VOICE_AGENT_WORKSPACE_ROOT"]),
+                    cache_root=Path(environment["VOICE_AGENT_MUTABLE_CACHE_ROOT"]) / "agent-environment",
+                )
+                self.assertEqual(
+                    agent_provider.environment.state_root,
+                    instance_root / "agent-environment/private",
+                )
+                self.assertEqual(agent_provider.environment.workspace, instance_root / "workspace")
+                self.assertEqual(agent_provider.environment.cache, instance_root / "cache/agent-environment")
+                self.assertEqual(
+                    agent_provider.environment.credential_store.path,
+                    instance_root / "credentials/credentials.json",
+                )
+
+            main_values = parse_private_config(config_path(state, "main"))
+            dev_values = parse_private_config(config_path(state, "dev"))
+            self.assertFalse(
+                {main_values[name] for name in (
+                    "VOICE_AGENT_LLM_PORT", "VOICE_AGENT_LIVEKIT_PORT",
+                    "VOICE_AGENT_RTC_UDP_PORT", "VOICE_AGENT_GATEWAY_PORT",
+                )} & {dev_values[name] for name in (
+                    "VOICE_AGENT_LLM_PORT", "VOICE_AGENT_LIVEKIT_PORT",
+                    "VOICE_AGENT_RTC_UDP_PORT", "VOICE_AGENT_GATEWAY_PORT",
+                )}
+            )
+            self.assertNotEqual(main_values["LIVEKIT_API_KEY"], dev_values["LIVEKIT_API_KEY"])
+            self.assertNotEqual(main_values["LIVEKIT_API_SECRET"], dev_values["LIVEKIT_API_SECRET"])
+            for name in (
+                "VOICE_AGENT_DATA_ROOT", "VOICE_AGENT_MUTABLE_CACHE_ROOT",
+                "VOICE_AGENT_TASK_RUNTIME_ROOT", "VOICE_AGENT_WORKSPACE_ROOT",
+                "VOICE_AGENT_CREDENTIALS_ROOT", "VOICE_AGENT_AGENT_ENVIRONMENT_ROOT",
+                "XDG_CACHE_HOME", "PYTHONPYCACHEPREFIX",
+            ):
+                self.assertNotEqual(environments["main"][name], environments["dev"][name])
+
+            main_status = status(state_root=state, instance="main", command=command)
+            dev_status = status(state_root=state, instance="dev", command=command)
+            self.assertIn(f"stand status main\nversion: {first_commit}", main_status)
+            self.assertIn(f"stand status dev\nversion: {second_commit}", dev_status)
+            self.assertIn(
+                f"stand logs main\nversion: {first_commit}\nunit: voice-agent-v2@main.service",
+                logs(state_root=state, instance="main", command=command),
+            )
+            self.assertIn(
+                f"stand logs dev\nversion: {second_commit}\nunit: voice-agent-v2@dev.service",
+                logs(state_root=state, instance="dev", command=command),
+            )
+            self.assertIn(("systemctl", "--user", "start", "voice-agent-v2@main.service"), command.calls)
+            self.assertIn(("systemctl", "--user", "start", "voice-agent-v2@dev.service"), command.calls)
+
+    def test_selected_instance_never_falls_back_to_legacy_mutable_paths_or_ports(self) -> None:
+        from voice_agent_v2.agent_config import AgentUserContext
+        from voice_agent_v2.instance_runtime import InstanceRuntimeError, listener_port, mutable_path
+
+        instance = Path("/tmp/voice-agent-instance-contract")
+        selected = {"VOICE_AGENT_INSTANCE_ROOT": str(instance)}
+        self.assertEqual(
+            mutable_path("runtime/traces", legacy=Path.home() / ".cache/legacy", environment=selected),
+            instance / "runtime/traces",
+        )
+        with self.assertRaisesRegex(InstanceRuntimeError, "requires explicit"):
+            listener_port("VOICE_AGENT_LLM_PORT", 18080, selected)
+        with patch.dict(os.environ, selected, clear=True):
+            context = AgentUserContext.effective()
+        self.assertEqual(context.profile_root, instance / "config/agent-profile")
+        self.assertNotEqual(context.profile_root, context.home / ".voice-agent")
 
 
 if __name__ == "__main__":

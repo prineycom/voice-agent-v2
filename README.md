@@ -45,22 +45,26 @@ The direct pull-request path is intentionally simple: run `./verify` locally onc
 
 It never installs packages, starts services, writes files, or changes user/system configuration. A Docker package alone is not sufficient: the report requires the current user's linger-enabled user-systemd rootless Docker daemon and the registered NVIDIA runtime.
 
-### Local dev release stand
+### Isolated local main and dev release stands
 
-Initialize the operator-owned state once. It creates external mutable state under `~/.local/share/voice-agent-v2`, including one ordinary user Git clone at `source/`, private `main`/`dev` mode-`0600` data-only configuration files, and the user-systemd template. The clone uses the controller's existing `origin` and ordinary user Git authentication; the command neither creates nor stores an access token. The generated ports are explicit loopback values and must be edited deliberately, never auto-allocated.
+Initialize the operator-owned state once. It creates external mutable state under `~/.local/share/voice-agent-v2`, including one ordinary user Git clone at `source/`, private `main`/`dev` mode-`0600` data-only configuration files, and the user-systemd template. The clone uses the controller's existing `origin` and ordinary user Git authentication; the command neither creates nor stores an access token. Each instance has explicit non-overlapping loopback ports, generated LiveKit credentials, and private data, cache/runtime, workspace, credential, and Docker AgentEnvironment paths. Only completed immutable releases and heavy immutable runtime/model caches are shared.
 
 ```sh
 ./stand init
+./stand deploy main <remote-branch|tag|40-lowercase-sha>
 ./stand deploy dev <remote-branch|tag|40-lowercase-sha>
-# The Issue #66 local committed-SHA path remains available:
+# The exact local committed-SHA path is available for either instance:
+./stand deploy main --local /path/to/voice-agent-v2 <40-lowercase-committed-sha>
 ./stand deploy dev --local /path/to/voice-agent-v2 <40-lowercase-committed-sha>
+./stand status main
 ./stand status dev
+./stand logs main
 ./stand logs dev
 ```
 
-Remote deployment fetches one permitted branch, tag, or full SHA and resolves it to one full commit SHA before construction or selection. Both paths build only that commit's `git archive` snapshot, with no `.git`; the temporary release contains the production frontend build, a per-release Python environment from `requirements-stand-production.lock`, and a manifest before atomic promotion. A completed release for the same SHA is reused. Frontend `node_modules` are removed after a successful build and releases are never deleted automatically. A fetch, resolution, build, or manifest failure leaves completed releases and `instances/dev/current` unchanged.
+Remote deployment fetches one permitted branch, tag, or full SHA and resolves it to one full commit SHA before construction or selection. Both paths build only that commit's `git archive` snapshot, with no `.git`; the temporary release contains the production frontend build, a per-release Python environment from `requirements-stand-production.lock`, and a manifest before atomic promotion. A completed release for the same SHA is reused. Frontend `node_modules` are removed after a successful build and releases are never deleted automatically. A fetch, resolution, build, or manifest failure leaves completed releases and the target instance's `current` pointer unchanged.
 
-It then starts `voice-agent-v2@dev.service`; a setup/readiness failure leaves the selected SHA visible as `not-ready` for diagnosis rather than claiming it started. `stand logs dev` reads only that unit's user journald records. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell. Main/version selection and later lifecycle behavior remain separately scoped.
+Deployment starts only `voice-agent-v2@<instance>.service`; a setup/readiness failure leaves that instance's selected SHA visible as `not-ready` for diagnosis rather than claiming it started. Status and logs include the requested instance and exact selected commit and query only its systemd unit. The launcher exports `VOICE_AGENT_INSTANCE_ROOT` and fail-closed explicit listener/path values before starting a complete LLM, LiveKit, gateway, STT, and two-worker TTS stack. Runtime process-tree RSS/count measurements are written to that unit's journal with `shared_inference=false`. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell. SemVer-only main admission, rollback, and later lifecycle completion remain separately scoped.
 
 The narrow immutable-release check remains available without the test runtime:
 
