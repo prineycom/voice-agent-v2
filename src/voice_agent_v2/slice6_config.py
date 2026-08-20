@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
+from .instance_runtime import listener_port
 from .runtime_directory import require_lifetime_runtime_root
 
 
@@ -23,13 +24,15 @@ class Slice6ConfigurationError(ValueError):
     pass
 
 
-def livekit_server_config() -> str:
+def livekit_server_config(environment: dict[str, str] | None = None) -> str:
+    signal_port = listener_port("VOICE_AGENT_LIVEKIT_PORT", 7880, environment)
+    rtc_udp_port = listener_port("VOICE_AGENT_RTC_UDP_PORT", 7882, environment)
     config = {
-        "port": 7880,
+        "port": signal_port,
         "bind_addresses": ["127.0.0.1"],
         "rtc": {
             "tcp_port": 0,
-            "udp_port": 7882,
+            "udp_port": rtc_udp_port,
             "use_external_ip": False,
             "node_ip": "127.0.0.1",
             "interfaces": {"includes": ["lo"]},
@@ -153,17 +156,23 @@ class Slice6Settings:
             loopback=True,
         )
         internal_endpoint = urlsplit(internal_url)
-        if internal_endpoint.hostname != "127.0.0.1" or internal_endpoint.port != 7880:
+        livekit_port = listener_port("VOICE_AGENT_LIVEKIT_PORT", 7880, values)
+        gateway_port = listener_port("VOICE_AGENT_GATEWAY_PORT", 8000, values)
+        # Validate the remaining complete-stack listeners even though settings
+        # do not expose them directly.
+        listener_port("VOICE_AGENT_LLM_PORT", 18080, values)
+        listener_port("VOICE_AGENT_RTC_UDP_PORT", 7882, values)
+        if internal_endpoint.hostname != "127.0.0.1" or internal_endpoint.port != livekit_port:
             raise Slice6ConfigurationError(
-                "LIVEKIT_INTERNAL_URL must match the IPv4 loopback listener"
+                "LIVEKIT_INTERNAL_URL must match the explicit IPv4 loopback listener"
             )
         public_url = _url(
-            values.get("LIVEKIT_PUBLIC_URL", "ws://127.0.0.1:7880"),
+            values.get("LIVEKIT_PUBLIC_URL", f"ws://127.0.0.1:{livekit_port}"),
             name="LIVEKIT_PUBLIC_URL",
             schemes={"ws", "wss"},
         )
         app_public_url = _url(
-            values.get("SLICE6_APP_PUBLIC_URL", LOOPBACK_APP_ORIGIN),
+            values.get("SLICE6_APP_PUBLIC_URL", f"http://127.0.0.1:{gateway_port}"),
             name="SLICE6_APP_PUBLIC_URL",
             schemes={"http", "https"},
         )

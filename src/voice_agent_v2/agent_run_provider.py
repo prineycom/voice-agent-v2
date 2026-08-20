@@ -7,6 +7,7 @@ from typing import Callable
 
 from .agent_environment import AgentEnvironment
 from .agent_environment_config import AgentConfigV2Snapshot
+from .agent_environment_credentials import InstallationCredentialStore
 from .agent_run import AgentRealtimeIdentity, AgentRun, ExactLocalLFMAgentAdapter
 from .contracts import LLM_VERSION, StageFailure
 from .local_lfm import LocalLFMProvider, MODEL_ALIAS, PROVIDER_IDENTITY
@@ -28,6 +29,9 @@ class AgentRunProvider:
         config: AgentConfigV2Snapshot,
         *,
         installation_root: Path,
+        credential_root: Path | None = None,
+        workspace_root: Path | None = None,
+        cache_root: Path | None = None,
         provider: LocalLFMProvider | None = None,
     ) -> None:
         selected = provider or LocalLFMProvider(request_timeout_seconds=120)
@@ -35,8 +39,12 @@ class AgentRunProvider:
         self.environment = AgentEnvironment(
             config,
             state_root=installation_root / "private",
-            workspace=installation_root / "workspace",
-            cache=installation_root / "cache",
+            workspace=workspace_root or (installation_root / "workspace"),
+            cache=cache_root or (installation_root / "cache"),
+            credential_store=(
+                InstallationCredentialStore(credential_root)
+                if credential_root is not None else None
+            ),
         )
         self.agent_run = AgentRun(
             self.environment,

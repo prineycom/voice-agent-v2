@@ -109,9 +109,7 @@ def config_path(state_root: Path, instance: str) -> Path:
 
 
 def _config_values(instance: str) -> dict[str, str]:
-    # The first runnable dev stand uses the existing foreground launcher's fixed
-    # loopback ports.  `main` is initialized but is intentionally not runnable
-    # until the later side-by-side isolation slice.
+    # Both complete stacks use explicit, non-overlapping loopback listeners.
     offset = 0 if instance == "dev" else 1
     livekit_port = 7880 + offset * 3
     return {
@@ -179,7 +177,22 @@ def parse_private_config(path: Path) -> dict[str, str]:
     expected_livekit_url = f"ws://127.0.0.1:{values['VOICE_AGENT_LIVEKIT_PORT']}"
     if values["LIVEKIT_INTERNAL_URL"] != expected_livekit_url or values["LIVEKIT_PUBLIC_URL"] != expected_livekit_url:
         raise StandError("private configuration must use its explicit loopback LiveKit port")
+    if len({values[key] for key in PORT_KEYS}) != len(PORT_KEYS):
+        raise StandError("private configuration listener ports must be distinct")
     return values
+
+
+def validate_instance_isolation(state_root: Path) -> None:
+    """Refuse overlapping listeners, identity, or credential material."""
+    main = parse_private_config(config_path(state_root, "main"))
+    dev = parse_private_config(config_path(state_root, "dev"))
+    if main["STAND_NAME"] != "main" or dev["STAND_NAME"] != "dev":
+        raise StandError("private configuration is assigned to the wrong instance")
+    if {main[key] for key in PORT_KEYS} & {dev[key] for key in PORT_KEYS}:
+        raise StandError("main and dev listener ports must not overlap")
+    for key in ("LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        if main[key] == dev[key]:
+            raise StandError("main and dev credentials must be independent")
 
 
 def unit_template(*, stand_executable: Path, state_root: Path) -> str:
@@ -225,6 +238,7 @@ def initialize(
         ):
             _mkdir_private(root / relative)
         _write_private_config(config_path(state_root, instance), _config_values(instance))
+    validate_instance_isolation(state_root)
     if controller_repository is not None:
         if command is None:
             raise StandError("controller clone requires the Git command boundary")
@@ -507,64 +521,128 @@ def status(*, state_root: Path, instance: str, command: CommandRunner) -> str:
     return f"stand status {instance}\nversion: {commit}\nreadiness: {readiness}"
 
 
-def logs(*, instance: str, command: CommandRunner) -> str:
-    result = command.run(("journalctl", "--user", "-u", unit_for(instance), "--no-pager"))
+def logs(*, state_root: Path, instance: str, command: CommandRunner) -> str:
+    selected = selected_release(state_root, instance)
+    version = selected[0] if selected is not None else "none"
+    unit = unit_for(instance)
+    result = command.run(("journalctl", "--user", "-u", unit, "--no-pager"))
     if result.returncode != 0:
         raise StandError("journald records for the selected stand are unavailable")
-    return result.stdout.rstrip("\n")
+    records = result.stdout.rstrip("\n")
+    header = f"stand logs {instance}\nversion: {version}\nunit: {unit}"
+    return f"{header}\n{records}" if records else header
 
 
-def _deploy_dev_release(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> str:
-    values = parse_private_config(config_path(state_root, "dev"))
-    if values["STAND_NAME"] != "dev":
-        raise StandError("dev configuration identifies another stand")
+def _deploy_instance_release(
+    *, state_root: Path, instance: str, repository: Path, commit: str,
+    command: CommandRunner,
+) -> str:
+    values = parse_private_config(config_path(state_root, instance))
+    if values["STAND_NAME"] != instance:
+        raise StandError("instance configuration identifies another stand")
     release = build_release(state_root=state_root, repository=repository, commit=commit, command=command)
-    select_release(state_root=state_root, instance="dev", release=release)
+    select_release(state_root=state_root, instance=instance, release=release)
     try:
-        start(instance="dev", command=command)
+        start(instance=instance, command=command)
     except StandError as error:
         # The selected release intentionally remains visible for diagnosis.
         raise StandError(f"release selected but readiness failed: {error}") from error
     return commit
 
 
+def deploy_local(
+    *, state_root: Path, instance: str, repository: Path, commit: str,
+    command: CommandRunner,
+) -> str:
+    """Select an exact local commit for either isolated instance."""
+    values = parse_private_config(config_path(state_root, instance))
+    if values["STAND_NAME"] != instance:
+        raise StandError("instance configuration identifies another stand")
+    local_release = build_local_release(
+        state_root=state_root, repository=repository, commit=commit, command=command,
+    )
+    return _deploy_instance_release(
+        state_root=state_root, instance=instance, repository=repository,
+        commit=str(_release_manifest(local_release)["commit"]), command=command,
+    )
+
+
 def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> str:
     """Issue #66's clean local SHA selection remains available unchanged."""
-    values = parse_private_config(config_path(state_root, "dev"))
-    if values["STAND_NAME"] != "dev":
-        raise StandError("dev configuration identifies another stand")
-    local_release = build_local_release(state_root=state_root, repository=repository, commit=commit, command=command)
-    return _deploy_dev_release(
-        state_root=state_root, repository=repository, commit=str(_release_manifest(local_release)["commit"]), command=command,
+    return deploy_local(
+        state_root=state_root, instance="dev", repository=repository,
+        commit=commit, command=command,
+    )
+
+
+def deploy_remote(*, state_root: Path, instance: str, ref: str, command: CommandRunner) -> str:
+    """Resolve remote Git state before any release construction or selection."""
+    values = parse_private_config(config_path(state_root, instance))
+    if values["STAND_NAME"] != instance:
+        raise StandError("instance configuration identifies another stand")
+    commit = resolve_remote_dev_ref(state_root=state_root, ref=ref, command=command)
+    return _deploy_instance_release(
+        state_root=state_root, instance=instance,
+        repository=controller_source_path(state_root), commit=commit, command=command,
     )
 
 
 def deploy_remote_dev(*, state_root: Path, ref: str, command: CommandRunner) -> str:
-    """Resolve remote Git state before any release construction or selection."""
-    values = parse_private_config(config_path(state_root, "dev"))
-    if values["STAND_NAME"] != "dev":
-        raise StandError("dev configuration identifies another stand")
-    commit = resolve_remote_dev_ref(state_root=state_root, ref=ref, command=command)
-    return _deploy_dev_release(
-        state_root=state_root, repository=controller_source_path(state_root), commit=commit, command=command,
-    )
+    return deploy_remote(state_root=state_root, instance="dev", ref=ref, command=command)
 
 
-def exec_launcher(*, state_root: Path, instance: str) -> None:
-    """Replace systemd's process with the established child-owning foreground runner."""
+def launcher_environment(
+    *, state_root: Path, instance: str, environment: Mapping[str, str] | None = None,
+) -> tuple[Path, tuple[str, ...], dict[str, str]]:
+    """Build the fail-closed exact-release environment for one foreground stack."""
     selected = selected_release(state_root, instance)
     if selected is None:
         raise StandError("launcher has no selected immutable release")
+    commit, release = selected
+    validate_instance_isolation(state_root)
     values = parse_private_config(config_path(state_root, instance))
     if values["STAND_NAME"] != instance:
         raise StandError("launcher configuration identifies another stand")
-    _, release = selected
+    root = instance_root(state_root, instance).resolve()
+    private_paths = {
+        "VOICE_AGENT_DATA_ROOT": root / "data",
+        "VOICE_AGENT_MUTABLE_CACHE_ROOT": root / "cache",
+        "VOICE_AGENT_TASK_RUNTIME_ROOT": root / "runtime" / "inference",
+        "VOICE_AGENT_WORKSPACE_ROOT": root / "workspace",
+        "VOICE_AGENT_CREDENTIALS_ROOT": root / "credentials",
+        "VOICE_AGENT_AGENT_ENVIRONMENT_ROOT": root / "agent-environment",
+    }
+    for path in private_paths.values():
+        if not path.is_relative_to(root):
+            raise StandError("launcher mutable path escaped the selected instance")
     launcher = release / "source" / "scripts" / "run_slice6.py"
-    if not launcher.is_file():
-        raise StandError("selected release lacks the foreground launcher")
-    environment = dict(os.environ)
-    environment.pop("LITELLM_BASE_URL", None)
-    environment.pop("LITELLM_TOKEN_FILE", None)
-    environment.update(values)
-    environment["VOICE_AGENT_INSTANCE_ROOT"] = str(instance_root(state_root, instance))
-    os.execve(sys.executable, (sys.executable, "-B", str(launcher)), environment)
+    python = release / "python" / "bin" / "python"
+    if not launcher.is_file() or not python.is_file():
+        raise StandError("selected release lacks its foreground runtime")
+    result = dict(os.environ if environment is None else environment)
+    shared_cache = Path(
+        result.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))
+    ).expanduser() / "voice-agent-v2"
+    result.pop("LITELLM_BASE_URL", None)
+    result.pop("LITELLM_TOKEN_FILE", None)
+    result.update(values)
+    result.update({name: str(path) for name, path in private_paths.items()})
+    result.update({
+        "VOICE_AGENT_INSTANCE_ROOT": str(root),
+        "VOICE_AGENT_SHARED_CACHE_ROOT": str(shared_cache),
+        "VOICE_AGENT_BUILD_ID": commit,
+        "VOICE_AGENT_RELEASE_ID": commit[:24],
+        "SLICE6_APP_PUBLIC_URL": f"http://127.0.0.1:{values['VOICE_AGENT_GATEWAY_PORT']}",
+        "SLICE6_WEB_DIST": str(release / "source" / "web" / "dist"),
+        "XDG_CACHE_HOME": str(root / "cache" / "xdg"),
+        "PYTHONPYCACHEPREFIX": str(root / "cache" / "pycache"),
+    })
+    return python, (str(python), "-B", str(launcher)), result
+
+
+def exec_launcher(*, state_root: Path, instance: str) -> None:
+    """Replace systemd's process with one instance-private complete stack."""
+    python, arguments, environment = launcher_environment(
+        state_root=state_root, instance=instance,
+    )
+    os.execve(str(python), arguments, environment)

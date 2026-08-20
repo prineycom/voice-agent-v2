@@ -12,6 +12,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from .contracts import LLM_VERSION, StageFailure, valid_correlation_id
+from .instance_runtime import listener_port
 from .tracer import CancellationToken
 
 LLAMA_ENDPOINT = "http://127.0.0.1:18080"
@@ -137,7 +138,7 @@ class LocalLFMProvider:
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.port != 18080:
             raise AssertionError("local LFM endpoint invariant changed")
         self._host = parsed.hostname
-        self._port = parsed.port
+        self._port = listener_port("VOICE_AGENT_LLM_PORT", parsed.port)
         self._connection_factory = connection_factory
         self._request_timeout_seconds = request_timeout_seconds
         self._handoff_cleanup_timeout_seconds = handoff_cleanup_timeout_seconds

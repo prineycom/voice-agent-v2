@@ -21,6 +21,9 @@ from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 import yaml
+
+from .instance_runtime import InstanceRuntimeError, selected_instance_root
+
 from yaml.events import (
     AliasEvent,
     CollectionEndEvent,
@@ -120,6 +123,7 @@ class AgentConfigV1(BaseModel):
 class AgentUserContext:
     uid: int
     home: Path
+    profile_root_override: Path | None = None
 
     @classmethod
     def effective(cls) -> "AgentUserContext":
@@ -131,11 +135,16 @@ class AgentUserContext:
         home = Path(account.pw_dir)
         if not home.is_absolute():
             raise AgentConfigError("config_path_unsafe")
-        return cls(uid=uid, home=home)
+        try:
+            instance = selected_instance_root()
+        except InstanceRuntimeError as error:
+            raise AgentConfigError("config_path_unsafe") from error
+        profile = instance / "config" / "agent-profile" if instance is not None else None
+        return cls(uid=uid, home=home, profile_root_override=profile)
 
     @property
     def profile_root(self) -> Path:
-        return self.home / PROFILE_ROOT_NAME
+        return self.profile_root_override or (self.home / PROFILE_ROOT_NAME)
 
 
 @dataclass(frozen=True)
@@ -502,11 +511,13 @@ class AgentConfigService:
         self.registry = load_production_registry(registry_path)
 
     def _open_profile_root(self) -> int:
-        home = _open_directory_path(self.context.home)
+        root = _open_directory_path(self.context.profile_root)
         try:
-            return _open_owned_directory_at(home, PROFILE_ROOT_NAME, self.context.uid)
-        finally:
-            os.close(home)
+            _verify_directory(os.fstat(root), self.context.uid)
+        except BaseException:
+            os.close(root)
+            raise
+        return root
 
     def _validate_reserved_tree(self, root: int) -> None:
         descriptors: list[int] = []
@@ -590,16 +601,17 @@ class AgentConfigService:
     def init(self) -> InitResult:
         """Create only absent paths after preflighting every existing path."""
 
-        home = _open_directory_path(self.context.home)
+        profile_root = self.context.profile_root
+        parent = _open_directory_path(profile_root.parent)
         root: int | None = None
         changed = False
         try:
-            if self._existing_at(home, PROFILE_ROOT_NAME):
-                root = _open_owned_directory_at(home, PROFILE_ROOT_NAME, self.context.uid)
+            if self._existing_at(parent, profile_root.name):
+                root = _open_owned_directory_at(parent, profile_root.name, self.context.uid)
             else:
-                self._create_directory(home, PROFILE_ROOT_NAME)
+                self._create_directory(parent, profile_root.name)
                 changed = True
-                root = _open_owned_directory_at(home, PROFILE_ROOT_NAME, self.context.uid)
+                root = _open_owned_directory_at(parent, profile_root.name, self.context.uid)
 
             # Preflight the complete existing known tree before adding anything.
             existing_directories: set[str] = set()
@@ -634,7 +646,7 @@ class AgentConfigService:
         finally:
             if root is not None:
                 os.close(root)
-            os.close(home)
+            os.close(parent)
 
         snapshot = self.status()
         return InitResult(changed=changed, snapshot=snapshot)

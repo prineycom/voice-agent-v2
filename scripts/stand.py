@@ -15,8 +15,8 @@ from voice_agent_v2.stand_dev import (  # noqa: E402
     DEFAULT_USER_UNIT_DIRECTORY,
     StandError,
     SystemCommandRunner,
-    deploy_local_dev,
-    deploy_remote_dev,
+    deploy_local,
+    deploy_remote,
     exec_launcher,
     initialize,
     logs,
@@ -28,7 +28,7 @@ from voice_agent_v2.stand_doctor import main as doctor_main  # noqa: E402
 
 
 def usage() -> int:
-    print("usage: stand doctor | init | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | status dev | logs dev")
+    print("usage: stand doctor | init | deploy <main|dev> <remote-branch|tag|sha> | deploy <main|dev> --local <repo> <committed-sha> | status <main|dev> | logs <main|dev>")
     return 2
 
 
@@ -48,24 +48,29 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             print("stand init: complete")
             return 0
-        if len(arguments) == 5 and arguments[:3] == ("deploy", "dev", "--local"):
-            commit = deploy_local_dev(
-                state_root=root, repository=Path(arguments[3]), commit=arguments[4], command=command,
+        if len(arguments) == 5 and arguments[0] == "deploy" and arguments[1] in {"main", "dev"} and arguments[2] == "--local":
+            instance = arguments[1]
+            commit = deploy_local(
+                state_root=root, instance=instance, repository=Path(arguments[3]),
+                commit=arguments[4], command=command,
             )
-            print(f"stand deploy dev: selected {commit}")
+            print(f"stand deploy {instance}: selected {commit}")
             return 0
-        if len(arguments) == 3 and arguments[:2] == ("deploy", "dev"):
-            commit = deploy_remote_dev(state_root=root, ref=arguments[2], command=command)
-            print(f"stand deploy dev: selected {commit}")
+        if len(arguments) == 3 and arguments[0] == "deploy" and arguments[1] in {"main", "dev"}:
+            instance = arguments[1]
+            commit = deploy_remote(
+                state_root=root, instance=instance, ref=arguments[2], command=command,
+            )
+            print(f"stand deploy {instance}: selected {commit}")
             return 0
-        if arguments == ("status", "dev"):
-            print(status(state_root=root, instance="dev", command=command))
+        if len(arguments) == 2 and arguments[0] == "status" and arguments[1] in {"main", "dev"}:
+            print(status(state_root=root, instance=arguments[1], command=command))
             return 0
-        if arguments == ("logs", "dev"):
-            print(logs(instance="dev", command=command))
+        if len(arguments) == 2 and arguments[0] == "logs" and arguments[1] in {"main", "dev"}:
+            print(logs(state_root=root, instance=arguments[1], command=command))
             return 0
-        if arguments == ("launcher", "dev"):
-            exec_launcher(state_root=root, instance="dev")
+        if len(arguments) == 2 and arguments[0] == "launcher" and arguments[1] in {"main", "dev"}:
+            exec_launcher(state_root=root, instance=arguments[1])
             raise AssertionError("foreground launcher unexpectedly returned")
     except StandError as error:
         print(f"stand: {error}", file=sys.stderr)

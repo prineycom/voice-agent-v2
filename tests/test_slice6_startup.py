@@ -252,6 +252,47 @@ class ParentProcessIdentityTests(unittest.TestCase):
 
 
 class RuntimePortCustodyTests(unittest.TestCase):
+    def test_complete_stack_resource_measurement_keeps_inference_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            fixture = {
+                101: ((102,), 10), 102: ((), 20),
+                201: ((), 30),
+                301: ((302, 303, 304), 40), 302: ((), 50),
+                303: ((), 60), 304: ((), 70),
+            }
+            for pid, (children, resident_kib) in fixture.items():
+                root = proc / str(pid)
+                (root / f"task/{pid}").mkdir(parents=True)
+                (root / f"task/{pid}/children").write_text(
+                    " ".join(map(str, children)), encoding="ascii",
+                )
+                (root / "status").write_text(
+                    f"Name:\tfixture\nVmRSS:\t{resident_kib} kB\n", encoding="ascii",
+                )
+            supervisor = run_slice6.ProcessSupervisor()
+            for pid, role in (
+                (101, "local-llm"),
+                (201, "livekit"),
+                (301, "gateway-controller-stt-tts-provider"),
+            ):
+                process = FakeProcess()
+                process.pid = pid
+                supervisor.processes.append(process)
+                supervisor._roles[id(process)] = role
+            measured = run_slice6.measure_supervised_resources(
+                supervisor, proc_root=proc, instance="main",
+            )
+            self.assertEqual(measured["instance"], "main")
+            self.assertIs(measured["shared_inference"], False)
+            self.assertEqual(measured["process_count"], 7)
+            self.assertEqual(measured["resident_kib"], 280)
+            self.assertEqual(measured["roles"]["local-llm"]["process_count"], 2)
+            self.assertEqual(
+                measured["roles"]["gateway-controller-stt-tts-provider"]["process_count"],
+                4,
+            )
+
     def test_final_listener_custody_rejects_an_unrelated_live_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             proc = Path(temporary)

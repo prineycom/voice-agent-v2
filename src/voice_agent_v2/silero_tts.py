@@ -14,6 +14,7 @@ import time
 from typing import Callable, Iterator
 
 from .contracts import AudioFormat, StageFailure, valid_correlation_id
+from .instance_runtime import mutable_path
 from .v2_audio import (
     TTS_OUTPUT_AUDIO_FORMAT,
     TTS_SEGMENT_MAX_BYTES,
@@ -35,9 +36,12 @@ CACHE_ROOT = Path("~/.cache/voice-agent-v2/experiments/silero-baya-tts").expandu
 MODEL_PATH = CACHE_ROOT / "downloads" / "v5_5_ru.pt"
 PYTHON_PATH = CACHE_ROOT / "venv" / "bin" / "python"
 WORKER_SCRIPT = ROOT / "scripts" / "silero_kseniya_worker.py"
-DEFAULT_RUNTIME_ROOT = Path(
-    "~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship"
-).expanduser()
+DEFAULT_RUNTIME_ROOT = mutable_path(
+    "runtime/tts",
+    legacy=Path(
+        "~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship"
+    ).expanduser(),
+)
 MODEL_IDENTITY = "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru"
 MODEL_SIZE = 145_420_684
 MODEL_SHA256 = "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437"

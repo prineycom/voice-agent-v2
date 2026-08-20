@@ -17,6 +17,7 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from voice_agent_v2.instance_runtime import listener_port, mutable_path, shared_cache_root
 from voice_agent_v2.runtime_directory import SYSTEMD_RUNTIME_ROOT
 from voice_agent_v2.silero_tts import verify_silero_runtime
 from voice_agent_v2.slice6_config import (
@@ -27,11 +28,15 @@ from voice_agent_v2.slice6_config import (
 )
 
 LIVEKIT_VERSION = "1.13.5"
-SIGNAL_PORT = 7880
-RTC_UDP_PORT = 7882
-GATEWAY_PORT = 8000
-LLAMA_PORT = 18080
-LFM_CACHE = Path("/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4")
+SIGNAL_PORT = listener_port("VOICE_AGENT_LIVEKIT_PORT", 7880)
+RTC_UDP_PORT = listener_port("VOICE_AGENT_RTC_UDP_PORT", 7882)
+GATEWAY_PORT = listener_port("VOICE_AGENT_GATEWAY_PORT", 8000)
+LLAMA_PORT = listener_port("VOICE_AGENT_LLM_PORT", 18080)
+SHARED_CACHE = shared_cache_root()
+LFM_CACHE = SHARED_CACHE / "llama-cpp-gguf-q4"
+INSTANCE_LLM_ROOT = mutable_path(
+    "runtime/llm", legacy=LFM_CACHE / "runtime", environment=os.environ,
+)
 LLAMA_BINARY = LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
 LLAMA_BIN_DIRECTORY = LLAMA_BINARY.parent
 CUDA_OVERLAY = LFM_CACHE / "runtime" / "cuda-13.3-overlay" / "lib"
@@ -396,6 +401,57 @@ def require_runtime_listener_custody(
             )
 
 
+def measure_supervised_resources(
+    supervisor: ProcessSupervisor,
+    *,
+    proc_root: Path = Path("/proc"),
+    instance: str | None = None,
+) -> dict[str, object]:
+    """Measure each independently launched process tree without sharing inference."""
+    roles: dict[str, dict[str, int]] = {}
+    for process in supervisor.processes:
+        pid = getattr(process, "pid", None)
+        if type(pid) is not int or pid <= 0:
+            raise ServiceProcessFailure("supervised resource identity is unavailable")
+        pending = [pid]
+        observed: set[int] = set()
+        resident_kib = 0
+        while pending:
+            current = pending.pop()
+            if current in observed:
+                continue
+            observed.add(current)
+            try:
+                children = (
+                    proc_root / str(current) / "task" / str(current) / "children"
+                ).read_text(encoding="ascii").split()
+                status_lines = (proc_root / str(current) / "status").read_text(
+                    encoding="ascii"
+                ).splitlines()
+            except OSError as error:
+                raise ServiceProcessFailure("supervised resource measurement is unavailable") from error
+            if any(not child.isdecimal() or int(child) <= 0 for child in children):
+                raise ServiceProcessFailure("supervised resource measurement is invalid")
+            pending.extend(int(child) for child in children)
+            rss = next((line for line in status_lines if line.startswith("VmRSS:")), "VmRSS: 0 kB")
+            fields = rss.split()
+            if len(fields) != 3 or fields[0] != "VmRSS:" or not fields[1].isdecimal() or fields[2] != "kB":
+                raise ServiceProcessFailure("supervised resource measurement is invalid")
+            resident_kib += int(fields[1])
+        roles[supervisor.role(process)] = {
+            "process_count": len(observed),
+            "resident_kib": resident_kib,
+        }
+    return {
+        "schema": "voice-agent.stand-resource-measurement.v1",
+        "instance": instance or "unselected",
+        "shared_inference": False,
+        "roles": roles,
+        "process_count": sum(item["process_count"] for item in roles.values()),
+        "resident_kib": sum(item["resident_kib"] for item in roles.values()),
+    }
+
+
 def require_supervised_children_alive(
     supervisor: ProcessSupervisor, *, phase: str,
 ) -> None:
@@ -533,7 +589,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "voice-agent-v2" / "slice-6"
+    cache = SHARED_CACHE / "slice-6"
     binary = cache / "tooling" / f"livekit-server-v{LIVEKIT_VERSION}"
     python = cache / "runtime" / "venv" / "bin" / "python"
     if not binary.is_file() or not os.access(binary, os.X_OK) or not python.is_file():
@@ -558,15 +614,15 @@ def main() -> int:
     for name in tuple(llama_environment):
         if name.startswith("LITELLM_"):
             llama_environment.pop(name)
-    llama_environment["HOME"] = str(LFM_CACHE / "runtime" / "home")
-    llama_environment["XDG_CACHE_HOME"] = str(LFM_CACHE / "runtime" / "home" / ".cache")
+    llama_environment["HOME"] = str(INSTANCE_LLM_ROOT / "home")
+    llama_environment["XDG_CACHE_HOME"] = str(INSTANCE_LLM_ROOT / "home" / ".cache")
     llama_environment["LD_LIBRARY_PATH"] = f"{CUDA_OVERLAY}:{LLAMA_BIN_DIRECTORY}"
     supervisor = ProcessSupervisor(stop_requested=lambda: stopping)
 
     try:
         if stopping:
             return 0
-        llama_log = LFM_CACHE / "logs" / "slice6-local-lfm.log"
+        llama_log = INSTANCE_LLM_ROOT / "logs" / "slice6-local-lfm.log"
         llama_log.parent.mkdir(parents=True, exist_ok=True)
         llama_output = llama_log.open("ab", buffering=0)
         local_lfm = supervisor.start(
@@ -624,6 +680,12 @@ def main() -> int:
             release_id=settings.release_id,
             stop_requested=lambda: stopping,
         )
+        print(json.dumps(
+            measure_supervised_resources(
+                supervisor, instance=os.environ.get("STAND_NAME"),
+            ),
+            sort_keys=True,
+        ))
         print("Voice Agent v2 Slice 6 local-LFM development app started")
         print(f"application: http://127.0.0.1:{GATEWAY_PORT}")
         print(

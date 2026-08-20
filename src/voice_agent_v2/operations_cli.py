@@ -759,17 +759,26 @@ def _agent_environment_manager():
     from .agent_config import AgentUserContext
     from .agent_environment import AgentEnvironment
     from .agent_environment_config import load_agent_config_v2
+    from .agent_environment_credentials import InstallationCredentialStore
+    from .instance_runtime import selected_instance_root
 
     context = AgentUserContext.effective()
     config = load_agent_config_v2(
         context.profile_root / "config.yaml", context=context
     )
-    root = context.home / ".cache" / "voice-agent-v2" / "agent-environment"
+    instance = selected_instance_root()
+    if instance is None:
+        root = context.home / ".cache" / "voice-agent-v2" / "agent-environment"
+        credentials = None
+    else:
+        root = instance / "agent-environment"
+        credentials = InstallationCredentialStore(instance / "credentials")
     return AgentEnvironment(
         config,
         state_root=root / "private",
-        workspace=root / "workspace",
-        cache=root / "cache",
+        workspace=(instance / "workspace") if instance is not None else root / "workspace",
+        cache=(instance / "cache" / "agent-environment") if instance is not None else root / "cache",
+        credential_store=credentials,
     )
 
 
