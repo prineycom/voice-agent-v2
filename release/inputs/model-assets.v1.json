@@ -1,0 +1,51 @@
+{
+  "schema": "voice-agent.model-assets.v1",
+  "platform": "linux-x86_64-nvidia",
+  "distribution_scope": "private-personal-noncommercial",
+  "sets": [
+    {
+      "id": "stt-whisper-large-v3-turbo",
+      "kind": "stt",
+      "aggregate_sha256": "193a994d541f0741b9a3535a3c9789cc52221ba76e1985f8f713c11679fc9e65",
+      "files": [
+        {"asset_id": "stt-config", "relative_path": "config.json", "size": 2263, "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e", "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11/config.json"},
+        {"asset_id": "stt-model", "relative_path": "model.bin", "size": 1617884929, "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da", "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11/model.bin"},
+        {"asset_id": "stt-preprocessor", "relative_path": "preprocessor_config.json", "size": 340, "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711", "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11/preprocessor_config.json"},
+        {"asset_id": "stt-tokenizer", "relative_path": "tokenizer.json", "size": 2710337, "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd", "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11/tokenizer.json"},
+        {"asset_id": "stt-vocabulary", "relative_path": "vocabulary.json", "size": 1068114, "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1", "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11/vocabulary.json"}
+      ],
+      "license": "MIT",
+      "license_evidence_url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/tree/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11"
+    },
+    {
+      "id": "llm-lfm2-5-2-6b-q4-k-m",
+      "kind": "llm",
+      "aggregate_sha256": "41a1f786e272a59b48f1adc89bbfe76e3b8abffb81373e944c62c02767cc7583",
+      "files": [
+        {"asset_id": "lfm-gguf", "relative_path": "LFM2.5-2.6B-Q4_K_M.gguf", "size": 1674454848, "sha256": "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14", "url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/b421ad1d549afeda6a0fb2ad3a697cb5a7879adc/LFM2.5-2.6B-Q4_K_M.gguf"}
+      ],
+      "license": "LicenseRef-LFM-Open-License-1.0",
+      "license_evidence_url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/tree/b421ad1d549afeda6a0fb2ad3a697cb5a7879adc"
+    },
+    {
+      "id": "tts-silero-v5-5-ru-kseniya",
+      "kind": "tts",
+      "aggregate_sha256": "72a8ff5e43df17f4b488a111e6ead7ab8c8f2adacac2e22510d618715c256ee9",
+      "files": [
+        {"asset_id": "silero-kseniya", "relative_path": "v5_5_ru.pt", "size": 145420684, "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437", "url": "https://models.silero.ai/models/tts/ru/v5_5_ru.pt"}
+      ],
+      "license": "CC-BY-NC-SA-4.0",
+      "license_evidence_url": "https://github.com/snakers4/silero-models/blob/d9355348e2781dc8fa25a135d1602c530afae24c/LICENSE"
+    },
+    {
+      "id": "vad-silero-v6",
+      "kind": "vad",
+      "aggregate_sha256": "45d0a8e36f778616d536ba0223d29ddfc9e25c212da0cc5ed9a52064d3d78f4d",
+      "files": [
+        {"asset_id": "silero-vad", "relative_path": "silero_vad_v6.onnx", "size": 1245151, "sha256": "4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2", "url": "https://raw.githubusercontent.com/SYSTRAN/faster-whisper/65882eee9f5cdbeeb2d877f1131d48cf241b327d/faster_whisper/assets/silero_vad_v6.onnx"}
+      ],
+      "license": "MIT",
+      "license_evidence_url": "https://github.com/snakers4/silero-vad/blob/806dcba3f0b5d95282d0889a074954a2f8c6397b/LICENSE"
+    }
+  ]
+}

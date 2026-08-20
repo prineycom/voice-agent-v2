@@ -221,7 +221,7 @@ function validateArtifactManifest(document) {
     fail('manifest_invalid', 'manifest identity is invalid');
   }
   for (const name of ['launcher_protocol', 'application_protocol', 'config_schema', 'data_schema']) validateRange(document[name], 'manifest_invalid');
-  if (!Array.isArray(document.entries) || document.entries.length < 1 || document.entries.length > 20000) {
+  if (!Array.isArray(document.entries) || document.entries.length < 1 || document.entries.length > 100000) {
     fail('manifest_invalid', 'manifest entry count is invalid');
   }
   const entries = new Map();

@@ -13,10 +13,12 @@ module.exports = function createReleaseSourceModule(core) {
 
   const CHANNEL_LIMIT = 256 * 1024;
   const SIGNATURE_LIMIT = 1024;
-  const ARTIFACT_LIMIT = 2 * 1024 * 1024 * 1024;
-  const EXPANDED_LIMIT = 1024 * 1024 * 1024;
-  const ENTRY_LIMIT = 512 * 1024 * 1024;
-  const ENTRY_COUNT_LIMIT = 20001;
+  // The closed CPython/CUDA/Torch runtime is intentionally large. These remain
+  // explicit synchronous-archive ceilings; physical assembly must measure below them.
+  const ARTIFACT_LIMIT = 3 * 1024 * 1024 * 1024;
+  const EXPANDED_LIMIT = (4 * 1024 * 1024 * 1024) - 1;
+  const ENTRY_LIMIT = 1024 * 1024 * 1024;
+  const ENTRY_COUNT_LIMIT = 100001;
   const PATH_BYTES_LIMIT = 1024;
   const EXPANSION_RATIO_LIMIT = 256;
   const CONNECT_TIMEOUT_MS = 10000;

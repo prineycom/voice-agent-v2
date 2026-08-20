@@ -15,7 +15,7 @@
     "data_schema": {"$ref": "#/$defs/range"},
     "service_template_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "entries": {
-      "type": "array", "minItems": 1, "maxItems": 20000,
+      "type": "array", "minItems": 1, "maxItems": 100000,
       "items": {
         "type": "object", "additionalProperties": false,
         "required": ["path", "type", "mode", "size", "sha256", "target"],
@@ -23,7 +23,7 @@
           "path": {"type": "string", "minLength": 1, "maxLength": 1024},
           "type": {"enum": ["directory", "file", "symlink", "hardlink"]},
           "mode": {"type": "string", "pattern": "^0[0-7]{3}$"},
-          "size": {"type": "integer", "minimum": 0},
+          "size": {"type": "integer", "minimum": 0, "maximum": 1073741824},
           "sha256": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
           "target": {"oneOf": [{"type": "string"}, {"type": "null"}]}
         }

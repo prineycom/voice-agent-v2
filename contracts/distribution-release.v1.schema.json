@@ -25,18 +25,28 @@
     },
     "runtimeBundle": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema", "platform", "architecture", "libc", "cuda", "python", "source", "test_only", "components", "elf", "files"],
+      "required": ["schema", "platform", "architecture", "builder", "libc", "cuda", "python", "source", "test_only", "components", "elf", "files"],
       "properties": {
         "schema": {"const": "voice-agent.runtime-bundle.v1"}, "platform": {"const": "linux-x86_64-nvidia"}, "architecture": {"const": "x86_64"},
-        "libc": {"type": "object"}, "cuda": {"type": "object"}, "python": {"type": "object"}, "source": {"type": "object"},
-        "test_only": {"type": "boolean"}, "components": {"type": "array", "minItems": 5}, "elf": {"type": "array", "minItems": 3}, "files": {"type": "array", "minItems": 3, "maxItems": 20000}
+        "builder": {
+          "type": "object", "additionalProperties": false, "required": ["image", "manifest_digest"],
+          "properties": {"image": {"type": "string", "pattern": "^docker\\.io/nvidia/cuda@sha256:[0-9a-f]{64}$"}, "manifest_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+        },
+        "libc": {"type": "object", "additionalProperties": false, "required": ["family", "minimum"], "properties": {"family": {"const": "glibc"}, "minimum": {"const": "2.28"}}},
+        "cuda": {"type": "object", "additionalProperties": false, "required": ["minimum_driver", "runtime"], "properties": {"minimum_driver": {"type": "string"}, "runtime": {"const": "cuda-12.9"}}},
+        "python": {"type": "object", "additionalProperties": false, "required": ["version"], "properties": {"version": {"const": "3.12.13"}}},
+        "source": {"type": "object", "additionalProperties": false, "required": ["distribution_scope", "immutable_url", "license_evidence_url", "sha256"], "properties": {"distribution_scope": {"const": "private-personal-noncommercial"}, "immutable_url": {"type": "string", "pattern": "^https://"}, "license_evidence_url": {"type": "string", "pattern": "^https://"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+        "test_only": {"type": "boolean"},
+        "components": {"type": "array", "minItems": 5, "maxItems": 1000, "items": {"type": "object", "additionalProperties": false, "required": ["download_url", "license", "name", "sha256", "size", "version"], "properties": {"download_url": {"type": "string", "pattern": "^https://"}, "license": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "size": {"type": "integer", "minimum": 1}, "version": {"type": "string", "minLength": 1}}}},
+        "elf": {"type": "array", "minItems": 3, "maxItems": 100000, "items": {"type": "object", "additionalProperties": false, "required": ["needed", "path", "required_glibc", "runpath", "soname", "uses_libcuda"], "properties": {"needed": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9_.+-]{1,255}$"}}, "path": {"type": "string", "minLength": 1}, "required_glibc": {"oneOf": [{"type": "string", "pattern": "^2\\.[0-9]+$"}, {"type": "null"}]}, "runpath": {"type": "string"}, "soname": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}, "uses_libcuda": {"type": "boolean"}}}},
+        "files": {"type": "array", "minItems": 3, "maxItems": 100000, "items": {"type": "object", "additionalProperties": false, "required": ["mode", "path", "sha256", "size"], "properties": {"mode": {"enum": ["0444", "0555"]}, "path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "size": {"type": "integer", "minimum": 0}}}}
       }
     },
     "candidate": {
       "type": "object", "additionalProperties": false,
       "required": ["schema", "artifact", "artifact_bytes", "artifact_sha256", "manifest_sha256", "sequence", "signed", "version"],
       "properties": {
-        "schema": {"const": "voice-agent.release-candidate.v1"}, "artifact": {"type": "string"}, "artifact_bytes": {"type": "integer", "minimum": 1},
+        "schema": {"const": "voice-agent.release-candidate.v1"}, "artifact": {"type": "string"}, "artifact_bytes": {"type": "integer", "minimum": 1, "maximum": 3221225472},
         "artifact_sha256": {"$ref": "#/$defs/sha256"}, "manifest_sha256": {"$ref": "#/$defs/sha256"}, "sequence": {"type": "integer", "minimum": 1},
         "signed": {"const": false}, "version": {"type": "string"}
       }

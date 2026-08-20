@@ -103,6 +103,155 @@ module.exports = function createAssetCache(core, installer) {
     return true;
   }
 
+  function validateModelSets(document, descriptors) {
+    const descriptorById = new Map(validateDescriptors(descriptors).map((item) => [item.id, item]));
+    exactKeys(document, ['schema', 'sets'], 'model_sets_invalid');
+    if (document.schema !== 'voice-agent.model-sets.v1' || !Array.isArray(document.sets) || document.sets.length !== 4) error('model_sets_invalid', 'model set closure is incomplete');
+    const kinds = new Set(); const assetIds = new Set(); const aggregates = new Set();
+    for (const set of document.sets) {
+      exactKeys(set, ['aggregate_sha256', 'files', 'id', 'kind'], 'model_sets_invalid');
+      if (!SAFE_ID.test(set.id) || !['stt', 'llm', 'tts', 'vad'].includes(set.kind) || kinds.has(set.kind) || !SHA256.test(set.aggregate_sha256)
+        || aggregates.has(set.aggregate_sha256) || !Array.isArray(set.files) || set.files.length < 1 || set.files.length > 8) error('model_sets_invalid', 'model set identity is invalid');
+      kinds.add(set.kind); aggregates.add(set.aggregate_sha256);
+      const names = new Set(); const hash = crypto.createHash('sha256');
+      for (const file of [...set.files].sort((a, b) => String(a.relative_path).localeCompare(String(b.relative_path)))) {
+        exactKeys(file, ['asset_id', 'relative_path', 'sha256', 'size'], 'model_sets_invalid');
+        if (!SAFE_ID.test(file.asset_id) || assetIds.has(file.asset_id) || typeof file.relative_path !== 'string'
+          || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(file.relative_path) || names.has(file.relative_path)
+          || !SHA256.test(file.sha256) || !Number.isSafeInteger(file.size) || file.size < 1) error('model_sets_invalid', 'model set member is invalid');
+        const descriptor = descriptorById.get(file.asset_id);
+        if (!descriptor || descriptor.kind !== 'model' || descriptor.reachability !== 'required' || descriptor.sha256 !== file.sha256 || descriptor.size !== file.size) error('model_sets_invalid', 'model set member differs from its signed asset descriptor');
+        assetIds.add(file.asset_id); names.add(file.relative_path);
+        hash.update(Buffer.from(`${file.relative_path}\0${file.size}\0${file.sha256}\n`));
+      }
+      if (hash.digest('hex') !== set.aggregate_sha256) error('model_sets_invalid', 'model set aggregate identity differs');
+      if (set.kind === 'stt' && [...names].sort().join('\0') !== ['config.json', 'model.bin', 'preprocessor_config.json', 'tokenizer.json', 'vocabulary.json'].join('\0')) error('model_sets_invalid', 'STT model set is not the exact five-file closure');
+    }
+    if ([...descriptorById.values()].filter((item) => item.kind === 'model' && item.reachability === 'required').some((item) => !assetIds.has(item.id))) error('model_sets_invalid', 'a required signed model asset has no canonical view owner');
+    return document;
+  }
+
+  function viewPath(layout, set) { return path.join(layout.modelViews, set.aggregate_sha256); }
+  function verifyViewUnchecked(layout, set) {
+    const root = viewPath(layout, set);
+    if (!exists(root)) return false;
+    installer.inspectManagedPath(root, layout.identity.uid, 0o700);
+    const expected = new Map(set.files.map((item) => [item.relative_path, item]));
+    const names = fs.readdirSync(root).sort();
+    if (names.length !== expected.size || names.some((name) => !expected.has(name))) error('model_view_invalid', 'canonical model view contains missing or extra files');
+    for (const name of names) {
+      const item = expected.get(name); const filename = path.join(root, name);
+      const metadata = installer.inspectManagedPath(filename, layout.identity.uid, 0o400, 'file');
+      if (!metadata || metadata.nlink !== 1 || metadata.size !== item.size || digest(core.readOwnedRegular(filename, layout.identity.uid, [0o400], item.size)) !== item.sha256) error('model_view_invalid', 'canonical model view bytes differ');
+    }
+    return true;
+  }
+
+  function removeViewStage(layout, root) {
+    const metadata = installer.inspectManagedPath(root, layout.identity.uid, 0o700);
+    if (!metadata) return;
+    for (const name of fs.readdirSync(root)) {
+      const filename = path.join(root, name); const file = installer.inspectManagedPath(filename, layout.identity.uid, 0o400, 'file');
+      if (!file || file.nlink !== 1) error('model_view_invalid', 'model view stage is unsafe');
+      fs.unlinkSync(filename);
+    }
+    fs.rmdirSync(root);
+  }
+
+  function copyVerifiedViewMember(layout, source, target, file) {
+    let input; let output;
+    try {
+      input = fs.openSync(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const before = fs.fstatSync(input);
+      if (!before.isFile() || before.uid !== layout.identity.uid || before.nlink !== 1 || (before.mode & 0o777) !== 0o400 || before.size !== file.size) error('model_view_source_invalid', 'model view source custody changed before copy');
+      output = fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o400);
+      const buffer = Buffer.allocUnsafe(Math.min(1024 * 1024, file.size)); const hash = crypto.createHash('sha256'); let offset = 0;
+      while (offset < file.size) {
+        const count = fs.readSync(input, buffer, 0, Math.min(buffer.length, file.size - offset), offset);
+        if (count < 1) error('model_view_source_invalid', 'model view source ended during copy');
+        hash.update(buffer.subarray(0, count));
+        let written = 0; while (written < count) written += fs.writeSync(output, buffer, written, count - written, offset + written);
+        offset += count;
+      }
+      const after = fs.fstatSync(input);
+      if (after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1 || after.size !== before.size || hash.digest('hex') !== file.sha256) error('model_view_source_invalid', 'model view source changed during custody copy');
+      fs.fsyncSync(output); fs.fchmodSync(output, 0o400);
+    } finally {
+      if (output !== undefined) fs.closeSync(output);
+      if (input !== undefined) fs.closeSync(input);
+    }
+  }
+
+  function materializeViews(layout, document, descriptors, owner) {
+    validateModelSets(document, descriptors);
+    if (!/^[0-9a-f]{32}$/.test(owner)) error('model_view_invalid', 'model view transaction owner is invalid');
+    installer.ensurePrivateDirectory(layout.modelViews, layout.identity.uid);
+    const outcomes = [];
+    for (const set of document.sets) {
+      if (verifyViewUnchecked(layout, set)) { outcomes.push({ aggregate_sha256: set.aggregate_sha256, kind: set.kind, state: 'existing_verified' }); continue; }
+      const stage = path.join(layout.modelViews, `.stage-${set.aggregate_sha256}.${owner}`);
+      if (exists(stage)) removeViewStage(layout, stage);
+      fs.mkdirSync(stage, { mode: 0o700 }); fs.chmodSync(stage, 0o700);
+      try {
+        for (const file of set.files) {
+          const descriptor = descriptors.find((item) => item.id === file.asset_id);
+          if (!verifyCached(layout, descriptor)) error('model_view_source_invalid', 'model view source lacks exact verified cache custody');
+          const source = cachePath(layout, descriptor); const target = path.join(stage, file.relative_path);
+          copyVerifiedViewMember(layout, source, target, file);
+          const metadata = installer.inspectManagedPath(target, layout.identity.uid, 0o400, 'file');
+          if (!metadata || metadata.nlink !== 1 || metadata.size !== file.size || digest(core.readOwnedRegular(target, layout.identity.uid, [0o400], file.size)) !== file.sha256) error('model_view_source_invalid', 'materialized model bytes differ after custody copy');
+        }
+        installer.syncDirectory(stage);
+        try { fs.renameSync(stage, viewPath(layout, set)); }
+        catch (reason) {
+          if (!['EEXIST', 'ENOTEMPTY'].includes(reason.code) || !verifyViewUnchecked(layout, set)) throw reason;
+          removeViewStage(layout, stage);
+        }
+        installer.syncDirectory(layout.modelViews);
+        if (!verifyViewUnchecked(layout, set)) error('model_view_invalid', 'canonical model view promotion failed');
+        outcomes.push({ aggregate_sha256: set.aggregate_sha256, kind: set.kind, state: 'materialized_verified' });
+      } catch (reason) {
+        if (exists(stage)) removeViewStage(layout, stage);
+        throw reason;
+      }
+    }
+    return { outcomes, roots: Object.fromEntries(document.sets.map((set) => [set.kind, viewPath(layout, set)])) };
+  }
+
+  function collectViews(layout, referencedAggregates) {
+    const keep = new Set(referencedAggregates || []); let count = 0; let bytes = 0;
+    if (!exists(layout.modelViews)) return { count, bytes };
+    for (const name of fs.readdirSync(layout.modelViews).sort()) {
+      if (!SHA256.test(name) || keep.has(name)) continue;
+      const root = path.join(layout.modelViews, name); installer.inspectManagedPath(root, layout.identity.uid, 0o700);
+      for (const entry of fs.readdirSync(root)) {
+        const filename = path.join(root, entry); const metadata = installer.inspectManagedPath(filename, layout.identity.uid, 0o400, 'file');
+        if (!metadata || metadata.nlink !== 1) error('model_view_gc_invalid', 'model view changed before exact cleanup');
+        bytes += metadata.size; fs.unlinkSync(filename);
+      }
+      fs.rmdirSync(root); count += 1;
+    }
+    if (count) installer.syncDirectory(layout.modelViews);
+    return { count, bytes };
+  }
+
+  function collectViewPartials(layout, keepOwners = new Set()) {
+    let count = 0; let bytes = 0;
+    if (!exists(layout.modelViews)) return { count, bytes };
+    for (const name of fs.readdirSync(layout.modelViews).sort()) {
+      const match = /^\.stage-[0-9a-f]{64}\.([0-9a-f]{32})$/.exec(name); if (!match || keepOwners.has(match[1])) continue;
+      const root = path.join(layout.modelViews, name); installer.inspectManagedPath(root, layout.identity.uid, 0o700);
+      for (const entry of fs.readdirSync(root)) {
+        const filename = path.join(root, entry); const metadata = installer.inspectManagedPath(filename, layout.identity.uid, 0o400, 'file');
+        if (!metadata || metadata.nlink !== 1) error('model_view_gc_invalid', 'model view partial changed before exact cleanup');
+        bytes += metadata.size; fs.unlinkSync(filename);
+      }
+      fs.rmdirSync(root); count += 1;
+    }
+    if (count) installer.syncDirectory(layout.modelViews);
+    return { count, bytes };
+  }
+
   function partialPaths(layout, descriptor, owner) {
     if (!/^[0-9a-f]{32}$/.test(owner)) error('asset_partial_invalid', 'asset partial owner is invalid');
     const base = `${descriptor.kind}-${descriptor.sha256}.${owner}`;
@@ -240,7 +389,7 @@ module.exports = function createAssetCache(core, installer) {
     const protectedSet = new Set(referencedDigests || []);
     let count = 0; let bytes = 0;
     const candidates = [];
-    for (const root of [path.join(layout.downloads, 'sha256'), layout.runtimes, layout.launchers]) {
+    for (const root of [path.join(layout.downloads, 'sha256'), layout.models, layout.runtimes, layout.launchers]) {
       if (!exists(root)) continue;
       for (const name of fs.readdirSync(root)) {
         if (!SHA256.test(name) || protectedSet.has(name)) continue;
@@ -276,7 +425,8 @@ module.exports = function createAssetCache(core, installer) {
   }
 
   return {
-    ASSET_KINDS, acquire, cachePath, collectAssets, collectPartials, compatible, programDescriptor, reconcile, requireSpace,
-    scanPartials, spaceSummary, validateDescriptor, validateDescriptors, verifyCached,
+    ASSET_KINDS, acquire, cachePath, collectAssets, collectPartials, collectViewPartials, collectViews, compatible, materializeViews,
+    programDescriptor, reconcile, requireSpace, scanPartials, spaceSummary, validateDescriptor, validateDescriptors, validateModelSets,
+    verifyCached, verifyViewUnchecked, viewPath,
   };
 };

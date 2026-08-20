@@ -57,8 +57,9 @@ test('runtime receipt refuses undeclared, unhashed, wrong-platform, wrong-archit
   const files = names.map((name) => ({ mode: '0555', path: name, sha256: archive.sha256(fs.readFileSync(path.join(root, name))), size: 7 }));
   const hash = crypto.createHash('sha256'); for (const item of files.sort((a, b) => a.path.localeCompare(b.path))) hash.update(Buffer.from(`${item.path}\0${item.mode}\0${item.size}\0${item.sha256}\n`));
   const components = ['CPython', 'LiveKit', 'llama.cpp', 'CUDA', 'gateway'].map((name, index) => ({ download_url: `https://runtime.example.invalid/${index}`, license: 'MIT', name, sha256: String(index + 1).repeat(64).slice(0, 64), size: index + 1, version: '1.0.0' }));
-  const elf = names.map((name) => ({ needed: [], path: name, runpath: '', soname: null }));
-  const receipt = { architecture: 'x86_64', components, cuda: { minimum_driver: '575.51.03', runtime: 'cuda-12.9' }, elf, files, libc: { family: 'glibc', minimum: '2.28' }, platform: core.SUPPORTED_PLATFORM,
+  const elf = names.map((name) => ({ needed: [], path: name, required_glibc: null, runpath: '', soname: null, uses_libcuda: false }));
+  const builder = { image: 'docker.io/nvidia/cuda@sha256:8d75fca3fc684919d806956e1fd2e197ee71a578af8106a61b4db24248fbe9be', manifest_digest: 'sha256:8d75fca3fc684919d806956e1fd2e197ee71a578af8106a61b4db24248fbe9be' };
+  const receipt = { architecture: 'x86_64', builder, components, cuda: { minimum_driver: '575.51.03', runtime: 'cuda-12.9' }, elf, files, libc: { family: 'glibc', minimum: '2.28' }, platform: core.SUPPORTED_PLATFORM,
     python: { version: '3.12.13' }, schema: 'voice-agent.runtime-bundle.v1', source: { distribution_scope: 'private-personal-noncommercial', immutable_url: 'https://runtime.example.invalid/bundles/exact.tar.zst', license_evidence_url: 'https://runtime.example.invalid/licenses/exact.json', sha256: hash.digest('hex') }, test_only: false };
   assert.equal(release.validateRuntimeReceipt(receipt, root).platform, core.SUPPORTED_PLATFORM);
   assert.throws(() => release.validateRuntimeReceipt({ ...receipt, architecture: 'arm64' }, root), (reason) => reason.code === 'runtime_receipt_invalid');
@@ -123,6 +124,8 @@ test('channel finalization requires immutable private GitHub IDs before offline 
 
 test('production payload contract includes the STT runner and excludes application Node', () => {
   const source = fs.readFileSync(path.join(__dirname, 'release.cjs'), 'utf8');
-  assert.equal(source.includes('benchmarks/slice2/runners/faster_whisper_runner.py'), true);
+  assert.equal(source.includes('src/voice_agent_v2/faster_whisper_runner.py'), true);
   assert.equal(source.includes('runtime/node/bin/node'), false);
+  assert.equal(source.includes('export VOICE_AGENT_RELEASE_ROOT='), false);
+  assert.equal(source.includes('export VOICE_AGENT_RUNTIME_CONFIG='), true);
 });

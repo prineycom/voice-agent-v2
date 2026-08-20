@@ -15,12 +15,11 @@ import time
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
-RELEASE_ROOT = Path(os.environ.get("VOICE_AGENT_RELEASE_ROOT", str(ROOT))).resolve()
-ASSET_ROOT = Path(os.environ.get("VOICE_AGENT_ASSET_ROOT", str(Path.home() / ".cache" / "voice-agent"))).resolve()
-RUNTIME_ROOT = Path(os.environ.get("VOICE_AGENT_RUNTIME_ROOT", str(Path.home() / ".local" / "state" / "voice-agent" / "runtime"))).resolve()
-PRODUCTION_LAYOUT = "VOICE_AGENT_RELEASE_ROOT" in os.environ
+RELEASE_ROOT = ROOT
+RUNTIME_ROOT = Path.home() / ".local" / "state" / "voice-agent" / "runtime"
 sys.path.insert(0, str(ROOT / "src"))
 
+from voice_agent_v2.runtime_config import load_production_runtime_config
 from voice_agent_v2.runtime_directory import SYSTEMD_RUNTIME_ROOT
 from voice_agent_v2.silero_tts import verify_silero_runtime
 from voice_agent_v2.slice6_config import (
@@ -35,11 +34,22 @@ SIGNAL_PORT = 7880
 RTC_UDP_PORT = 7882
 GATEWAY_PORT = 8000
 LLAMA_PORT = 18080
-LFM_CACHE = RUNTIME_ROOT / "llm" if PRODUCTION_LAYOUT else Path.home() / ".cache" / "voice-agent-v2" / "llama-cpp-gguf-q4"
-LLAMA_BINARY = RELEASE_ROOT / "runtime" / "llama" / "bin" / "llama-server" if PRODUCTION_LAYOUT else LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
+_RUNTIME_CONFIG = load_production_runtime_config()
+PRODUCTION_LAYOUT = _RUNTIME_CONFIG is not None
+if PRODUCTION_LAYOUT:
+    RELEASE_ROOT = _RUNTIME_CONFIG["release_root"]
+    RUNTIME_ROOT = _RUNTIME_CONFIG["paths"]["state"]
+    LFM_CACHE = RUNTIME_ROOT / "llm"
+    LLAMA_BINARY = _RUNTIME_CONFIG["executables"]["llama"]
+    CUDA_OVERLAY = RELEASE_ROOT / "runtime" / "lib"
+    LFM_MODEL = _RUNTIME_CONFIG["models"]["llm"] / "LFM2.5-2.6B-Q4_K_M.gguf"
+    os.environ.setdefault("SLICE6_WEB_DIST", str(_RUNTIME_CONFIG["paths"]["web"]))
+else:
+    LFM_CACHE = Path.home() / ".cache" / "voice-agent-v2" / "llama-cpp-gguf-q4"
+    LLAMA_BINARY = LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
+    CUDA_OVERLAY = LFM_CACHE / "runtime" / "cuda-13.3-overlay" / "lib"
+    LFM_MODEL = LFM_CACHE / "model" / "LFM2.5-2.6B-Q4_K_M.gguf"
 LLAMA_BIN_DIRECTORY = LLAMA_BINARY.parent
-CUDA_OVERLAY = RELEASE_ROOT / "runtime" / "cuda" / "lib" if PRODUCTION_LAYOUT else LFM_CACHE / "runtime" / "cuda-13.3-overlay" / "lib"
-LFM_MODEL = ASSET_ROOT / "models" / "sha256" / "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14" if PRODUCTION_LAYOUT else LFM_CACHE / "model" / "LFM2.5-2.6B-Q4_K_M.gguf"
 LFM_MODEL_SIZE = 1_674_454_848
 LFM_MODEL_SHA256 = "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14"
 LLAMA_BINARY_SHA256 = "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11"
@@ -538,8 +548,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "voice-agent-v2" / "slice-6"
-    binary = RELEASE_ROOT / "runtime" / "livekit" / "bin" / "livekit-server" if PRODUCTION_LAYOUT else cache / "tooling" / f"livekit-server-v{LIVEKIT_VERSION}"
-    python = Path(sys.executable) if PRODUCTION_LAYOUT else cache / "runtime" / "venv" / "bin" / "python"
+    binary = _RUNTIME_CONFIG["executables"]["livekit"] if PRODUCTION_LAYOUT else cache / "tooling" / f"livekit-server-v{LIVEKIT_VERSION}"
+    python = _RUNTIME_CONFIG["executables"]["python"] if PRODUCTION_LAYOUT else cache / "runtime" / "venv" / "bin" / "python"
     if not binary.is_file() or not os.access(binary, os.X_OK) or not python.is_file():
         raise RuntimeError("Slice 6 tooling is missing; run ./setup-slice6")
     if not settings.web_dist.is_dir():

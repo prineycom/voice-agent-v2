@@ -221,6 +221,14 @@ module.exports = function createUpdater(core, installer) {
     return references;
   }
 
+  function modelViewReferences(layout, journal = null, extraReleaseIds = []) {
+    const references = new Set();
+    for (const id of protectedReleaseIds(layout, journal, extraReleaseIds)) {
+      try { for (const set of installer.loadModelSets(readRelease(layout, id).root, readRelease(layout, id).record, layout.identity.uid).sets) references.add(set.aggregate_sha256); } catch {}
+    }
+    return references;
+  }
+
   function collectReleases(layout, journal, extra = []) {
     const protectedIds = protectedReleaseIds(layout, journal, extra);
     let removed = 0;
@@ -246,6 +254,7 @@ module.exports = function createUpdater(core, installer) {
 
   function removeTransactionPartials(layout, journal, keepCandidate = false) {
     assetCache.collectPartials(layout, new Set());
+    assetCache.collectViewPartials(layout, new Set());
     const targets = [
       path.join(layout.transactions, `stage-${journal.id}`),
       path.join(layout.downloads, `update-${journal.id}.partial`),
@@ -427,6 +436,9 @@ module.exports = function createUpdater(core, installer) {
       installer.atomicWrite(path.join(layout.config, 'config.yaml'), snapshot.config, 0o600, layout.identity.uid);
       atomicPointer(layout, layout.current, prior.id, next.id);
       atomicPointer(layout, layout.rollback, next.operation === 'rollback' ? next.candidate : prior.id, next.id);
+      const priorModelSets = installer.loadModelSets(prior.root, prior.record, layout.identity.uid);
+      assetCache.materializeViews(layout, priorModelSets, installer.modelDescriptorsForRelease(priorModelSets, prior.record), next.id);
+      installer.writeRuntimeConfig(layout, prior.root, priorModelSets);
       if (!core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024).equals(snapshot.unit)) await dependencies.service.installUnit({ path: layout.unit, bytes: snapshot.unit, mode: 0o600, uid: layout.identity.uid });
       installer.atomicWrite(layout.installRecord, snapshot.install, 0o600, layout.identity.uid);
       fault(dependencies, 'action', 'prior_restored');
@@ -480,6 +492,9 @@ module.exports = function createUpdater(core, installer) {
     const gc = collectReleases(layout, next, [candidate.id, next.prior_healthy]);
     const references = () => [...assetReferences(layout, exists(layout.updateJournal) ? readJournal(layout) : null, [candidate.id, next.prior_healthy])];
     const assetGc = assetCache.collectAssets(layout, references(), { references });
+    const viewReferences = () => [...modelViewReferences(layout, exists(layout.updateJournal) ? readJournal(layout) : null, [candidate.id, next.prior_healthy])];
+    const viewGc = assetCache.collectViews(layout, viewReferences());
+    assetGc.views = viewGc.count; assetGc.view_bytes = viewGc.bytes;
     fault(dependencies, 'action', 'post_gc_complete');
     removeTransactionPartials(layout, next, true); removeSnapshot(layout, next);
     fs.unlinkSync(layout.updateJournal); installer.syncDirectory(layout.transactions);
@@ -627,12 +642,14 @@ module.exports = function createUpdater(core, installer) {
       if (!dependencies.host || typeof dependencies.host.inspectBase !== 'function') error('rollback_host_incompatible', 'current host compatibility facts are unavailable');
       const hostFacts = installer.hostPreflight(await dependencies.host.inspectBase());
       if (hostFacts.user.uid !== layout.identity.uid || hostFacts.user.name !== layout.identity.username || hostFacts.user.home !== layout.identity.home) error('rollback_host_incompatible', 'current host identity differs from the installation');
+      const id = dependencies.randomBytes(16).toString('hex');
       verifyRollbackAssets(layout, target);
+      const targetModelSets = installer.loadModelSets(target.root, target.record, layout.identity.uid);
+      assetCache.materializeViews(layout, targetModelSets, installer.modelDescriptorsForRelease(targetModelSets, target.record), id);
       if (dependencies.host && typeof dependencies.host.inspectRollbackCompatibility === 'function') {
         const compatible = await dependencies.host.inspectRollbackCompatibility({ layout, current: selected, target });
         if (!compatible || compatible.platform !== true || compatible.host !== true) error('rollback_host_incompatible', 'the recorded prior release is incompatible with current host facts');
       }
-      const id = dependencies.randomBytes(16).toString('hex');
       journal = {
         schema: UPDATE_SCHEMA, id, requested_channel: 'stable', operation: 'rollback', phase: 'checking',
         prior_selected: selected.id, prior_running: running.id, prior_healthy: running.id, candidate: target.id, config_snapshot: id,
@@ -653,6 +670,7 @@ module.exports = function createUpdater(core, installer) {
       journal = persistJournal(layout, journal, 'quiescing', dependencies, { receipts: { service_stopped: true } });
       atomicPointer(layout, layout.rollback, selected.id, journal.id);
       atomicPointer(layout, layout.current, target.id, journal.id);
+      installer.writeRuntimeConfig(layout, target.root, targetModelSets);
       fault(dependencies, 'action', 'pointer_activated');
       journal = persistJournal(layout, journal, 'activating', dependencies, { receipts: { pointer_activated: true } });
       const unit = installer.renderUnit(layout, target.root);
@@ -819,6 +837,10 @@ module.exports = function createUpdater(core, installer) {
         fs.renameSync(stage, candidateRoot); fs.chmodSync(candidateRoot, 0o500); installer.syncDirectory(layout.releases);
         candidate = readRelease(layout, candidateId);
       }
+      const modelSets = installer.loadModelSets(candidate.root, release, layout.identity.uid);
+      assetCache.materializeViews(layout, modelSets, release.assets, journal.id);
+      const closureFacts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout, candidateRoot: candidate.root, modelSets });
+      installer.compatibilityPreflight(closureFacts, requirements, requiredBytes);
       fault(dependencies, 'action', 'release_staged');
       journal = persistJournal(layout, journal, 'verified', dependencies, { receipts: { release_staged: true } });
       await prepareSnapshots(layout, journal, prior, candidate, acquired, dependencies);
@@ -835,6 +857,7 @@ module.exports = function createUpdater(core, installer) {
       installer.atomicWrite(path.join(layout.config, 'config.yaml'), snapshot.candidate, 0o600, layout.identity.uid);
       atomicPointer(layout, layout.rollback, prior.id, journal.id);
       atomicPointer(layout, layout.current, candidate.id, journal.id);
+      installer.writeRuntimeConfig(layout, candidate.root, modelSets);
       fault(dependencies, 'action', 'pointer_activated');
       journal = persistJournal(layout, journal, 'activating', dependencies, { receipts: { pointer_activated: true } });
       const unit = installer.renderUnit(layout, candidate.root);

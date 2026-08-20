@@ -7,6 +7,16 @@
     "nvidia_driver": ">=575.51.03",
     "provided_by_host": ["kernel", "glibc loader/family", "NVIDIA kernel driver", "libcuda.so.1"]
   },
+  "builder": {
+    "image": "docker.io/nvidia/cuda@sha256:8d75fca3fc684919d806956e1fd2e197ee71a578af8106a61b4db24248fbe9be",
+    "manifest_digest": "sha256:8d75fca3fc684919d806956e1fd2e197ee71a578af8106a61b4db24248fbe9be",
+    "upstream_tag": "12.9.1-devel-rockylinux8",
+    "platform": "linux/amd64",
+    "glibc_floor": "2.28",
+    "cuda_toolchain": "12.9.1",
+    "network_during_build": false,
+    "ambient_mounts": false
+  },
   "inputs": [
     {
       "name": "CPython",
@@ -28,6 +38,28 @@
       "license": "MIT",
       "license_url": "https://github.com/nodejs/node/blob/v26.7.0/LICENSE",
       "purpose": "web-and-sea-build-only"
+    },
+    {
+      "name": "CMake",
+      "version": "4.1.1",
+      "url": "https://github.com/Kitware/CMake/releases/download/v4.1.1/cmake-4.1.1-linux-x86_64.tar.gz",
+      "github_asset_id": 286839996,
+      "size": 56395347,
+      "sha256": "5a6c61cb62b38e153148a2c8d4af7b3d387f0c8c32b6dbceb5eb4af113efd65a",
+      "license": "BSD-3-Clause",
+      "license_url": "https://github.com/Kitware/CMake/blob/v4.1.1/Copyright.txt",
+      "purpose": "application-runtime-build"
+    },
+    {
+      "name": "patchelf",
+      "version": "0.18.0",
+      "url": "https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz",
+      "github_asset_id": 104921688,
+      "size": 457219,
+      "sha256": "ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0",
+      "license": "GPL-3.0-or-later",
+      "license_url": "https://github.com/NixOS/patchelf/blob/0.18.0/COPYING",
+      "purpose": "application-runtime-build"
     },
     {
       "name": "LiveKit server",

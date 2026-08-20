@@ -11,30 +11,17 @@ const launcher = require('../voice-agent.cjs');
 const installer = require('../install.cjs')(launcher);
 const archive = require('../../release/archive.cjs');
 const releaseSource = require('../release-source.cjs')(launcher);
+const fixture = require('./artifact-fixture.cjs');
 const NOW = new Date('2026-08-21T00:00:00Z');
 const UID = process.geteuid();
 
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 function mode(filename) { return fs.lstatSync(filename).mode & 0o777; }
 function errorCode(code, action) { return assert.rejects(action, (reason) => reason && reason.code === code); }
-function assetDescriptor(id, kind, bytes) {
-  const sha256 = hash(bytes); const image = kind === 'agent_environment_image';
-  return { authority: { origin: 'https://assets.example.invalid', path_prefix: '/voice-agent/' }, compatibility: { minimum_launcher_protocol: 1, maximum_launcher_protocol: 1, minimum_application_protocol: 1, maximum_application_protocol: 1 }, digest: `sha256:${sha256}`, id, kind, license: { id: 'Fixture-Test-Only', acceptance: 'accepted' }, platform: launcher.SUPPORTED_PLATFORM, reachability: image ? 'optional' : 'required', required_free_space_reserve: 1024, sha256, size: bytes.length, url: image ? `https://assets.example.invalid/voice-agent/images/environment@sha256:${sha256}` : `https://assets.example.invalid/voice-agent/${kind}/${sha256}` };
-}
-
 function fixtureArtifact(overrides = {}) {
-  const contents = new Map([
-    ['bin/voice-agent-runtime', Buffer.from('#!/bin/sh\nexit 0\n')],
-    ['descriptors/local-models.json', Buffer.from('{"llm":"lfm2.5-q4","stt":"whisper-large-v3-turbo","tts":"silero-v5_5_ru-kseniya"}')],
-    ['descriptors/runtime.json', Buffer.from('{"cuda":"compatible","livekit":"pinned","provider":"local","fallback":false}')],
-  ]);
-  const entries = [
-    { path: 'bin', type: 'directory', mode: '0555', size: 0, sha256: null, target: null },
-    { path: 'bin/voice-agent-runtime', type: 'file', mode: '0555', size: contents.get('bin/voice-agent-runtime').length, sha256: hash(contents.get('bin/voice-agent-runtime')), target: null },
-    { path: 'descriptors', type: 'directory', mode: '0555', size: 0, sha256: null, target: null },
-    { path: 'descriptors/local-models.json', type: 'file', mode: '0444', size: contents.get('descriptors/local-models.json').length, sha256: hash(contents.get('descriptors/local-models.json')), target: null },
-    { path: 'descriptors/runtime.json', type: 'file', mode: '0444', size: contents.get('descriptors/runtime.json').length, sha256: hash(contents.get('descriptors/runtime.json')), target: null },
-  ];
+  const closed = fixture.closedFixture(launcher, 'install');
+  const contents = closed.contents;
+  const entries = fixture.entriesFor(contents);
   const manifest = {
     application_protocol: { maximum: 1, minimum: 1 }, build_id: 'd'.repeat(40), config_schema: { maximum: 2, minimum: 2 },
     data_schema: { maximum: 2, minimum: 2 }, entries, launcher_protocol: { maximum: 1, minimum: 1 },
@@ -48,8 +35,8 @@ function fixtureArtifact(overrides = {}) {
     { path: 'release-manifest.json', type: 'file', mode: '0444', bytes: manifestBytes, target: null },
     ...manifest.entries.map((entry) => ({ ...entry, bytes: entry.type === 'file' ? contents.get(entry.path) : Buffer.alloc(0) })),
   ], 1787184000);
-  const assetContents = new Map([['model', Buffer.from('model-exact')], ['runtime', Buffer.from('runtime-exact')], ['agent_environment_image', Buffer.from('image-exact')]]);
-  const assets = [...assetContents].map(([kind, bytes]) => assetDescriptor(`${kind}-fixture`, kind, bytes));
+  const assetContents = closed.assetContents;
+  const assets = closed.assets;
   const release = {
     artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: 'https://releases.example.invalid/voice-agent-1.0.0.tar.zst', assets,
     build_id: manifest.build_id, launcher: null, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
@@ -70,7 +57,7 @@ function fixtureArtifact(overrides = {}) {
     ...manifest.entries,
   ];
   const readEntry = async (name) => contents.get(name);
-  return { artifactBytes, manifestBytes, archiveEntries, readEntry, channelBytes, signatureBytes, publicKeyPem, release, manifest, assetContents };
+  return { artifactBytes, manifestBytes, archiveEntries, readEntry, channelBytes, signatureBytes, publicKeyPem, release, manifest, assetContents, bytesForDescriptor: closed.bytesForDescriptor };
 }
 
 function readyDocument(artifact, active = true, optional = { agent_environment: 'disabled', telegram: 'disabled' }) {
@@ -123,7 +110,7 @@ function makeHarness(options = {}) {
   const source = {
     acquireChannel: async () => ({ channelBytes: artifact.channelBytes, signatureBytes: options.signatureBytes || artifact.signatureBytes, publicKeyPem: artifact.publicKeyPem }),
     acquireArtifact: async () => { const indexed = releaseSource.indexArchive(artifact.artifactBytes); return { artifactBytes: artifact.artifactBytes, ...indexed, archiveEntries: options.archiveEntries || indexed.archiveEntries }; },
-    downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: (descriptor.kind === 'program' ? artifact.artifactBytes : artifact.assetContents.get(descriptor.kind)).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }),
+    downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: artifact.bytesForDescriptor(descriptor, artifact.artifactBytes).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }),
   };
   const dependencies = {
     identity, clock, host, source, service, output: { info: (line) => lines.push(line) },
@@ -273,6 +260,28 @@ test('partial/foreign/symlinked state routes to doctor and preserves pre-existin
   });
   fs.mkdirSync(unowned.layout.data, { recursive: true, mode: 0o700 }); fs.chmodSync(unowned.layout.data, 0o700);
   await errorCode('path_custody_invalid', () => install(unowned));
+});
+
+test('production SystemHost derives compatibility only from the staged runtime receipt and exact four-set views', async (context) => {
+  const value = makeHarness(); cleanup(context, value); installer.installDirectories(value.layout);
+  const host = new installer.SystemHost();
+  const requirements = installer.artifactPreflight(value.artifact.manifest, value.artifact.release, value.artifact.archiveEntries, value.artifact.manifestBytes);
+  let facts = await host.inspectCompatibility({ release: value.artifact.release, manifest: value.artifact.manifest, requirements, layout: value.layout });
+  assert.equal(facts.assets.runtime_available, false); assert.equal(facts.assets.model_available, false);
+
+  const candidateRoot = path.join(value.layout.transactions, 'system-host-candidate'); fs.mkdirSync(candidateRoot, { mode: 0o700 });
+  await installer.extractVerifiedArchive(candidateRoot, value.artifact.manifest, value.artifact.manifestBytes, value.artifact);
+  const modelSets = JSON.parse(fs.readFileSync(path.join(candidateRoot, 'descriptors', 'model-sets.json')));
+  for (const item of value.artifact.release.assets.filter((entry) => entry.kind === 'model')) {
+    const target = path.join(value.layout.models, item.sha256); fs.writeFileSync(target, value.artifact.assetContents.get(item.id), { mode: 0o400 }); fs.chmodSync(target, 0o400);
+  }
+  launcher.loadAssetCache(installer).materializeViews(value.layout, modelSets, value.artifact.release.assets, 'f'.repeat(32));
+  facts = await host.inspectCompatibility({ release: value.artifact.release, manifest: value.artifact.manifest, requirements, layout: value.layout, candidateRoot, modelSets });
+  assert.equal(facts.assets.runtime_available, true); assert.equal(facts.assets.runtime_compatible, true); assert.equal(facts.assets.model_available, true);
+
+  const runtime = path.join(candidateRoot, 'runtime', 'python', 'bin', 'python3'); fs.chmodSync(runtime, 0o755); fs.writeFileSync(runtime, Buffer.alloc(fs.statSync(runtime).size, 0x78)); fs.chmodSync(runtime, 0o555);
+  facts = await host.inspectCompatibility({ release: value.artifact.release, manifest: value.artifact.manifest, requirements, layout: value.layout, candidateRoot, modelSets });
+  assert.equal(facts.assets.runtime_available, false); assert.equal(facts.assets.runtime_compatible, false);
 });
 
 test('production CLI accepts no arbitrary install root and install output/records leak no secret or content bytes', async (context) => {

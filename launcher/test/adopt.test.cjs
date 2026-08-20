@@ -13,26 +13,17 @@ const updater = require('../update.cjs')(core, installer);
 const adopter = require('../adopt.cjs')(core, installer, updater);
 const archive = require('../../release/archive.cjs');
 const releaseSource = require('../release-source.cjs')(core);
+const fixture = require('./artifact-fixture.cjs');
 const UID = process.geteuid();
 const NOW = new Date('2026-08-21T00:00:00Z');
 
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 function exists(filename) { try { fs.lstatSync(filename); return true; } catch { return false; } }
 function code(expected, action) { return assert.rejects(action, (reason) => reason && reason.code === expected); }
-function assetDescriptor(id, kind, bytes) { const sha256 = hash(bytes); const image = kind === 'agent_environment_image'; return { authority: { origin: 'https://assets.example.invalid', path_prefix: '/voice-agent/' }, compatibility: { minimum_launcher_protocol: 1, maximum_launcher_protocol: 1, minimum_application_protocol: 1, maximum_application_protocol: 1 }, digest: `sha256:${sha256}`, id, kind, license: { id: 'Fixture-Test-Only', acceptance: 'accepted' }, platform: core.SUPPORTED_PLATFORM, reachability: image ? 'optional' : 'required', required_free_space_reserve: 1024, sha256, size: bytes.length, url: image ? `https://assets.example.invalid/voice-agent/images/environment@sha256:${sha256}` : `https://assets.example.invalid/voice-agent/${kind}/${sha256}` }; }
-
 function candidateArtifact(options = {}) {
-  const contents = new Map([
-    ['bin/voice-agent-runtime', Buffer.from('#!/bin/sh\nexit 0\n')],
-    ['descriptors/local-models.json', Buffer.from('{"models":"exact"}')],
-    ['descriptors/runtime.json', Buffer.from('{"runtime":"exact"}')],
-  ]);
-  const entries = [
-    { path: 'bin', type: 'directory', mode: '0555', size: 0, sha256: null, target: null },
-    { path: 'bin/voice-agent-runtime', type: 'file', mode: '0555', size: contents.get('bin/voice-agent-runtime').length, sha256: hash(contents.get('bin/voice-agent-runtime')), target: null },
-    { path: 'descriptors', type: 'directory', mode: '0555', size: 0, sha256: null, target: null },
-    ...[...contents.entries()].filter(([name]) => name.startsWith('descriptors/')).map(([name, bytes]) => ({ path: name, type: 'file', mode: '0444', size: bytes.length, sha256: hash(bytes), target: null })),
-  ];
+  const closed = fixture.closedFixture(core, 'adopt');
+  const contents = closed.contents;
+  const entries = fixture.entriesFor(contents);
   const manifest = {
     application_protocol: { minimum: 1, maximum: 1 }, build_id: 'd'.repeat(40), config_schema: { minimum: 2, maximum: 2 },
     data_schema: { minimum: 2, maximum: 2 }, entries, launcher_protocol: { minimum: 1, maximum: 1 },
@@ -44,8 +35,8 @@ function candidateArtifact(options = {}) {
     { path: 'release-manifest.json', type: 'file', mode: '0444', bytes: manifestBytes, target: null },
     ...entries.map((entry) => ({ ...entry, bytes: entry.type === 'file' ? contents.get(entry.path) : Buffer.alloc(0) })),
   ], 1787184000);
-  const assetContents = new Map([['model', Buffer.from('model-adopt')], ['runtime', Buffer.from('runtime-adopt')], ['agent_environment_image', Buffer.from('image-adopt')]]);
-  const assets = [...assetContents].map(([kind, bytes]) => assetDescriptor(`${kind}-adopt`, kind, bytes));
+  const assetContents = closed.assetContents;
+  const assets = closed.assets;
   const release = {
     artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: 'https://releases.example.invalid/1.0.0.tar.zst', assets,
     build_id: manifest.build_id, launcher: null, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
@@ -58,7 +49,7 @@ function candidateArtifact(options = {}) {
     signatureBytes: Buffer.from(`${crypto.sign(null, channelBytes, pair.privateKey).toString('base64')}\n`),
     publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }),
     archiveEntries: [{ path: 'release-manifest.json', type: 'file', mode: '0444', size: manifestBytes.length, sha256: hash(manifestBytes), target: null }, ...entries],
-    readEntry: async (name) => contents.get(name), ...options,
+    readEntry: async (name) => contents.get(name), bytesForDescriptor: closed.bytesForDescriptor, modelSets: closed.modelSets, ...options,
   };
 }
 
@@ -150,7 +141,7 @@ function harness(options = {}) {
       }),
       inspectCompatibility: async ({ requirements }) => ({ free_bytes: 20 * 1024 ** 3, assets: { ...requirements, model_available: true, runtime_available: true, runtime_compatible: true } }),
     },
-    source: { acquireChannel: async () => artifact, acquireArtifact: async () => ({ artifactBytes: artifact.artifactBytes, ...releaseSource.indexArchive(artifact.artifactBytes) }), downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: (descriptor.kind === 'program' ? artifact.artifactBytes : artifact.assetContents.get(descriptor.kind)).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }) },
+    source: { acquireChannel: async () => artifact, acquireArtifact: async () => ({ artifactBytes: artifact.artifactBytes, ...releaseSource.indexArchive(artifact.artifactBytes) }), downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: artifact.bytesForDescriptor(descriptor, artifact.artifactBytes).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }) },
     clock: { now: () => new Date(NOW), monotonic: () => monotonic, sleep: async (ms) => { monotonic += ms; } },
     randomBytes: (length) => Buffer.alloc(length, 0x7c), output: { info: (line) => lines.push(line) }, fault: options.fault || null,
   };
@@ -253,6 +244,9 @@ test('interruption after every durable write/action converges without duplicate 
       afterAction(name) { if (!fired && event === `action:${name}`) { fired = true; throw new core.LauncherError('legacy_adoption_interrupted', 'fixture'); } },
     };
     await code('legacy_adoption_interrupted', () => adopt(value)); value.dependencies.fault = null;
+    if (event === 'action:candidate_staged') for (const set of value.artifact.modelSets.sets) {
+      const root = path.join(value.layout.modelViews, set.aggregate_sha256); if (exists(root)) fs.rmSync(root, { recursive: true });
+    }
     const result = await adopt(value); assert.equal(result.state, 'legacy_adopted_healthy', event);
     for (const action of ['legacy-stop', 'candidate-start', 'legacy-retire']) assert.ok(value.calls.filter((item) => item === action).length <= 1, `${event}:${action}`);
     assert.equal(fs.readdirSync(value.layout.releases).length, 3, event);

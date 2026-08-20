@@ -42,7 +42,7 @@ The architecture and contract ownership are defined in [`architecture.md`](archi
                                        └─ I5 AgentEnvironment/config preservation
                                           └─ I6 Assets/cache/offline hardening
                                              └─ I7 Rollback/uninstall/support bundle
-                                                └─ D1 Compiled distribution bridge (strict tooling implemented; production runtime inputs blocked)
+                                                └─ D1 Compiled distribution bridge (runtime assembler/materialization implemented; physical output pending)
                                                    └─ I8 Host/power-loss/reboot/physical acceptance
 ```
 
@@ -80,12 +80,12 @@ Production signing-key provisioning, publication or downloads; install/update/ro
 4. **I5 AgentEnvironment/config preservation — implemented deterministically:** durable XDG-data migration, explicit owner-only rootless authority, content-free exact inventory and before/after identity proof across install/update/rollback/recovery/adoption; real Docker/host evidence remains I8.
 5. **I6 assets/cache/offline/self-update — implemented deterministically:** resumable exact downloads, signed content-addressed dependencies, verified cached-only policy, genuine-space-only refusal and application-health-gated launcher replacement; real network/filesystem power-loss evidence remains I8.
 6. **I7 rollback/uninstall/support bundle — implemented deterministically:** recorded-prior-only exact-ready rollback, preservation-first closed-category uninstall, and fixed local privacy-scanned diagnostics; real host/deletion/voice evidence remains I8.
-7. **D1 compiled distribution bridge — strict boundary implemented, production candidate blocked:** explicit reproducible SEA inputs with one pinned key/HTTPS stable URL, production HTTPS/archive source, canonical application artifact/SBOM/provenance tooling, owner-only offline signing and collision/readback-safe `gh-axi` publication dry run. A working artifact is not assembled until the Python lock gains artifact hashes, an accepted redistributable Linux x86_64 Python/Node/CUDA dependency closure exists, host paths are removed from release inputs and Silero licensing is approved. PR fixtures exercise format/refusal only.
+7. **D1 compiled distribution bridge — deterministic closure implemented, physical candidate pending:** explicit reproducible SEA inputs with one pinned key/HTTPS stable URL, production HTTPS/archive source, one digest-pinned network-disabled runtime assembler, closed model aggregate views, launcher-generated host-neutral runtime config, canonical artifact/SBOM/provenance tooling, owner-only offline signing and collision/readback-safe `gh-axi` publication. PR fixtures exercise orchestration, closure, recovery and refusal only; the real OCI build, production signing/publication and physical host acceptance remain I8.
 8. **I8 acceptance:** disposable real-host install, VM phase/power loss, reboot, update/rollback voice turn and physical/full-stack gates before stable publication. macOS native support remains later.
 
 ## Distribution bridge D1 — Compiled authority and offline candidate tooling
 
-> **Implemented boundary, blocked production payload:** ADR-0017 owns the bridge. No working production artifact, signing key, publication, model download, or live-host action is claimed.
+> **Implemented deterministic boundary and assembler:** ADR-0017 owns the bridge. No physically assembled production artifact, signing key, publication, model download, or live-host action is claimed.
 
 ### User-visible outcome
 
@@ -97,16 +97,18 @@ A separately built launcher can contain one immutable Ed25519 verifier and stabl
 - TLS/public-DNS/standard-port/exact-URL/no-redirect/no-credentials bounds; exact content length, deadlines, strong validator/range and content-free errors.
 - Canonical zstd/ustar indexing with closed manifest, metadata/type/path/count/size/ratio/link and complete extraction inventory guards.
 - Clean exact-source, lock/hash, runtime closure, x86_64/glibc/CUDA, license/source/redistribution, host-path/secret, SBOM/provenance and undeclared-file gates.
+- Repository-owned `assemble-runtime` with a pinned CUDA-12.9.1 Rocky-8 builder, isolated content cache, separate exact npm acquisition, network-disabled build, bundled CPython/wheels/static LiveKit/rebuilt llama.cpp, recursive ELF/RUNPATH/de-duplication receipts and normalized runtime/web output.
+- Four exact model sets and atomic owner-only aggregate views, one launcher-generated host-neutral runtime descriptor, exact staged production compatibility and pre-quiesce/recovery/rollback materialization.
 - Offline mode-`0400`/`0600` Ed25519 signing of reviewed canonical bytes only; dry-run/confirmed `gh-axi` publication with immutable tag/sequence collision refusal and exact download readback.
 - PR workflow with committed public test root only and no signing secret/publication authority.
 
-### Production blocker and required incoming evidence
+### Remaining production evidence
 
-Pasha fixed D1's scope to a private personal noncommercial release, MIT source and separately CC BY-NC-SA Kseniya. `requirements-release/` and `release/inputs/` now close CPython 3.12.13, gateway/STT/TTS wheels, build-only Node 26.7.0, CUDA 12.9, LiveKit/llama.cpp and license/model receipts. Application paths are release/XDG-relative, the STT runner is shipped, Node is excluded from the payload, and SPDX 2.3 plus two-phase private GitHub IDs are enforced. No model weights are acquired by repository verification; physical runtime acceptance remains pending.
+Pasha fixed D1's scope to a private personal noncommercial release, MIT source and separately CC BY-NC-SA Kseniya. `requirements-release/` and `release/inputs/` close CPython 3.12.13, gateway/STT/TTS wheels, build-only Node 26.7.0, the digest-pinned CUDA-12.9.1 builder, CMake/patchelf, LiveKit/llama.cpp and license/model receipts. The repository-owned command now assembles the runtime/web receipt path; application paths are release/XDG-relative through exact model views, the STT runner is shipped, Node is excluded from the payload, and SPDX 2.3 plus two-phase private GitHub IDs are enforced. No model weights are acquired by repository verification. Two real isolated assembly comparisons, measured expanded/archive size and file count, production signing/publication and disposable-host GPU/systemd/voice/reboot acceptance remain pending.
 
 ### Acceptance and evidence
 
-`./verify` owns key-injection, HTTPS/redirect/TLS/deadline/length/range, archive/PAX/type/path/metadata/ratio, reproducible launcher/candidate receipt, dirty/floating/unhashed/undeclared/license/host-leak, offline key-permission/leak, publication collision/readback and real lifecycle fixture cases. `.github/workflows/release-candidate.yml` receives no private key and cannot publish. Actual network, runtime assembly, signing, GitHub publication, install, reboot and physical voice remain separate authorized evidence.
+`./verify` owns key-injection, HTTPS/redirect/TLS/deadline/length/range, archive/PAX/type/path/metadata/ratio, assembler authority/input-cache/network-denial orchestration, model-view/preflight/recovery closure, reproducible launcher/candidate receipt, dirty/floating/unhashed/undeclared/license/host-leak, offline key-permission/leak, publication collision/readback and lifecycle fixture cases. `.github/workflows/release-candidate.yml` receives no private key and cannot publish. Actual OCI/network runtime assembly, signing, GitHub publication, install, reboot and physical voice remain separate authorized evidence.
 
 ## Installation evolution I2 — Fresh supported-Linux install
 
