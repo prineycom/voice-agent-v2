@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/distribution-release.v1.schema.json",
+  "oneOf": [
+    {"$ref": "#/$defs/launcherProvenance"},
+    {"$ref": "#/$defs/runtimeBundle"},
+    {"$ref": "#/$defs/candidate"},
+    {"$ref": "#/$defs/immutableAssets"},
+    {"$ref": "#/$defs/channelFinalization"},
+    {"$ref": "#/$defs/signingReceipt"},
+    {"$ref": "#/$defs/publicationPlan"}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "launcherProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "github_api_origin", "github_asset_origins", "github_channel_path", "github_ref", "github_repository", "executable_sha256", "launcher_protocol", "launcher_version", "public_key_sha256", "source_commit", "source_timestamp"],
+      "properties": {
+        "schema": {"const": "voice-agent.launcher-provenance.v1"},
+        "github_api_origin": {"const": "https://api.github.com/"}, "github_asset_origins": {"type": "array", "minItems": 1, "maxItems": 2},
+        "github_channel_path": {"const": "stable.json"}, "github_ref": {"const": "release-channel"}, "github_repository": {"type": "string"},
+        "executable_sha256": {"$ref": "#/$defs/sha256"}, "launcher_protocol": {"type": "integer", "minimum": 1}, "launcher_version": {"type": "string"},
+        "public_key_sha256": {"$ref": "#/$defs/sha256"}, "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "source_timestamp": {"type": "string"}
+      }
+    },
+    "runtimeBundle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "platform", "architecture", "libc", "cuda", "python", "source", "test_only", "components", "elf", "files"],
+      "properties": {
+        "schema": {"const": "voice-agent.runtime-bundle.v1"}, "platform": {"const": "linux-x86_64-nvidia"}, "architecture": {"const": "x86_64"},
+        "libc": {"type": "object"}, "cuda": {"type": "object"}, "python": {"type": "object"}, "source": {"type": "object"},
+        "test_only": {"type": "boolean"}, "components": {"type": "array", "minItems": 5}, "elf": {"type": "array", "minItems": 3}, "files": {"type": "array", "minItems": 3, "maxItems": 20000}
+      }
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "artifact", "artifact_bytes", "artifact_sha256", "manifest_sha256", "sequence", "signed", "version"],
+      "properties": {
+        "schema": {"const": "voice-agent.release-candidate.v1"}, "artifact": {"type": "string"}, "artifact_bytes": {"type": "integer", "minimum": 1},
+        "artifact_sha256": {"$ref": "#/$defs/sha256"}, "manifest_sha256": {"$ref": "#/$defs/sha256"}, "sequence": {"type": "integer", "minimum": 1},
+        "signed": {"const": false}, "version": {"type": "string"}
+      }
+    },
+    "immutableAssets": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "repository", "tag", "release_id", "assets"],
+      "properties": {
+        "schema": {"const": "voice-agent.immutable-assets.v1"}, "repository": {"type": "string"}, "tag": {"type": "string"},
+        "release_id": {"type": "integer", "minimum": 1}, "assets": {"type": "array", "minItems": 3}
+      }
+    },
+    "channelFinalization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "repository", "tag", "release_id", "sequence", "channel_sha256", "immutable_assets_sha256"],
+      "properties": {
+        "schema": {"const": "voice-agent.channel-finalization.v1"}, "repository": {"type": "string"}, "tag": {"type": "string"},
+        "release_id": {"type": "integer", "minimum": 1}, "sequence": {"type": "integer", "minimum": 1},
+        "channel_sha256": {"$ref": "#/$defs/sha256"}, "immutable_assets_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "signingReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "channel_bytes", "channel_sha256", "sequence", "signature_sha256", "version"],
+      "properties": {
+        "schema": {"const": "voice-agent.channel-signing-receipt.v1"}, "channel_bytes": {"type": "integer", "minimum": 1}, "channel_sha256": {"$ref": "#/$defs/sha256"},
+        "sequence": {"type": "integer", "minimum": 1}, "signature_sha256": {"$ref": "#/$defs/sha256"}, "version": {"type": "string"}
+      }
+    },
+    "publicationPlan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "repository", "tag", "version", "sequence", "source_commit", "assets", "channel_documents", "channel_url", "collision_policy", "readback"],
+      "properties": {
+        "schema": {"const": "voice-agent.publication-plan.v1"}, "repository": {"type": "string"}, "tag": {"type": "string"}, "version": {"type": "string"},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "sequence": {"type": "integer", "minimum": 1}, "assets": {"type": "array", "minItems": 1}, "channel_documents": {"type": "array", "minItems": 2, "maxItems": 2},
+        "channel_url": {"type": "string", "pattern": "^https://api\\.github\\.com/repos/"}, "collision_policy": {"const": "refuse"}, "readback": {"const": "exact-sha256"}
+      }
+    }
+  }
+}

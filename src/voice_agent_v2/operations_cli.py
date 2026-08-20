@@ -38,6 +38,8 @@ SYSTEM_UNIT_PATH = Path("/etc/systemd/system") / SERVICE_NAME
 SYSTEMD_JOB_TIMEOUT_SECONDS = 390
 SYSTEM_COMMAND_TIMEOUT_SECONDS = 30
 RUNTIME_STATUS_TIMEOUT_SECONDS = 1.0
+_LEGACY_HOME = Path("/home") / "priney"
+_LEGACY_RELEASE = _LEGACY_HOME / ".local" / "share" / "voice-agent-v2" / "current"
 SYSTEMD_UNIT_CONTRACT = {
     "Unit": {
         "Description": ["Voice Agent v2 loopback-local single-host stack"],
@@ -53,9 +55,9 @@ SYSTEMD_UNIT_CONTRACT = {
         "NotifyAccess": ["main"],
         "User": ["priney"],
         "Group": ["priney"],
-        "WorkingDirectory": ["/home/priney/.local/share/voice-agent-v2/current"],
+        "WorkingDirectory": [str(_LEGACY_RELEASE)],
         "Environment": [
-            "HOME=/home/priney",
+            f"HOME={_LEGACY_HOME}",
             "XDG_RUNTIME_DIR=/run/voice-agent-v2",
             "PYTHONUNBUFFERED=1",
             "PYTHONPYCACHEPREFIX=/run/voice-agent-v2/pycache",
@@ -63,9 +65,7 @@ SYSTEMD_UNIT_CONTRACT = {
         "RuntimeDirectory": ["voice-agent-v2"],
         "RuntimeDirectoryMode": ["0700"],
         "RuntimeDirectoryPreserve": ["no"],
-        "ExecStart": [
-            "/home/priney/.local/share/voice-agent-v2/current/voice-agent-ops run"
-        ],
+        "ExecStart": [f"{_LEGACY_RELEASE}/voice-agent-ops run"],
         "Restart": ["on-failure"],
         "RestartSec": ["5s"],
         "RestartPreventExitStatus": ["2"],
@@ -79,7 +79,7 @@ SYSTEMD_UNIT_CONTRACT = {
         "PrivateTmp": ["yes"],
         "ProtectSystem": ["strict"],
         "ProtectHome": ["read-only"],
-        "ReadWritePaths": ["/home/priney/.cache/voice-agent-v2"],
+        "ReadWritePaths": [str(_LEGACY_HOME / ".cache" / "voice-agent-v2")],
         "ProtectClock": ["yes"],
         "ProtectControlGroups": ["yes"],
         "ProtectKernelLogs": ["yes"],

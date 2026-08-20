@@ -1,0 +1,62 @@
+{
+  "schema": "voice-agent.runtime-sources.v1",
+  "platform": "linux-x86_64-nvidia",
+  "host_boundary": {
+    "kernel": "Linux x86_64",
+    "libc": "glibc >=2.28",
+    "nvidia_driver": ">=575.51.03",
+    "provided_by_host": ["kernel", "glibc loader/family", "NVIDIA kernel driver", "libcuda.so.1"]
+  },
+  "inputs": [
+    {
+      "name": "CPython",
+      "version": "3.12.13+20260807",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.12.13%2B20260807-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "github_asset_id": 505153699,
+      "size": 109285525,
+      "sha256": "5bd6f36fd7ef02b909234c94dca9994ef0da06ace3bc3cece4fe27870e9cdbbe",
+      "license": "PSF-2.0",
+      "license_url": "https://docs.python.org/3.12/license.html",
+      "purpose": "application-runtime"
+    },
+    {
+      "name": "Node.js",
+      "version": "26.7.0",
+      "url": "https://nodejs.org/download/release/v26.7.0/node-v26.7.0-linux-x64.tar.xz",
+      "size": 33539588,
+      "sha256": "982aa24dd8be4c889c6a8ab337ddff3b0896645b20f4239356e80552c16277ee",
+      "license": "MIT",
+      "license_url": "https://github.com/nodejs/node/blob/v26.7.0/LICENSE",
+      "purpose": "web-and-sea-build-only"
+    },
+    {
+      "name": "LiveKit server",
+      "version": "1.13.5",
+      "commit": "3b9f118327b257301083a7c4aa46076c8012918a",
+      "url": "https://github.com/livekit/livekit/releases/download/v1.13.5/livekit_1.13.5_linux_amd64.tar.gz",
+      "size": 18064127,
+      "sha256": "c020fac437b7cc9b776eef1ad5ea8af77be9acfa07602eca20a3a44930dfbc70",
+      "binary_sha256": "51a1bbe04439b33d6d7a6d6d83fdefad9b938162c341f0f07f75af03e456b49a",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/livekit/livekit/blob/3b9f118327b257301083a7c4aa46076c8012918a/LICENSE",
+      "purpose": "application-runtime"
+    },
+    {
+      "name": "llama.cpp source",
+      "version": "b10357",
+      "commit": "689e227db485c6b33d061555e74034c93a867649",
+      "url": "https://github.com/ggml-org/llama.cpp/archive/689e227db485c6b33d061555e74034c93a867649.tar.gz",
+      "size": 36775744,
+      "sha256": "0ce0978a3310651d615159689200dd751a22fb2484ab3eb4eccc25671f6db118",
+      "license": "MIT",
+      "license_url": "https://github.com/ggml-org/llama.cpp/blob/689e227db485c6b33d061555e74034c93a867649/LICENSE",
+      "build": "CUDA 12.9; GGML_CUDA=ON; server-only; relative RUNPATH; exact output ELF inventory",
+      "purpose": "application-runtime-build"
+    }
+  ],
+  "wheelhouse": "python-wheelhouse.v1.json",
+  "node_in_application_runtime": false,
+  "ambient_cache_allowed": false,
+  "host_python_allowed": false,
+  "host_node_allowed": false
+}

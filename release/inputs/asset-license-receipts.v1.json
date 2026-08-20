@@ -1,0 +1,56 @@
+{
+  "schema": "voice-agent.asset-license-receipts.v1",
+  "distribution_scope": "private-personal-noncommercial",
+  "assets": [
+    {
+      "id": "silero-v5-5-ru-kseniya",
+      "kind": "model",
+      "upstream": "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru",
+      "source_url": "https://models.silero.ai/models/tts/ru/v5_5_ru.pt",
+      "size": 145420684,
+      "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437",
+      "license": "CC-BY-NC-SA-4.0",
+      "license_url": "https://github.com/snakers4/silero-models/blob/d9355348e2781dc8fa25a135d1602c530afae24c/LICENSE",
+      "attribution": "Silero Models by Silero Team / snakers4",
+      "commercial_use_authorized": false,
+      "separate_from_mit_source": true
+    },
+    {
+      "id": "lfm2-5-2-6b-q4-k-m",
+      "kind": "model",
+      "upstream": "LiquidAI/LFM2.5-2.6B-GGUF@b421ad1d549afeda6a0fb2ad3a697cb5a7879adc#Q4_K_M",
+      "source_url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/blob/b421ad1d549afeda6a0fb2ad3a697cb5a7879adc/LFM2.5-2.6B-Q4_K_M.gguf",
+      "size": 1674454848,
+      "sha256": "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14",
+      "license": "LicenseRef-LFM-Open-License-1.0",
+      "license_url": "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/tree/b421ad1d549afeda6a0fb2ad3a697cb5a7879adc",
+      "private_personal_distribution_authorized": true
+    },
+    {
+      "id": "whisper-large-v3-turbo-ctranslate2",
+      "kind": "model",
+      "upstream": "mobiuslabsgmbh/faster-whisper-large-v3-turbo@0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11",
+      "source_url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/tree/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11",
+      "files": [
+        ["model.bin", 1617884929, "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"],
+        ["config.json", 2263, "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"],
+        ["tokenizer.json", 2710337, "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"],
+        ["vocabulary.json", 1068114, "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"],
+        ["preprocessor_config.json", 340, "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"]
+      ],
+      "license": "MIT",
+      "license_url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/tree/0e7a9a46fd2ec6300297f1665cd1b1f2c8b15c11",
+      "private_personal_distribution_authorized": true
+    },
+    {
+      "id": "agent-environment-oci",
+      "kind": "agent_environment_image",
+      "upstream": "ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421",
+      "source_url": "https://github.com/prineycom/voice-agent-v2/tree/main/agent-environment",
+      "license": "MIT-and-contained-package-licenses",
+      "license_url": "https://github.com/prineycom/voice-agent-v2/blob/main/THIRD_PARTY_NOTICES.md",
+      "copied_into_application_artifact": false,
+      "publication_requires_exact_oci_spdx": true
+    }
+  ]
+}

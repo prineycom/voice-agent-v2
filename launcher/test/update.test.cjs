@@ -10,6 +10,8 @@ const test = require('node:test');
 const launcher = require('../voice-agent.cjs');
 const installer = require('../install.cjs')(launcher);
 const updater = require('../update.cjs')(launcher, installer);
+const archive = require('../../release/archive.cjs');
+const releaseSource = require('../release-source.cjs')(launcher);
 const UID = process.geteuid();
 const NOW = new Date('2026-08-21T00:00:00Z');
 
@@ -57,7 +59,10 @@ function artifact(version, sequence, options = {}) {
     schema: 'voice-agent.platform-artifact-manifest.v1', service_template_sha256: installer.UNIT_CONTRACT_SHA256, version,
   };
   const manifestBytes = Buffer.from(launcher.canonicalJson(manifest));
-  const artifactBytes = Buffer.from(`signed-artifact-${version}`);
+  const artifactBytes = archive.createTarZstd([
+    { path: 'release-manifest.json', type: 'file', mode: '0444', bytes: manifestBytes, target: null },
+    ...entries.map((entry) => ({ ...entry, bytes: entry.type === 'file' ? contents.get(entry.path) : Buffer.alloc(0) })),
+  ], 1787184000);
   const assetContents = new Map([
     ['model', Buffer.from(`model-${version}`)], ['runtime', Buffer.from(`runtime-${version}`)], ['agent_environment_image', Buffer.from(`image-${version}`)],
   ]);
@@ -153,7 +158,7 @@ function harness(options = {}) {
       if (options.metadataUnavailable && sourceArtifact === candidate) throw new launcher.LauncherError('network_unavailable', 'fixture');
       return { channelBytes: sourceArtifact.channelBytes, signatureBytes: sourceArtifact.signatureBytes, publicKeyPem: sourceArtifact.publicKeyPem, cached: request.offline === true || options.cached === true, local_authorized: request.offline === true || options.cached === true };
     },
-    acquireArtifact: async (release, request = {}) => ({ artifactBytes: sourceArtifact.artifactBytes, manifestBytes: sourceArtifact.manifestBytes, archiveEntries: sourceArtifact.archiveEntries, readEntry: sourceArtifact.readEntry, cached: request.offline === true, url: release.artifact_url }),
+    acquireArtifact: async (release, request = {}) => ({ artifactBytes: sourceArtifact.artifactBytes, ...releaseSource.indexArchive(sourceArtifact.artifactBytes), cached: request.offline === true, url: release.artifact_url }),
     downloadAsset: async ({ descriptor, offset }) => {
       const bytes = (descriptor.kind === 'program' ? sourceArtifact.artifactBytes : sourceArtifact.assetContents.get(descriptor.kind)).subarray(offset);
       return { status: offset ? 206 : 200, bytes, validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url };

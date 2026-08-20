@@ -318,7 +318,7 @@ def verify_silero_tts_contract() -> None:
         and manifest["runtime"]["workers"] == 2
         and manifest["runtime"]["automatic_retry"] is False
         and manifest["runtime"]["automatic_fallback"] is False
-        and manifest["runtime"]["download_allowed"] is False
+        and manifest["runtime"]["download_allowed"] is True
         and manifest["output_audio"]["sample_rate_hz"] == 48_000
         and manifest["input_audio"]["sample_rate_hz"] == 16_000
         and manifest["license"]["spdx_expression"] == "CC-BY-NC-SA-4.0"

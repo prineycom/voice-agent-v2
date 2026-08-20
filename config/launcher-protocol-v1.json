@@ -1,6 +1,6 @@
 {
   "schema": "voice-agent.launcher-protocol.v1",
-  "launcher_version": "0.7.0",
+  "launcher_version": "0.8.0",
   "protocol": 1,
   "channels": ["stable"],
   "platforms": ["linux-x86_64-nvidia"],

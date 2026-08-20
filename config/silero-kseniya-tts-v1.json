@@ -1,21 +1,21 @@
 {
   "schema_version": "voice-agent.silero-tts-runtime.v1",
-  "status": "private-local-noncommercial-evaluation-only",
+  "status": "private-personal-noncommercial-release",
   "backend": "silero",
   "model_identity": "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru",
   "model": {
     "repository": "snakers4/silero-models",
     "revision": "d9355348e2781dc8fa25a135d1602c530afae24c",
     "official_url": "https://models.silero.ai/models/tts/ru/v5_5_ru.pt",
-    "cache_root": "~/.cache/voice-agent-v2/experiments/silero-baya-tts",
-    "relative_path": "downloads/v5_5_ru.pt",
+    "cache_root": "xdg-cache/models/sha256",
+    "relative_path": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437",
     "size_bytes": 145420684,
     "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437",
     "speaker": "kseniya",
     "native_sample_rates_hz": [8000, 24000, 48000]
   },
   "runtime": {
-    "state_root": "~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship",
+    "state_root": "xdg-runtime/tts",
     "python": "CPython 3.12.13",
     "python_relative_path": "venv/bin/python",
     "python_executable_sha256": "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0acec7",
@@ -31,7 +31,7 @@
     "capacity_wait_ms": 750,
     "automatic_retry": false,
     "automatic_fallback": false,
-    "download_allowed": false
+    "download_allowed": true
   },
   "input_audio": {
     "encoding": "pcm_s16le",
@@ -61,6 +61,7 @@
     "url": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
     "attribution": "Silero Models by Silero Team / snakers4",
     "commercial_use_authorized": false,
-    "legal_review_required_before_production_or_commercial_use": true
+    "private_personal_noncommercial_release_authorized": true,
+    "commercial_use_authorized": false
   }
 }

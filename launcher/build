@@ -1,21 +1,131 @@
 #!/bin/sh
 set -eu
+umask 077
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 NODE=${VOICE_AGENT_SEA_NODE:-node}
-OUTPUT=${1:-"$ROOT/dist/voice-agent"}
+OUTPUT=
+PUBLIC_KEY=
+GITHUB_REPOSITORY=
+GITHUB_REF=release-channel
+GITHUB_CHANNEL_PATH=stable.json
+LAUNCHER_VERSION=
+LAUNCHER_PROTOCOL=
+SOURCE_TIMESTAMP=
+SOURCE_COMMIT=
+COMPARE=
+usage() {
+  echo "usage: launcher/build --output PATH --public-key PATH --github-repository OWNER/REPO [--github-ref REF] [--github-channel-path PATH] --launcher-version X.Y.Z --launcher-protocol N --source-timestamp RFC3339 --source-commit SHA [--compare PATH]" >&2
+  exit 2
+}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) [ "$#" -ge 2 ] || usage; OUTPUT=$2; shift 2 ;;
+    --public-key) [ "$#" -ge 2 ] || usage; PUBLIC_KEY=$2; shift 2 ;;
+    --github-repository) [ "$#" -ge 2 ] || usage; GITHUB_REPOSITORY=$2; shift 2 ;;
+    --github-ref) [ "$#" -ge 2 ] || usage; GITHUB_REF=$2; shift 2 ;;
+    --github-channel-path) [ "$#" -ge 2 ] || usage; GITHUB_CHANNEL_PATH=$2; shift 2 ;;
+    --launcher-version) [ "$#" -ge 2 ] || usage; LAUNCHER_VERSION=$2; shift 2 ;;
+    --launcher-protocol) [ "$#" -ge 2 ] || usage; LAUNCHER_PROTOCOL=$2; shift 2 ;;
+    --source-timestamp) [ "$#" -ge 2 ] || usage; SOURCE_TIMESTAMP=$2; shift 2 ;;
+    --source-commit) [ "$#" -ge 2 ] || usage; SOURCE_COMMIT=$2; shift 2 ;;
+    --compare) [ "$#" -ge 2 ] || usage; COMPARE=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
+[ -n "$OUTPUT" ] && [ -n "$PUBLIC_KEY" ] && [ -n "$GITHUB_REPOSITORY" ] && [ -n "$GITHUB_REF" ] && [ -n "$GITHUB_CHANNEL_PATH" ] && [ -n "$LAUNCHER_VERSION" ] \
+  && [ -n "$LAUNCHER_PROTOCOL" ] && [ -n "$SOURCE_TIMESTAMP" ] && [ -n "$SOURCE_COMMIT" ] || usage
 case "$OUTPUT" in /*) ;; *) OUTPUT="$PWD/$OUTPUT" ;; esac
+case "$PUBLIC_KEY" in /*) ;; *) PUBLIC_KEY="$PWD/$PUBLIC_KEY" ;; esac
+[ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || { echo "public key input must be one regular non-link file" >&2; exit 2; }
 "$NODE" -e 'const major=Number(process.versions.node.split(".")[0]); process.exit(major >= 26 ? 0 : 1)' || {
   echo "voice-agent SEA packaging requires Node.js 26 or newer" >&2
   exit 2
 }
+NODE=$("$NODE" -p 'require("node:fs").realpathSync(process.execPath)')
 mkdir -p "$(dirname -- "$OUTPUT")"
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voice-agent-sea.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+PUBLIC_KEY="$PUBLIC_KEY" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" GITHUB_CHANNEL_PATH="$GITHUB_CHANNEL_PATH" LAUNCHER_VERSION="$LAUNCHER_VERSION" LAUNCHER_PROTOCOL="$LAUNCHER_PROTOCOL" SOURCE_TIMESTAMP="$SOURCE_TIMESTAMP" SOURCE_COMMIT="$SOURCE_COMMIT" \
+  "$NODE" <<'NODE' > "$TEMP/build-config.json"
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const keyBytes = fs.readFileSync(process.env.PUBLIC_KEY);
+let key;
+try {
+  key = crypto.createPublicKey(keyBytes);
+  const canonical = key.export({ type: 'spki', format: 'pem' }).toString();
+  if (key.asymmetricKeyType !== 'ed25519' || canonical !== keyBytes.toString()
+      || (canonical.match(/BEGIN PUBLIC KEY/g) || []).length !== 1) throw new Error('key');
+} catch { process.stderr.write('public key input must contain exactly one canonical Ed25519 SPKI public key\n'); process.exit(2); }
+if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(process.env.GITHUB_REPOSITORY)
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(process.env.GITHUB_REF) || process.env.GITHUB_REF.includes('..')
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.json$/.test(process.env.GITHUB_CHANNEL_PATH)
+    || process.env.GITHUB_CHANNEL_PATH.split('/').some((part) => part === '.' || part === '..')) {
+  process.stderr.write('private GitHub repository, ref, or channel path is invalid\n'); process.exit(2);
+}
+if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(process.env.LAUNCHER_VERSION)
+    || !/^[1-9][0-9]*$/.test(process.env.LAUNCHER_PROTOCOL) || Number(process.env.LAUNCHER_PROTOCOL) > Number.MAX_SAFE_INTEGER
+    || !/^[0-9a-f]{40}$/.test(process.env.SOURCE_COMMIT)
+    || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(process.env.SOURCE_TIMESTAMP)
+    || new Date(process.env.SOURCE_TIMESTAMP).toISOString().replace('.000Z', 'Z') !== process.env.SOURCE_TIMESTAMP) {
+  process.stderr.write('launcher version, protocol, timestamp, or source commit input is invalid\n'); process.exit(2);
+}
+const value = {
+  github_api_origin: 'https://api.github.com/',
+  github_asset_origins: ['https://objects.githubusercontent.com/', 'https://release-assets.githubusercontent.com/'],
+  github_channel_path: process.env.GITHUB_CHANNEL_PATH,
+  github_ref: process.env.GITHUB_REF,
+  github_repository: process.env.GITHUB_REPOSITORY,
+  launcher_protocol: Number(process.env.LAUNCHER_PROTOCOL),
+  launcher_version: process.env.LAUNCHER_VERSION,
+  public_key_pem: key.export({ type: 'spki', format: 'pem' }).toString(),
+  source_commit: process.env.SOURCE_COMMIT,
+  source_timestamp: process.env.SOURCE_TIMESTAMP,
+};
+process.stdout.write(JSON.stringify(value));
+NODE
+for SOURCE in voice-agent.cjs install.cjs update.cjs adopt.cjs asset-cache.cjs agent-environment.cjs release-source.cjs self-update.cjs lifecycle.cjs; do
+  cp "$ROOT/launcher/$SOURCE" "$TEMP/$SOURCE"
+done
 cat > "$TEMP/sea.json" <<EOF
-{"main":"$ROOT/launcher/voice-agent.cjs","output":"$OUTPUT","disableExperimentalSEAWarning":true,"useCodeCache":false,"useSnapshot":false,"assets":{"install.cjs":"$ROOT/launcher/install.cjs","update.cjs":"$ROOT/launcher/update.cjs","adopt.cjs":"$ROOT/launcher/adopt.cjs","asset-cache.cjs":"$ROOT/launcher/asset-cache.cjs","self-update.cjs":"$ROOT/launcher/self-update.cjs","lifecycle.cjs":"$ROOT/launcher/lifecycle.cjs"}}
+{"main":"voice-agent.cjs","output":"$OUTPUT","disableExperimentalSEAWarning":true,"useCodeCache":false,"useSnapshot":false,"assets":{"build-config.json":"build-config.json","install.cjs":"install.cjs","update.cjs":"update.cjs","adopt.cjs":"adopt.cjs","asset-cache.cjs":"asset-cache.cjs","agent-environment.cjs":"agent-environment.cjs","release-source.cjs":"release-source.cjs","self-update.cjs":"self-update.cjs","lifecycle.cjs":"lifecycle.cjs"}}
 EOF
-"$NODE" --build-sea="$TEMP/sea.json"
+SOURCE_DATE_EPOCH=$("$NODE" -e 'process.stdout.write(String(Date.parse(process.argv[1])/1000))' "$SOURCE_TIMESTAMP")
+export SOURCE_DATE_EPOCH
+(cd "$TEMP" && "$NODE" --build-sea=sea.json)
 chmod 0755 "$OUTPUT"
 mkdir -p "$TEMP/home"
 HOME="$TEMP/home" "$OUTPUT" status --json >/dev/null
-printf 'voice-agent SEA ready: %s\n' "$OUTPUT"
+SHA256=$(sha256sum "$OUTPUT" | awk '{print $1}')
+printf '%s\n' "$SHA256" > "$OUTPUT.sha256"
+BUILD_CONFIG="$TEMP/build-config.json" OUTPUT_SHA256="$SHA256" "$NODE" <<'NODE' > "$OUTPUT.provenance.json"
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const configuration = JSON.parse(fs.readFileSync(process.env.BUILD_CONFIG));
+const key = crypto.createPublicKey(configuration.public_key_pem);
+const value = {
+  github_api_origin: configuration.github_api_origin,
+  github_asset_origins: configuration.github_asset_origins,
+  github_channel_path: configuration.github_channel_path,
+  github_ref: configuration.github_ref,
+  github_repository: configuration.github_repository,
+  executable_sha256: process.env.OUTPUT_SHA256,
+  launcher_protocol: configuration.launcher_protocol,
+  launcher_version: configuration.launcher_version,
+  public_key_sha256: crypto.createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('hex'),
+  schema: 'voice-agent.launcher-provenance.v1',
+  source_commit: configuration.source_commit,
+  source_timestamp: configuration.source_timestamp,
+};
+const canonical = (v) => v === null || typeof v !== 'object' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`;
+process.stdout.write(canonical(value));
+NODE
+chmod 0644 "$OUTPUT.sha256" "$OUTPUT.provenance.json"
+if [ -n "$COMPARE" ]; then
+  case "$COMPARE" in /*) ;; *) COMPARE="$PWD/$COMPARE" ;; esac
+  [ -f "$COMPARE" ] && cmp -s "$OUTPUT" "$COMPARE" || {
+    echo "launcher reproducibility check failed" >&2
+    exit 3
+  }
+fi
+printf 'voice-agent SEA ready: %s sha256=%s\n' "$OUTPUT" "$SHA256"

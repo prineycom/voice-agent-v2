@@ -9,6 +9,8 @@ const test = require('node:test');
 
 const launcher = require('../voice-agent.cjs');
 const installer = require('../install.cjs')(launcher);
+const archive = require('../../release/archive.cjs');
+const releaseSource = require('../release-source.cjs')(launcher);
 const NOW = new Date('2026-08-21T00:00:00Z');
 const UID = process.geteuid();
 
@@ -42,7 +44,10 @@ function fixtureArtifact(overrides = {}) {
   };
   if (overrides.entries) manifest.entries = overrides.entries(entries);
   const manifestBytes = Buffer.from(launcher.canonicalJson(manifest));
-  const artifactBytes = Buffer.from('deterministic signed Linux artifact archive bytes');
+  const artifactBytes = archive.createTarZstd([
+    { path: 'release-manifest.json', type: 'file', mode: '0444', bytes: manifestBytes, target: null },
+    ...manifest.entries.map((entry) => ({ ...entry, bytes: entry.type === 'file' ? contents.get(entry.path) : Buffer.alloc(0) })),
+  ], 1787184000);
   const assetContents = new Map([['model', Buffer.from('model-exact')], ['runtime', Buffer.from('runtime-exact')], ['agent_environment_image', Buffer.from('image-exact')]]);
   const assets = [...assetContents].map(([kind, bytes]) => assetDescriptor(`${kind}-fixture`, kind, bytes));
   const release = {
@@ -117,7 +122,7 @@ function makeHarness(options = {}) {
   };
   const source = {
     acquireChannel: async () => ({ channelBytes: artifact.channelBytes, signatureBytes: options.signatureBytes || artifact.signatureBytes, publicKeyPem: artifact.publicKeyPem }),
-    acquireArtifact: async () => ({ artifactBytes: artifact.artifactBytes, manifestBytes: artifact.manifestBytes, archiveEntries: options.archiveEntries || artifact.archiveEntries, readEntry: artifact.readEntry }),
+    acquireArtifact: async () => { const indexed = releaseSource.indexArchive(artifact.artifactBytes); return { artifactBytes: artifact.artifactBytes, ...indexed, archiveEntries: options.archiveEntries || indexed.archiveEntries }; },
     downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: (descriptor.kind === 'program' ? artifact.artifactBytes : artifact.assetContents.get(descriptor.kind)).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }),
   };
   const dependencies = {

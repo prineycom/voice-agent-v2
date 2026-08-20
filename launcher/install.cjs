@@ -7,7 +7,7 @@ module.exports = function createInstaller(core) {
   const os = require('node:os');
   const path = require('node:path');
   const { spawnSync } = require('node:child_process');
-  const agentEnvironment = require('./agent-environment.cjs')(core);
+  const agentEnvironment = core.loadAgentEnvironment();
 
   const SERVICE_UNIT = 'voice-agent.service';
   const REQUIRED_COMPONENTS = ['livekit', 'controller', 'stt', 'selected_llm', 'tts'];
@@ -267,8 +267,15 @@ agent_environment:
 
   async function extractVerifiedArchive(root, manifest, manifestBytes, acquired) {
     const entries = manifest.entries;
+    const writeStageFile = (filename, bytes, mode) => {
+      let descriptor;
+      try {
+        descriptor = fs.openSync(filename, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), mode);
+        fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); fs.fchmodSync(descriptor, mode);
+      } finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+    };
     const manifestPath = path.join(root, 'release-manifest.json');
-    fs.writeFileSync(manifestPath, manifestBytes, { mode: 0o444, flag: 'wx' }); fs.chmodSync(manifestPath, 0o444);
+    writeStageFile(manifestPath, manifestBytes, 0o444);
     for (const entry of entries.filter((item) => item.type === 'directory').sort((left, right) => left.path.split('/').length - right.path.split('/').length)) {
       const filename = path.join(root, ...entry.path.split('/'));
       fs.mkdirSync(filename, { mode: 0o700 }); fs.chmodSync(filename, 0o700);
@@ -277,7 +284,7 @@ agent_environment:
       const bytes = await acquired.readEntry(entry.path);
       if (!Buffer.isBuffer(bytes) || bytes.length !== entry.size || digest(bytes) !== entry.sha256) error('archive_invalid', 'archive file bytes differ from the signed manifest');
       const filename = path.join(root, ...entry.path.split('/'));
-      fs.writeFileSync(filename, bytes, { mode: Number.parseInt(entry.mode, 8), flag: 'wx' }); fs.chmodSync(filename, Number.parseInt(entry.mode, 8));
+      writeStageFile(filename, bytes, Number.parseInt(entry.mode, 8));
     }
     for (const entry of entries.filter((item) => item.type === 'hardlink')) {
       const filename = path.join(root, ...entry.path.split('/'));
@@ -285,7 +292,8 @@ agent_environment:
     }
     for (const entry of entries.filter((item) => item.type === 'symlink')) fs.symlinkSync(entry.target, path.join(root, ...entry.path.split('/')));
     for (const entry of entries.filter((item) => item.type === 'directory').sort((left, right) => right.path.split('/').length - left.path.split('/').length)) {
-      fs.chmodSync(path.join(root, ...entry.path.split('/')), Number.parseInt(entry.mode, 8));
+      const directory = path.join(root, ...entry.path.split('/'));
+      fs.chmodSync(directory, Number.parseInt(entry.mode, 8)); syncDirectory(directory);
     }
     syncDirectory(root);
   }
@@ -462,8 +470,9 @@ agent_environment:
       let trustedSequence = 0;
       if (exists(layout.installRecord)) { try { trustedSequence = readPrivateJson(layout.installRecord, layout.identity.uid).channel_sequence || 0; } catch { error('existing_install_requires_doctor', 'existing installation metadata is invalid; run voice-agent doctor'); } }
       else if (exists(layout.journal)) { trustedSequence = readPrivateJson(layout.journal, layout.identity.uid).channel_sequence || 0; }
-      const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, signed.publicKeyPem, { now: dependencies.clock.now(), trustedSequence });
-      const channelAuthority = digest(Buffer.from(signed.publicKeyPem));
+      const authorityKey = core.releaseAuthorityKey(dependencies.source, signed, testMode);
+      const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, authorityKey, { now: dependencies.clock.now(), trustedSequence });
+      const channelAuthority = digest(Buffer.from(authorityKey));
       const release = selectRelease(channel);
       const acquired = await dependencies.source.acquireArtifact(release);
       if (!acquired || !acquired.artifactBytes || !acquired.manifestBytes || !acquired.archiveEntries || typeof acquired.readEntry !== 'function') error('artifact_unavailable', 'the authorized platform artifact is unavailable');
@@ -503,7 +512,7 @@ agent_environment:
         installDirectories(layout);
         writeJournal(layout, journalBase, 'layout_created', dependencies);
       } else installDirectories(layout);
-      writeJson(layout.channelReceipt, { schema: 'voice-agent.cached-channel.v1', channel_base64: Buffer.from(signed.channelBytes).toString('base64'), signature_base64: Buffer.from(signed.signatureBytes).toString('base64'), public_key_base64: Buffer.from(signed.publicKeyPem).toString('base64'), authority_sha256: channelAuthority, sequence: channel.sequence, expires_at: channel.expires_at, verified_at: timestamp(dependencies.clock) }, layout.identity.uid);
+      writeJson(layout.channelReceipt, { schema: 'voice-agent.cached-channel.v1', channel_base64: Buffer.from(signed.channelBytes).toString('base64'), signature_base64: Buffer.from(signed.signatureBytes).toString('base64'), public_key_base64: Buffer.from(authorityKey).toString('base64'), authority_sha256: channelAuthority, sequence: channel.sequence, expires_at: channel.expires_at, verified_at: timestamp(dependencies.clock) }, layout.identity.uid);
       const assetOutcome = await assetManager.reconcile(layout, descriptors, journalBase.id, dependencies.source, {
         offline: false, applicationProtocol: manifest.application_protocol.minimum,
         imageInspector: dependencies.host.inspectAgentImage ? (descriptor) => dependencies.host.inspectAgentImage(descriptor) : null,
@@ -653,11 +662,6 @@ agent_environment:
     }
   }
 
-  class UnprovisionedSource {
-    async acquireChannel() { error('release_authority_unprovisioned', 'production signing-key/channel publication is not provisioned in this repository build; nothing was installed'); }
-    async acquireArtifact() { error('artifact_unavailable', 'release artifact unavailable'); }
-  }
-
   class SystemService {
     constructor() { this.probeOwner = new core.SystemServiceProbe(); }
     async enableLinger({ username }) {
@@ -705,7 +709,7 @@ agent_environment:
   }
 
   function defaultDependencies() {
-    return { host: new SystemHost(), source: new UnprovisionedSource(), service: new SystemService(), clock: new SystemClock(), randomBytes: crypto.randomBytes, output: { info(line) { process.stdout.write(`${line}\n`); } } };
+    return { host: new SystemHost(), source: core.createProductionSource(), service: new SystemService(), clock: new SystemClock(), randomBytes: crypto.randomBytes, output: { info(line) { process.stdout.write(`${line}\n`); } } };
   }
 
   function installContractSchemaNames() { return ['install-transaction.v1.schema.json', 'installation.v1.schema.json']; }

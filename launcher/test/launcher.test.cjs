@@ -239,14 +239,24 @@ test('Node 26 SEA packaging is deterministic and executable without another host
   context.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const first = path.join(temporary, 'voice-agent-one');
   const second = path.join(temporary, 'voice-agent-two');
+  const buildArguments = (output) => [
+    '--output', output, '--public-key', path.join(ROOT, 'launcher', 'keys', 'release-fixture-ed25519-public.pem'), '--github-repository', 'prineycom/voice-agent-v2',
+    '--github-ref', 'release-channel', '--github-channel-path', 'stable.json', '--launcher-version', '0.8.0', '--launcher-protocol', '1', '--source-timestamp', '2026-08-20T00:00:00Z', '--source-commit', 'a'.repeat(40),
+  ];
   for (const output of [first, second]) {
-    const result = spawnSync(path.join(ROOT, 'launcher', 'build'), [output], {
+    const result = spawnSync(path.join(ROOT, 'launcher', 'build'), buildArguments(output), {
       cwd: ROOT, encoding: 'utf8', timeout: 30000,
-      env: { ...process.env, VOICE_AGENT_SEA_NODE: process.execPath, HOME: path.join(temporary, 'unused-home') },
+      env: { ...process.env, VOICE_AGENT_SEA_NODE: process.execPath, HOME: path.join(temporary, 'unused-home'), VOICE_AGENT_RELEASE_TOKEN: 'must-not-enter-sea' },
     });
     assert.equal(result.status, 0, result.stderr);
   }
   assert.equal(hash(fs.readFileSync(first)), hash(fs.readFileSync(second)));
+  const comparison = spawnSync(path.join(ROOT, 'launcher', 'build'), [...buildArguments(second), '--compare', first], { cwd: ROOT, encoding: 'utf8', timeout: 30000, env: { ...process.env, VOICE_AGENT_SEA_NODE: process.execPath } });
+  assert.equal(comparison.status, 0, comparison.stderr);
+  const provenance = JSON.parse(fs.readFileSync(`${first}.provenance.json`));
+  assert.equal(provenance.executable_sha256, hash(fs.readFileSync(first)));
+  const executableText = fs.readFileSync(first).toString('latin1');
+  for (const forbidden of [ROOT, temporary, os.homedir(), 'must-not-enter-sea', 'fixture-private-key-material-must-not-enter-sea']) assert.equal(executableText.includes(forbidden), false, forbidden);
   const home = path.join(temporary, 'fresh-home');
   fs.mkdirSync(home);
   const execution = spawnSync(first, ['doctor', '--json'], { encoding: 'utf8', timeout: 5000, env: { HOME: home, PATH: '/usr/bin:/bin' } });
@@ -256,7 +266,7 @@ test('Node 26 SEA packaging is deterministic and executable without another host
 
 test('all launcher schemas, protocol, public keys, and signed fixtures are bounded public material', () => {
   for (const name of [
-    'release-channel.v1.schema.json', 'platform-artifact-manifest.v1.schema.json', 'release-record.v1.schema.json',
+    'release-channel.v1.schema.json', 'platform-artifact-manifest.v1.schema.json', 'release-record.v1.schema.json', 'distribution-release.v1.schema.json',
     'install-transaction.v1.schema.json', 'update-transaction.v1.schema.json', 'legacy-adoption.v1.schema.json', 'legacy-import-release.v1.schema.json',
     'legacy-config-migration.v1.schema.json', 'docker-endpoint.v1.schema.json', 'config-migrations.v1.schema.json', 'installation.v1.schema.json',
     'launcher-status.v1.schema.json', 'launcher-doctor.v1.schema.json', 'legacy-discovery.v1.schema.json',
