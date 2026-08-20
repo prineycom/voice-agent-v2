@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 set -euo pipefail
 export HOME=/work/home XDG_CONFIG_HOME=/work/config XDG_CACHE_HOME=/work/xdg
 export PIP_CONFIG_FILE=/dev/null NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/dev/null
@@ -6,7 +6,7 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null PYTHONNOUSERSITE=1 PYTH
 unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy
 unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS
-/bin/mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+/usr/bin/mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 
 input() {
   local name=$1 digest
@@ -14,39 +14,20 @@ input() {
   test "$digest" && test -f "/inputs/$digest"
   printf '/inputs/%s' "$digest"
 }
-single_line() {
-  local value=$1
-  value=${value//$'\n'/ | }
-  value=${value//$'\t'/ }
-  printf '%s' "$value"
-}
-
 builder_tool_preflight() {
-  /bin/rm -rf /build/tool-bin /build/tools /build/web /build/tool-report.tsv
-  /bin/mkdir -p /build/tool-bin /build/tools
-  local phase provenance name tool_path expected detail observed status failures=0
-  while IFS=$'\t' read -r phase provenance name tool_path expected detail; do
+  /usr/bin/rm -rf /build/tool-bin /build/tools /build/web /build/tool-report.tsv
+  /usr/bin/mkdir -p /build/tool-bin /build/tools
+  /tool-preflight /build/tool-authority.tsv /build/tool-report.tsv builder
+  local phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail
+  local report_provenance report_name report_path evidence status failures=0
+  declare -A builder_status=()
+  while IFS=$'\t' read -r report_provenance report_name report_path evidence status; do builder_status[$report_name]=$status; done </build/tool-report.tsv
+  while IFS=$'\t' read -r phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail; do
     test "$phase" = builder || continue
-    status=ok observed=
-    if test ! -e "$tool_path" || test ! -x "$tool_path"; then
-      status=absent observed=absent failures=$((failures + 1))
-    elif test "$expected" = builder-image; then
-      observed=builder-image
-    else
-      set +e
-      observed=$("$tool_path" --version 2>&1)
-      local probe_status=$?
-      set -e
-      observed=$(single_line "$observed")
-      if test "$probe_status" -ne 0 || [[ "$observed" != *"$expected"* ]]; then
-        status=mismatch failures=$((failures + 1))
-      fi
-    fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$provenance" "$name" "$tool_path" "$observed" "$status" >>/build/tool-report.tsv
-    if test "$status" = ok; then /usr/bin/ln -s "$tool_path" "/build/tool-bin/$name"; fi
+    if test "${builder_status[$name]:-absent}" = ok; then /usr/bin/ln -s "$tool_path" "/build/tool-bin/$name"; else failures=$((failures + 1)); fi
   done </build/tool-authority.tsv
   if test "$failures" -ne 0; then
-    while IFS=$'\t' read -r phase provenance name tool_path expected detail; do
+    while IFS=$'\t' read -r phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail; do
       [[ "$phase" = content || "$phase" = web ]] || continue
       printf '%s\t%s\t%s\t%s\tblocked\n' "$provenance" "$name" "$tool_path" blocked >>/build/tool-report.tsv
     done </build/tool-authority.tsv
@@ -69,28 +50,27 @@ builder_tool_preflight() {
   located=$(find /build/tools/patchelf-unpacked -type f -name patchelf -print -quit)
   if test "$located"; then cp "$located" /build/tools/patchelf/patchelf; else extraction_failed=1; fi
 
-  while IFS=$'\t' read -r phase provenance name tool_path expected detail; do
+  if test "$extraction_failed" -ne 0; then
+    while IFS=$'\t' read -r phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail; do
+      test "$phase" = content || continue
+      printf '%s\t%s\t%s\tabsent\tabsent\n' "$provenance" "$name" "$tool_path" >>/build/tool-report.tsv
+    done </build/tool-authority.tsv
+  else
+    /tool-preflight /build/tool-authority.tsv /build/tool-report.tsv content
+  fi
+  local content_failures=0
+  declare -A closure_status=()
+  while IFS=$'\t' read -r report_provenance report_name report_path evidence status; do closure_status[$report_name]=$status; done </build/tool-report.tsv
+  while IFS=$'\t' read -r phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail; do
     test "$phase" = content || continue
-    status=ok observed=
-    if test "$extraction_failed" -ne 0; then
-      status=absent observed=archive-extraction-failed
-    else
-      set +e
-      case "$name" in
-        node) observed=$("$tool_path" --version 2>&1);;
-        npm) observed=$(/build/tools/node/bin/node "$tool_path" --version 2>&1);;
-        python) observed=$("$tool_path" -VV 2>&1);;
-        pip) observed=$(/build/tools/python/bin/python3 -I -m pip --version 2>&1);;
-        cmake|patchelf) observed=$("$tool_path" --version 2>&1);;
-        *) observed=undeclared-tool; status=extra;;
-      esac
-      local probe_status=$?
-      set -e
-      observed=$(single_line "$observed")
-      if test "$probe_status" -ne 0 || [[ "$observed" != *"$expected"* ]]; then status=mismatch; fi
-    fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$provenance" "$name" "$tool_path" "$observed" "$status" >>/build/tool-report.tsv
+    test "${closure_status[$name]:-absent}" = ok || content_failures=$((content_failures + 1))
   done </build/tool-authority.tsv
+  if test "$content_failures" -ne 0; then
+    while IFS=$'\t' read -r phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail; do
+      test "$phase" = web || continue
+      printf '%s\t%s\t%s\tblocked\tblocked\n' "$provenance" "$name" "$tool_path" >>/build/tool-report.tsv
+    done </build/tool-authority.tsv
+  fi
 }
 
 acquire_web_cache() {
@@ -131,14 +111,16 @@ prepare_web_tools() {
 'use strict';
 const fs = require('node:fs');
 for (const line of fs.readFileSync('/build/tool-authority.tsv', 'utf8').trimEnd().split('\n')) {
-  const [phase, provenance, name, packageName, expected] = line.split('\t');
+  const fields = line.split('\t');
+  const [phase, provenance, name, packageName] = fields; const expected = fields[10];
   if (phase !== 'web') continue;
   let observed = 'absent'; let status = 'absent';
   try {
     observed = JSON.parse(fs.readFileSync(`/build/web/node_modules/${packageName}/package.json`)).version;
     status = observed === expected ? 'ok' : 'mismatch';
   } catch {}
-  process.stdout.write(`${provenance}\t${name}\t${packageName}\t${observed}\t${status}\n`);
+  const evidence = status === 'ok' ? `lock:${observed}` : status;
+  process.stdout.write(`${provenance}\t${name}\t${packageName}\t${evidence}\t${status}\n`);
 }
 NODE
 }
@@ -197,8 +179,8 @@ tar -xzf "$(input 689e227db485c6b33d061555e74034c93a867649.tar.gz)" -C /work/lla
 /build/tools/cmake/bin/cmake -S /work/llama -B /work/llama-build -G 'Unix Makefiles' \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/work/llama-install \
   -DCMAKE_C_COMPILER=/build/tool-bin/gcc -DCMAKE_CXX_COMPILER=/build/tool-bin/g++ \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_MAKE_PROGRAM=/build/tool-bin/make \
-  -DCMAKE_DISABLE_FIND_PACKAGE_Git=TRUE -DGIT_EXECUTABLE=/build/tool-bin/false \
+  -DCMAKE_CUDA_COMPILER=/build/tool-bin/nvcc -DCMAKE_MAKE_PROGRAM=/build/tool-bin/make \
+  -DCMAKE_DISABLE_FIND_PACKAGE_Git=TRUE \
   -DCMAKE_INSTALL_RPATH='$ORIGIN:$ORIGIN/../lib:$ORIGIN/../../lib' \
   -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DGGML_LTO=ON -DGGML_CCACHE=OFF -DGGML_CUDA_NCCL=OFF \
   -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF \
