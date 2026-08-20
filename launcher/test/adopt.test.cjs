@@ -11,6 +11,8 @@ const core = require('../voice-agent.cjs');
 const installer = require('../install.cjs')(core);
 const updater = require('../update.cjs')(core, installer);
 const adopter = require('../adopt.cjs')(core, installer, updater);
+const archive = require('../../release/archive.cjs');
+const releaseSource = require('../release-source.cjs')(core);
 const UID = process.geteuid();
 const NOW = new Date('2026-08-21T00:00:00Z');
 
@@ -37,7 +39,11 @@ function candidateArtifact(options = {}) {
     platform: core.SUPPORTED_PLATFORM, schema: 'voice-agent.platform-artifact-manifest.v1',
     service_template_sha256: installer.UNIT_CONTRACT_SHA256, version: '1.0.0',
   };
-  const manifestBytes = Buffer.from(core.canonicalJson(manifest)); const artifactBytes = Buffer.from('signed-adoption-candidate');
+  const manifestBytes = Buffer.from(core.canonicalJson(manifest));
+  const artifactBytes = archive.createTarZstd([
+    { path: 'release-manifest.json', type: 'file', mode: '0444', bytes: manifestBytes, target: null },
+    ...entries.map((entry) => ({ ...entry, bytes: entry.type === 'file' ? contents.get(entry.path) : Buffer.alloc(0) })),
+  ], 1787184000);
   const assetContents = new Map([['model', Buffer.from('model-adopt')], ['runtime', Buffer.from('runtime-adopt')], ['agent_environment_image', Buffer.from('image-adopt')]]);
   const assets = [...assetContents].map(([kind, bytes]) => assetDescriptor(`${kind}-adopt`, kind, bytes));
   const release = {
@@ -144,7 +150,7 @@ function harness(options = {}) {
       }),
       inspectCompatibility: async ({ requirements }) => ({ free_bytes: 20 * 1024 ** 3, assets: { ...requirements, model_available: true, runtime_available: true, runtime_compatible: true } }),
     },
-    source: { acquireChannel: async () => artifact, acquireArtifact: async () => artifact, downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: (descriptor.kind === 'program' ? artifact.artifactBytes : artifact.assetContents.get(descriptor.kind)).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }) },
+    source: { acquireChannel: async () => artifact, acquireArtifact: async () => ({ artifactBytes: artifact.artifactBytes, ...releaseSource.indexArchive(artifact.artifactBytes) }), downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: (descriptor.kind === 'program' ? artifact.artifactBytes : artifact.assetContents.get(descriptor.kind)).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }) },
     clock: { now: () => new Date(NOW), monotonic: () => monotonic, sleep: async (ms) => { monotonic += ms; } },
     randomBytes: (length) => Buffer.alloc(length, 0x7c), output: { info: (line) => lines.push(line) }, fault: options.fault || null,
   };

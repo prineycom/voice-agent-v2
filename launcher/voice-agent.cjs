@@ -8,11 +8,22 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const LAUNCHER_VERSION = '0.7.0';
-const LAUNCHER_PROTOCOL = 1;
+const DEFAULT_LAUNCHER_VERSION = '0.8.0';
+const DEFAULT_LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';
-function agentEnvironmentPreserver() { return require('./agent-environment.cjs')(module.exports); }
+
+function embeddedBuildConfiguration() {
+  try {
+    const sea = require('node:sea');
+    if (!sea.isSea()) return null;
+    return JSON.parse(sea.getAsset('build-config.json', 'utf8'));
+  } catch { return null; }
+}
+const BUILD_CONFIGURATION = embeddedBuildConfiguration();
+const LAUNCHER_VERSION = BUILD_CONFIGURATION && typeof BUILD_CONFIGURATION.launcher_version === 'string' ? BUILD_CONFIGURATION.launcher_version : DEFAULT_LAUNCHER_VERSION;
+const LAUNCHER_PROTOCOL = BUILD_CONFIGURATION && Number.isSafeInteger(BUILD_CONFIGURATION.launcher_protocol) ? BUILD_CONFIGURATION.launcher_protocol : DEFAULT_LAUNCHER_PROTOCOL;
+function agentEnvironmentPreserver() { return loadAgentEnvironment(); }
 const SHA256 = /^[0-9a-f]{64}$/;
 const BUILD_ID = /^[0-9a-f]{40}$/;
 const LEGACY_RELEASE_ID = /^[0-9a-f]{24}$/;
@@ -294,6 +305,15 @@ function verifyPlatformArtifact(artifactBytes, manifestBytes, channelRelease, op
   }
   if (manifest.platform !== platform) fail('platform_incompatible', 'artifact platform differs');
   return manifest;
+}
+
+function releaseAuthorityKey(source, signed, testMode = false) {
+  if (testMode) {
+    if (!signed || !signed.publicKeyPem) fail('channel_signature_invalid', 'test release authority is unavailable');
+    return signed.publicKeyPem;
+  }
+  if (!source || typeof source.trustedPublicKey !== 'function') fail('release_authority_unprovisioned', 'launcher has no compiled release authority');
+  return source.trustedPublicKey();
 }
 
 function signCanonicalFixture(document, privateKeyPem) {
@@ -976,6 +996,26 @@ function parseCli(argv) {
   return result;
 }
 
+function loadAgentEnvironment() {
+  if (!require('node:sea').isSea()) return require('./agent-environment.cjs')(module.exports);
+  const source = require('node:sea').getAsset('agent-environment.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports);
+}
+
+function loadReleaseSource() {
+  if (!require('node:sea').isSea()) return require('./release-source.cjs')(module.exports);
+  const source = require('node:sea').getAsset('release-source.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports);
+}
+
+function createProductionSource(options = {}) {
+  return loadReleaseSource().createProductionSource(BUILD_CONFIGURATION, options);
+}
+
 function loadInstaller() {
   if (!require('node:sea').isSea()) return require('./install.cjs')(module.exports);
   const source = require('node:sea').getAsset('install.cjs', 'utf8');
@@ -1077,10 +1117,10 @@ async function main(argv = process.argv.slice(2)) {
 }
 
 module.exports = {
-  LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError, SystemServiceProbe,
-  canonicalJson, collectDoctor, collectStatus, discoverLegacy, dockerEvidence, humanDoctor, humanStatus, readOwnedRegular,
-  legacyReleaseId, legacyTreeDigest, loadAdopter, loadAssetCache, loadInstaller, loadLifecycle, loadSelfUpdater, loadUpdater, main, noSymlinkComponents, ownedDirectory, parseCanonicalJson, parseCli,
-  safePointer, signCanonicalFixture, validateArchiveEntries, validateArtifactManifest, validateChannel, validateLegacyImportRecord,
+  BUILD_CONFIGURATION, LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError, SystemServiceProbe,
+  canonicalJson, collectDoctor, collectStatus, createProductionSource, discoverLegacy, dockerEvidence, humanDoctor, humanStatus, readOwnedRegular, releaseAuthorityKey,
+  legacyReleaseId, legacyTreeDigest, loadAdopter, loadAgentEnvironment, loadAssetCache, loadInstaller, loadLifecycle, loadReleaseSource, loadSelfUpdater, loadUpdater, main, noSymlinkComponents, ownedDirectory, parseCanonicalJson, parseCli,
+  safePointer, signCanonicalFixture, validateArchiveEntries, validateArchivePath, validateArtifactManifest, validateChannel, validateLegacyImportRecord,
   validateLegacyRelease, validateLegacyRunning, validateReleaseRecord, verifyPlatformArtifact, verifySignedChannel,
 };
 

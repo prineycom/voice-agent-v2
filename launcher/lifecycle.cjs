@@ -8,7 +8,7 @@ module.exports = function createLifecycle(core, installer, updater) {
   const zlib = require('node:zlib');
   const readline = require('node:readline/promises');
   const { spawnSync } = require('node:child_process');
-  const agentEnvironment = require('./agent-environment.cjs')(core);
+  const agentEnvironment = core.loadAgentEnvironment();
 
   const CATEGORIES = ['program', 'program_cache', 'models', 'agent_environment', 'application_data'];
   const BUNDLE_CATEGORIES = ['status', 'doctor', 'last-operation', 'service-policy', 'journal-metadata'];

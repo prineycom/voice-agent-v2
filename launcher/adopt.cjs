@@ -6,7 +6,7 @@ module.exports = function createAdopter(core, installer, updater) {
   const os = require('node:os');
   const path = require('node:path');
   const { spawnSync } = require('node:child_process');
-  const agentEnvironment = require('./agent-environment.cjs')(core);
+  const agentEnvironment = core.loadAgentEnvironment();
 
   const SERVICE_NAME = 'voice-agent-v2.service';
   const ADOPTION_SCHEMA = 'voice-agent.legacy-adoption.v1';
@@ -233,12 +233,14 @@ module.exports = function createAdopter(core, installer, updater) {
     return compatible.sort((left, right) => right.version.localeCompare(left.version, undefined, { numeric: true }))[0];
   }
 
-  async function acquireCandidate(dependencies, layout, trustedSequence = 0) {
+  async function acquireCandidate(dependencies, layout, trustedSequence = 0, testMode = false) {
     const base = installer.hostPreflight(await dependencies.host.inspectBase());
     if (base.user.uid !== layout.identity.uid || base.user.name !== layout.identity.username || base.user.home !== layout.identity.home) error('host_user_invalid', 'host and invoking legacy service identities differ');
-    const signed = await dependencies.source.acquireChannel();
-    const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, signed.publicKeyPem, { now: dependencies.clock.now(), trustedSequence });
-    const authoritySha256 = digest(Buffer.from(signed.publicKeyPem));
+    let signed = await dependencies.source.acquireChannel();
+    const authorityKey = core.releaseAuthorityKey(dependencies.source, signed, testMode);
+    const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, authorityKey, { now: dependencies.clock.now(), trustedSequence });
+    const authoritySha256 = digest(Buffer.from(authorityKey));
+    signed = { ...signed, publicKeyPem: authorityKey };
     const release = selectRelease(channel);
     const acquired = await dependencies.source.acquireArtifact(release);
     if (acquired.redirected === true || (acquired.url && acquired.url !== release.artifact_url)) error('artifact_redirect_refused', 'program artifact redirect or changed authority was refused');
@@ -371,7 +373,7 @@ module.exports = function createAdopter(core, installer, updater) {
       let candidate = null;
       if (journal && journal.receipts.candidate_staged) candidate = updater.readRelease(layout, journal.candidate);
       let acquired = null;
-      if (!candidate) acquired = await acquireCandidate(dependencies, layout);
+      if (!candidate) acquired = await acquireCandidate(dependencies, layout, 0, testMode);
       const source = core.readOwnedRegular(evidence.running.document.configuration_path, layout.identity.uid, [0o600], 4 * 1024 * 1024);
       const endpoint = evidence.docker.state === 'available' ? agentEnvironment.endpointFor(layout.identity.uid) : '';
       const canonical = canonicalServiceEnv(source, endpoint);
@@ -460,7 +462,13 @@ module.exports = function createAdopter(core, installer, updater) {
         journal = writeJournal(layout, journal, journal.phase, dependencies, { agent_environment: { ...journal.agent_environment, after }, receipts: { environment_after: true } });
       }
       markCandidateReady(layout, candidate, dependencies);
-      const channelAuthority = acquired ? acquired.authoritySha256 : installer.readPrivateJson(layout.channelReceipt, layout.identity.uid).authority_sha256;
+      let channelAuthority = acquired && acquired.authoritySha256;
+      if (!channelAuthority) {
+        const cachedReceipt = installer.readPrivateJson(layout.channelReceipt, layout.identity.uid);
+        const authorityKey = core.releaseAuthorityKey(dependencies.source, { publicKeyPem: Buffer.from(cachedReceipt.public_key_base64, 'base64') }, testMode);
+        channelAuthority = digest(Buffer.from(authorityKey));
+        if (cachedReceipt.authority_sha256 !== channelAuthority) error('channel_authority_invalid', 'cached adoption authority receipt differs from the compiled root');
+      }
       if (!/^[0-9a-f]{64}$/.test(channelAuthority)) error('channel_authority_invalid', 'cached adoption channel authority is invalid');
       installer.writeJson(layout.installRecord, {
         schema: 'voice-agent.installation.v1', installation_id: journal.id, channel: 'stable', channel_sequence: candidate.record.channel_sequence,
@@ -481,7 +489,9 @@ module.exports = function createAdopter(core, installer, updater) {
       if (!acquired && exists(layout.channelReceipt)) {
         const receipt = installer.readPrivateJson(layout.channelReceipt, layout.identity.uid);
         try {
-          const channel = core.verifySignedChannel(Buffer.from(receipt.channel_base64, 'base64'), Buffer.from(receipt.signature_base64, 'base64'), Buffer.from(receipt.public_key_base64, 'base64'), { now: dependencies.clock.now(), trustedSequence: candidate.record.channel_sequence });
+          const cachedSigned = { publicKeyPem: Buffer.from(receipt.public_key_base64, 'base64') };
+          const authorityKey = core.releaseAuthorityKey(dependencies.source, cachedSigned, testMode);
+          const channel = core.verifySignedChannel(Buffer.from(receipt.channel_base64, 'base64'), Buffer.from(receipt.signature_base64, 'base64'), authorityKey, { now: dependencies.clock.now(), trustedSequence: candidate.record.channel_sequence });
           const exactRelease = channel.releases.find((item) => item.artifact_sha256 === candidate.record.artifact_sha256);
           launcherDescriptor = exactRelease && exactRelease.launcher;
         } catch { error('channel_receipt_invalid', 'cached adoption channel receipt is invalid'); }

@@ -5,7 +5,7 @@ module.exports = function createUpdater(core, installer) {
   const fs = require('node:fs');
   const path = require('node:path');
   const { spawnSync } = require('node:child_process');
-  const agentEnvironment = require('./agent-environment.cjs')(core);
+  const agentEnvironment = core.loadAgentEnvironment();
   const assetCache = core.loadAssetCache(installer);
 
   const PHASES = new Set([
@@ -721,8 +721,10 @@ module.exports = function createUpdater(core, installer) {
       }
       if (!signed || !signed.channelBytes || !signed.signatureBytes || !signed.publicKeyPem) error(options.offline === true ? 'offline_material_insufficient' : 'channel_unavailable', 'signed stable channel metadata is unavailable');
       if (options.offline === true && (signed.cached !== true || signed.local_authorized !== true)) error('offline_material_insufficient', 'offline mode requires a previously verified locally authorized channel receipt; latest cannot be known');
-      const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, signed.publicKeyPem, { now: dependencies.clock.now(), trustedSequence: installRecord.channel_sequence });
-      const channelAuthority = digest(Buffer.from(signed.publicKeyPem));
+      const authorityKey = core.releaseAuthorityKey(dependencies.source, signed, testMode);
+      const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, authorityKey, { now: dependencies.clock.now(), trustedSequence: installRecord.channel_sequence });
+      const channelAuthority = digest(Buffer.from(authorityKey));
+      signed = { ...signed, publicKeyPem: authorityKey };
       if (installRecord.channel_authority_sha256 && installRecord.channel_authority_sha256 !== channelAuthority) error('channel_authority_changed', 'channel signing authority differs from the installation trust receipt');
       if (options.offline !== true) writeChannelReceipt(layout, signed, channel, channelAuthority, dependencies);
       const release = selectCandidate(channel, selected);
