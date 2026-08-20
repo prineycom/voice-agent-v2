@@ -15,7 +15,7 @@ input() {
   printf '/inputs/%s' "$digest"
 }
 builder_tool_preflight() {
-  /usr/bin/rm -rf /build/tool-bin /build/tools /build/web /build/tool-report.tsv
+  /usr/bin/rm -rf /build/tool-bin /build/tools /build/web /build/tool-report.tsv /build/node-compatibility-report.tsv
   /usr/bin/mkdir -p /build/tool-bin /build/tools
   /tool-preflight /build/tool-authority.tsv /build/tool-report.tsv builder
   local phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail
@@ -35,13 +35,30 @@ builder_tool_preflight() {
   fi
 
   export PATH=/build/tool-bin
-  local node_archive python_archive cmake_archive patchelf_archive extraction_failed=0
-  mkdir -p /build/tools/node /build/tools/cmake
+  local node_archive libatomic_archive python_archive cmake_archive patchelf_archive extraction_failed=0
+  mkdir -p /build/tools/node /build/tools/node-runtime/lib /build/tools/node-runtime/unpacked /build/tools/cmake
   node_archive=$(input node-v26.7.0-linux-x64.tar.gz)
+  libatomic_archive=$(input libatomic-8.5.0-26.el8_10.x86_64.rpm)
   python_archive=$(input cpython-3.12.13%2B20260807-x86_64-unknown-linux-gnu-install_only.tar.gz)
   cmake_archive=$(input cmake-4.1.1-linux-x86_64.tar.gz)
   patchelf_archive=$(input patchelf-0.18.0-x86_64.tar.gz)
   tar -xzf "$node_archive" -C /build/tools/node --strip-components=1 || extraction_failed=1
+  cp "$libatomic_archive" /build/tools/node-runtime/libatomic.rpm || extraction_failed=1
+  if test "$extraction_failed" -eq 0; then
+    rpm --checksig --verbose /build/tools/node-runtime/libatomic.rpm > /build/tools/node-runtime/rpm-signature.txt || extraction_failed=1
+    grep -F 'V4 RSA/SHA256 Signature, key ID 6d745a60: OK' /build/tools/node-runtime/rpm-signature.txt >/dev/null || extraction_failed=1
+    (cd /build/tools/node-runtime && rpm2archive -n libatomic.rpm) || extraction_failed=1
+    tar -xf /build/tools/node-runtime/libatomic.rpm.tar -C /build/tools/node-runtime/unpacked || extraction_failed=1
+    if test -f /build/tools/node-runtime/unpacked/usr/lib64/libatomic.so.1.2.0; then
+      cp /build/tools/node-runtime/unpacked/usr/lib64/libatomic.so.1.2.0 /build/tools/node-runtime/lib/libatomic.so.1
+    else
+      extraction_failed=1
+    fi
+  fi
+  rm -rf /build/tools/node-runtime/unpacked /build/tools/node-runtime/libatomic.rpm /build/tools/node-runtime/libatomic.rpm.tar /build/tools/node-runtime/rpm-signature.txt
+  test -f /build/tools/node/bin/node && chmod 0555 /build/tools/node/bin/node
+  test -f /build/tools/node-runtime/lib/libatomic.so.1 && chmod 0555 /build/tools/node-runtime/lib/libatomic.so.1
+  /node-compatibility-preflight /build/node-compatibility-authority.tsv /build/node-compatibility-report.tsv
   tar -xzf "$python_archive" -C /build/tools || extraction_failed=1
   tar -xzf "$cmake_archive" -C /build/tools/cmake --strip-components=1 || extraction_failed=1
   mkdir -p /build/tools/patchelf-unpacked /build/tools/patchelf

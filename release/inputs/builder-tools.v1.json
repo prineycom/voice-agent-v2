@@ -1,5 +1,5 @@
 {
-  "schema": "voice-agent.builder-tools.v2",
+  "schema": "voice-agent.builder-tools.v3",
   "builder_image": "docker.io/nvidia/cuda@sha256:8d75fca3fc684919d806956e1fd2e197ee71a578af8106a61b4db24248fbe9be",
   "restricted_path": "/build/tool-bin",
   "builder_tools": [
@@ -20,6 +20,8 @@
     {"name":"gzip","path":"/usr/bin/gzip","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"gzip 1.9","version":"1.9"}},
     {"name":"head","path":"/usr/bin/head","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"head (GNU coreutils) 8.30","version":"8.30"}},
     {"name":"ld","path":"/usr/bin/ld.bfd","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"GNU ld version 2.30-125.el8_10","version":"2.30-125.el8_10"}},
+    {"name":"ldd","path":"/usr/bin/ldd","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"ldd (GNU libc) 2.28","version":"2.28"}},
+    {"name":"node-loader","path":"/usr/lib64/ld-2.28.so","custody":{"mode":"0755","owner_uid":0,"parent":"ldd","parent_version":"2.28","sha256":"1f63cfdca38ee154fb84c6f1edf1fe96d51462fe3d271910cb83aa193607218f","tool_root":"/usr/lib64"}},
     {"name":"ln","path":"/usr/bin/ln","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"ln (GNU coreutils) 8.30","version":"8.30"}},
     {"name":"make","path":"/usr/bin/make","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"GNU Make 4.2.1","version":"4.2.1"}},
     {"name":"mkdir","path":"/usr/bin/mkdir","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"mkdir (GNU coreutils) 8.30","version":"8.30"}},
@@ -28,7 +30,10 @@
     {"name":"readelf","path":"/usr/bin/readelf","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"GNU readelf version 2.30-125.el8_10","version":"2.30-125.el8_10"}},
     {"name":"readlink","path":"/usr/bin/readlink","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"readlink (GNU coreutils) 8.30","version":"8.30"}},
     {"name":"rm","path":"/usr/bin/rm","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"rm (GNU coreutils) 8.30","version":"8.30"}},
+    {"name":"rpm","path":"/usr/bin/rpm","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"RPM version 4.14.3","version":"4.14.3"}},
+    {"name":"rpm2archive","path":"/usr/bin/rpm2archive","custody":{"mode":"0755","owner_uid":0,"parent":"rpm","parent_version":"4.14.3","sha256":"a2bbd03015fa78003a704b91adee8c9970aef7c94d10eac5f7ab68aac54845b9","tool_root":"/usr/bin"}},
     {"name":"sha256sum","path":"/usr/bin/sha256sum","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"sha256sum (GNU coreutils) 8.30","version":"8.30"}},
+    {"name":"sort","path":"/usr/bin/sort","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"sort (GNU coreutils) 8.30","version":"8.30"}},
     {"name":"strip","path":"/usr/bin/strip","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"GNU strip version 2.30-125.el8_10","version":"2.30-125.el8_10"}},
     {"name":"tar","path":"/usr/bin/tar","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"tar (GNU tar) 1.30","version":"1.30"}},
     {"name":"touch","path":"/usr/bin/touch","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"touch (GNU coreutils) 8.30","version":"8.30"}},
@@ -45,9 +50,54 @@
     {"name":"nvlink","path":"/usr/local/cuda-12.9/bin/nvlink","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"nvlink: NVIDIA (R) Cuda linker","version":"V12.9.86"}},
     {"name":"ptxas","path":"/usr/local/cuda-12.9/bin/ptxas","owner_uid":0,"probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":4096,"output_prefix":"ptxas: NVIDIA (R) Ptx optimizing assembler","version":"V12.9.86"}}
   ],
+  "node_runtime": {
+    "name": "node-runtime",
+    "input": "Rocky Linux libatomic",
+    "parent": "node",
+    "parent_version": "v26.7.0",
+    "rpm": {
+      "name": "libatomic",
+      "version": "8.5.0-26.el8_10",
+      "architecture": "x86_64",
+      "signing_key_fingerprint": "7051C470A929F454CEBE37B715AF5DAC6D745A60",
+      "library_member": "./usr/lib64/libatomic.so.1.2.0",
+      "library_sha256": "5807cd82fe685155d2831a25111f14c366f681b47a304b997c6d32adeec59a1b"
+    },
+    "elf": {
+      "binary_sha256": "ad19784f7e90ba789a099eccba77ede8dc90a778c424f1c10a70fed3ff903fdc",
+      "class": "ELF64",
+      "data": "2's complement, little endian",
+      "type": "EXEC (Executable file)",
+      "machine": "Advanced Micro Devices X86-64",
+      "interpreter": "/lib64/ld-linux-x86-64.so.2",
+      "loader": "/usr/lib64/ld-2.28.so",
+      "needed": ["ld-linux-x86-64.so.2", "libatomic.so.1", "libc.so.6", "libdl.so.2", "libgcc_s.so.1", "libm.so.6", "libpthread.so.0", "libstdc++.so.6"],
+      "required_glibc": ["GLIBC_2.2.5", "GLIBC_2.3", "GLIBC_2.3.2", "GLIBC_2.3.3", "GLIBC_2.3.4", "GLIBC_2.4", "GLIBC_2.5", "GLIBC_2.6", "GLIBC_2.7", "GLIBC_2.9", "GLIBC_2.10", "GLIBC_2.12", "GLIBC_2.14", "GLIBC_2.15", "GLIBC_2.16", "GLIBC_2.17", "GLIBC_2.18", "GLIBC_2.25", "GLIBC_2.27", "GLIBC_2.28"],
+      "required_glibcxx": ["GLIBCXX_3.4", "GLIBCXX_3.4.9", "GLIBCXX_3.4.11", "GLIBCXX_3.4.14", "GLIBCXX_3.4.15", "GLIBCXX_3.4.17", "GLIBCXX_3.4.18", "GLIBCXX_3.4.19", "GLIBCXX_3.4.20", "GLIBCXX_3.4.21"],
+      "required_cxxabi": ["CXXABI_1.3", "CXXABI_1.3.2", "CXXABI_1.3.5", "CXXABI_1.3.7", "CXXABI_1.3.8", "CXXABI_1.3.9", "CXXABI_1.3.11"]
+    },
+    "library": {
+      "path": "/build/tools/node-runtime/lib/libatomic.so.1",
+      "needed": ["libc.so.6", "libpthread.so.0"],
+      "required_glibc": ["GLIBC_2.2.5", "GLIBC_2.4", "GLIBC_2.14"]
+    },
+    "raw_failure": {
+      "exit_status": 127,
+      "stderr_class": "missing-libatomic",
+      "stderr_sha256": "1f8d90ae432ea9b5bff473c68cfe44196b2320aed67980959217a76f4d011ea0",
+      "max_stderr_bytes": 1024
+    },
+    "corrected_probe": {
+      "exit_status": 0,
+      "output": "v26.7.0",
+      "output_sha256": "fe9da612097c5b1f2808feef32b5685e7a19a607fd96c7d6abe1454f0edc7e1c",
+      "max_output_bytes": 1024
+    },
+    "wrapper": "/build/tools/node-command"
+  },
   "content_addressed_tools": [
-    {"name":"node","input":"Node.js","path":"/build/tools/node/bin/node","command":"/build/tools/node/bin/node","probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":1024,"output_prefix":"v26.7.0","version":"v26.7.0"}},
-    {"name":"npm","input":"Node.js","path":"/build/tools/node/lib/node_modules/npm/bin/npm-cli.js","command":"/build/tools/node/bin/node","probe":{"argv":["/build/tools/node/lib/node_modules/npm/bin/npm-cli.js","--version"],"exit_status":0,"max_output_bytes":1024,"output_prefix":"11.19.0","version":"11.19.0"},"parent":"node","parent_version":"v26.7.0"},
+    {"name":"node","input":"Node.js","path":"/build/tools/node/bin/node","command":"/build/tools/node-command","probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":1024,"output_prefix":"v26.7.0","version":"v26.7.0"}},
+    {"name":"npm","input":"Node.js","path":"/build/tools/node/lib/node_modules/npm/bin/npm-cli.js","command":"/build/tools/node-command","probe":{"argv":["/build/tools/node/lib/node_modules/npm/bin/npm-cli.js","--version"],"exit_status":0,"max_output_bytes":1024,"output_prefix":"11.19.0","version":"11.19.0"},"parent":"node","parent_version":"v26.7.0"},
     {"name":"python","input":"CPython","path":"/build/tools/python/bin/python3.12","command":"/build/tools/python/bin/python3.12","probe":{"argv":["-VV"],"exit_status":0,"max_output_bytes":2048,"output_prefix":"Python 3.12.13","version":"3.12.13"}},
     {"name":"pip","input":"CPython","path":"/build/tools/python/lib/python3.12/site-packages/pip","command":"/build/tools/python/bin/python3.12","probe":{"argv":["-I","-m","pip","--version"],"exit_status":0,"max_output_bytes":2048,"output_prefix":"pip 26.2.1","version":"26.2.1"},"parent":"python","parent_version":"3.12.13"},
     {"name":"cmake","input":"CMake","path":"/build/tools/cmake/bin/cmake","command":"/build/tools/cmake/bin/cmake","probe":{"argv":["--version"],"exit_status":0,"max_output_bytes":2048,"output_prefix":"cmake version 4.1.1","version":"4.1.1"}},
