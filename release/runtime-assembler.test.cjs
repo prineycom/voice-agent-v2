@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { gzipSync } = require('node:zlib');
 const { EventEmitter } = require('node:events');
 const { Readable } = require('node:stream');
 const test = require('node:test');
@@ -65,7 +66,21 @@ test('committed runtime assembler authority pins the exact OCI/toolchain and clo
   assert.equal(authority.sources.builder.network_during_build, false);
   assert.equal(authority.sources.builder.ambient_mounts, false);
   assert.equal(authority.sources.node_in_application_runtime, false);
+  assert.equal(authority.tools.builder_image, authority.sources.builder.image);
+  assert.equal(authority.tools.restricted_path, '/build/tool-bin');
+  assert.equal(authority.tools.builder_tools.some((item) => item.name === 'gzip' && item.version_contains === '1.9'), true);
+  assert.equal(authority.tools.builder_tools.some((item) => item.name === 'cicc'), true);
+  assert.deepEqual(authority.tools.content_addressed_tools.map((item) => item.name), ['node', 'npm', 'python', 'pip', 'cmake', 'patchelf']);
+  assert.deepEqual(authority.tools.npm_lock_tools.map((item) => item.name), ['vite', 'rolldown', 'rolldown-linux-x64-gnu', 'lightningcss', 'lightningcss-linux-x64-gnu']);
   assert.equal(new Set(authority.inputs.map((item) => item.sha256)).size, authority.inputs.length);
+  const node = authority.sources.inputs.find((item) => item.name === 'Node.js');
+  assert.equal(node.url, 'https://nodejs.org/download/release/v26.7.0/node-v26.7.0-linux-x64.tar.gz');
+  assert.equal(node.size, 62014253); assert.equal(node.sha256, 'bd6b6c31e377bad9ad579bed72e5bc11f4c879ac9452ad51d30e646ea3d828df');
+  assert.deepEqual(node.signed_checksum, {
+    url: 'https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt', sha256: '4533f0a43b9ba7f78a48230a0511b9dd5c931f20c3b3cac281ff9b7a2080fb2e', size: 2943,
+    signature_url: 'https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt.sig', signature_sha256: '7bb1dfdce6e58b8659b3e7f3e148c8165ad715358fd4876be49aa656fc8b8224', signature_size: 119,
+    signer_fingerprint: '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356',
+  });
   const llama = authority.inputs.find((item) => item.name === 'llama.cpp source');
   const receipt = authority.sources.inputs.find((item) => item.name === 'llama.cpp source');
   assert.equal(llama.url, LLAMA_URL); assert.equal(llama.commit, LLAMA_COMMIT);
@@ -73,6 +88,35 @@ test('committed runtime assembler authority pins the exact OCI/toolchain and clo
   assert.equal(llama.size, 36775744); assert.equal(llama.sha256, '0ce0978a3310651d615159689200dd751a22fb2484ab3eb4eccc25671f6db118');
   assert.equal(receipt.version, 'b10357'); assert.equal(receipt.license, 'MIT');
   assert.equal(receipt.license_url, `https://github.com/ggml-org/llama.cpp/blob/${LLAMA_COMMIT}/LICENSE`);
+});
+
+test('the accepted exact Node gzip archive extracts without xz and retains exact file bytes', (context) => {
+  const root = temporary(context); const archive = path.join(root, 'node-fixture.tar.gz'); const output = path.join(root, 'out'); const bin = path.join(root, 'bin');
+  fs.mkdirSync(output); fs.mkdirSync(bin);
+  const payload = Buffer.from('v26.7.0\n'); const header = Buffer.alloc(512);
+  header.write('node-v26.7.0-linux-x64/bin/node');
+  const octal = (offset, length, value) => header.write(`${value.toString(8).padStart(length - 1, '0')}\0`, offset, length, 'ascii');
+  octal(100, 8, 0o755); octal(108, 8, 0); octal(116, 8, 0); octal(124, 12, payload.length); octal(136, 12, 0);
+  header.fill(0x20, 148, 156); header[156] = '0'.charCodeAt(0); header.write('ustar\0', 257); header.write('00', 263);
+  octal(148, 8, [...header].reduce((sum, value) => sum + value, 0));
+  const tar = Buffer.concat([header, payload, Buffer.alloc((512 - payload.length % 512) % 512), Buffer.alloc(1024)]);
+  fs.writeFileSync(archive, gzipSync(tar, { level: 9, mtime: 0 }));
+  for (const name of ['tar', 'gzip']) fs.symlinkSync(spawnSync('which', [name], { encoding: 'utf8' }).stdout.trim(), path.join(bin, name));
+  const result = spawnSync(path.join(bin, 'tar'), ['-xzf', archive, '-C', output, '--strip-components=1'], { env: { PATH: bin }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr); assert.equal(fs.readFileSync(path.join(output, 'bin', 'node')).equals(payload), true);
+  assert.equal(fs.existsSync(path.join(bin, 'xz')), false);
+});
+
+test('tool closure reports absent, tampered, and extra tools together without host fallback data', (context) => {
+  const root = temporary(context); const authority = assembler.validateAuthority(ROOT); const report = path.join(root, 'tool-report.tsv');
+  const lines = assembler.fixtureToolReport(authority, ROOT).trimEnd().split('\n');
+  const altered = lines.filter((line) => !line.includes('\tbash\t')).map((line) => line.includes('\tgcc\t') ? line.replace('\t8.5.0\tok', '\twrong-version\tmismatch') : line)
+    .map((line) => line.includes('\tpatchelf\t') ? line.replace(/^sha256:[^\t]+/, 'sha256:' + 'f'.repeat(64)) : line);
+  altered.push(`builder:${authority.sources.builder.manifest_digest}\tambient-extra\t/host/bin/tool\t1\tok`);
+  fs.writeFileSync(report, `${altered.join('\n')}\n`);
+  assert.throws(() => assembler.inspectToolReport(report, authority, ROOT), (reason) => reason.code === 'runtime_tool_closure_invalid'
+    && reason.message.includes('absent=[bash]') && reason.message.includes('mismatch=[gcc,patchelf]') && reason.message.includes('extra=[ambient-extra]')
+    && !reason.message.includes('/host/bin/tool'));
 });
 
 test('llama.cpp admits only the exact direct owner/repository/full-commit codeload locator', () => {
@@ -149,11 +193,14 @@ test('acquisition network fails closed for a missing helper, rootful engine, wro
   assert.throws(() => assembler.validateAssembleOptions({ cache: '/cache', output: '/output', network: 'host' }), (reason) => reason.code === 'runtime_acquisition_network_override_refused');
 });
 
-test('production assembler skips RUNPATH mutation for static ELF, de-duplicates providers, and clears image credentials', () => {
+test('production assembler closes extraction, compiler, ELF, PATH, and credential tool authority', () => {
   const shell = fs.readFileSync(path.join(ROOT, 'release', 'assemble-runtime.sh'), 'utf8');
+  assert.match(shell, /input node-v26\.7\.0-linux-x64\.tar\.gz/); assert.doesNotMatch(shell, /tar -xJf|node-v26\.7\.0-linux-x64\.tar\.xz/);
+  assert.match(shell, /export PATH=\/build\/tool-bin/); assert.match(shell, /builder_tool_preflight/);
   assert.match(shell, /readelf -dW "\$file"[^\n]+grep -q 'Dynamic section'/);
   assert.match(shell, /'\/runtime\/llama\/lib\/' in selected\.as_posix\(\): shutil\.move\(selected,target\)/);
   assert.doesNotMatch(shell, /cp .*\/output\/runtime\/llama\/lib\/.*\/output\/runtime\/lib/);
+  assert.match(shell, /pacote\.tarball\.stream/); assert.match(shell, /npm-cli\.js ci --ignore-scripts --offline/);
   assert.match(shell, /unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY/);
   assert.match(shell, /unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN/);
 });
@@ -168,12 +215,19 @@ test('input cache accepts only exact single-link bytes and refuses missing, tamp
   assert.equal(await assembler.prepareInputs(cache, authority, false), shaRoot);
   fs.writeFileSync(path.join(shaRoot, 'ambient'), 'x', { mode: 0o400 });
   await assert.rejects(() => assembler.prepareInputs(cache, authority, false), (reason) => reason.code === 'ambient_cache_refused');
-  fs.unlinkSync(path.join(shaRoot, 'ambient')); fs.chmodSync(path.join(shaRoot, item.sha256), 0o600); fs.writeFileSync(path.join(shaRoot, item.sha256), Buffer.alloc(bytes.length, 0x78)); fs.chmodSync(path.join(shaRoot, item.sha256), 0o400);
+  fs.unlinkSync(path.join(shaRoot, 'ambient')); fs.chmodSync(path.join(shaRoot, item.sha256), 0o600); fs.appendFileSync(path.join(shaRoot, item.sha256), 'x'); fs.chmodSync(path.join(shaRoot, item.sha256), 0o400);
+  await assert.rejects(() => assembler.prepareInputs(cache, authority, false), (reason) => reason.code === 'runtime_input_custody_invalid');
+  fs.chmodSync(path.join(shaRoot, item.sha256), 0o600); fs.writeFileSync(path.join(shaRoot, item.sha256), Buffer.alloc(bytes.length, 0x78)); fs.chmodSync(path.join(shaRoot, item.sha256), 0o400);
   await assert.rejects(() => assembler.prepareInputs(cache, authority, false), (reason) => reason.code === 'runtime_input_hash_mismatch');
 });
 
-test('fixture assembly uses exact pasta only for web acquisition and network none for every build phase', async (context) => {
-  const root = temporary(context); const cache = path.join(root, 'cache'); const output = path.join(root, 'output'); const calls = []; const podmanCommands = [];
+test('fixture assembly preflights the full closure, cache-installs tools offline, and builds only with network none', async (context) => {
+  const root = temporary(context); const cache = path.join(root, 'cache'); const output = path.join(root, 'output'); const calls = []; const podmanCommands = []; const prepared = [];
+  const authority = assembler.validateAuthority(ROOT);
+  const buildRoot = (args) => {
+    const mount = args.find((value) => typeof value === 'string' && value.endsWith(':/build:rw'));
+    return mount && mount.slice(0, -':/build:rw'.length);
+  };
   const runCommand = (command, args, options = {}) => {
     if (command === 'podman') {
       podmanCommands.push({ args, env: options.env });
@@ -182,13 +236,13 @@ test('fixture assembly uses exact pasta only for web acquisition and network non
         assert.equal(authIndex > 1, true); assert.equal(fs.readFileSync(authFile, 'utf8'), '{}\n'); assert.equal(fs.lstatSync(authFile).mode & 0o777, 0o600);
         return '';
       }
-      if (args[1] === 'image') return 'sha256:8d75fca3fc684919d806956e1fd2e197ee71a578af8106a61b4db24248fbe9be';
+      if (args[1] === 'image') return authority.sources.builder.manifest_digest;
       calls.push({ args, env: options.env });
+      if (args.at(-1) === 'tool-preflight') fs.writeFileSync(path.join(buildRoot(args), 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])));
+      if (args.at(-1) === 'web-prepare') fs.appendFileSync(path.join(buildRoot(args), 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['web'])));
       if (args.at(-1) === 'assemble') {
-        fs.mkdirSync(path.join(output, 'runtime'), { recursive: true, mode: 0o700 });
-        fs.mkdirSync(path.join(output, 'web'), { recursive: true, mode: 0o700 });
-        fs.writeFileSync(path.join(output, 'runtime', 'fixture'), 'runtime');
-        fs.writeFileSync(path.join(output, 'web', 'index.html'), '<!doctype html>');
+        fs.mkdirSync(path.join(output, 'runtime'), { recursive: true, mode: 0o700 }); fs.mkdirSync(path.join(output, 'web'), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(output, 'runtime', 'fixture'), 'runtime'); fs.writeFileSync(path.join(output, 'web', 'index.html'), '<!doctype html>');
       }
       return '';
     }
@@ -199,27 +253,49 @@ test('fixture assembly uses exact pasta only for web acquisition and network non
   const result = await assembler.assemble({ cache, output, fetch: true }, {
     root: ROOT, runCommand, environment: { HOME: '/fixture/home', PATH: '/fixture/bin', HTTPS_PROXY: 'http://ambient.invalid', GITHUB_TOKEN: 'credential' },
     inspectAcquisitionNetwork: (_runner, environment) => ({ environment: assembler.isolatedPodmanEnvironment(environment), mode: 'pasta', podmanVersion: '6.0.2' }),
-    prepareInputs: async (_cache, authority) => {
-      const llama = authority.inputs.find((item) => item.name === 'llama.cpp source');
-      assert.equal(llama.url, LLAMA_URL); assert.equal(llama.commit, LLAMA_COMMIT);
-      assert.equal(llama.size, 36775744); assert.equal(llama.sha256, '0ce0978a3310651d615159689200dd751a22fb2484ab3eb4eccc25671f6db118');
-      const value = path.join(cache, 'sha256'); fs.mkdirSync(value, { recursive: true, mode: 0o700 }); return value;
+    prepareInputs: async (_cache, value, _fetch, _fetcher, selected = value.inputs) => {
+      prepared.push(selected.map((item) => item.name));
+      const shaRoot = path.join(cache, 'sha256'); fs.mkdirSync(shaRoot, { recursive: true, mode: 0o700 }); return shaRoot;
     },
   });
-  assert.equal(result.output, output); assert.equal(calls.length, 2); assert.equal(podmanCommands.length, 4);
-  const [acquire, build] = calls;
-  assert.equal(acquire.args.includes('--network=pasta'), true); assert.equal(acquire.args.includes('--network=none'), false); assert.equal(acquire.args.at(-1), 'web-acquire');
-  assert.equal(build.args.includes('--network=none'), true); assert.equal(build.args.includes('--network=pasta'), false); assert.equal(build.args.at(-1), 'assemble');
+  assert.equal(prepared.length, 2); assert.equal(prepared[0].includes('Node.js'), true); assert.equal(prepared[0].includes('llama.cpp source'), false); assert.equal(prepared[1].includes('llama.cpp source'), true);
+  assert.equal(result.output, output); assert.equal(result.tools.length, authority.tools.builder_tools.length + authority.tools.content_addressed_tools.length + authority.tools.npm_lock_tools.length);
+  assert.equal(calls.length, 4); assert.equal(podmanCommands.length, 6);
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), ['tool-preflight', 'web-acquire', 'web-prepare', 'assemble']);
+  const [toolPreflight, acquire, webPrepare, build] = calls;
+  for (const call of [toolPreflight, webPrepare, build]) { assert.equal(call.args.includes('--network=none'), true); assert.equal(call.args.includes('--network=pasta'), false); }
+  assert.equal(acquire.args.includes('--network=pasta'), true); assert.equal(acquire.args.includes('--network=none'), false);
+  assert.equal(toolPreflight.args.some((value) => value.endsWith(':/build:rw')), true); assert.equal(acquire.args.some((value) => value.endsWith(':/build:ro')), true);
+  assert.equal(webPrepare.args.some((value) => value.endsWith(':/build:rw')), true); assert.equal(build.args.some((value) => value.endsWith(':/build:ro')), true);
   for (const call of calls) {
     assert.deepEqual(call.args.slice(0, 3), ['--remote=false', 'run', '--rm']);
     for (const flag of ['--read-only', '--env-host=false', '--http-proxy=false', '--cap-drop=all']) assert.equal(call.args.includes(flag), true);
     for (const value of ['HOME=/work/home', 'XDG_CONFIG_HOME=/work/config', 'NPM_CONFIG_USERCONFIG=/dev/null', 'GIT_CONFIG_GLOBAL=/dev/null']) assert.equal(call.args.includes(value), true);
     assert.equal(Object.hasOwn(call.env, 'HTTPS_PROXY'), false); assert.equal(Object.hasOwn(call.env, 'GITHUB_TOKEN'), false);
     assert.equal(call.args.some((value) => /(?:docker|podman)\.sock/.test(value)), false);
+    assert.equal(call.args.some((value) => value.includes('/usr/bin/xz') || value.includes('/bin/xz')), false);
   }
   const implementation = fs.readFileSync(path.join(ROOT, 'release', 'runtime-assembler.cjs'), 'utf8');
-  assert.doesNotMatch(implementation, /slirp4netns|--network=host/);
-  assert.equal(fs.existsSync(path.join(output, 'web', 'index.html')), true);
+  assert.doesNotMatch(implementation, /slirp4netns|--network=host/); assert.equal(fs.existsSync(path.join(output, 'web', 'index.html')), true);
+});
+
+test('one complete tool preflight error stops before remaining fetch, web acquisition, or runtime output', async (context) => {
+  const root = temporary(context); const cache = path.join(root, 'cache'); const output = path.join(root, 'output'); const authority = assembler.validateAuthority(ROOT); const phases = []; let inputPasses = 0;
+  const runCommand = (command, args, options = {}) => {
+    if (command === 'podman') {
+      phases.push(args.at(-1));
+      const mount = args.find((value) => typeof value === 'string' && value.endsWith(':/build:rw')); const build = mount.slice(0, -':/build:rw'.length);
+      const lines = assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])).trimEnd().split('\n')
+        .filter((line) => !line.includes('\tbash\t')).map((line) => line.includes('\tgcc\t') ? line.replace('\t8.5.0\tok', '\ttampered\tmismatch') : line);
+      lines.push(`builder:${authority.sources.builder.manifest_digest}\textra-tool\t/ambient/tool\t1\tok`); fs.writeFileSync(path.join(build, 'tool-report.tsv'), `${lines.join('\n')}\n`); return '';
+    }
+    const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' }); if (result.status !== 0) throw new Error('fixture command failed'); return result.stdout.trim();
+  };
+  await assert.rejects(() => assembler.assemble({ cache, output, fetch: true }, {
+    root: ROOT, runCommand, inspectBuilder: () => {}, inspectAcquisitionNetwork: (_runner, environment) => ({ environment: assembler.isolatedPodmanEnvironment(environment) }),
+    prepareInputs: async () => { inputPasses += 1; const shaRoot = path.join(cache, 'sha256'); fs.mkdirSync(shaRoot, { recursive: true }); return shaRoot; },
+  }), (reason) => reason.code === 'runtime_tool_closure_invalid' && reason.message.includes('absent=[') && reason.message.includes('bash') && reason.message.includes('mismatch=[gcc]') && reason.message.includes('extra=[extra-tool]'));
+  assert.deepEqual(phases, ['tool-preflight']); assert.equal(inputPasses, 1); assert.equal(fs.existsSync(output), false);
 });
 
 test('unsupported rootless facts stop before input fetch or runtime output', async (context) => {

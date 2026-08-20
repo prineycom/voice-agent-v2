@@ -6,7 +6,7 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null PYTHONNOUSERSITE=1 PYTH
 unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy
 unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS
-mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+/bin/mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 
 input() {
   local name=$1 digest
@@ -14,37 +14,163 @@ input() {
   test "$digest" && test -f "/inputs/$digest"
   printf '/inputs/%s' "$digest"
 }
-extract_node() {
-  rm -rf /work/node && mkdir -p /work/node
-  tar -xJf "$(input node-v26.7.0-linux-x64.tar.xz)" -C /work/node --strip-components=1
-  test "$(/work/node/bin/node --version)" = v26.7.0
+single_line() {
+  local value=$1
+  value=${value//$'\n'/ | }
+  value=${value//$'\t'/ }
+  printf '%s' "$value"
 }
-prepare_web() {
-  extract_node
-  rm -rf /work/web && cp -a /source/web /work/web && chmod -R u+rwX /work/web
-  cd /work/web
-  /work/node/bin/node /work/node/lib/node_modules/npm/bin/npm-cli.js ci --ignore-scripts --cache /npm-cache "$@"
+
+builder_tool_preflight() {
+  /bin/rm -rf /build/tool-bin /build/tools /build/web /build/tool-report.tsv
+  /bin/mkdir -p /build/tool-bin /build/tools
+  local phase provenance name tool_path expected detail observed status failures=0
+  while IFS=$'\t' read -r phase provenance name tool_path expected detail; do
+    test "$phase" = builder || continue
+    status=ok observed=
+    if test ! -e "$tool_path" || test ! -x "$tool_path"; then
+      status=absent observed=absent failures=$((failures + 1))
+    elif test "$expected" = builder-image; then
+      observed=builder-image
+    else
+      set +e
+      observed=$("$tool_path" --version 2>&1)
+      local probe_status=$?
+      set -e
+      observed=$(single_line "$observed")
+      if test "$probe_status" -ne 0 || [[ "$observed" != *"$expected"* ]]; then
+        status=mismatch failures=$((failures + 1))
+      fi
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$provenance" "$name" "$tool_path" "$observed" "$status" >>/build/tool-report.tsv
+    if test "$status" = ok; then /usr/bin/ln -s "$tool_path" "/build/tool-bin/$name"; fi
+  done </build/tool-authority.tsv
+  if test "$failures" -ne 0; then
+    while IFS=$'\t' read -r phase provenance name tool_path expected detail; do
+      [[ "$phase" = content || "$phase" = web ]] || continue
+      printf '%s\t%s\t%s\t%s\tblocked\n' "$provenance" "$name" "$tool_path" blocked >>/build/tool-report.tsv
+    done </build/tool-authority.tsv
+    return 0
+  fi
+
+  export PATH=/build/tool-bin
+  local node_archive python_archive cmake_archive patchelf_archive extraction_failed=0
+  mkdir -p /build/tools/node /build/tools/cmake
+  node_archive=$(input node-v26.7.0-linux-x64.tar.gz)
+  python_archive=$(input cpython-3.12.13%2B20260807-x86_64-unknown-linux-gnu-install_only.tar.gz)
+  cmake_archive=$(input cmake-4.1.1-linux-x86_64.tar.gz)
+  patchelf_archive=$(input patchelf-0.18.0-x86_64.tar.gz)
+  tar -xzf "$node_archive" -C /build/tools/node --strip-components=1 || extraction_failed=1
+  tar -xzf "$python_archive" -C /build/tools || extraction_failed=1
+  tar -xzf "$cmake_archive" -C /build/tools/cmake --strip-components=1 || extraction_failed=1
+  mkdir -p /build/tools/patchelf-unpacked /build/tools/patchelf
+  tar -xzf "$patchelf_archive" -C /build/tools/patchelf-unpacked || extraction_failed=1
+  local located
+  located=$(find /build/tools/patchelf-unpacked -type f -name patchelf -print -quit)
+  if test "$located"; then cp "$located" /build/tools/patchelf/patchelf; else extraction_failed=1; fi
+
+  while IFS=$'\t' read -r phase provenance name tool_path expected detail; do
+    test "$phase" = content || continue
+    status=ok observed=
+    if test "$extraction_failed" -ne 0; then
+      status=absent observed=archive-extraction-failed
+    else
+      set +e
+      case "$name" in
+        node) observed=$("$tool_path" --version 2>&1);;
+        npm) observed=$(/build/tools/node/bin/node "$tool_path" --version 2>&1);;
+        python) observed=$("$tool_path" -VV 2>&1);;
+        pip) observed=$(/build/tools/python/bin/python3 -I -m pip --version 2>&1);;
+        cmake|patchelf) observed=$("$tool_path" --version 2>&1);;
+        *) observed=undeclared-tool; status=extra;;
+      esac
+      local probe_status=$?
+      set -e
+      observed=$(single_line "$observed")
+      if test "$probe_status" -ne 0 || [[ "$observed" != *"$expected"* ]]; then status=mismatch; fi
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$provenance" "$name" "$tool_path" "$observed" "$status" >>/build/tool-report.tsv
+  done </build/tool-authority.tsv
+}
+
+acquire_web_cache() {
+  export PATH=/build/tool-bin
+  cat >/work/acquire-web-cache.cjs <<'NODE'
+'use strict';
+const fs = require('node:fs');
+const pacote = require('/build/tools/node/lib/node_modules/npm/node_modules/pacote');
+const lock = JSON.parse(fs.readFileSync('/source/web/package-lock.json'));
+const accepted = new Map();
+for (const item of Object.values(lock.packages || {})) {
+  if (!item || !item.resolved) continue;
+  const url = new URL(item.resolved);
+  if (url.protocol !== 'https:' || url.hostname !== 'registry.npmjs.org' || url.username || url.password || url.port || url.search || url.hash || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.integrity || '')) throw new Error('npm lock authority is not closed');
+  const prior = accepted.get(item.resolved);
+  if (prior && prior !== item.integrity) throw new Error('npm lock locator is ambiguous');
+  accepted.set(item.resolved, item.integrity);
+}
+(async () => {
+  for (const [resolved, integrity] of [...accepted].sort(([a], [b]) => a.localeCompare(b))) {
+    await pacote.tarball.stream(resolved, (stream) => new Promise((resolve, reject) => {
+      stream.on('data', () => {}); stream.on('end', resolve); stream.on('error', reject);
+    }), { cache: '/npm-cache', integrity, preferOnline: true });
+  }
+})().catch(() => { process.exitCode = 1; });
+NODE
+  /build/tools/node/bin/node /work/acquire-web-cache.cjs
+}
+
+prepare_web_tools() {
+  export PATH=/build/tool-bin
+  rm -rf /build/web
+  cp -a /source/web /build/web
+  chmod -R u+rwX /build/web
+  cd /build/web
+  /build/tools/node/bin/node /build/tools/node/lib/node_modules/npm/bin/npm-cli.js ci --ignore-scripts --offline --cache /npm-cache
+  /build/tools/node/bin/node <<'NODE' >>/build/tool-report.tsv
+'use strict';
+const fs = require('node:fs');
+for (const line of fs.readFileSync('/build/tool-authority.tsv', 'utf8').trimEnd().split('\n')) {
+  const [phase, provenance, name, packageName, expected] = line.split('\t');
+  if (phase !== 'web') continue;
+  let observed = 'absent'; let status = 'absent';
+  try {
+    observed = JSON.parse(fs.readFileSync(`/build/web/node_modules/${packageName}/package.json`)).version;
+    status = observed === expected ? 'ok' : 'mismatch';
+  } catch {}
+  process.stdout.write(`${provenance}\t${name}\t${packageName}\t${observed}\t${status}\n`);
+}
+NODE
 }
 
 case "${1:-}" in
+  tool-preflight)
+    builder_tool_preflight
+    exit 0
+    ;;
   web-acquire)
-    prepare_web --prefer-online
+    acquire_web_cache
+    exit 0
+    ;;
+  web-prepare)
+    prepare_web_tools
     exit 0
     ;;
   assemble) ;;
-  *) echo 'usage: assemble-runtime.sh web-acquire|assemble' >&2; exit 64 ;;
+  *) echo 'usage: assemble-runtime.sh tool-preflight|web-acquire|web-prepare|assemble' >&2; exit 64 ;;
 esac
 
-rm -rf /output/runtime /output/web /work/runtime /work/wheels /work/llama /work/cmake /work/patchelf
-mkdir -p /output/runtime /output/web /work/wheels /work/llama /work/cmake /work/patchelf
-prepare_web --offline
+export PATH=/build/tool-bin
+rm -rf /output/runtime /output/web /work/runtime /work/wheels /work/llama
+mkdir -p /output/runtime /output/web /work/wheels /work/llama
+cp -a /build/web /work/web
 cd /work/web
-VITE_APP_VERSION="$VOICE_AGENT_BUILD_ID" /work/node/bin/node /work/node/lib/node_modules/npm/bin/npm-cli.js run build:production-only
+VITE_APP_VERSION="$VOICE_AGENT_BUILD_ID" /build/tools/node/bin/node /build/tools/node/lib/node_modules/npm/bin/npm-cli.js run build:production-only
 cp -a dist/. /output/web/
-rm -rf /work/node /work/web /output/web/node_modules
+rm -rf /work/web /output/web/node_modules
 
 # One exact relocatable CPython and one closed wheelhouse; no host Python/pip.
-tar -xzf "$(input cpython-3.12.13%2B20260807-x86_64-unknown-linux-gnu-install_only.tar.gz)" -C /output/runtime
+cp -a /build/tools/python /output/runtime/python
 PY=/output/runtime/python/bin/python3
 "$PY" -VV | grep -F '3.12.13'
 while IFS=$'\t' read -r digest filename; do
@@ -66,18 +192,20 @@ test "$LIVEKIT" && test "$(sha256sum "$LIVEKIT" | cut -d' ' -f1)" = 51a1bbe04439
 cp "$LIVEKIT" /output/runtime/livekit/bin/livekit-server
 
 # Exact CMake/patchelf build tools and exact llama.cpp source; tools never ship.
-tar -xzf "$(input cmake-4.1.1-linux-x86_64.tar.gz)" -C /work/cmake --strip-components=1
-tar -xzf "$(input patchelf-0.18.0-x86_64.tar.gz)" -C /work/patchelf
-PATCHELF=$(find /work/patchelf -type f -name patchelf -print -quit)
+PATCHELF=/build/tools/patchelf/patchelf
 tar -xzf "$(input 689e227db485c6b33d061555e74034c93a867649.tar.gz)" -C /work/llama --strip-components=1
-/work/cmake/bin/cmake -S /work/llama -B /work/llama-build -G 'Unix Makefiles' \
+/build/tools/cmake/bin/cmake -S /work/llama -B /work/llama-build -G 'Unix Makefiles' \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/work/llama-install \
+  -DCMAKE_C_COMPILER=/build/tool-bin/gcc -DCMAKE_CXX_COMPILER=/build/tool-bin/g++ \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_MAKE_PROGRAM=/build/tool-bin/make \
+  -DCMAKE_DISABLE_FIND_PACKAGE_Git=TRUE -DGIT_EXECUTABLE=/build/tool-bin/false \
   -DCMAKE_INSTALL_RPATH='$ORIGIN:$ORIGIN/../lib:$ORIGIN/../../lib' \
-  -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DGGML_LTO=ON -DLLAMA_BUILD_SERVER=ON \
-  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF \
+  -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DGGML_LTO=ON -DGGML_CCACHE=OFF -DGGML_CUDA_NCCL=OFF \
+  -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF \
+  -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_LLGUIDANCE=OFF -DLLAMA_OPENSSL=OFF \
   -DLLAMA_CURL=OFF -DLLAMA_BUILD_COMMON=ON
-/work/cmake/bin/cmake --build /work/llama-build --target llama-server -j12
-/work/cmake/bin/cmake --install /work/llama-build --strip
+/build/tools/cmake/bin/cmake --build /work/llama-build --target llama-server -j12
+/build/tools/cmake/bin/cmake --install /work/llama-build --strip
 mkdir -p /output/runtime/llama/bin /output/runtime/llama/lib /output/runtime/lib
 cp /work/llama-install/bin/llama-server /output/runtime/llama/bin/
 while IFS= read -r -d '' library; do
@@ -89,7 +217,7 @@ test -f "$CUDART" && cp "$CUDART" /output/runtime/lib/libcudart.so.12
 
 # Resolve every DT_NEEDED recursively. Only the documented glibc/kernel/libcuda boundary may resolve on the host.
 cat >/work/close-elf.py <<'PY'
-import hashlib, os, pathlib, shutil, subprocess, sys
+import hashlib, os, pathlib, shutil, subprocess
 root=pathlib.Path('/output/runtime'); lib=root/'lib'
 allowed={'linux-vdso.so.1','ld-linux-x86-64.so.2','libc.so.6','libm.so.6','libpthread.so.0','libdl.so.2','librt.so.1','libutil.so.1','libresolv.so.2','libcuda.so.1'}
 def elf(p):
@@ -117,9 +245,6 @@ while changed:
    selected=values[0]; target=lib/name
    if target.exists() and sha(target)!=sha(selected): raise SystemExit(f'colliding DT_NEEDED: {name}')
    if not target.exists():
-    # NVIDIA wheel libraries are providers, not importable Python extensions.
-    # Move them into the one common closure so CUDA/cuDNN/cuBLAS are not
-    # duplicated in the application archive and every consumer shares one byte.
     if '/site-packages/nvidia/' in selected.as_posix() or '/runtime/llama/lib/' in selected.as_posix(): shutil.move(selected,target)
     else: shutil.copyfile(selected,target)
     changed=True

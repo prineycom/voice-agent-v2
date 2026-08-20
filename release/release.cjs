@@ -618,6 +618,12 @@ function publish(values) {
   finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 }
 
+async function preflightRuntimeCommand(values) {
+  requireCleanCurrentCommit();
+  const result = await runtimeAssembler.preflight(values, { root: ROOT });
+  return { builder_image: result.builder_image, tool_authority_sha256: result.tool_authority_sha256, tools: result.tools };
+}
+
 async function assembleRuntimeCommand(values) {
   const commit = requireCleanCurrentCommit();
   const assembled = await runtimeAssembler.assemble(values, { root: ROOT });
@@ -626,7 +632,7 @@ async function assembleRuntimeCommand(values) {
   const web = []; const webRoot = path.join(assembled.output, 'web');
   function walk(directory, prefix = '') { for (const name of fs.readdirSync(directory).sort()) { const filename = path.join(directory, name); const relative = prefix ? `${prefix}/${name}` : name; const metadata = fs.lstatSync(filename); if (metadata.isDirectory() && !metadata.isSymbolicLink()) walk(filename, relative); else if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1) { const bytes = fs.readFileSync(filename); pathLeakScan(bytes); web.push({ path: relative, sha256: sha256(bytes), size: bytes.length }); } else fail('web_output_invalid', 'static web output contains a link or special file'); } }
   walk(webRoot); if (!web.some((item) => item.path === 'index.html') || web.some((item) => item.path.includes('node_modules'))) fail('web_output_invalid', 'static web closure is incomplete or contains Node');
-  const document = { schema: 'voice-agent.runtime-assembly.v1', builder_image: assembled.authority.sources.builder.image, inputs: assembled.authority.inputs.map((item) => ({ sha256: item.sha256, size: item.size })).sort((a, b) => a.sha256.localeCompare(b.sha256)), runtime_receipt_sha256: sha256(fs.readFileSync(receiptPath)), source_commit: commit, web };
+  const document = { schema: 'voice-agent.runtime-assembly.v1', builder_image: assembled.authority.sources.builder.image, inputs: assembled.authority.inputs.map((item) => ({ sha256: item.sha256, size: item.size })).sort((a, b) => a.sha256.localeCompare(b.sha256)), runtime_receipt_sha256: sha256(fs.readFileSync(receiptPath)), source_commit: commit, tool_authority_sha256: assembled.tool_authority_sha256, tools: assembled.tools, web };
   writeCanonical(path.join(assembled.output, 'assembly-receipt.json'), document, 0o444);
   if (values.compareWith) {
     const prior = readCanonical(path.join(path.resolve(values.compareWith), 'assembly-receipt.json'), 16 * 1024 * 1024);
@@ -645,6 +651,7 @@ async function main(argv = process.argv.slice(2)) {
   try {
     const parsed = args([...argv]); let result;
     if (parsed.command === 'candidate') { required(parsed.values, ['input', 'runtimeRoot', 'runtimeReceipt', 'webRoot', 'publicKey', 'output']); result = candidateCommand(parsed.values); }
+    else if (parsed.command === 'preflight-runtime') { required(parsed.values, ['cache']); result = await preflightRuntimeCommand(parsed.values); }
     else if (parsed.command === 'assemble-runtime') { required(parsed.values, ['cache', 'output']); result = await assembleRuntimeCommand(parsed.values); }
     else if (parsed.command === 'runtime-receipt') { required(parsed.values, ['runtimeRoot', 'sourceCommit', 'output']); result = runtimeReceiptCommand(parsed.values); }
     else if (parsed.command === 'publish-assets') { required(parsed.values, ['candidate', 'repository', 'assetMap', 'confirm']); if (!parsed.values.dryRun) required(parsed.values, ['output']); result = publishAssets(parsed.values); }
@@ -652,13 +659,14 @@ async function main(argv = process.argv.slice(2)) {
     else if (parsed.command === 'finalize-channel') { required(parsed.values, ['candidate', 'assetReceipt', 'repository']); result = finalizeChannel(parsed.values); }
     else if (parsed.command === 'sign-channel') { required(parsed.values, ['channel', 'privateKey', 'output']); result = signChannel(parsed.values); }
     else if (parsed.command === 'publish') { required(parsed.values, ['candidate', 'repository', 'publicKey', 'confirm']); result = publish(parsed.values); }
-    else fail('usage', 'expected assemble-runtime, runtime-receipt, candidate, verify, publish-assets, finalize-channel, sign-channel, or publish');
+    else fail('usage', 'expected preflight-runtime, assemble-runtime, runtime-receipt, candidate, verify, publish-assets, finalize-channel, sign-channel, or publish');
     process.stdout.write(`${canonical({ state: parsed.values.dryRun ? 'dry_run' : 'ok', ...result })}\n`); return 0;
   } catch (reason) {
     const code = reason instanceof ReleaseError || reason instanceof runtimeAssembler.AssemblyError ? reason.code : 'release_failed';
-    process.stderr.write(`${code}: command failed safely\n`); return 2;
+    const detail = code === 'runtime_tool_closure_invalid' ? `: ${reason.message}` : ': command failed safely';
+    process.stderr.write(`${code}${detail}\n`); return 2;
   }
 }
 
-module.exports = { ReleaseError, assembleFromTree, assembleRuntimeCommand, buildRuntimeTree, candidateCommand, createSpdx, finalizeChannel, main, modelSetsForAssets, pathLeakScan, publicationPlan, publish, publishAssets, publishWithRemote, runtimeReceiptCommand, signChannel, validateExactDependencies, validateLocks, validateRuntimeInputAuthority, validateRuntimeReceipt, validateSourceState, validateSpdx, verifyCandidate };
+module.exports = { ReleaseError, assembleFromTree, assembleRuntimeCommand, buildRuntimeTree, candidateCommand, createSpdx, finalizeChannel, main, modelSetsForAssets, pathLeakScan, preflightRuntimeCommand, publicationPlan, publish, publishAssets, publishWithRemote, runtimeReceiptCommand, signChannel, validateExactDependencies, validateLocks, validateRuntimeInputAuthority, validateRuntimeReceipt, validateSourceState, validateSpdx, verifyCandidate };
 if (require.main === module) main().then((code) => { process.exitCode = code; }, () => { process.stderr.write('release_failed: command failed safely\n'); process.exitCode = 2; });
