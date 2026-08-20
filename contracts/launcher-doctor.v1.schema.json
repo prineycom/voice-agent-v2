@@ -7,7 +7,7 @@
     "schema_version": {"const": "voice-agent.launcher-doctor.v1"},
     "launcher": {"type": "object"},
     "overall": {"enum": ["read_only_complete", "recovery_required", "invalid"]},
-    "checks": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["code", "state"], "properties": {"code": {"enum": ["install_root", "selected_release", "running_release", "selected_running_alignment", "rollback_custody", "transaction", "rootless_docker", "agent_environment"]}, "state": {"type": "string"}}}},
+    "checks": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"type": "object", "additionalProperties": false, "required": ["code", "state"], "properties": {"code": {"enum": ["install_root", "selected_release", "running_release", "selected_running_alignment", "rollback_custody", "transaction", "rootless_docker", "agent_environment", "verified_assets", "disk_preflight", "offline_authority", "launcher_self_update"]}, "state": {"type": "string"}}}},
     "status": {"type": "object"},
     "repair_performed": {"const": false},
     "read_only": {"const": true}

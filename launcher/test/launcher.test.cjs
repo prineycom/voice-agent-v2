@@ -133,6 +133,11 @@ test('forged, wrong-key, expired, rollback, and noncanonical channel metadata fa
   expectCode('channel_signature_invalid', () => launcher.verifySignedChannel(
     Buffer.from(launcher.canonicalJson(forged)), fixture('release-channel.v1.json.sig'), PUBLIC_KEY, { now: NOW },
   ));
+  const assetForged = structuredClone(original);
+  assetForged.releases[0].assets[0].size += 1;
+  expectCode('channel_signature_invalid', () => launcher.verifySignedChannel(
+    Buffer.from(launcher.canonicalJson(assetForged)), fixture('release-channel.v1.json.sig'), PUBLIC_KEY, { now: NOW },
+  ));
   const wrong = crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' });
   expectCode('channel_signature_invalid', () => launcher.verifySignedChannel(
     fixture('release-channel.v1.json'), fixture('release-channel.v1.json.sig'), wrong, { now: NOW },
@@ -255,7 +260,8 @@ test('all launcher schemas, protocol, public keys, and signed fixtures are bound
     'install-transaction.v1.schema.json', 'update-transaction.v1.schema.json', 'legacy-adoption.v1.schema.json', 'legacy-import-release.v1.schema.json',
     'legacy-config-migration.v1.schema.json', 'docker-endpoint.v1.schema.json', 'config-migrations.v1.schema.json', 'installation.v1.schema.json',
     'launcher-status.v1.schema.json', 'launcher-doctor.v1.schema.json', 'legacy-discovery.v1.schema.json',
-    'agent-environment-preservation.v1.schema.json',
+    'agent-environment-preservation.v1.schema.json', 'asset-descriptor.v1.schema.json', 'cached-channel.v1.schema.json',
+    'launcher-self-update.v1.schema.json', 'update-result.v1.schema.json',
   ]) JSON.parse(fs.readFileSync(path.join(ROOT, 'contracts', name), 'utf8'));
   const protocol = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'launcher-protocol-v1.json'), 'utf8'));
   assert.equal(protocol.protocol, 1);

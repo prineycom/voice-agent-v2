@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const LAUNCHER_VERSION = '0.5.0';
+const LAUNCHER_VERSION = '0.6.0';
 const LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';
@@ -20,7 +20,7 @@ const RELEASE_ID = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$/;
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/;
 const CHANNEL_KEYS = ['channel', 'expires_at', 'generated_at', 'releases', 'schema', 'sequence'];
 const CHANNEL_RELEASE_KEYS = [
-  'artifact_bytes', 'artifact_sha256', 'artifact_url', 'build_id', 'manifest_sha256',
+  'artifact_bytes', 'artifact_sha256', 'artifact_url', 'assets', 'build_id', 'launcher', 'manifest_sha256',
   'maximum_data_schema', 'minimum_data_schema', 'minimum_launcher_protocol', 'platform', 'version',
 ];
 const MANIFEST_KEYS = [
@@ -134,6 +134,15 @@ function validateChannel(document, options = {}) {
     try { url = new URL(release.artifact_url); } catch { fail('channel_invalid', 'artifact URL is invalid'); }
     if (url.protocol !== 'https:' || url.username || url.password || url.hash || release.artifact_url.length > 2048) {
       fail('channel_invalid', 'artifact URL authority is invalid');
+    }
+    const descriptors = loadAssetCache().validateDescriptors(release.assets);
+    const requiredKinds = descriptors.filter((item) => item.reachability === 'required').map((item) => item.kind);
+    if (!requiredKinds.includes('model') || !requiredKinds.includes('runtime')
+        || descriptors.filter((item) => item.kind === 'agent_environment_image').length > 1
+        || descriptors.some((item) => item.kind === 'launcher')) fail('channel_invalid', 'release dependency descriptors are incomplete or misplaced');
+    if (release.launcher !== null) {
+      const launcher = loadAssetCache().validateDescriptor(release.launcher);
+      if (launcher.kind !== 'launcher' || launcher.reachability !== 'required') fail('channel_invalid', 'launcher replacement descriptor is invalid');
     }
     const identity = `${release.version}\0${release.platform}`;
     if (identities.has(identity)) fail('channel_invalid', 'duplicate release identity');
@@ -563,11 +572,13 @@ async function discoverLegacy(options) {
 }
 
 function validateReleaseRecord(record) {
-  const keys = [
+  const oldKeys = [
     'application_protocol', 'artifact_bytes', 'artifact_sha256', 'build_id', 'channel', 'channel_sequence',
     'data_schema', 'launcher_protocol', 'manifest_sha256', 'platform', 'readiness', 'release_id', 'schema',
     'service_template_sha256', 'verified_at', 'version',
   ];
+  if (record && Object.keys(record).sort().join('\0') === [...oldKeys].sort().join('\0')) record = { ...record, asset_digests: [], launcher_sha256: null };
+  const keys = [...oldKeys, 'asset_digests', 'launcher_sha256'];
   exactKeys(record, keys, 'release_record_invalid');
   if (record.schema !== 'voice-agent.release-record.v1' || !RELEASE_ID.test(record.release_id)
       || !VERSION.test(record.version) || !BUILD_ID.test(record.build_id) || record.channel !== 'stable'
@@ -575,7 +586,9 @@ function validateReleaseRecord(record) {
       || record.platform !== SUPPORTED_PLATFORM || !SHA256.test(record.artifact_sha256)
       || !SHA256.test(record.manifest_sha256) || !SHA256.test(record.service_template_sha256)
       || !Number.isSafeInteger(record.artifact_bytes) || record.artifact_bytes < 1
-      || record.launcher_protocol !== LAUNCHER_PROTOCOL) fail('release_record_invalid', 'release record identity is invalid');
+      || record.launcher_protocol !== LAUNCHER_PROTOCOL || !Array.isArray(record.asset_digests) || record.asset_digests.length > 64
+      || record.asset_digests.some((value) => !SHA256.test(value)) || new Set(record.asset_digests).size !== record.asset_digests.length
+      || (record.launcher_sha256 !== null && !SHA256.test(record.launcher_sha256))) fail('release_record_invalid', 'release record identity is invalid');
   validateRange(record.application_protocol, 'release_record_invalid');
   validateRange(record.data_schema, 'release_record_invalid');
   parseTime(record.verified_at, 'release_record_invalid');
@@ -781,6 +794,7 @@ async function collectStatus(options = {}) {
   const installRoot = options.installRoot ?? path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'voice-agent');
   const legacyRoot = options.legacyRoot ?? path.join(home, '.local', 'share', 'voice-agent-v2');
   const configRoot = options.configRoot ?? path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'voice-agent');
+  const stateRoot = options.stateRoot ?? path.join(process.env.XDG_STATE_HOME || path.join(home, '.local', 'state'), 'voice-agent');
   const serviceUnitPath = options.serviceUnitPath ?? path.join('/etc', 'systemd', 'system', SERVICE_NAME);
   const serviceProbe = options.serviceProbe ?? new SystemServiceProbe();
   const canonical = canonicalState(installRoot, uid);
@@ -823,6 +837,26 @@ async function collectStatus(options = {}) {
       canonicalDocker = { state: record.endpoint ? 'available' : 'unavailable', endpoint_kind: record.endpoint ? 'rootless' : 'none', ownership_verified: record.ownership_verified };
     }
   } catch { canonicalDocker = { state: 'invalid', endpoint_kind: 'none', ownership_verified: false }; }
+  let lifecycle = { assets: { state: 'not_recorded', referenced: null, reclaimed: null }, offline: { used: false, latest_known: null }, space: { required: null, available: null, reclaimable: null }, self_update: { state: 'none' } };
+  try {
+    const resultPath = path.join(stateRoot, 'last-update.json');
+    if (lstatExists(resultPath)) {
+      const result = JSON.parse(readOwnedRegular(resultPath, uid, [0o600], 256 * 1024).toString('utf8'));
+      exactKeys(result, ['assets', 'error_code', 'latest_known', 'offline', 'release_id', 'rollback_release', 'schema', 'self_update', 'space', 'state'], 'update_result_invalid');
+      exactKeys(result.assets, ['reclaimed', 'referenced'], 'update_result_invalid'); exactKeys(result.space, ['available', 'reclaimable', 'required'], 'update_result_invalid');
+      if (result.schema !== 'voice-agent.update-result.v1' || !['updated_healthy', 'failed_safe', 'failed_needs_repair'].includes(result.state)
+        || typeof result.offline !== 'boolean' || typeof result.latest_known !== 'boolean'
+        || ![result.assets.referenced, result.assets.reclaimed, result.space.required, result.space.available, result.space.reclaimable].every((value) => Number.isSafeInteger(value) && value >= 0)
+        || typeof result.self_update !== 'string' || !/^[a-z0-9_]{1,64}$/.test(result.self_update)) fail('update_result_invalid', 'last update result is invalid');
+      lifecycle = {
+        assets: { state: 'verified', referenced: result.assets.referenced, reclaimed: result.assets.reclaimed },
+        offline: { used: result.offline, latest_known: result.latest_known },
+        space: { required: result.space.required, available: result.space.available, reclaimable: result.space.reclaimable },
+        self_update: { state: result.self_update },
+      };
+    }
+    if (lstatExists(path.join(installRoot, 'transactions', 'launcher-update.json'))) lifecycle.self_update = { state: 'recovery_required' };
+  } catch { lifecycle = { assets: { state: 'invalid', referenced: null, reclaimed: null }, offline: { used: false, latest_known: null }, space: { required: null, available: null, reclaimable: null }, self_update: { state: 'invalid' } }; }
   return {
     schema_version: 'voice-agent.launcher-status.v1',
     launcher: { version: LAUNCHER_VERSION, protocol: LAUNCHER_PROTOCOL },
@@ -840,6 +874,7 @@ async function collectStatus(options = {}) {
     },
     agent_environment: canonical.agent_environment,
     docker: canonicalDocker || legacy.docker,
+    assets: lifecycle.assets, offline: lifecycle.offline, space: lifecycle.space, self_update: lifecycle.self_update,
     legacy: { state: legacy.state, adoption_eligible: legacy.adoption_eligible, runtime_custody: legacy.runtime_custody },
     read_only: true,
   };
@@ -856,6 +891,10 @@ async function collectDoctor(options = {}) {
     { code: 'transaction', state: status.transaction.state === 'invalid' ? 'fail' : status.transaction.state },
     { code: 'rootless_docker', state: status.docker.state },
     { code: 'agent_environment', state: status.agent_environment.state },
+    { code: 'verified_assets', state: status.assets.state },
+    { code: 'disk_preflight', state: status.space.required === null ? 'not_recorded' : 'ok' },
+    { code: 'offline_authority', state: status.offline.used ? 'cached_verified_latest_unknown' : 'online_or_not_recorded' },
+    { code: 'launcher_self_update', state: status.self_update.state },
   ];
   return {
     schema_version: 'voice-agent.launcher-doctor.v1', launcher: status.launcher,
@@ -874,6 +913,10 @@ function humanStatus(status) {
     `Transaction: ${status.transaction.state}${status.transaction.phase ? `/${status.transaction.phase}` : ''}`,
     `Agent tools: ${status.agent_environment.state} (action: ${status.agent_environment.action})`,
     `Docker: ${status.docker.state} (${status.docker.endpoint_kind})`,
+    `Assets: ${status.assets.state}`,
+    `Offline: ${status.offline.used ? 'verified cache; latest unknown' : 'not used'}`,
+    `Space preflight: ${status.space.required === null ? 'not recorded' : 'recorded'}`,
+    `Launcher self-update: ${status.self_update.state}`,
     'Read only: yes',
   ].join('\n');
 }
@@ -883,6 +926,7 @@ function humanDoctor(doctor) {
 }
 
 function parseCli(argv) {
+  if (argv[0] === '__post-self-update' && argv.length === 2 && /^[0-9a-f]{32}$/.test(argv[1])) return { command: '__post-self-update', json: false, offline: false, transactionId: argv[1] };
   if (argv.length < 1 || !['install', 'update', 'status', 'doctor'].includes(argv[0])) fail('usage', 'expected install, update, status, or doctor');
   const result = { command: argv[0], json: false, offline: false };
   for (let index = 1; index < argv.length; index += 1) {
@@ -902,10 +946,27 @@ function loadInstaller() {
   return embedded.exports(module.exports);
 }
 
+function loadAssetCache(installer = {}) {
+  if (!require('node:sea').isSea()) return require('./asset-cache.cjs')(module.exports, installer);
+  const source = require('node:sea').getAsset('asset-cache.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports, installer);
+}
+
 function loadUpdater() {
   const installer = loadInstaller();
   if (!require('node:sea').isSea()) return require('./update.cjs')(module.exports, installer);
   const source = require('node:sea').getAsset('update.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports, installer);
+}
+
+function loadSelfUpdater() {
+  const installer = loadInstaller();
+  if (!require('node:sea').isSea()) return require('./self-update.cjs')(module.exports, installer);
+  const source = require('node:sea').getAsset('self-update.cjs', 'utf8');
   const embedded = { exports: {} };
   Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
   return embedded.exports(module.exports, installer);
@@ -924,6 +985,15 @@ function loadAdopter() {
 async function main(argv = process.argv.slice(2)) {
   try {
     const arguments_ = parseCli(argv);
+    if (arguments_.command === '__post-self-update') {
+      const installer = loadInstaller();
+      loadSelfUpdater().postSelfUpdate(installer.layoutFor(), arguments_.transactionId);
+      return 0;
+    }
+    if (['install', 'update'].includes(arguments_.command)) {
+      const installer = loadInstaller(); const layout = installer.layoutFor();
+      if (lstatExists(layout.selfUpdateJournal)) loadSelfUpdater().recover(layout);
+    }
     if (arguments_.command === 'install') {
       await loadAdopter().installVoiceAgent();
       return 0;
@@ -938,7 +1008,7 @@ async function main(argv = process.argv.slice(2)) {
   } catch (error) {
     const code = error instanceof LauncherError ? error.code : 'launcher_failed';
     const actionable = (argv[0] === 'install' && ['host_unsupported', 'linger_privilege_unavailable', 'release_authority_unprovisioned', 'update_failed_safe', 'update_failed_needs_repair', 'canonical_config_conflict', 'legacy_split_not_eligible'].includes(code))
-      || (argv[0] === 'update' && ['update_failed_safe', 'update_failed_needs_repair', 'update_in_progress', 'migration_requires_decision', 'insufficient_space'].includes(code));
+      || (argv[0] === 'update' && ['update_failed_safe', 'update_failed_needs_repair', 'update_in_progress', 'migration_requires_decision', 'insufficient_space', 'offline_material_insufficient', 'launcher_update_failed_safe', 'asset_unavailable', 'asset_hash_mismatch', 'asset_oversize', 'asset_redirect_refused'].includes(code));
     process.stderr.write(actionable ? `${code}: ${error.message}\n` : `${code}: command failed safely; no healthy installation was claimed\n`);
     return 2;
   }
@@ -947,7 +1017,7 @@ async function main(argv = process.argv.slice(2)) {
 module.exports = {
   LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError, SystemServiceProbe,
   canonicalJson, collectDoctor, collectStatus, discoverLegacy, dockerEvidence, humanDoctor, humanStatus, readOwnedRegular,
-  legacyReleaseId, legacyTreeDigest, loadAdopter, loadInstaller, loadUpdater, main, noSymlinkComponents, ownedDirectory, parseCanonicalJson, parseCli,
+  legacyReleaseId, legacyTreeDigest, loadAdopter, loadAssetCache, loadInstaller, loadSelfUpdater, loadUpdater, main, noSymlinkComponents, ownedDirectory, parseCanonicalJson, parseCli,
   safePointer, signCanonicalFixture, validateArchiveEntries, validateArtifactManifest, validateChannel, validateLegacyImportRecord,
   validateLegacyRelease, validateLegacyRunning, validateReleaseRecord, verifyPlatformArtifact, verifySignedChannel,
 };

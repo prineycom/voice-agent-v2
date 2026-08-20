@@ -6,6 +6,7 @@ module.exports = function createUpdater(core, installer) {
   const path = require('node:path');
   const { spawnSync } = require('node:child_process');
   const agentEnvironment = require('./agent-environment.cjs')(core);
+  const assetCache = core.loadAssetCache(installer);
 
   const PHASES = new Set([
     'recovering', 'checking', 'staging', 'verified', 'migrations_prepared', 'prior_custody',
@@ -17,17 +18,23 @@ module.exports = function createUpdater(core, installer) {
     'restoring', 'starting_prior', 'prior_ready', 'failed_safe', 'failed_needs_repair',
   ]);
   const RECEIPT_KEYS = [
-    'artifact_verified', 'candidate_ready', 'channel_checked', 'migration_prepared',
+    'artifact_verified', 'assets_verified', 'candidate_ready', 'channel_checked', 'launcher_staged', 'migration_prepared',
     'environment_after', 'environment_before', 'pointer_activated', 'pre_gc_complete', 'prior_custody', 'prior_ready', 'prior_restored',
-    'release_staged', 'service_started', 'service_stopped', 'terminal', 'unit_reloaded',
+    'release_staged', 'service_started', 'service_stopped', 'space_preflight', 'terminal', 'unit_reloaded',
   ];
   const JOURNAL_KEYS = [
-    'agent_environment', 'candidate', 'config_snapshot', 'failure_code', 'id', 'phase', 'prior_healthy',
-    'prior_running', 'prior_selected', 'receipts', 'requested_channel', 'schema', 'service',
+    'agent_environment', 'assets', 'candidate', 'config_snapshot', 'failure_code', 'id', 'launcher', 'offline', 'phase', 'prior_healthy',
+    'prior_running', 'prior_selected', 'receipts', 'requested_channel', 'schema', 'service', 'space',
     'started_at', 'updated_at',
   ];
-  const PRE_PRESERVATION_JOURNAL_KEYS = JOURNAL_KEYS.filter((key) => key !== 'agent_environment');
-  const PRE_PRESERVATION_RECEIPT_KEYS = RECEIPT_KEYS.filter((key) => !['environment_before', 'environment_after'].includes(key));
+  const HISTORICAL_JOURNAL_KEYS = [
+    'candidate', 'config_snapshot', 'failure_code', 'id', 'phase', 'prior_healthy', 'prior_running', 'prior_selected',
+    'receipts', 'requested_channel', 'schema', 'service', 'started_at', 'updated_at',
+  ];
+  const HISTORICAL_RECEIPT_KEYS = [
+    'artifact_verified', 'candidate_ready', 'channel_checked', 'migration_prepared', 'pointer_activated', 'pre_gc_complete',
+    'prior_custody', 'prior_ready', 'prior_restored', 'release_staged', 'service_started', 'service_stopped', 'terminal', 'unit_reloaded',
+  ];
   const MIGRATION_KEYS = ['destructive', 'from', 'id', 'operation', 'product_choice', 'reversible', 'scope', 'sha256', 'to'];
   const UPDATE_SCHEMA = 'voice-agent.update-transaction.v1';
 
@@ -72,13 +79,15 @@ module.exports = function createUpdater(core, installer) {
   function emptyReceipts() { return Object.fromEntries(RECEIPT_KEYS.map((key) => [key, false])); }
 
   function normalizeJournal(document) {
-    if (document && typeof document === 'object' && !Array.isArray(document)
-      && Object.keys(document).sort().join('\0') === [...PRE_PRESERVATION_JOURNAL_KEYS].sort().join('\0')
-      && document.receipts && typeof document.receipts === 'object' && !Array.isArray(document.receipts)
-      && Object.keys(document.receipts).sort().join('\0') === [...PRE_PRESERVATION_RECEIPT_KEYS].sort().join('\0')) {
+    if (!document || typeof document !== 'object' || Array.isArray(document)) return document;
+    const observed = new Set(Object.keys(document));
+    if (HISTORICAL_JOURNAL_KEYS.every((key) => observed.has(key)) && [...observed].every((key) => JOURNAL_KEYS.includes(key))) {
       return {
-        ...document, agent_environment: { before: null, after: null },
-        receipts: { ...emptyReceipts(), ...document.receipts },
+        ...document,
+        agent_environment: document.agent_environment || { before: null, after: null },
+        assets: document.assets || [], launcher: document.launcher || null, offline: document.offline === true,
+        space: document.space || null,
+        receipts: { ...emptyReceipts(), ...(document.receipts || {}) },
       };
     }
     return document;
@@ -95,6 +104,12 @@ module.exports = function createUpdater(core, installer) {
       || document.config_snapshot !== document.id
       || (document.failure_code !== null && (typeof document.failure_code !== 'string' || !/^[a-z0-9_]{1,64}$/.test(document.failure_code)))) {
       error('update_journal_invalid', 'the durable update journal is invalid');
+    }
+    if (!Array.isArray(document.assets) || document.assets.length > 64 || document.assets.some((value) => !/^[0-9a-f]{64}$/.test(value))
+      || new Set(document.assets).size !== document.assets.length || typeof document.offline !== 'boolean'
+      || (document.launcher !== null && !/^[0-9a-f]{64}$/.test(document.launcher))) error('update_journal_invalid', 'asset/offline/launcher transaction custody is invalid');
+    if (document.space !== null) {
+      try { assetCache.spaceSummary(document.space); } catch { error('update_journal_invalid', 'disk preflight receipt is invalid'); }
     }
     exactKeys(document.agent_environment, ['after', 'before'], 'update_journal_invalid');
     try {
@@ -190,6 +205,21 @@ module.exports = function createUpdater(core, installer) {
     return values;
   }
 
+  function assetReferences(layout, journal = null, extraReleaseIds = []) {
+    const references = new Set(journal && Array.isArray(journal.assets) ? journal.assets : []);
+    if (journal && journal.launcher) references.add(journal.launcher);
+    for (const id of protectedReleaseIds(layout, journal, extraReleaseIds)) {
+      try { const record = readRelease(layout, id).record; references.add(record.artifact_sha256); for (const value of record.asset_digests || []) references.add(value); if (record.launcher_sha256) references.add(record.launcher_sha256); } catch {}
+    }
+    if (exists(layout.selfUpdateJournal)) {
+      try {
+        const receipt = installer.readPrivateJson(layout.selfUpdateJournal, layout.identity.uid);
+        if (/^[0-9a-f]{64}$/.test(receipt.new_sha256)) references.add(receipt.new_sha256);
+      } catch {}
+    }
+    return references;
+  }
+
   function collectReleases(layout, journal, extra = []) {
     const protectedIds = protectedReleaseIds(layout, journal, extra);
     let removed = 0;
@@ -214,6 +244,7 @@ module.exports = function createUpdater(core, installer) {
   }
 
   function removeTransactionPartials(layout, journal, keepCandidate = false) {
+    assetCache.collectPartials(layout, new Set());
     const targets = [
       path.join(layout.transactions, `stage-${journal.id}`),
       path.join(layout.downloads, `update-${journal.id}.partial`),
@@ -376,11 +407,11 @@ module.exports = function createUpdater(core, installer) {
     error('candidate_not_ready', 'the exact candidate did not become five-component ready within 300 seconds');
   }
 
-  function updateInstallationRecord(layout, candidate, rollbackId, sequence, clock) {
+  function updateInstallationRecord(layout, candidate, rollbackId, sequence, authoritySha256, clock) {
     const previous = installer.readPrivateJson(layout.installRecord, layout.identity.uid);
     installer.writeJson(layout.installRecord, {
       schema: 'voice-agent.installation.v1', installation_id: previous.installation_id, channel: 'stable', channel_sequence: sequence,
-      launcher_protocol: core.LAUNCHER_PROTOCOL, release_id: candidate.id, healthy_release: candidate.id, rollback_release: rollbackId,
+      launcher_protocol: core.LAUNCHER_PROTOCOL, channel_authority_sha256: authoritySha256, release_id: candidate.id, healthy_release: candidate.id, rollback_release: rollbackId,
       version: candidate.record.version, build_id: candidate.record.build_id, artifact_sha256: candidate.record.artifact_sha256,
       installed_at: timestamp(clock),
     }, layout.identity.uid);
@@ -409,17 +440,21 @@ module.exports = function createUpdater(core, installer) {
       agentEnvironment.writePreservation(layout, environmentAfter, installer.writeJson);
       next = persistJournal(layout, next, 'prior_ready', dependencies, { agent_environment: { ...next.agent_environment, after: environmentAfter }, receipts: { environment_after: true, prior_ready: true } });
       next = persistJournal(layout, next, 'failed_safe', dependencies, { receipts: { terminal: true } });
+      installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: 'failed_safe', error_code: originalCode, offline: next.offline, latest_known: !next.offline, release_id: next.prior_healthy, rollback_release: next.prior_healthy, assets: { referenced: next.assets.length, reclaimed: 0 }, space: next.space || { required: 0, available: 0, reclaimable: 0 }, self_update: 'not_attempted' }, layout.identity.uid);
       removeTransactionPartials(layout, next, false); removeSnapshot(layout, next);
       fs.unlinkSync(layout.updateJournal); installer.syncDirectory(layout.transactions);
       error('update_failed_safe', `candidate failed (${originalCode}); the exact prior release was restored and proved ready`);
     } catch (reason) {
       if (reason instanceof core.LauncherError && reason.code === 'update_failed_safe') throw reason;
-      try { persistJournal(layout, next, 'failed_needs_repair', dependencies, { failure_code: originalCode, receipts: { terminal: true } }); } catch {}
+      try {
+        next = persistJournal(layout, next, 'failed_needs_repair', dependencies, { failure_code: originalCode, receipts: { terminal: true } });
+        installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: 'failed_needs_repair', error_code: originalCode, offline: next.offline, latest_known: !next.offline, release_id: next.candidate, rollback_release: next.prior_healthy, assets: { referenced: next.assets.length, reclaimed: 0 }, space: next.space || { required: 0, available: 0, reclaimable: 0 }, self_update: 'not_attempted' }, layout.identity.uid);
+      } catch {}
       error('update_failed_needs_repair', `candidate failed (${originalCode}) and prior readiness could not be restored; recovery material was retained`);
     }
   }
 
-  async function commitCandidate(layout, journal, candidate, sequence, dependencies) {
+  async function commitCandidate(layout, journal, candidate, sequence, authoritySha256, dependencies) {
     let next = persistJournal(layout, journal, 'committing', dependencies);
     const recordPath = path.join(candidate.root, 'release-record.json');
     const record = core.validateReleaseRecord(JSON.parse(core.readOwnedRegular(recordPath, layout.identity.uid, [0o400], 256 * 1024).toString('utf8')));
@@ -429,7 +464,7 @@ module.exports = function createUpdater(core, installer) {
     }
     atomicPointer(layout, layout.current, candidate.id, next.id);
     atomicPointer(layout, layout.rollback, next.prior_healthy, next.id);
-    updateInstallationRecord(layout, candidate, next.prior_healthy, sequence, dependencies.clock);
+    updateInstallationRecord(layout, candidate, next.prior_healthy, sequence, authoritySha256, dependencies.clock);
     fault(dependencies, 'action', 'healthy_committed');
     next = persistJournal(layout, next, 'healthy', dependencies, { receipts: { terminal: true } });
     const final = await dependencies.service.probe({ release_id: candidate.id, build_id: candidate.record.build_id, deadline_ms: 0 });
@@ -439,10 +474,14 @@ module.exports = function createUpdater(core, installer) {
     agentEnvironment.writePreservation(layout, environmentAfter, installer.writeJson);
     next = persistJournal(layout, next, 'healthy', dependencies, { agent_environment: { ...next.agent_environment, after: environmentAfter }, receipts: { environment_after: true } });
     const gc = collectReleases(layout, next, [candidate.id, next.prior_healthy]);
+    const references = () => [...assetReferences(layout, exists(layout.updateJournal) ? readJournal(layout) : null, [candidate.id, next.prior_healthy])];
+    const assetGc = assetCache.collectAssets(layout, references(), { references });
     fault(dependencies, 'action', 'post_gc_complete');
     removeTransactionPartials(layout, next, true); removeSnapshot(layout, next);
     fs.unlinkSync(layout.updateJournal); installer.syncDirectory(layout.transactions);
-    return { state: 'updated_healthy', release_id: candidate.id, version: candidate.record.version, rollback_release: next.prior_healthy, gc };
+    const result = { state: 'updated_healthy', release_id: candidate.id, version: candidate.record.version, rollback_release: next.prior_healthy, gc, asset_gc: assetGc, transaction_id: next.id, offline: next.offline, latest_known: !next.offline, space: next.space, self_update: next.launcher ? 'staged_after_application_health' : 'not_required' };
+    installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: result.state, error_code: null, offline: result.offline, latest_known: result.latest_known, release_id: result.release_id, rollback_release: result.rollback_release, assets: { referenced: next.assets.length, reclaimed: assetGc.count }, space: next.space, self_update: result.self_update }, layout.identity.uid);
+    return result;
   }
 
   async function priorStillExactReady(layout, journal, dependencies) {
@@ -479,7 +518,7 @@ module.exports = function createUpdater(core, installer) {
       if (installer.validateReadiness(probe, releaseLike(candidate), layout.identity.uid)) {
         journal = persistJournal(layout, journal, 'ready', dependencies, { receipts: { candidate_ready: true } });
         const install = installer.readPrivateJson(layout.installRecord, layout.identity.uid);
-        return commitCandidate(layout, journal, candidate, Math.max(install.channel_sequence, candidate.record.channel_sequence), dependencies);
+        return commitCandidate(layout, journal, candidate, Math.max(install.channel_sequence, candidate.record.channel_sequence), install.channel_authority_sha256 || null, dependencies);
       }
     } catch {}
     return rollback(layout, journal, dependencies, journal.failure_code || 'update_interrupted');
@@ -490,6 +529,22 @@ module.exports = function createUpdater(core, installer) {
     const a = parse(left); const b = parse(right);
     for (let index = 0; index < 3; index += 1) if (a[index] !== b[index]) return a[index] - b[index];
     return left.includes('-') === right.includes('-') ? left.localeCompare(right) : left.includes('-') ? -1 : 1;
+  }
+
+  function writeChannelReceipt(layout, signed, channel, authoritySha256, dependencies) {
+    installer.writeJson(layout.channelReceipt, { schema: 'voice-agent.cached-channel.v1', channel_base64: Buffer.from(signed.channelBytes).toString('base64'), signature_base64: Buffer.from(signed.signatureBytes).toString('base64'), public_key_base64: Buffer.from(signed.publicKeyPem).toString('base64'), authority_sha256: authoritySha256, sequence: channel.sequence, expires_at: channel.expires_at, verified_at: timestamp(dependencies.clock) }, layout.identity.uid);
+  }
+
+  function readChannelReceipt(layout, installRecord) {
+    if (!installRecord.channel_authority_sha256 || !/^[0-9a-f]{64}$/.test(installRecord.channel_authority_sha256) || !exists(layout.channelReceipt)) error('offline_material_insufficient', 'no locally authorized cached channel receipt is available; latest cannot be known');
+    const receipt = installer.readPrivateJson(layout.channelReceipt, layout.identity.uid);
+    exactKeys(receipt, ['authority_sha256', 'channel_base64', 'expires_at', 'public_key_base64', 'schema', 'sequence', 'signature_base64', 'verified_at'], 'offline_material_insufficient');
+    let signed;
+    try { signed = { channelBytes: Buffer.from(receipt.channel_base64, 'base64'), signatureBytes: Buffer.from(receipt.signature_base64, 'base64'), publicKeyPem: Buffer.from(receipt.public_key_base64, 'base64'), cached: true, local_authorized: true }; } catch { error('offline_material_insufficient', 'cached channel receipt encoding is invalid'); }
+    if (receipt.schema !== 'voice-agent.cached-channel.v1' || receipt.authority_sha256 !== installRecord.channel_authority_sha256
+      || digest(Buffer.from(signed.publicKeyPem)) !== receipt.authority_sha256 || !Number.isSafeInteger(receipt.sequence)
+      || typeof receipt.expires_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(receipt.verified_at)) error('offline_material_insufficient', 'cached channel receipt is not locally authorized');
+    return signed;
   }
 
   function selectCandidate(channel, current) {
@@ -527,16 +582,21 @@ module.exports = function createUpdater(core, installer) {
       const { snapshot: priorSnapshot, running: prior } = await observeHealthyRunning(layout, dependencies.service);
       const installRecord = installer.readPrivateJson(layout.installRecord, layout.identity.uid);
       let signed;
-      try { signed = await dependencies.source.acquireChannel({ offline: options.offline === true }); }
+      try { signed = options.offline === true ? readChannelReceipt(layout, installRecord) : await dependencies.source.acquireChannel({ offline: false }); }
       catch (reason) {
+        if (options.offline === true) error('offline_material_insufficient', 'verified non-expired locally authorized channel material is unavailable; nothing was changed and latest cannot be known');
         if (['channel_unavailable', 'network_unavailable', 'release_authority_unprovisioned'].includes(reason && reason.code)) {
           output.info(`Could not check the stable channel. Current release ${prior.record.version} remains healthy; latest is unknown and no change was made.`);
           return { state: 'metadata_unavailable_current_healthy', release_id: prior.id, latest_known: false };
         }
         throw reason;
       }
-      if (!signed || !signed.channelBytes || !signed.signatureBytes || !signed.publicKeyPem) error('channel_unavailable', 'signed stable channel metadata is unavailable');
+      if (!signed || !signed.channelBytes || !signed.signatureBytes || !signed.publicKeyPem) error(options.offline === true ? 'offline_material_insufficient' : 'channel_unavailable', 'signed stable channel metadata is unavailable');
+      if (options.offline === true && (signed.cached !== true || signed.local_authorized !== true)) error('offline_material_insufficient', 'offline mode requires a previously verified locally authorized channel receipt; latest cannot be known');
       const channel = core.verifySignedChannel(signed.channelBytes, signed.signatureBytes, signed.publicKeyPem, { now: dependencies.clock.now(), trustedSequence: installRecord.channel_sequence });
+      const channelAuthority = digest(Buffer.from(signed.publicKeyPem));
+      if (installRecord.channel_authority_sha256 && installRecord.channel_authority_sha256 !== channelAuthority) error('channel_authority_changed', 'channel signing authority differs from the installation trust receipt');
+      if (options.offline !== true) writeChannelReceipt(layout, signed, channel, channelAuthority, dependencies);
       const release = selectCandidate(channel, selected);
       if (releaseId(release) === selected.id && prior.id === selected.id) {
         const environmentBefore = await agentEnvironment.capture(layout, dependencies, { phase: 'reconcile_before' });
@@ -554,7 +614,8 @@ module.exports = function createUpdater(core, installer) {
         schema: UPDATE_SCHEMA, id: dependencies.randomBytes(16).toString('hex'), requested_channel: 'stable', phase: 'checking',
         prior_selected: selected.id, prior_running: prior.id, prior_healthy: prior.id, candidate: releaseId(release), config_snapshot: null,
         service: { was_active: priorSnapshot.service_active === true, was_enabled: priorSnapshot.service_enabled === true, unit_sha256: null },
-        agent_environment: { before: null, after: null }, receipts: emptyReceipts(), failure_code: null, started_at: timestamp(dependencies.clock), updated_at: timestamp(dependencies.clock),
+        agent_environment: { before: null, after: null }, assets: [release.artifact_sha256, ...release.assets.map((item) => item.sha256)].sort(), launcher: release.launcher ? release.launcher.sha256 : null,
+        offline: options.offline === true, space: null, receipts: emptyReceipts(), failure_code: null, started_at: timestamp(dependencies.clock), updated_at: timestamp(dependencies.clock),
       };
       journal.config_snapshot = journal.id;
       journal.service = serviceState(priorSnapshot, core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024));
@@ -564,25 +625,48 @@ module.exports = function createUpdater(core, installer) {
       journal = persistJournal(layout, journal, 'checking', dependencies, { agent_environment: { before: environmentBefore, after: null }, receipts: { environment_before: true } });
       journal = persistJournal(layout, journal, 'staging', dependencies, { receipts: { channel_checked: true } });
       const preGc = collectReleases(layout, journal, [selected.id, prior.id]);
+      const partialGc = assetCache.collectPartials(layout, new Set([journal.id]));
+      const beforeReferences = () => [...assetReferences(layout, exists(layout.updateJournal) ? readJournal(layout) : journal, [selected.id, prior.id])];
+      const assetGc = assetCache.collectAssets(layout, beforeReferences(), { references: beforeReferences });
       fault(dependencies, 'action', 'pre_gc_complete');
       journal = persistJournal(layout, journal, 'staging', dependencies, { receipts: { pre_gc_complete: true } });
 
-      const acquired = await dependencies.source.acquireArtifact(release, { offline: options.offline === true });
-      if (!acquired || !Buffer.isBuffer(acquired.artifactBytes) || !Buffer.isBuffer(acquired.manifestBytes) || !Array.isArray(acquired.archiveEntries) || typeof acquired.readEntry !== 'function') error('artifact_unavailable', 'the exact authorized candidate artifact is unavailable');
-      const partial = path.join(layout.downloads, `update-${journal.id}.partial`);
-      const verifiedDownload = path.join(layout.downloads, `update-${journal.id}.verified`);
-      installer.atomicWrite(partial, acquired.artifactBytes, 0o600, layout.identity.uid); fault(dependencies, 'action', 'artifact_downloaded');
+      let acquired;
+      try { acquired = await dependencies.source.acquireArtifact(release, { offline: options.offline === true }); }
+      catch (reason) { if (options.offline === true) error('offline_material_insufficient', 'the exact verified cached program artifact is unavailable; latest cannot be known'); throw reason; }
+      if (!acquired || !Buffer.isBuffer(acquired.artifactBytes) || !Buffer.isBuffer(acquired.manifestBytes) || !Array.isArray(acquired.archiveEntries) || typeof acquired.readEntry !== 'function') error(options.offline === true ? 'offline_material_insufficient' : 'artifact_unavailable', 'the exact authorized candidate artifact is unavailable');
+      if (options.offline === true && acquired.cached !== true) error('offline_material_insufficient', 'offline reconciliation refused non-cached program bytes');
+      if (acquired.redirected === true || (acquired.url && acquired.url !== release.artifact_url)) error('artifact_redirect_refused', 'program artifact redirect or changed authority was refused');
       const manifest = core.verifyPlatformArtifact(acquired.artifactBytes, acquired.manifestBytes, release);
       const requirements = installer.artifactPreflight(manifest, release, acquired.archiveEntries, acquired.manifestBytes);
       const payloadBytes = manifest.entries.reduce((sum, item) => sum + (item.type === 'file' ? item.size : 0), 0);
       const facts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout });
       if (!facts || !facts.assets || facts.assets.model_descriptor_sha256 !== requirements.model_descriptor_sha256
-        || facts.assets.runtime_descriptor_sha256 !== requirements.runtime_descriptor_sha256 || facts.assets.model_available !== true
-        || facts.assets.runtime_available !== true || facts.assets.runtime_compatible !== true) {
-        error('runtime_assets_unavailable', 'the exact signed candidate model/runtime assets are unavailable or incompatible');
+        || facts.assets.runtime_descriptor_sha256 !== requirements.runtime_descriptor_sha256) error('runtime_assets_unavailable', 'candidate descriptor identity differs from the verified platform artifact');
+      const missingAssetBytes = release.assets.filter((item) => item.reachability === 'required' && item.kind !== 'agent_environment_image' && !assetCache.verifyCached(layout, item)).reduce((sum, item) => sum + item.size, 0);
+      const launcherBytes = release.launcher && !assetCache.verifyCached(layout, release.launcher) ? release.launcher.size * 2 : 0;
+      const snapshotBytes = core.readOwnedRegular(path.join(layout.config, 'config.yaml'), layout.identity.uid, [0o600], 4 * 1024 * 1024).length
+        + core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024).length
+        + core.readOwnedRegular(layout.installRecord, layout.identity.uid, [0o600], 256 * 1024).length;
+      const descriptorReserve = Math.max(0, ...release.assets.map((item) => item.required_free_space_reserve), release.launcher ? release.launcher.required_free_space_reserve : 0);
+      const requiredBytes = installer.FREE_SPACE_RESERVE + descriptorReserve + (release.artifact_bytes * 2) + payloadBytes + snapshotBytes + missingAssetBytes + launcherBytes + prior.record.artifact_bytes;
+      const space = assetCache.requireSpace({ required: requiredBytes, available: Number.isSafeInteger(facts.free_bytes) ? facts.free_bytes : 0, reclaimable: assetGc.bytes + partialGc.bytes + preGc.bytes });
+      journal = persistJournal(layout, journal, 'staging', dependencies, { space, receipts: { space_preflight: true } });
+
+      const assetOutcome = await assetCache.reconcile(layout, release.assets, journal.id, dependencies.source, {
+        offline: options.offline === true, applicationProtocol: manifest.application_protocol.minimum,
+        imageInspector: dependencies.host.inspectAgentImage ? (descriptor) => dependencies.host.inspectAgentImage(descriptor) : null,
+      });
+      if (release.launcher) {
+        let launcherOutcome;
+        do { launcherOutcome = await assetCache.acquire(layout, release.launcher, journal.id, dependencies.source, { offline: options.offline === true, applicationProtocol: manifest.application_protocol.minimum }); } while (launcherOutcome.state === 'partial');
       }
-      if (!Number.isSafeInteger(facts.free_bytes) || facts.free_bytes < installer.FREE_SPACE_RESERVE + release.artifact_bytes + payloadBytes) error('insufficient_space', 'genuine disk shortage remains after safe owned release collection');
-      fs.renameSync(partial, verifiedDownload); installer.syncDirectory(layout.downloads); fault(dependencies, 'action', 'artifact_verified');
+      journal = persistJournal(layout, journal, 'staging', dependencies, { receipts: { assets_verified: true, launcher_staged: release.launcher !== null } });
+      const programDescriptor = assetCache.programDescriptor(release);
+      let programOutcome;
+      do { programOutcome = await assetCache.acquire(layout, programDescriptor, journal.id, dependencies.source, { offline: options.offline === true, applicationProtocol: 1 }); } while (programOutcome.state === 'partial');
+      if (digest(core.readOwnedRegular(assetCache.cachePath(layout, programDescriptor), layout.identity.uid, [0o400], release.artifact_bytes)) !== release.artifact_sha256) error('artifact_cache_invalid', 'cached program artifact digest differs');
+      fault(dependencies, 'action', 'artifact_verified');
       journal = persistJournal(layout, journal, 'verified', dependencies, { receipts: { artifact_verified: true } });
 
       const candidateId = releaseId(release);
@@ -599,6 +683,7 @@ module.exports = function createUpdater(core, installer) {
           platform: release.platform, channel: 'stable', channel_sequence: channel.sequence, artifact_sha256: release.artifact_sha256,
           artifact_bytes: release.artifact_bytes, manifest_sha256: release.manifest_sha256, launcher_protocol: core.LAUNCHER_PROTOCOL,
           application_protocol: manifest.application_protocol, data_schema: manifest.data_schema, service_template_sha256: manifest.service_template_sha256,
+          asset_digests: release.assets.map((item) => item.sha256).sort(), launcher_sha256: release.launcher ? release.launcher.sha256 : null,
           verified_at: timestamp(dependencies.clock), readiness: { state: 'not_verified', checked_at: null },
         })), 0o400, layout.identity.uid);
         fs.renameSync(stage, candidateRoot); fs.chmodSync(candidateRoot, 0o500); installer.syncDirectory(layout.releases);
@@ -635,8 +720,15 @@ module.exports = function createUpdater(core, installer) {
       await waitReady(dependencies.service, candidate, layout, dependencies);
       fault(dependencies, 'action', 'candidate_readiness_proved');
       journal = persistJournal(layout, journal, 'ready', dependencies, { receipts: { candidate_ready: true } });
-      const result = await commitCandidate(layout, journal, candidate, channel.sequence, dependencies);
-      output.info(`Voice Agent ${candidate.record.version} is healthy; rollback ${prior.record.version} retained; removed ${result.gc.removed + preGc.removed} older owned program releases.`);
+      const result = await commitCandidate(layout, journal, candidate, channel.sequence, channelAuthority, dependencies);
+      if (release.launcher) {
+        const selfUpdater = core.loadSelfUpdater();
+        const replacement = selfUpdater.replace(layout, release.launcher, result.transaction_id, result.release_id, dependencies.selfUpdate || {});
+        result.self_update = replacement.state;
+        installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: result.state, error_code: replacement.state === 'old_launcher_restored' ? 'launcher_update_failed_safe' : null, offline: result.offline, latest_known: result.latest_known, release_id: result.release_id, rollback_release: result.rollback_release, assets: { referenced: release.assets.length + 1, reclaimed: result.asset_gc.count }, space: result.space, self_update: result.self_update }, layout.identity.uid);
+        if (replacement.state === 'old_launcher_restored') error('launcher_update_failed_safe', 'application update is durably healthy but launcher replacement failed and the exact old launcher was restored');
+      }
+      output.info(`Voice Agent ${candidate.record.version} is healthy; rollback ${prior.record.version} retained; removed ${result.gc.removed + preGc.removed} older owned program releases and ${result.asset_gc.count} unreferenced reconstructible assets.`);
       return result;
     } catch (reason) {
       if (reason && ['update_interrupted', 'update_failed_safe', 'update_failed_needs_repair'].includes(reason.code)) throw reason;

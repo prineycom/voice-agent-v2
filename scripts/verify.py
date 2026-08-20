@@ -113,6 +113,7 @@ def main() -> int:
                 str(ROOT / "launcher/test/install.test.cjs"),
                 str(ROOT / "launcher/test/update.test.cjs"),
                 str(ROOT / "launcher/test/adopt.test.cjs"),
+                str(ROOT / "launcher/test/assets-self-update.test.cjs"),
             ],
             cwd=ROOT,
             environment=environment,

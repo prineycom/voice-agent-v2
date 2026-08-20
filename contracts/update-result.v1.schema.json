@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/update-result.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "state", "error_code", "offline", "latest_known", "release_id", "rollback_release", "assets", "space", "self_update"],
+  "properties": {
+    "schema": {"const": "voice-agent.update-result.v1"},
+    "state": {"enum": ["updated_healthy", "failed_safe", "failed_needs_repair"]},
+    "error_code": {"oneOf": [{"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}, {"type": "null"}]},
+    "offline": {"type": "boolean"}, "latest_known": {"type": "boolean"},
+    "release_id": {"type": "string"}, "rollback_release": {"type": "string"},
+    "assets": {"type": "object", "additionalProperties": false, "required": ["referenced", "reclaimed"], "properties": {"referenced": {"type": "integer", "minimum": 0}, "reclaimed": {"type": "integer", "minimum": 0}}},
+    "space": {"type": "object", "additionalProperties": false, "required": ["required", "available", "reclaimable"], "properties": {"required": {"type": "integer", "minimum": 0}, "available": {"type": "integer", "minimum": 0}, "reclaimable": {"type": "integer", "minimum": 0}}},
+    "self_update": {"type": "string"}
+  }
+}

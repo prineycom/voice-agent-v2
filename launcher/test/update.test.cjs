@@ -16,6 +16,20 @@ const NOW = new Date('2026-08-21T00:00:00Z');
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 function exists(filename) { try { fs.lstatSync(filename); return true; } catch { return false; } }
 function code(expected, action) { return assert.rejects(action, (reason) => reason && reason.code === expected); }
+function assetDescriptor(id, kind, bytes, overrides = {}) {
+  const sha256 = hash(bytes);
+  const image = kind === 'agent_environment_image';
+  return {
+    authority: { origin: 'https://assets.example.invalid', path_prefix: '/voice-agent/' },
+    compatibility: { minimum_launcher_protocol: 1, maximum_launcher_protocol: 1, minimum_application_protocol: 1, maximum_application_protocol: 1 },
+    digest: `sha256:${sha256}`, id, kind, license: { id: image ? 'OCI-fixture' : 'Fixture-Test-Only', acceptance: 'accepted' },
+    platform: launcher.SUPPORTED_PLATFORM, reachability: image ? 'optional' : 'required', required_free_space_reserve: 1024,
+    sha256, size: bytes.length,
+    url: image ? `https://assets.example.invalid/voice-agent/images/environment@sha256:${sha256}` : `https://assets.example.invalid/voice-agent/${kind}/${sha256}`,
+    ...overrides,
+  };
+}
+
 function migration(overrides) {
   const value = { id: 'config-v2-v3', from: 2, to: 3, scope: 'config', operation: 'schema-version', reversible: true, destructive: false, product_choice: false, ...overrides };
   value.sha256 = hash(Buffer.from(launcher.canonicalJson(value)));
@@ -44,16 +58,22 @@ function artifact(version, sequence, options = {}) {
   };
   const manifestBytes = Buffer.from(launcher.canonicalJson(manifest));
   const artifactBytes = Buffer.from(`signed-artifact-${version}`);
+  const assetContents = new Map([
+    ['model', Buffer.from(`model-${version}`)], ['runtime', Buffer.from(`runtime-${version}`)], ['agent_environment_image', Buffer.from(`image-${version}`)],
+  ]);
+  const assets = [assetDescriptor(`model-${version.replaceAll('.', '-')}`, 'model', assetContents.get('model')),
+    assetDescriptor(`runtime-${version.replaceAll('.', '-')}`, 'runtime', assetContents.get('runtime')),
+    assetDescriptor(`environment-${version.replaceAll('.', '-')}`, 'agent_environment_image', assetContents.get('agent_environment_image'))];
   const release = {
-    artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: `https://releases.example.invalid/${version}.tar.zst`,
-    build_id: manifest.build_id, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
+    artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: `https://releases.example.invalid/${version}.tar.zst`, assets,
+    build_id: manifest.build_id, launcher: options.launcher || null, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
     minimum_launcher_protocol: 1, platform: launcher.SUPPORTED_PLATFORM, version,
   };
   const channel = { channel: 'stable', expires_at: options.expires || '2026-09-20T00:00:00Z', generated_at: '2026-08-20T00:00:00Z', releases: [release], schema: 'voice-agent.channel.v1', sequence };
-  const keys = crypto.generateKeyPairSync('ed25519');
+  const keys = options.keys || crypto.generateKeyPairSync('ed25519');
   const channelBytes = Buffer.from(launcher.canonicalJson(channel));
   return {
-    artifactBytes, manifestBytes, release, manifest, channelBytes,
+    artifactBytes, manifestBytes, release, manifest, channelBytes, assetContents,
     signatureBytes: Buffer.from(`${crypto.sign(null, channelBytes, keys.privateKey).toString('base64')}\n`),
     publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }),
     archiveEntries: [{ path: 'release-manifest.json', type: 'file', mode: '0444', size: manifestBytes.length, sha256: hash(manifestBytes), target: null }, ...entries],
@@ -94,8 +114,13 @@ async function addOwnedRelease(value, releaseArtifact) {
 function harness(options = {}) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-agent-update-test-')); fs.chmodSync(parent, 0o700);
   const identity = { uid: UID, username: 'fixture-user', home: path.join(parent, 'home'), dataHome: path.join(parent, 'data'), configHome: path.join(parent, 'config'), cacheHome: path.join(parent, 'cache'), stateHome: path.join(parent, 'state'), runtimeHome: path.join(parent, 'runtime') };
-  const initial = artifact('1.0.0', 9);
-  const candidate = options.candidate || artifact('1.1.0', 10, options.candidateOptions);
+  const keys = crypto.generateKeyPairSync('ed25519');
+  const initial = artifact('1.0.0', 9, { keys });
+  const candidate = options.candidate || artifact('1.1.0', 10, { ...options.candidateOptions, keys });
+  if (options.candidate) {
+    candidate.signatureBytes = Buffer.from(`${crypto.sign(null, candidate.channelBytes, keys.privateKey).toString('base64')}\n`);
+    candidate.publicKeyPem = keys.publicKey.export({ type: 'spki', format: 'pem' });
+  }
   let sourceArtifact = initial;
   let seeding = true;
   let active = false;
@@ -123,11 +148,15 @@ function harness(options = {}) {
   };
   const clock = { now: () => new Date(NOW), monotonic: () => monotonic, sleep: async (ms) => { monotonic += ms; } };
   const source = {
-    acquireChannel: async () => {
+    acquireChannel: async (request = {}) => {
       if (options.metadataUnavailable && sourceArtifact === candidate) throw new launcher.LauncherError('network_unavailable', 'fixture');
-      return { channelBytes: sourceArtifact.channelBytes, signatureBytes: sourceArtifact.signatureBytes, publicKeyPem: sourceArtifact.publicKeyPem, cached: options.cached === true };
+      return { channelBytes: sourceArtifact.channelBytes, signatureBytes: sourceArtifact.signatureBytes, publicKeyPem: sourceArtifact.publicKeyPem, cached: request.offline === true || options.cached === true, local_authorized: request.offline === true || options.cached === true };
     },
-    acquireArtifact: async () => ({ artifactBytes: sourceArtifact.artifactBytes, manifestBytes: sourceArtifact.manifestBytes, archiveEntries: sourceArtifact.archiveEntries, readEntry: sourceArtifact.readEntry }),
+    acquireArtifact: async (release, request = {}) => ({ artifactBytes: sourceArtifact.artifactBytes, manifestBytes: sourceArtifact.manifestBytes, archiveEntries: sourceArtifact.archiveEntries, readEntry: sourceArtifact.readEntry, cached: request.offline === true, url: release.artifact_url }),
+    downloadAsset: async ({ descriptor, offset }) => {
+      const bytes = (descriptor.kind === 'program' ? sourceArtifact.artifactBytes : sourceArtifact.assetContents.get(descriptor.kind)).subarray(offset);
+      return { status: offset ? 206 : 200, bytes, validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url };
+    },
   };
   let environmentCapture = 0;
   const dependencies = {
@@ -145,6 +174,10 @@ function harness(options = {}) {
   return { parent, identity, initial, candidate, dependencies, layout, calls, lines, seed, update, cleanup, setSource(value) { sourceArtifact = value; } };
 }
 
+function cacheChannel(value, source, sequence = 10, expiresAt = '2026-09-20T00:00:00Z') {
+  installer.writeJson(value.layout.channelReceipt, { schema: 'voice-agent.cached-channel.v1', channel_base64: source.channelBytes.toString('base64'), signature_base64: source.signatureBytes.toString('base64'), public_key_base64: Buffer.from(source.publicKeyPem).toString('base64'), authority_sha256: hash(Buffer.from(source.publicKeyPem)), sequence, expires_at: expiresAt, verified_at: '2026-08-21T00:00:00Z' }, UID);
+}
+
 test('canonical update stages fully, quiesces once, proves exact candidate, commits rollback, and clears durable journal', async (context) => {
   const value = harness(); value.cleanup(context); await value.seed();
   const result = await value.update();
@@ -156,6 +189,8 @@ test('canonical update stages fully, quiesces once, proves exact candidate, comm
   assert.equal(value.calls.filter((item) => item.startsWith('start:')).length, 1);
   assert.equal(fs.lstatSync(value.layout.updateLock).mode & 0o777, 0o600);
   assert.equal(fs.lstatSync(value.layout.config).mode & 0o777, 0o700);
+  assert.equal(fs.readdirSync(value.layout.runtimes).length, 2);
+  for (const source of [value.initial, value.candidate]) for (const item of source.release.assets.filter((asset) => asset.kind === 'runtime')) assert.equal(launcher.loadAssetCache(installer).verifyCached(value.layout, item), true);
 });
 
 test('candidate failure automatically restores exact prior release/config/unit and returns failed-safe; double failure retains recovery material', async (context) => {
@@ -163,6 +198,7 @@ test('candidate failure automatically restores exact prior release/config/unit a
   const beforeConfig = fs.readFileSync(path.join(safe.layout.config, 'config.yaml'));
   await code('update_failed_safe', () => safe.update());
   assert.match(fs.readlinkSync(safe.layout.current), /1\.0\.0-/);
+  for (const item of safe.candidate.release.assets.filter((asset) => asset.reachability === 'required')) assert.equal(launcher.loadAssetCache(installer).verifyCached(safe.layout, item), true);
   assert.deepEqual(fs.readFileSync(path.join(safe.layout.config, 'config.yaml')), beforeConfig);
   assert.equal(exists(safe.layout.updateJournal), false);
 
@@ -211,6 +247,21 @@ test('all durable phase/action interruption points converge on retry to candidat
   }
 });
 
+test('offline cached candidate reconciliation succeeds only with exact verified material and keeps latest unknown', async (context) => {
+  const value = harness(); value.cleanup(context); await value.seed();
+  const cache = launcher.loadAssetCache(installer);
+  cacheChannel(value, value.candidate);
+  for (const descriptor of [...value.candidate.release.assets.filter((item) => item.reachability === 'required'), cache.programDescriptor(value.candidate.release)]) {
+    let outcome; do { outcome = await cache.acquire(value.layout, descriptor, '8'.repeat(32), value.dependencies.source); } while (outcome.state === 'partial');
+  }
+  const result = await value.update({ offline: true });
+  assert.equal(result.state, 'updated_healthy'); assert.equal(result.latest_known, false); assert.equal(result.offline, true);
+
+  const insufficient = harness(); insufficient.cleanup(context); await insufficient.seed(); cacheChannel(insufficient, insufficient.candidate);
+  await code('offline_material_insufficient', () => insufficient.update({ offline: true }));
+  assert.equal(insufficient.calls.includes('quiesce'), false);
+});
+
 test('already-current online/offline and unavailable metadata are honest and service-action free', async (context) => {
   const current = harness(); current.cleanup(context); await current.seed(); current.setSource(current.initial);
   let result = await current.update(); assert.equal(result.state, 'already_current_healthy'); assert.equal(result.latest_known, true);
@@ -231,6 +282,13 @@ test('concurrent updater, channel rollback/expiry, disk shortage, prior identity
 
   const rollback = harness({ candidate: artifact('0.9.0', 10) }); rollback.cleanup(context); await rollback.seed();
   await code('channel_release_rollback', () => rollback.update());
+
+  const offlineExpired = harness({ candidate: artifact('1.1.0', 10, { expires: '2026-08-20T12:00:00Z' }) }); offlineExpired.cleanup(context); await offlineExpired.seed();
+  cacheChannel(offlineExpired, offlineExpired.candidate, 10, '2026-08-20T12:00:00Z');
+  await code('channel_expired', () => offlineExpired.update({ offline: true }));
+  const offlineRollback = harness({ candidate: artifact('0.9.0', 10) }); offlineRollback.cleanup(context); await offlineRollback.seed();
+  cacheChannel(offlineRollback, offlineRollback.candidate);
+  await code('channel_release_rollback', () => offlineRollback.update({ offline: true }));
 
   const disk = harness({ freeBytes: 1 }); disk.cleanup(context); await disk.seed();
   await code('insufficient_space', () => disk.update()); assert.equal(disk.calls.includes('quiesce'), false);
@@ -315,6 +373,7 @@ test('reachability GC refuses unsafe/unowned targets without deleting user/confi
 test('CLI exposes only canonical update/offline surface and records/output are content-free', () => {
   assert.deepEqual(launcher.parseCli(['update']), { command: 'update', json: false, offline: false });
   assert.deepEqual(launcher.parseCli(['update', '--offline']), { command: 'update', json: false, offline: true });
+  assert.deepEqual(launcher.parseCli(['__post-self-update', 'a'.repeat(32)]), { command: '__post-self-update', json: false, offline: false, transactionId: 'a'.repeat(32) });
   assert.throws(() => launcher.parseCli(['update', '--root', '/tmp/x']));
   assert.throws(() => launcher.parseCli(['update', '--channel', 'beta']));
 });

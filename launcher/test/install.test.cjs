@@ -15,6 +15,10 @@ const UID = process.geteuid();
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 function mode(filename) { return fs.lstatSync(filename).mode & 0o777; }
 function errorCode(code, action) { return assert.rejects(action, (reason) => reason && reason.code === code); }
+function assetDescriptor(id, kind, bytes) {
+  const sha256 = hash(bytes); const image = kind === 'agent_environment_image';
+  return { authority: { origin: 'https://assets.example.invalid', path_prefix: '/voice-agent/' }, compatibility: { minimum_launcher_protocol: 1, maximum_launcher_protocol: 1, minimum_application_protocol: 1, maximum_application_protocol: 1 }, digest: `sha256:${sha256}`, id, kind, license: { id: 'Fixture-Test-Only', acceptance: 'accepted' }, platform: launcher.SUPPORTED_PLATFORM, reachability: image ? 'optional' : 'required', required_free_space_reserve: 1024, sha256, size: bytes.length, url: image ? `https://assets.example.invalid/voice-agent/images/environment@sha256:${sha256}` : `https://assets.example.invalid/voice-agent/${kind}/${sha256}` };
+}
 
 function fixtureArtifact(overrides = {}) {
   const contents = new Map([
@@ -39,9 +43,11 @@ function fixtureArtifact(overrides = {}) {
   if (overrides.entries) manifest.entries = overrides.entries(entries);
   const manifestBytes = Buffer.from(launcher.canonicalJson(manifest));
   const artifactBytes = Buffer.from('deterministic signed Linux artifact archive bytes');
+  const assetContents = new Map([['model', Buffer.from('model-exact')], ['runtime', Buffer.from('runtime-exact')], ['agent_environment_image', Buffer.from('image-exact')]]);
+  const assets = [...assetContents].map(([kind, bytes]) => assetDescriptor(`${kind}-fixture`, kind, bytes));
   const release = {
-    artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: 'https://releases.example.invalid/voice-agent-1.0.0.tar.zst',
-    build_id: manifest.build_id, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
+    artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: 'https://releases.example.invalid/voice-agent-1.0.0.tar.zst', assets,
+    build_id: manifest.build_id, launcher: null, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
     minimum_launcher_protocol: 1, platform: launcher.SUPPORTED_PLATFORM, version: manifest.version,
     ...overrides.release,
   };
@@ -59,7 +65,7 @@ function fixtureArtifact(overrides = {}) {
     ...manifest.entries,
   ];
   const readEntry = async (name) => contents.get(name);
-  return { artifactBytes, manifestBytes, archiveEntries, readEntry, channelBytes, signatureBytes, publicKeyPem, release, manifest };
+  return { artifactBytes, manifestBytes, archiveEntries, readEntry, channelBytes, signatureBytes, publicKeyPem, release, manifest, assetContents };
 }
 
 function readyDocument(artifact, active = true, optional = { agent_environment: 'disabled', telegram: 'disabled' }) {
@@ -112,6 +118,7 @@ function makeHarness(options = {}) {
   const source = {
     acquireChannel: async () => ({ channelBytes: artifact.channelBytes, signatureBytes: options.signatureBytes || artifact.signatureBytes, publicKeyPem: artifact.publicKeyPem }),
     acquireArtifact: async () => ({ artifactBytes: artifact.artifactBytes, manifestBytes: artifact.manifestBytes, archiveEntries: options.archiveEntries || artifact.archiveEntries, readEntry: artifact.readEntry }),
+    downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: (descriptor.kind === 'program' ? artifact.artifactBytes : artifact.assetContents.get(descriptor.kind)).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }),
   };
   const dependencies = {
     identity, clock, host, source, service, output: { info: (line) => lines.push(line) },

@@ -17,6 +17,7 @@ const NOW = new Date('2026-08-21T00:00:00Z');
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 function exists(filename) { try { fs.lstatSync(filename); return true; } catch { return false; } }
 function code(expected, action) { return assert.rejects(action, (reason) => reason && reason.code === expected); }
+function assetDescriptor(id, kind, bytes) { const sha256 = hash(bytes); const image = kind === 'agent_environment_image'; return { authority: { origin: 'https://assets.example.invalid', path_prefix: '/voice-agent/' }, compatibility: { minimum_launcher_protocol: 1, maximum_launcher_protocol: 1, minimum_application_protocol: 1, maximum_application_protocol: 1 }, digest: `sha256:${sha256}`, id, kind, license: { id: 'Fixture-Test-Only', acceptance: 'accepted' }, platform: core.SUPPORTED_PLATFORM, reachability: image ? 'optional' : 'required', required_free_space_reserve: 1024, sha256, size: bytes.length, url: image ? `https://assets.example.invalid/voice-agent/images/environment@sha256:${sha256}` : `https://assets.example.invalid/voice-agent/${kind}/${sha256}` }; }
 
 function candidateArtifact(options = {}) {
   const contents = new Map([
@@ -37,15 +38,17 @@ function candidateArtifact(options = {}) {
     service_template_sha256: installer.UNIT_CONTRACT_SHA256, version: '1.0.0',
   };
   const manifestBytes = Buffer.from(core.canonicalJson(manifest)); const artifactBytes = Buffer.from('signed-adoption-candidate');
+  const assetContents = new Map([['model', Buffer.from('model-adopt')], ['runtime', Buffer.from('runtime-adopt')], ['agent_environment_image', Buffer.from('image-adopt')]]);
+  const assets = [...assetContents].map(([kind, bytes]) => assetDescriptor(`${kind}-adopt`, kind, bytes));
   const release = {
-    artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: 'https://releases.example.invalid/1.0.0.tar.zst',
-    build_id: manifest.build_id, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
+    artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: 'https://releases.example.invalid/1.0.0.tar.zst', assets,
+    build_id: manifest.build_id, launcher: null, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
     minimum_launcher_protocol: 1, platform: core.SUPPORTED_PLATFORM, version: '1.0.0',
   };
   const channel = { channel: 'stable', expires_at: '2026-09-20T00:00:00Z', generated_at: '2026-08-20T00:00:00Z', releases: [release], schema: 'voice-agent.channel.v1', sequence: 11 };
   const pair = crypto.generateKeyPairSync('ed25519'); const channelBytes = Buffer.from(core.canonicalJson(channel));
   return {
-    artifactBytes, manifestBytes, manifest, release, channelBytes,
+    artifactBytes, manifestBytes, manifest, release, channelBytes, assetContents,
     signatureBytes: Buffer.from(`${crypto.sign(null, channelBytes, pair.privateKey).toString('base64')}\n`),
     publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }),
     archiveEntries: [{ path: 'release-manifest.json', type: 'file', mode: '0444', size: manifestBytes.length, sha256: hash(manifestBytes), target: null }, ...entries],
@@ -141,7 +144,7 @@ function harness(options = {}) {
       }),
       inspectCompatibility: async ({ requirements }) => ({ free_bytes: 20 * 1024 ** 3, assets: { ...requirements, model_available: true, runtime_available: true, runtime_compatible: true } }),
     },
-    source: { acquireChannel: async () => artifact, acquireArtifact: async () => artifact },
+    source: { acquireChannel: async () => artifact, acquireArtifact: async () => artifact, downloadAsset: async ({ descriptor, offset }) => ({ status: offset ? 206 : 200, bytes: (descriptor.kind === 'program' ? artifact.artifactBytes : artifact.assetContents.get(descriptor.kind)).subarray(offset), validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url }) },
     clock: { now: () => new Date(NOW), monotonic: () => monotonic, sleep: async (ms) => { monotonic += ms; } },
     randomBytes: (length) => Buffer.alloc(length, 0x7c), output: { info: (line) => lines.push(line) }, fault: options.fault || null,
   };
