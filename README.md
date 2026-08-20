@@ -37,7 +37,7 @@ The direct pull-request path is intentionally simple: run `./verify` locally onc
 
 ## Local versioned stand preflight
 
-`stand doctor` is the read-only preflight for the supported Arch Linux/EndeavourOS x86_64 NVIDIA host. It reports `READY`, `INCOMPLETE`, or `UNSUPPORTED`, validates the pinned artifacts/runtimes and shared immutable caches declared in [`config/operations-v1.json`](config/operations-v1.json), and prints remediation commands without executing them:
+`stand doctor` is the read-only preflight for the supported Arch Linux/EndeavourOS x86_64 NVIDIA host. It reports `READY`, `INCOMPLETE`, or `UNSUPPORTED`, validates the pinned artifacts/runtimes and shared immutable caches declared in [`config/operations-v1.json`](config/operations-v1.json), and prints remediation commands without executing them. Cache symlinks pass only when their stable resolved target is read-only inside the same immutable tree, inside another explicitly declared immutable cache (including the selected local-LFM CUDA package root), or is a root-owned, non-group/other-writable Arch package path; dangling, looping, writable, undeclared, or unsafe targets fail closed with the exact affected-root remedy:
 
 ```sh
 ./stand doctor

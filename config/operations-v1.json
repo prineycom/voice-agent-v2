@@ -238,6 +238,11 @@
         "maximum_bytes": 1073741824
       },
       {
+        "name": "local-lfm-cuda-runtime",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/runtime/vllm-venv/lib/python3.14/site-packages/nvidia/cu13",
+        "maximum_bytes": 2147483648
+      },
+      {
         "name": "local-lfm-runtime",
         "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4",
         "maximum_bytes": 5368709120
