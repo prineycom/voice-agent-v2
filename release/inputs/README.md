@@ -2,7 +2,7 @@
 
 This directory is the closed input authority for Pasha's private personal noncommercial Linux `x86_64` release.
 
-- `runtime-sources.v1.json` pins the CUDA-12.9.1 Rocky-8 builder manifest, relocatable CPython 3.12.13, build-only Node 26.7.0, CMake, patchelf, LiveKit 1.13.5 and llama.cpp `689e227…`. Node builds web/SEA inputs and must not appear below the application `runtime/` tree.
+- `runtime-sources.v1.json` pins the CUDA-12.9.1 Rocky-8 builder manifest, relocatable CPython 3.12.13, build-only Node 26.7.0, CMake, patchelf, LiveKit 1.13.5 and llama.cpp `689e227…`. The llama.cpp row uses only the direct canonical `codeload.github.com/ggml-org/llama.cpp/tar.gz/<full-commit>` locator: owner, repository, path and full receipt commit are exact, query/userinfo/fragment variants fail, and codeload is never admitted through a redirect. Its accepted size/SHA-256, archive filename, source commit and MIT receipt remain unchanged. Node builds web/SEA inputs and must not appear below the application `runtime/` tree.
 - `python-wheelhouse.v1.json` records the exact filename, immutable URL, size, SHA-256 and license metadata for every wheel admitted by `requirements-release/{gateway,stt,tts}.lock`. Acquire into an empty wheelhouse, verify every row, then install with `pip --require-hashes --no-index --find-links` under the pinned CPython only.
 - `model-assets.v1.json` owns the exact four model sets: five named STT files plus LFM, Kseniya and VAD members, with individual and aggregate identities.
 - `asset-license-receipts.v1.json` owns exact model/AgentEnvironment provenance and license separation. Model bytes remain separately signed content-addressed assets and are not copied into the application archive.

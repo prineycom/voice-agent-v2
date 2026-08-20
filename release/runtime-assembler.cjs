@@ -8,7 +8,10 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const SHA256 = /^[0-9a-f]{64}$/;
+const GIT_COMMIT = /^[0-9a-f]{40}$/;
 const BUILDER = /^docker\.io\/nvidia\/cuda@sha256:([0-9a-f]{64})$/;
+const CODELOAD_HOST = 'codeload.github.com';
+const LLAMA_REPOSITORY = 'ggml-org/llama.cpp';
 const REDIRECT_HOSTS = new Set(['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'github-production-release-asset-2e65be.s3.amazonaws.com']);
 
 class AssemblyError extends Error { constructor(code, message) { super(message); this.code = code; } }
@@ -21,6 +24,22 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: options.cwd, env: options.env || process.env, encoding: 'utf8', timeout: options.timeout || 120000, input: options.input });
   if (result.status !== 0) fail(options.code || 'runtime_assembly_failed', options.message || 'bounded runtime assembly command failed');
   return result.stdout.trim();
+}
+
+function parseHttpsUrl(value, code = 'runtime_assembly_authority_invalid') {
+  let url; try { url = new URL(value); } catch { fail(code, 'immutable runtime input URL is invalid'); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || url.hash) fail(code, 'immutable runtime input URL is not canonical HTTPS authority');
+  return url;
+}
+
+function validateInputLocator(item) {
+  const url = parseHttpsUrl(item.url);
+  if (item.name === 'llama.cpp source' || url.hostname === CODELOAD_HOST) {
+    if (item.name !== 'llama.cpp source' || !GIT_COMMIT.test(item.commit || '')) fail('runtime_assembly_authority_invalid', 'llama.cpp source commit authority is invalid');
+    const expected = `https://${CODELOAD_HOST}/${LLAMA_REPOSITORY}/tar.gz/${item.commit}`;
+    if (item.url !== expected || item.filename !== `${item.commit}.tar.gz` || url.hostname !== CODELOAD_HOST || url.pathname !== `/${LLAMA_REPOSITORY}/tar.gz/${item.commit}`) fail('runtime_assembly_authority_invalid', 'llama.cpp codeload authority is invalid');
+  }
+  return url;
 }
 
 function validateAuthority(root) {
@@ -38,10 +57,12 @@ function validateAuthority(root) {
   if (wheels.schema !== 'voice-agent.python-wheelhouse.v1' || wheels.python !== '3.12.13' || !Array.isArray(wheels.wheels) || wheels.wheels.length < 10) fail('runtime_assembly_authority_invalid', 'wheelhouse authority is invalid');
   const inputs = [];
   for (const item of [...sources.inputs, ...wheels.wheels]) {
-    const url = item.url; const size = item.size; const sha256 = item.sha256; const filename = item.filename || path.basename(new URL(url).pathname);
-    if (typeof url !== 'string' || new URL(url).protocol !== 'https:' || !Number.isSafeInteger(size) || size < 1 || !SHA256.test(sha256)
+    const url = item.url; const size = item.size; const sha256 = item.sha256;
+    if (typeof url !== 'string') fail('runtime_assembly_authority_invalid', 'immutable runtime input is invalid');
+    const locator = validateInputLocator(item); const filename = item.filename || path.basename(locator.pathname);
+    if (!Number.isSafeInteger(size) || size < 1 || !SHA256.test(sha256)
       || typeof filename !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+%-]{0,255}$/.test(filename)) fail('runtime_assembly_authority_invalid', 'immutable runtime input is invalid');
-    inputs.push({ filename, name: item.name, purpose: item.purpose || 'python-wheel', sha256, size, url });
+    inputs.push({ commit: item.commit, filename, name: item.name, purpose: item.purpose || 'python-wheel', sha256, size, url });
   }
   const digests = new Set();
   for (const item of inputs) { if (digests.has(item.sha256)) fail('runtime_assembly_authority_invalid', 'runtime input digest is duplicated'); digests.add(item.sha256); }
@@ -55,14 +76,17 @@ function inspectInput(filename, item) {
   return true;
 }
 
-function fetchInput(item, target, redirects = 0, originalHost = null) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(item.url); const host = originalHost || url.hostname;
-    if (url.protocol !== 'https:' || redirects > 4 || (redirects > 0 && url.hostname !== host && !REDIRECT_HOSTS.has(url.hostname))) return reject(new AssemblyError('runtime_input_redirect_refused', 'runtime input redirect escaped closed HTTPS authority'));
-    const request = https.get(url, { headers: { Accept: 'application/octet-stream', 'Accept-Encoding': 'identity', 'User-Agent': 'voice-agent-runtime-assembler/1' }, timeout: 30000 }, (response) => {
+function fetchInput(item, target, options = {}) {
+  const initialUrl = validateInputLocator(item); const requestGet = options.requestGet || https.get;
+  const requestUrl = (url, redirects, originalHost) => new Promise((resolve, reject) => {
+    if (url.protocol !== 'https:' || redirects > 4 || (redirects > 0 && url.hostname !== originalHost && !REDIRECT_HOSTS.has(url.hostname))) return reject(new AssemblyError('runtime_input_redirect_refused', 'runtime input redirect escaped closed HTTPS authority'));
+    const request = requestGet(url, { headers: { Accept: 'application/octet-stream', 'Accept-Encoding': 'identity', 'User-Agent': 'voice-agent-runtime-assembler/1' }, timeout: 30000 }, (response) => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
-        response.resume(); if (!response.headers.location) return reject(new AssemblyError('runtime_input_redirect_refused', 'runtime input redirect is incomplete'));
-        const next = new URL(response.headers.location, url); return fetchInput({ ...item, url: next.href }, target, redirects + 1, host).then(resolve, reject);
+        response.resume();
+        if (!response.headers.location || url.hostname === CODELOAD_HOST) return reject(new AssemblyError('runtime_input_redirect_refused', 'runtime input redirect is not admitted'));
+        let next; try { next = new URL(response.headers.location, url); } catch { return reject(new AssemblyError('runtime_input_redirect_refused', 'runtime input redirect is invalid')); }
+        if (next.protocol !== 'https:' || next.username || next.password || next.hostname === CODELOAD_HOST) return reject(new AssemblyError('runtime_input_redirect_refused', 'runtime input redirect escaped closed HTTPS authority'));
+        return requestUrl(next, redirects + 1, originalHost).then(resolve, reject);
       }
       if (response.statusCode !== 200) { response.resume(); return reject(new AssemblyError('runtime_input_unavailable', 'runtime input server refused exact bytes')); }
       const temporary = `${target}.partial`; let seen = 0; const hash = crypto.createHash('sha256'); const output = fs.createWriteStream(temporary, { flags: 'wx', mode: 0o600 });
@@ -80,9 +104,10 @@ function fetchInput(item, target, redirects = 0, originalHost = null) {
     request.on('timeout', () => request.destroy(new AssemblyError('runtime_input_timeout', 'runtime input acquisition exceeded deadline')));
     request.on('error', reject);
   });
+  return requestUrl(initialUrl, 0, initialUrl.hostname);
 }
 
-async function prepareInputs(cacheRoot, authority, fetch) {
+async function prepareInputs(cacheRoot, authority, fetch, fetcher = fetchInput) {
   fs.mkdirSync(cacheRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(cacheRoot, 0o700);
   const shaRoot = path.join(cacheRoot, 'sha256'); fs.mkdirSync(shaRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(shaRoot, 0o700);
   for (const name of fs.readdirSync(shaRoot)) if (!SHA256.test(name) || !authority.inputs.some((item) => item.sha256 === name)) fail('ambient_cache_refused', 'assembly cache contains bytes outside release input authority');
@@ -90,7 +115,7 @@ async function prepareInputs(cacheRoot, authority, fetch) {
     const filename = path.join(shaRoot, item.sha256);
     if (inspectInput(filename, item)) continue;
     if (!fetch) fail('runtime_input_missing', 'an accepted immutable runtime input is absent; rerun with --fetch');
-    await fetchInput(item, filename);
+    await fetcher(item, filename);
     inspectInput(filename, item);
   }
   return shaRoot;
@@ -141,4 +166,4 @@ async function assemble(values, context) {
   } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 }
 
-module.exports = { AssemblyError, assemble, copyTrackedSource, digest, inspectBuilder, inspectInput, prepareInputs, validateAuthority };
+module.exports = { AssemblyError, assemble, copyTrackedSource, digest, fetchInput, inspectBuilder, inspectInput, prepareInputs, validateAuthority, validateInputLocator };
