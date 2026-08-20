@@ -11,6 +11,7 @@ const { Readable } = require('node:stream');
 const test = require('node:test');
 
 const assembler = require('./runtime-assembler.cjs');
+const npmBoundary = require('./npm-boundary-preflight.cjs');
 const ROOT = path.resolve(__dirname, '..');
 
 function temporary(context) {
@@ -66,6 +67,30 @@ function probeRow({ phase = 'builder', provenance = 'builder:fixture', name, too
 function custodyRow({ name, toolPath, sha256, parent, parentVersion, ownerUid = process.getuid(), mode = '0755', toolRoot = path.dirname(toolPath) }) {
   return ['builder', 'builder:fixture', name, toolPath, 'custody', '-', '-', '-', '-', '-', parentVersion, sha256, ownerUid, mode, toolRoot, parent, parentVersion, '-'].join('\t');
 }
+function privateNpmFixture(root, overrides = {}) {
+  const expected = {
+    HOME: path.join(root, 'home'), NPM_CONFIG_CACHE: path.join(root, 'cache'), NPM_CONFIG_GLOBALCONFIG: path.join(root, 'global', 'npmrc'),
+    NPM_CONFIG_PREFIX: path.join(root, 'prefix'), NPM_CONFIG_REGISTRY: npmBoundary.PUBLIC_REGISTRY, NPM_CONFIG_USERCONFIG: path.join(root, 'user', 'npmrc'),
+    TMPDIR: path.join(root, 'temp'), XDG_CACHE_HOME: path.join(root, 'xdg-cache'), XDG_CONFIG_HOME: path.join(root, 'xdg-config'), ...overrides,
+  };
+  for (const directory of new Set([expected.HOME, expected.NPM_CONFIG_CACHE, expected.NPM_CONFIG_PREFIX, expected.TMPDIR, expected.XDG_CACHE_HOME, expected.XDG_CONFIG_HOME,
+    path.dirname(expected.NPM_CONFIG_USERCONFIG), path.dirname(expected.NPM_CONFIG_GLOBALCONFIG)])) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (const filename of new Set([expected.NPM_CONFIG_USERCONFIG, expected.NPM_CONFIG_GLOBALCONFIG])) if (!fs.existsSync(filename)) fs.writeFileSync(filename, '', { mode: 0o600 });
+  const environment = { ...expected };
+  const runNpm = (args) => {
+    if (expected.NPM_CONFIG_USERCONFIG === expected.NPM_CONFIG_GLOBALCONFIG) return { status: 1, stdout: '', stderr: 'npm error double-loading config as global, previously loaded as user\n' };
+    const key = args.join('\0'); const outputs = new Map([
+      ['--version', '11.19.0'], ['config\0get\0userconfig', expected.NPM_CONFIG_USERCONFIG], ['config\0get\0globalconfig', expected.NPM_CONFIG_GLOBALCONFIG], ['config\0get\0registry', npmBoundary.PUBLIC_REGISTRY],
+    ]);
+    return { status: outputs.has(key) ? 0 : 64, stdout: outputs.has(key) ? `${outputs.get(key)}\n` : '', stderr: '' };
+  };
+  return { environment, expected, runNpm };
+}
+
+function inspectPrivateNpm(fixture, extra = {}) {
+  return npmBoundary.inspectPrivateNpmBoundary({ ...fixture, privateRoot: path.dirname(fixture.expected.HOME), ...extra });
+}
+
 function runToolProbe(root, rows, phase = 'builder') {
   const authority = path.join(root, `${phase}-authority.tsv`); const report = path.join(root, `${phase}-report.tsv`);
   fs.writeFileSync(authority, `${rows.join('\n')}\n`);
@@ -117,6 +142,71 @@ test('committed runtime assembler authority pins the exact OCI/toolchain and clo
   assert.equal(llama.size, 36775744); assert.equal(llama.sha256, '0ce0978a3310651d615159689200dd751a22fb2484ab3eb4eccc25671f6db118');
   assert.equal(receipt.version, 'b10357'); assert.equal(receipt.license, 'MIT');
   assert.equal(receipt.license_url, `https://github.com/ggml-org/llama.cpp/blob/${LLAMA_COMMIT}/LICENSE`);
+});
+
+test('private npm boundary accepts exact distinct empty configs and separate owner-only directories with npm 11', (context) => {
+  const root = temporary(context); const fixture = privateNpmFixture(root); const facts = inspectPrivateNpm(fixture);
+  for (const item of facts.values()) assert.equal(item.status, 'ok');
+  assert.notEqual(fs.lstatSync(fixture.expected.NPM_CONFIG_USERCONFIG).ino, fs.lstatSync(fixture.expected.NPM_CONFIG_GLOBALCONFIG).ino);
+  assert.equal(fs.lstatSync(fixture.expected.NPM_CONFIG_USERCONFIG).mode & 0o777, 0o600);
+  for (const name of ['HOME', 'NPM_CONFIG_CACHE', 'NPM_CONFIG_PREFIX', 'TMPDIR']) assert.equal(fs.lstatSync(fixture.expected[name]).mode & 0o777, 0o700);
+});
+
+test('observed npm 11 double-loading refusal remains a regression for identical private config paths', (context) => {
+  const root = temporary(context); const filename = path.join(root, 'same', 'npmrc');
+  const fixture = privateNpmFixture(root, { NPM_CONFIG_USERCONFIG: filename, NPM_CONFIG_GLOBALCONFIG: filename });
+  const facts = inspectPrivateNpm(fixture);
+  assert.equal(facts.get('config-identities').status, 'mismatch'); assert.equal(facts.get('npm-behavior').status, 'mismatch');
+});
+
+test('private npm boundary refuses inode aliases, symlinks, wrong mode or owner, path escape, and ambient package authority', (context) => {
+  const cases = [];
+  {
+    const root = path.join(temporary(context), 'hardlink'); const fixture = privateNpmFixture(root); fs.unlinkSync(fixture.expected.NPM_CONFIG_GLOBALCONFIG); fs.linkSync(fixture.expected.NPM_CONFIG_USERCONFIG, fixture.expected.NPM_CONFIG_GLOBALCONFIG);
+    cases.push([inspectPrivateNpm(fixture), ['global-config', 'config-identities']]);
+  }
+  {
+    const root = path.join(temporary(context), 'symlink'); const fixture = privateNpmFixture(root); fs.unlinkSync(fixture.expected.NPM_CONFIG_GLOBALCONFIG); fs.symlinkSync(fixture.expected.NPM_CONFIG_USERCONFIG, fixture.expected.NPM_CONFIG_GLOBALCONFIG);
+    cases.push([inspectPrivateNpm(fixture), ['global-config']]);
+  }
+  {
+    const root = path.join(temporary(context), 'mode'); const fixture = privateNpmFixture(root); fs.chmodSync(fixture.expected.NPM_CONFIG_USERCONFIG, 0o644);
+    cases.push([inspectPrivateNpm(fixture), ['user-config']]);
+  }
+  {
+    const root = path.join(temporary(context), 'directory-mode'); const fixture = privateNpmFixture(root); fs.chmodSync(fixture.expected.NPM_CONFIG_CACHE, 0o755);
+    cases.push([inspectPrivateNpm(fixture), ['private-directories']]);
+  }
+  {
+    const root = path.join(temporary(context), 'owner'); const fixture = privateNpmFixture(root);
+    cases.push([inspectPrivateNpm(fixture, { expectedUid: process.getuid() + 1 }), ['user-config', 'global-config', 'private-directories']]);
+  }
+  {
+    const root = path.join(temporary(context), 'escape'); const fixture = privateNpmFixture(root, { NPM_CONFIG_USERCONFIG: path.join(root, '..', 'escaped-npmrc') });
+    cases.push([inspectPrivateNpm(fixture, { privateRoot: root }), ['config-identities']]);
+  }
+  {
+    const root = path.join(temporary(context), 'registry'); const fixture = privateNpmFixture(root); fixture.environment.NPM_CONFIG_REGISTRY = 'https://registry.example.invalid/';
+    cases.push([inspectPrivateNpm(fixture), ['registry']]);
+  }
+  {
+    const root = path.join(temporary(context), 'ambient'); const fixture = privateNpmFixture(root); fixture.environment.NPM_TOKEN = 'private'; fixture.environment.HTTPS_PROXY = 'http://proxy.invalid'; fixture.environment.npm_config_registry = 'https://evil.invalid/';
+    cases.push([inspectPrivateNpm(fixture), ['environment']]);
+  }
+  for (const [facts, names] of cases) for (const name of names) assert.equal(facts.get(name).status, 'mismatch', name);
+});
+
+test('npm lock authority refuses arbitrary registries, missing integrity, incomplete dependencies, and unexpected packages', () => {
+  const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'web', 'package-lock.json'))); const packageDocument = JSON.parse(fs.readFileSync(path.join(ROOT, 'web', 'package.json')));
+  assert.equal(assembler.validateNpmLock(lock, packageDocument).length, Object.keys(lock.packages).length - 1);
+  const mutate = (operation) => { const value = structuredClone(lock); operation(value); return value; };
+  const first = Object.keys(lock.packages).find(Boolean);
+  for (const invalid of [
+    mutate((value) => { value.packages[first].resolved = value.packages[first].resolved.replace('registry.npmjs.org', 'registry.example.invalid'); }),
+    mutate((value) => { delete value.packages[first].integrity; }),
+    mutate((value) => { value.packages[first].dependencies = { ...(value.packages[first].dependencies || {}), absent: '1.0.0' }; }),
+    mutate((value) => { value.packages['node_modules/unexpected-fixture'] = { version: '1.0.0', resolved: 'https://registry.npmjs.org/unexpected-fixture/-/unexpected-fixture-1.0.0.tgz', integrity: `sha512-${Buffer.alloc(64).toString('base64')}` }; }),
+  ]) assert.throws(() => assembler.validateNpmLock(invalid, packageDocument), (reason) => reason.code === 'runtime_assembly_authority_invalid');
 });
 
 test('the accepted exact Node gzip archive extracts without xz and retains exact file bytes', (context) => {
@@ -233,6 +323,16 @@ test('Node compatibility reports missing and tampered loader/library plus symbol
     && reason.message.includes('absent=[library-glibc,library-layout,library-needed]') && reason.message.includes('mismatch=[loader]'));
 });
 
+test('npm boundary preflight errors are complete and privacy-safe', (context) => {
+  const root = temporary(context); const authority = assembler.validateAuthority(ROOT); const report = path.join(root, 'npm-boundary.tsv');
+  const lines = assembler.fixtureNpmBoundaryReport(authority, ROOT).trimEnd().split('\n')
+    .filter((line) => !line.includes('\tglobal-config\t')).map((line) => line.includes('\tenvironment\t') ? line.replace(/\t[^\t]+\tok$/, '\tPRIVATE-MARKER\tmismatch') : line);
+  lines.push('invalid\textra-private-fact\tPRIVATE-MARKER\tok'); fs.writeFileSync(report, `${lines.join('\n')}\n`);
+  assert.throws(() => assembler.inspectNpmBoundaryReport(report, authority, ROOT), (reason) => reason.code === 'runtime_npm_boundary_invalid'
+    && reason.message.includes('absent=[global-config]') && reason.message.includes('mismatch=[environment]') && reason.message.includes('extra=[extra-private-fact]')
+    && !reason.message.includes('PRIVATE-MARKER') && reason.message.length < 384);
+});
+
 test('llama.cpp admits only the exact direct owner/repository/full-commit codeload locator', () => {
   const bytes = Buffer.from('fixture codeload archive'); const accepted = llamaItem(bytes);
   assert.equal(assembler.validateInputLocator(accepted).href, LLAMA_URL);
@@ -324,9 +424,12 @@ test('production assembler closes extraction, compiler, ELF, PATH, and credentia
   assert.match(shell, /readelf -dW "\$file"[^\n]+grep -q 'Dynamic section'/);
   assert.match(shell, /'\/runtime\/llama\/lib\/' in selected\.as_posix\(\): shutil\.move\(selected,target\)/);
   assert.doesNotMatch(shell, /cp .*\/output\/runtime\/llama\/lib\/.*\/output\/runtime\/lib/);
-  assert.match(shell, /pacote\.tarball\.stream/); assert.match(shell, /npm-cli\.js ci --ignore-scripts --offline/);
+  assert.match(shell, /pacote\.tarball\.stream/); assert.match(shell, /npm-cli\.js ci --ignore-scripts --offline/); assert.match(shell, /offline: mode === 'check'/);
+  assert.match(shell, /NPM_CONFIG_USERCONFIG=\/work\/npm-user\/npmrc NPM_CONFIG_GLOBALCONFIG=\/work\/npm-global\/npmrc/);
+  assert.match(shell, /require_npm_boundary/); assert.doesNotMatch(shell, /NPM_CONFIG_(?:USER|GLOBAL)CONFIG=\/dev\/null/);
   assert.match(shell, /-DCMAKE_CUDA_COMPILER=\/build\/tool-bin\/nvcc/); assert.doesNotMatch(shell, /GIT_EXECUTABLE|tool-bin\/false/);
-  assert.match(shell, /unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY/);
+  assert.match(shell, /npm_\*\|yarn_\*\|pnpm_\*/);
+  assert.match(shell, /\*registry\*\|\*auth\*\|\*token\*\|\*cert\*\|\*proxy\*/);
   assert.match(shell, /unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN/);
   const compatibility = fs.readFileSync(path.join(ROOT, 'release', 'node-compatibility-preflight.sh'), 'utf8');
   assert.match(compatibility, /unset LD_LIBRARY_PATH LD_PRELOAD/); assert.match(compatibility, /--inhibit-cache --library-path \/build\/tools\/node-runtime\/lib:\/lib64:\/usr\/lib64/);
@@ -353,7 +456,7 @@ test('input cache accepts only exact single-link bytes and refuses missing, tamp
 
 test('fixture assembly preflights the full closure, cache-installs tools offline, and builds only with network none', async (context) => {
   const root = temporary(context); const cache = path.join(root, 'cache'); const output = path.join(root, 'output'); const calls = []; const podmanCommands = []; const prepared = [];
-  const authority = assembler.validateAuthority(ROOT);
+  const authority = assembler.validateAuthority(ROOT); let acquired = false;
   const buildRoot = (args) => {
     const mount = args.find((value) => typeof value === 'string' && value.endsWith(':/build:rw'));
     return mount && mount.slice(0, -':/build:rw'.length);
@@ -371,7 +474,10 @@ test('fixture assembly preflights the full closure, cache-installs tools offline
       if (args.at(-1) === 'tool-preflight') {
         fs.writeFileSync(path.join(buildRoot(args), 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])));
         fs.writeFileSync(path.join(buildRoot(args), 'node-compatibility-report.tsv'), assembler.fixtureNodeCompatibilityReport(authority));
+        fs.writeFileSync(path.join(buildRoot(args), 'npm-boundary-report.tsv'), assembler.fixtureNpmBoundaryReport(authority, ROOT));
       }
+      if (args.at(-1) === 'web-cache-check') fs.writeFileSync(path.join(buildRoot(args), 'npm-cache-status'), acquired ? 'complete\n' : 'missing\n');
+      if (args.at(-1) === 'web-acquire') acquired = true;
       if (args.at(-1) === 'web-prepare') fs.appendFileSync(path.join(buildRoot(args), 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['web'])));
       if (args.at(-1) === 'assemble') {
         fs.mkdirSync(path.join(output, 'runtime'), { recursive: true, mode: 0o700 }); fs.mkdirSync(path.join(output, 'web'), { recursive: true, mode: 0o700 });
@@ -393,27 +499,78 @@ test('fixture assembly preflights the full closure, cache-installs tools offline
   });
   assert.equal(prepared.length, 2); assert.equal(prepared[0].includes('Node.js'), true); assert.equal(prepared[0].includes('Rocky Linux libatomic'), true); assert.equal(prepared[0].includes('llama.cpp source'), false); assert.equal(prepared[1].includes('llama.cpp source'), true);
   assert.equal(result.output, output); assert.equal(result.tools.length, authority.tools.builder_tools.length + authority.tools.content_addressed_tools.length + authority.tools.npm_lock_tools.length);
-  assert.equal(result.node_runtime.facts.length, 16); assert.match(result.node_runtime.provenance, /runtime:sha256:/);
-  assert.equal(calls.length, 4); assert.equal(podmanCommands.length, 6);
-  assert.deepEqual(calls.map((call) => call.args.at(-1)), ['tool-preflight', 'web-acquire', 'web-prepare', 'assemble']);
-  const [toolPreflight, acquire, webPrepare, build] = calls;
-  for (const call of [toolPreflight, webPrepare, build]) { assert.equal(call.args.includes('--network=none'), true); assert.equal(call.args.includes('--network=pasta'), false); }
+  assert.equal(result.node_runtime.facts.length, 16); assert.match(result.node_runtime.provenance, /runtime:sha256:/); assert.equal(result.npm_boundary.length, 7);
+  assert.equal(calls.length, 6); assert.equal(podmanCommands.length, 8);
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), ['tool-preflight', 'web-cache-check', 'web-acquire', 'web-cache-check', 'web-prepare', 'assemble']);
+  const [toolPreflight, initialCacheCheck, acquire, finalCacheCheck, webPrepare, build] = calls;
+  for (const call of [toolPreflight, initialCacheCheck, finalCacheCheck, webPrepare, build]) { assert.equal(call.args.includes('--network=none'), true); assert.equal(call.args.includes('--network=pasta'), false); }
   assert.equal(acquire.args.includes('--network=pasta'), true); assert.equal(acquire.args.includes('--network=none'), false);
   assert.equal(toolPreflight.args.some((value) => value.endsWith(':/build:rw')), true); assert.equal(acquire.args.some((value) => value.endsWith(':/build:ro')), true);
   assert.equal(webPrepare.args.some((value) => value.endsWith(':/build:rw')), true); assert.equal(build.args.some((value) => value.endsWith(':/build:ro')), true);
+  for (const call of [toolPreflight, initialCacheCheck, finalCacheCheck, webPrepare, build]) assert.equal(call.args.some((value) => value.endsWith(':/npm-cache:ro')), true);
+  assert.equal(acquire.args.some((value) => value.endsWith(':/npm-cache:rw')), true);
   for (const call of calls) {
     assert.deepEqual(call.args.slice(0, 3), ['--remote=false', 'run', '--rm']);
     for (const flag of ['--read-only', '--env-host=false', '--http-proxy=false', '--cap-drop=all']) assert.equal(call.args.includes(flag), true);
-    for (const value of ['HOME=/work/home', 'XDG_CONFIG_HOME=/work/config', 'NPM_CONFIG_USERCONFIG=/dev/null', 'GIT_CONFIG_GLOBAL=/dev/null']) assert.equal(call.args.includes(value), true);
+    for (const value of ['HOME=/work/npm-home', 'XDG_CONFIG_HOME=/work/xdg-config', 'NPM_CONFIG_USERCONFIG=/work/npm-user/npmrc', 'NPM_CONFIG_GLOBALCONFIG=/work/npm-global/npmrc', 'NPM_CONFIG_CACHE=/npm-cache', 'NPM_CONFIG_PREFIX=/work/npm-prefix', 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/', 'GIT_CONFIG_GLOBAL=/dev/null']) assert.equal(call.args.includes(value), true);
     assert.equal(Object.hasOwn(call.env, 'HTTPS_PROXY'), false); assert.equal(Object.hasOwn(call.env, 'GITHUB_TOKEN'), false);
     assert.equal(call.args.some((value) => /(?:docker|podman)\.sock/.test(value)), false);
     assert.equal(call.args.some((value) => value.includes('/usr/bin/xz') || value.includes('/bin/xz')), false);
     assert.equal(call.args.includes('/usr/bin/bash'), true);
     assert.equal(call.args.some((value) => value.endsWith('/release/tool-preflight.sh:/tool-preflight:ro')), true);
     assert.equal(call.args.some((value) => value.endsWith('/release/node-compatibility-preflight.sh:/node-compatibility-preflight:ro')), true);
+    assert.equal(call.args.some((value) => value.endsWith('/release/npm-boundary-preflight.cjs:/npm-boundary-preflight.cjs:ro')), true);
   }
   const implementation = fs.readFileSync(path.join(ROOT, 'release', 'runtime-assembler.cjs'), 'utf8');
   assert.doesNotMatch(implementation, /slirp4netns|--network=host/); assert.equal(fs.existsSync(path.join(output, 'web', 'index.html')), true);
+});
+
+test('a complete exact npm cache reruns with network none and byte-identical cache custody', async (context) => {
+  const root = temporary(context); const cache = path.join(root, 'cache'); const authority = assembler.validateAuthority(ROOT); const phases = [];
+  fs.mkdirSync(path.join(cache, 'npm', 'content'), { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(cache, 'npm', 'content', 'fixture'), 'exact-cache-byte', { mode: 0o600 });
+  const before = assembler.npmCacheIdentity(path.join(cache, 'npm'));
+  const buildRoot = (args) => args.find((value) => typeof value === 'string' && value.endsWith(':/build:rw')).slice(0, -':/build:rw'.length);
+  const runCommand = (command, args, options = {}) => {
+    if (command === 'podman') {
+      phases.push({ args, phase: args.at(-1) }); const build = buildRoot(args);
+      if (args.at(-1) === 'tool-preflight') {
+        fs.writeFileSync(path.join(build, 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])));
+        fs.writeFileSync(path.join(build, 'node-compatibility-report.tsv'), assembler.fixtureNodeCompatibilityReport(authority));
+        fs.writeFileSync(path.join(build, 'npm-boundary-report.tsv'), assembler.fixtureNpmBoundaryReport(authority, ROOT));
+      }
+      if (args.at(-1) === 'web-cache-check') fs.writeFileSync(path.join(build, 'npm-cache-status'), 'complete\n');
+      if (args.at(-1) === 'web-prepare') fs.appendFileSync(path.join(build, 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['web'])));
+      return '';
+    }
+    const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' }); if (result.status !== 0) throw new Error('fixture command failed'); return result.stdout.trim();
+  };
+  const contextValue = {
+    root: ROOT, runCommand, inspectBuilder: () => {}, inspectAcquisitionNetwork: (_runner, environment) => ({ environment: assembler.isolatedPodmanEnvironment(environment) }),
+    prepareInputs: async () => { const shaRoot = path.join(cache, 'sha256'); fs.mkdirSync(shaRoot, { recursive: true, mode: 0o700 }); return shaRoot; },
+  };
+  await assembler.preflight({ cache }, contextValue); await assembler.preflight({ cache }, contextValue);
+  assert.deepEqual(phases.map((item) => item.phase), ['tool-preflight', 'web-cache-check', 'web-prepare', 'tool-preflight', 'web-cache-check', 'web-prepare']);
+  for (const item of phases) { assert.equal(item.args.includes('--network=none'), true); assert.equal(item.args.includes('--network=pasta'), false); assert.equal(item.args.some((value) => value.endsWith(':/npm-cache:ro')), true); }
+  assert.equal(assembler.npmCacheIdentity(path.join(cache, 'npm')), before);
+});
+
+test('npm identity or npm 11 preflight failure stops before cache inspection, acquisition, or output', async (context) => {
+  const root = temporary(context); const cache = path.join(root, 'cache'); const authority = assembler.validateAuthority(ROOT); const phases = [];
+  const runCommand = (command, args, options = {}) => {
+    if (command === 'podman') {
+      phases.push(args.at(-1)); const mount = args.find((value) => typeof value === 'string' && value.endsWith(':/build:rw')); const build = mount.slice(0, -':/build:rw'.length);
+      fs.writeFileSync(path.join(build, 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])));
+      fs.writeFileSync(path.join(build, 'node-compatibility-report.tsv'), assembler.fixtureNodeCompatibilityReport(authority));
+      const report = assembler.fixtureNpmBoundaryReport(authority, ROOT).replace(/\tenvironment\t[^\t]+\tok\n/, '\tenvironment\tmismatch\tmismatch\n');
+      fs.writeFileSync(path.join(build, 'npm-boundary-report.tsv'), report); return '';
+    }
+    const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' }); if (result.status !== 0) throw new Error('fixture command failed'); return result.stdout.trim();
+  };
+  await assert.rejects(() => assembler.preflight({ cache, fetch: true }, {
+    root: ROOT, runCommand, inspectBuilder: () => {}, inspectAcquisitionNetwork: (_runner, environment) => ({ environment: assembler.isolatedPodmanEnvironment(environment) }),
+    prepareInputs: async () => { const shaRoot = path.join(cache, 'sha256'); fs.mkdirSync(shaRoot, { recursive: true }); return shaRoot; },
+  }), (reason) => reason.code === 'runtime_npm_boundary_invalid' && reason.message.includes('mismatch=[environment]') && !reason.message.includes('/work/'));
+  assert.deepEqual(phases, ['tool-preflight']);
 });
 
 test('one complete tool preflight error stops before remaining fetch, web acquisition, or runtime output', async (context) => {

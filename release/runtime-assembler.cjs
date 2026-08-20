@@ -19,6 +19,17 @@ const BUILDER_TOOL_NAMES = ['bash', 'sh', 'awk', 'ar', 'as', 'basename', 'cat', 
 const NODE_COMPATIBILITY_FACTS = ['architecture', 'node-layout', 'interpreter', 'needed', 'required-glibc', 'required-glibcxx', 'required-cxxabi', 'loader', 'library-layout', 'library-needed', 'library-glibc', 'raw-exit', 'raw-stderr', 'corrected-exit', 'corrected-output', 'environment'];
 const CONTENT_TOOL_NAMES = ['node', 'npm', 'python', 'pip', 'cmake', 'patchelf'];
 const NPM_TOOL_NAMES = ['vite', 'rolldown', 'rolldown-linux-x64-gnu', 'lightningcss', 'lightningcss-linux-x64-gnu'];
+const NPM_BOUNDARY_EVIDENCE = Object.freeze({
+  'config-identities': 'distinct-paths-and-inodes:no-links:private-boundary',
+  environment: 'ambient-npm-yarn-pnpm-node-options-registry-auth-token-cert-proxy-denied',
+  'global-config': 'regular:0600:single-link:empty:owner=current',
+  'npm-behavior': 'npm:11.19.0:userconfig-exact:globalconfig-exact:registry-exact',
+  'private-directories': 'cache-prefix-temp-home:distinct:0700:owner=current:no-links',
+  registry: 'https://registry.npmjs.org/',
+  'user-config': 'regular:0600:single-link:empty:owner=current',
+});
+const NPM_BOUNDARY_FACTS = Object.keys(NPM_BOUNDARY_EVIDENCE).sort();
+const NPM_PUBLIC_REGISTRY = 'https://registry.npmjs.org/';
 const PODMAN_ENVIRONMENT_KEYS = new Set(['DBUS_SESSION_BUS_ADDRESS', 'HOME', 'LANG', 'LC_ALL', 'LOGNAME', 'PATH', 'TMPDIR', 'USER', 'XDG_RUNTIME_DIR']);
 
 class AssemblyError extends Error { constructor(code, message) { super(message); this.code = code; } }
@@ -83,6 +94,51 @@ function validateInputLocator(item) {
     if (item.url !== expected || item.filename !== `${item.commit}.tar.gz` || url.hostname !== CODELOAD_HOST || url.pathname !== `/${LLAMA_REPOSITORY}/tar.gz/${item.commit}`) fail('runtime_assembly_authority_invalid', 'llama.cpp codeload authority is invalid');
   }
   return url;
+}
+
+function validateNpmLock(lock, packageDocument) {
+  exactKeys(lock, ['lockfileVersion', 'name', 'packages', 'requires', 'version']);
+  if (lock.lockfileVersion !== 3 || lock.requires !== true || !lock.packages || typeof lock.packages !== 'object' || Array.isArray(lock.packages)) fail('runtime_assembly_authority_invalid', 'npm lock authority is invalid');
+  const rootItem = lock.packages[''];
+  if (!rootItem || lock.name !== packageDocument.name || lock.version !== packageDocument.version || rootItem.name !== packageDocument.name || rootItem.version !== packageDocument.version
+    || JSON.stringify(rootItem.dependencies || {}) !== JSON.stringify(packageDocument.dependencies || {})
+    || JSON.stringify(rootItem.devDependencies || {}) !== JSON.stringify(packageDocument.devDependencies || {})) fail('runtime_assembly_authority_invalid', 'npm lock root authority is invalid');
+  const packagePaths = new Set(Object.keys(lock.packages).filter(Boolean)); const rows = []; const locators = new Map();
+  for (const [packagePath, item] of Object.entries(lock.packages)) {
+    if (!packagePath) continue;
+    if (!/^node_modules\/(?:[^/]+|@[^/]+\/[^/]+)(?:\/node_modules\/(?:[^/]+|@[^/]+\/[^/]+))*$/.test(packagePath)
+      || !item || typeof item.version !== 'string' || !item.version || typeof item.resolved !== 'string') fail('runtime_assembly_authority_invalid', 'npm lock package inventory is invalid');
+    const url = parseHttpsUrl(item.resolved);
+    if (url.origin !== NPM_PUBLIC_REGISTRY.slice(0, -1) || !url.pathname.endsWith('.tgz') || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.integrity || '')) fail('runtime_assembly_authority_invalid', 'npm lock authority is invalid');
+    if (locators.has(item.resolved) && locators.get(item.resolved) !== item.integrity) fail('runtime_assembly_authority_invalid', 'npm lock locator is ambiguous');
+    locators.set(item.resolved, item.integrity);
+    rows.push({ integrity: item.integrity, package_path: packagePath, resolved: item.resolved, version: item.version });
+  }
+  const resolveDependency = (from, name) => {
+    let base = from;
+    while (true) {
+      const candidate = `${base ? `${base}/` : ''}node_modules/${name}`;
+      if (packagePaths.has(candidate)) return candidate;
+      if (!base) return null;
+      const boundary = base.lastIndexOf('node_modules/');
+      if (boundary < 0) return null;
+      base = base.slice(0, boundary).replace(/\/$/, '');
+    }
+  };
+  const reached = new Set(['']); const pending = [''];
+  while (pending.length) {
+    const packagePath = pending.shift(); const item = lock.packages[packagePath];
+    for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+      for (const name of Object.keys(item[field] || {})) {
+        const target = resolveDependency(packagePath, name);
+        const optional = field === 'optionalDependencies' || (field === 'peerDependencies' && item.peerDependenciesMeta?.[name]?.optional === true);
+        if (!target && !optional) fail('runtime_assembly_authority_invalid', 'npm lock dependency inventory is incomplete');
+        if (target && !reached.has(target)) { reached.add(target); pending.push(target); }
+      }
+    }
+  }
+  if (rows.some((item) => !reached.has(item.package_path)) || reached.size !== rows.length + 1) fail('runtime_assembly_authority_invalid', 'npm lock package inventory contains an unexpected package');
+  return rows.sort((left, right) => left.package_path.localeCompare(right.package_path));
 }
 
 function validateAuthority(root) {
@@ -174,12 +230,8 @@ function validateAuthority(root) {
   const toolNames = [...tools.builder_tools, runtime, ...tools.content_addressed_tools, ...tools.npm_lock_tools].map((item) => item.name);
   if (new Set(toolNames).size !== toolNames.length) fail('runtime_assembly_authority_invalid', 'runtime tool name is duplicated');
   const npmLock = JSON.parse(fs.readFileSync(path.join(root, 'web', 'package-lock.json')));
-  if (!npmLock || npmLock.lockfileVersion !== 3 || !npmLock.packages || typeof npmLock.packages !== 'object') fail('runtime_assembly_authority_invalid', 'npm tool lock authority is invalid');
-  for (const item of Object.values(npmLock.packages)) {
-    if (!item || !item.resolved) continue;
-    const url = parseHttpsUrl(item.resolved);
-    if (url.hostname !== 'registry.npmjs.org' || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.integrity || '')) fail('runtime_assembly_authority_invalid', 'npm tool lock authority is invalid');
-  }
+  const npmPackage = JSON.parse(fs.readFileSync(path.join(root, 'web', 'package.json')));
+  const npmPackages = validateNpmLock(npmLock, npmPackage);
   for (const item of tools.npm_lock_tools) if (npmLock.packages[`node_modules/${item.package}`]?.version !== item.version) fail('runtime_assembly_authority_invalid', 'npm tool version differs from exact lock');
   if (wheels.schema !== 'voice-agent.python-wheelhouse.v1' || wheels.python !== '3.12.13' || !Array.isArray(wheels.wheels) || wheels.wheels.length < 10) fail('runtime_assembly_authority_invalid', 'wheelhouse authority is invalid');
   const inputs = [];
@@ -213,7 +265,7 @@ function validateAuthority(root) {
     || node.signed_checksum.signature_url !== 'https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt.sig' || node.signed_checksum.signature_size !== 119
     || node.signed_checksum.signature_sha256 !== '7bb1dfdce6e58b8659b3e7f3e148c8165ad715358fd4876be49aa656fc8b8224'
     || node.signed_checksum.signer_fingerprint !== '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356') fail('runtime_assembly_authority_invalid', 'Node signed checksum authority is invalid');
-  return { sources, wheels, tools, inputs };
+  return { sources, wheels, tools, inputs, npmPackages };
 }
 
 function inspectInput(filename, item) {
@@ -336,6 +388,69 @@ function inspectToolReport(filename, authority, root, phases = new Set(['builder
   });
 }
 
+function npmBoundaryAuthority(authority, root) {
+  const lockDigest = digest(fs.readFileSync(path.join(root, 'web', 'package-lock.json')));
+  return { facts: NPM_BOUNDARY_FACTS, provenance: `npm-lock:${lockDigest}+npm:11.19.0` };
+}
+
+function npmBoundaryAuthorityJson(authority, root) {
+  const boundary = npmBoundaryAuthority(authority, root);
+  return JSON.stringify({ facts: boundary.facts, provenance: boundary.provenance, schema: 'voice-agent.npm-boundary.v1' }) + '\n';
+}
+
+function npmAcquisitionAuthorityJson(authority, root) {
+  return JSON.stringify({ package_lock_sha256: digest(fs.readFileSync(path.join(root, 'web', 'package-lock.json'))), packages: authority.npmPackages,
+    registry: NPM_PUBLIC_REGISTRY, schema: 'voice-agent.npm-acquisition.v1' }) + '\n';
+}
+
+function inspectNpmBoundaryReport(filename, authority, root) {
+  const expected = npmBoundaryAuthority(authority, root); const observed = new Map(); const extra = [];
+  let text = '';
+  try {
+    const metadata = fs.lstatSync(filename);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > 16 * 1024) extra.push('malformed');
+    else text = fs.readFileSync(filename, 'utf8');
+  } catch {}
+  for (const line of text.split('\n').filter(Boolean)) {
+    const fields = line.split('\t'); const name = /^[a-z0-9-]+$/.test(fields[1] || '') ? fields[1] : 'malformed';
+    if (fields.length !== 4 || observed.has(fields[1]) || !expected.facts.includes(fields[1])) { extra.push(name); continue; }
+    observed.set(fields[1], { evidence: fields[2], provenance: fields[0], status: fields[3] });
+  }
+  const absent = []; const mismatch = [];
+  for (const name of expected.facts) {
+    const item = observed.get(name);
+    if (!item || item.status === 'absent') absent.push(name);
+    else if (item.status !== 'ok' || item.provenance !== expected.provenance || item.evidence !== NPM_BOUNDARY_EVIDENCE[name]) mismatch.push(name);
+  }
+  if (absent.length || mismatch.length || extra.length) {
+    const list = (values) => `[${[...new Set(values)].sort().join(',')}]`;
+    fail('runtime_npm_boundary_invalid', `private npm boundary preflight failed: absent=${list(absent)} mismatch=${list(mismatch)} extra=${list(extra)}`);
+  }
+  return expected.facts.map((name) => ({ evidence: observed.get(name).evidence, name }));
+}
+
+function fixtureNpmBoundaryReport(authority, root) {
+  const expected = npmBoundaryAuthority(authority, root);
+  return expected.facts.map((name) => `${expected.provenance}\t${name}\t${NPM_BOUNDARY_EVIDENCE[name]}\tok`).join('\n') + '\n';
+}
+
+function npmCacheIdentity(root) {
+  const hash = crypto.createHash('sha256'); const identities = new Set();
+  const walk = (directory, relative = '') => {
+    const metadata = fs.lstatSync(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail('npm_cache_custody_invalid', 'private npm cache custody is invalid');
+    for (const name of fs.readdirSync(directory).sort()) {
+      const filename = path.join(directory, name); const child = fs.lstatSync(filename); const childRelative = relative ? `${relative}/${name}` : name;
+      if (child.isSymbolicLink() || (!child.isDirectory() && !child.isFile()) || (child.isFile() && child.nlink !== 1)) fail('npm_cache_custody_invalid', 'private npm cache custody is invalid');
+      const identity = `${child.dev}:${child.ino}`;
+      if (identities.has(identity)) fail('npm_cache_custody_invalid', 'private npm cache contains an inode alias');
+      identities.add(identity); hash.update(`${child.isDirectory() ? 'd' : 'f'}\0${childRelative}\0${child.mode & 0o777}\0${child.size}\0`);
+      if (child.isDirectory()) walk(filename, childRelative); else hash.update(fs.readFileSync(filename));
+    }
+  };
+  walk(root); return hash.digest('hex');
+}
+
 function nodeCompatibilityAuthority(authority) {
   const runtime = authority.tools.node_runtime;
   const node = authority.inputs.find((item) => item.name === 'Node.js');
@@ -406,6 +521,7 @@ function copyTrackedSource(root, target, runner = run) {
   if (!names.includes('src/voice_agent_v2/faster_whisper_runner.py') || !names.includes('web/package-lock.json')) fail('runtime_source_incomplete', 'production source closure lacks STT runner or web lock');
   for (const relative of names) {
     if (relative.includes('node_modules') || relative.startsWith('web/dist/')) continue;
+    if (/(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.yml)?|pnpmfile\.cjs)$/.test(relative)) fail('runtime_source_custody_invalid', 'package-manager host configuration is not admitted to assembly source');
     const source = path.join(root, relative); const destination = path.join(target, relative); const metadata = fs.lstatSync(source);
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) fail('runtime_source_custody_invalid', 'tracked assembly source is not a regular file');
     const bytes = fs.readFileSync(source); const text = bytes.toString('latin1');
@@ -424,28 +540,51 @@ function inspectBuilder(image, fetch, runner = run, options = {}) {
 
 async function prepareToolClosure(values, context, state) {
   const { authority, authFile, build, cache, network, root, runner, shaRoot, source } = state;
-  const npmCache = path.join(cache, 'npm'); fs.mkdirSync(npmCache, { mode: 0o700 }); fs.chmodSync(npmCache, 0o700);
+  const npmCache = path.join(cache, 'npm'); fs.mkdirSync(npmCache, { recursive: true, mode: 0o700 }); fs.chmodSync(npmCache, 0o700);
   copyTrackedSource(root, source, runner); fs.mkdirSync(build, { mode: 0o700 });
   fs.writeFileSync(path.join(build, 'input-map.tsv'), authority.inputs.map((item) => `${item.sha256}\t${item.filename}`).sort().join('\n') + '\n', { mode: 0o600 });
   fs.writeFileSync(path.join(build, 'tool-authority.tsv'), toolAuthorityTsv(authority, root), { mode: 0o600 });
   fs.writeFileSync(path.join(build, 'node-compatibility-authority.tsv'), nodeCompatibilityAuthorityTsv(authority), { mode: 0o600 });
+  fs.writeFileSync(path.join(build, 'npm-boundary-authority.json'), npmBoundaryAuthorityJson(authority, root), { mode: 0o600 });
+  fs.writeFileSync(path.join(build, 'npm-acquisition-authority.json'), npmAcquisitionAuthorityJson(authority, root), { mode: 0o600 });
   const sourceEpoch = runner('git', ['show', '-s', '--format=%ct', 'HEAD'], { cwd: root }); const sourceCommit = runner('git', ['rev-parse', 'HEAD'], { cwd: root });
   const base = ['--remote=false', 'run', '--rm', '--userns=keep-id', '--env-host=false', '--http-proxy=false', '--cap-drop=all', '--security-opt=no-new-privileges', '--pids-limit=2048', '--memory=24g', '--cpus=12',
-    '--env', 'HOME=/work/home', '--env', 'XDG_CONFIG_HOME=/work/config', '--env', 'XDG_CACHE_HOME=/work/xdg', '--env', 'NPM_CONFIG_USERCONFIG=/dev/null', '--env', 'NPM_CONFIG_GLOBALCONFIG=/dev/null', '--env', 'GIT_CONFIG_NOSYSTEM=1', '--env', 'GIT_CONFIG_GLOBAL=/dev/null',
-    '--env', `SOURCE_DATE_EPOCH=${sourceEpoch}`, '--env', `VOICE_AGENT_BUILD_ID=${sourceCommit}`,
-    '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${npmCache}:/npm-cache:rw`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`, '--volume', `${path.join(root, 'release', 'tool-preflight.sh')}:/tool-preflight:ro`, '--volume', `${path.join(root, 'release', 'node-compatibility-preflight.sh')}:/node-compatibility-preflight:ro`];
+    '--env', 'HOME=/work/npm-home', '--env', 'XDG_CONFIG_HOME=/work/xdg-config', '--env', 'XDG_CACHE_HOME=/work/xdg-cache', '--env', 'TMPDIR=/work/npm-temp',
+    '--env', 'NPM_CONFIG_USERCONFIG=/work/npm-user/npmrc', '--env', 'NPM_CONFIG_GLOBALCONFIG=/work/npm-global/npmrc', '--env', 'NPM_CONFIG_CACHE=/npm-cache', '--env', 'NPM_CONFIG_PREFIX=/work/npm-prefix', '--env', `NPM_CONFIG_REGISTRY=${NPM_PUBLIC_REGISTRY}`,
+    '--env', 'GIT_CONFIG_NOSYSTEM=1', '--env', 'GIT_CONFIG_GLOBAL=/dev/null', '--env', `SOURCE_DATE_EPOCH=${sourceEpoch}`, '--env', `VOICE_AGENT_BUILD_ID=${sourceCommit}`,
+    '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`, '--volume', `${path.join(root, 'release', 'tool-preflight.sh')}:/tool-preflight:ro`,
+    '--volume', `${path.join(root, 'release', 'node-compatibility-preflight.sh')}:/node-compatibility-preflight:ro`, '--volume', `${path.join(root, 'release', 'npm-boundary-preflight.cjs')}:/npm-boundary-preflight.cjs:ro`];
   const sandbox = ['--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=4g', '--tmpfs', '/work:rw,nosuid,size=12g'];
-  const image = authority.sources.builder.image; const environment = network.environment;
-  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/usr/bin/bash', '/assembler', 'tool-preflight'], { env: environment, timeout: 600000, code: 'runtime_tool_preflight_failed', message: 'network-disabled builder tool preflight could not complete' });
-  const compatibilityReport = path.join(build, 'node-compatibility-report.tsv');
+  const image = authority.sources.builder.image; const environment = network.environment; const cacheReadOnly = ['--volume', `${npmCache}:/npm-cache:ro`]; const cacheWritable = ['--volume', `${npmCache}:/npm-cache:rw`];
+  runner('podman', [...base, ...cacheReadOnly, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/usr/bin/bash', '/assembler', 'tool-preflight'], { env: environment, timeout: 600000, code: 'runtime_tool_preflight_failed', message: 'network-disabled builder tool preflight could not complete' });
+  const compatibilityReport = path.join(build, 'node-compatibility-report.tsv'); const npmBoundaryReport = path.join(build, 'npm-boundary-report.tsv');
   let nodeRuntime = fs.existsSync(compatibilityReport) ? inspectNodeCompatibilityReport(compatibilityReport, authority) : null;
+  let npmBoundary = fs.existsSync(npmBoundaryReport) ? inspectNpmBoundaryReport(npmBoundaryReport, authority, root) : null;
   try { inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root, new Set(['builder', 'content'])); }
   catch (reason) { if (reason.code !== 'runtime_tool_closure_invalid') throw reason; inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root); }
   if (!nodeRuntime) nodeRuntime = inspectNodeCompatibilityReport(compatibilityReport, authority);
-  if (values.fetch === true) runner('podman', [...base, '--volume', `${build}:/build:ro`, '--network=pasta', ...sandbox, image, '/usr/bin/bash', '/assembler', 'web-acquire'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact npm lock bytes could not be acquired' });
-  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/usr/bin/bash', '/assembler', 'web-prepare'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'network-disabled exact npm tool installation could not complete' });
+  if (!npmBoundary) npmBoundary = inspectNpmBoundaryReport(npmBoundaryReport, authority, root);
+  const cacheStatusFile = path.join(build, 'npm-cache-status');
+  const checkCache = () => {
+    runner('podman', [...base, ...cacheReadOnly, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/usr/bin/bash', '/assembler', 'web-cache-check'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'network-disabled exact npm cache inspection could not complete' });
+    try {
+      const metadata = fs.lstatSync(cacheStatusFile); const status = fs.readFileSync(cacheStatusFile, 'utf8');
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || (status !== 'complete\n' && status !== 'missing\n')) throw new Error('invalid');
+      return status.trim();
+    } catch { fail('web_dependency_unavailable', 'exact npm cache status is invalid'); }
+  };
+  let cacheStatus = checkCache();
+  if (cacheStatus === 'missing') {
+    if (values.fetch !== true) fail('web_dependency_unavailable', 'exact npm cache is incomplete; rerun with --fetch');
+    runner('podman', [...base, ...cacheWritable, '--volume', `${build}:/build:ro`, '--network=pasta', ...sandbox, image, '/usr/bin/bash', '/assembler', 'web-acquire'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact npm lock bytes could not be acquired' });
+    cacheStatus = checkCache();
+    if (cacheStatus !== 'complete') fail('web_dependency_unavailable', 'exact npm cache remains incomplete after acquisition');
+  }
+  const cacheIdentity = npmCacheIdentity(npmCache);
+  runner('podman', [...base, ...cacheReadOnly, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/usr/bin/bash', '/assembler', 'web-prepare'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'network-disabled exact npm tool installation could not complete' });
+  if (npmCacheIdentity(npmCache) !== cacheIdentity) fail('npm_cache_identity_changed', 'network-disabled web preparation changed the exact npm cache');
   const tools = inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root);
-  return { base, nodeRuntime, sandbox, sourceCommit, tools };
+  return { base, cacheReadOnly, nodeRuntime, npmBoundary, sandbox, sourceCommit, tools };
 }
 
 async function runPreflight(values, context, assembleOutput) {
@@ -464,13 +603,13 @@ async function runPreflight(values, context, assembleOutput) {
     const temporary = fs.mkdtempSync(path.join(cache, '.preflight-')); const source = path.join(temporary, 'source'); const build = path.join(temporary, 'build');
     try {
       const prepared = await prepareToolClosure(values, context, { authority, authFile, build, cache, network, root, runner, shaRoot, source });
-      if (!assembleOutput) return { authority, builder_image: authority.sources.builder.image, node_runtime: prepared.nodeRuntime, tool_authority_sha256: digest(Buffer.from(toolAuthorityTsv(authority, root) + nodeCompatibilityAuthorityTsv(authority))), tools: prepared.tools };
+      if (!assembleOutput) return { authority, builder_image: authority.sources.builder.image, node_runtime: prepared.nodeRuntime, npm_boundary: prepared.npmBoundary, tool_authority_sha256: digest(Buffer.from(toolAuthorityTsv(authority, root) + nodeCompatibilityAuthorityTsv(authority) + npmBoundaryAuthorityJson(authority, root))), tools: prepared.tools };
       await inputPreparer(cache, authority, values.fetch === true);
       fs.mkdirSync(assembleOutput, { mode: 0o700 });
-      const outputBase = [...prepared.base, '--volume', `${build}:/build:ro`, '--volume', `${assembleOutput}:/output:rw`];
+      const outputBase = [...prepared.base, ...prepared.cacheReadOnly, '--volume', `${build}:/build:ro`, '--volume', `${assembleOutput}:/output:rw`];
       runner('podman', [...outputBase, '--network=none', ...prepared.sandbox, authority.sources.builder.image, '/usr/bin/bash', '/assembler', 'assemble'], { env: network.environment, timeout: 7200000 });
       if (!fs.existsSync(path.join(assembleOutput, 'runtime')) || !fs.existsSync(path.join(assembleOutput, 'web', 'index.html'))) fail('runtime_assembly_incomplete', 'builder did not emit runtime and static web closure');
-      return { authority, node_runtime: prepared.nodeRuntime, output: assembleOutput, shaRoot, tool_authority_sha256: digest(Buffer.from(toolAuthorityTsv(authority, root) + nodeCompatibilityAuthorityTsv(authority))), tools: prepared.tools };
+      return { authority, node_runtime: prepared.nodeRuntime, npm_boundary: prepared.npmBoundary, output: assembleOutput, shaRoot, tool_authority_sha256: digest(Buffer.from(toolAuthorityTsv(authority, root) + nodeCompatibilityAuthorityTsv(authority) + npmBoundaryAuthorityJson(authority, root))), tools: prepared.tools };
     } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
   } finally { fs.rmSync(policy, { recursive: true, force: true }); }
 }
@@ -488,4 +627,4 @@ async function assemble(values, context) {
   return runPreflight(values, context, output);
 }
 
-module.exports = { AssemblyError, assemble, copyTrackedSource, digest, fetchInput, fixtureNodeCompatibilityReport, fixtureToolReport, inspectAcquisitionNetwork, inspectBuilder, inspectInput, inspectNodeCompatibilityReport, inspectToolReport, isolatedPodmanEnvironment, nodeCompatibilityAuthorityTsv, preflight, prepareInputs, toolAuthorityTsv, validateAssembleOptions, validateAuthority, validateInputLocator, validatePreflightOptions };
+module.exports = { AssemblyError, assemble, copyTrackedSource, digest, fetchInput, fixtureNodeCompatibilityReport, fixtureNpmBoundaryReport, fixtureToolReport, inspectAcquisitionNetwork, inspectBuilder, inspectInput, inspectNodeCompatibilityReport, inspectNpmBoundaryReport, inspectToolReport, isolatedPodmanEnvironment, nodeCompatibilityAuthorityTsv, npmAcquisitionAuthorityJson, npmBoundaryAuthorityJson, npmCacheIdentity, preflight, prepareInputs, toolAuthorityTsv, validateAssembleOptions, validateAuthority, validateInputLocator, validateNpmLock, validatePreflightOptions };
