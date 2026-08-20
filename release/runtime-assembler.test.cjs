@@ -24,6 +24,23 @@ const LLAMA_URL = `https://codeload.github.com/ggml-org/llama.cpp/tar.gz/${LLAMA
 function llamaItem(bytes, overrides = {}) {
   return { commit: LLAMA_COMMIT, filename: `${LLAMA_COMMIT}.tar.gz`, name: 'llama.cpp source', purpose: 'application-runtime-build', sha256: assembler.digest(bytes), size: bytes.length, url: LLAMA_URL, ...overrides };
 }
+function podmanInformation(overrides = {}) {
+  return JSON.stringify({
+    host: { networkBackend: 'netavark', networkBackendInfo: { backend: 'netavark' }, security: { rootless: true }, ...(overrides.host || {}) },
+    version: { Version: '6.0.2', ...(overrides.version || {}) },
+  });
+}
+function networkRunner(information = podmanInformation(), helper = 'pasta 2025_08_11') {
+  const calls = [];
+  const runner = (command, args, options = {}) => {
+    calls.push({ args, command, env: options.env });
+    if (command === 'podman') return information;
+    if (command === 'pasta' && helper instanceof Error) throw helper;
+    if (command === 'pasta') return helper;
+    throw new Error(`unexpected fixture command: ${command}`);
+  };
+  return { calls, runner };
+}
 function fakeHttps(responses) {
   const requests = []; let position = 0;
   return {
@@ -105,11 +122,40 @@ test('codeload refuses redirects and a downloaded digest mismatch leaves no cach
   assert.equal(fs.existsSync(target), false); assert.equal(fs.existsSync(`${target}.partial`), false);
 });
 
-test('production assembler skips RUNPATH mutation for static ELF and de-duplicates llama/CUDA providers', () => {
+test('rootless Podman 6 netavark and pasta facts are exact and strip ambient host authority', () => {
+  const fixture = networkRunner();
+  const result = assembler.inspectAcquisitionNetwork(fixture.runner, {
+    HOME: '/fixture/home', PATH: '/fixture/bin', USER: 'fixture', XDG_RUNTIME_DIR: '/run/user/1234',
+    HTTPS_PROXY: 'http://proxy.invalid', GITHUB_TOKEN: 'credential', CONTAINER_HOST: 'ssh://remote.invalid', REGISTRY_AUTH_FILE: '/ambient/auth.json',
+  });
+  assert.equal(result.mode, 'pasta'); assert.equal(result.podmanVersion, '6.0.2');
+  assert.deepEqual(fixture.calls.map(({ command, args }) => [command, args]), [
+    ['podman', ['--remote=false', 'info', '--format=json']], ['pasta', ['--version']],
+  ]);
+  for (const call of fixture.calls) {
+    assert.equal(call.env.HOME, '/fixture/home'); assert.equal(call.env.PATH, '/fixture/bin');
+    for (const denied of ['HTTPS_PROXY', 'GITHUB_TOKEN', 'CONTAINER_HOST', 'REGISTRY_AUTH_FILE']) assert.equal(Object.hasOwn(call.env, denied), false);
+  }
+});
+
+test('acquisition network fails closed for a missing helper, rootful engine, wrong backend, unsupported engine, and arbitrary override', () => {
+  const cases = [
+    networkRunner(podmanInformation(), new Error('missing')),
+    networkRunner(podmanInformation({ host: { security: { rootless: false } } })),
+    networkRunner(podmanInformation({ host: { networkBackend: 'cni', networkBackendInfo: { backend: 'cni' } } })),
+    networkRunner(podmanInformation({ version: { Version: '5.6.2' } })),
+  ];
+  for (const fixture of cases) assert.throws(() => assembler.inspectAcquisitionNetwork(fixture.runner, {}), (reason) => reason.code === 'runtime_acquisition_network_unsupported' && /rootless Podman 6.*netavark.*pasta/.test(reason.message));
+  assert.throws(() => assembler.validateAssembleOptions({ cache: '/cache', output: '/output', network: 'host' }), (reason) => reason.code === 'runtime_acquisition_network_override_refused');
+});
+
+test('production assembler skips RUNPATH mutation for static ELF, de-duplicates providers, and clears image credentials', () => {
   const shell = fs.readFileSync(path.join(ROOT, 'release', 'assemble-runtime.sh'), 'utf8');
   assert.match(shell, /readelf -dW "\$file"[^\n]+grep -q 'Dynamic section'/);
   assert.match(shell, /'\/runtime\/llama\/lib\/' in selected\.as_posix\(\): shutil\.move\(selected,target\)/);
   assert.doesNotMatch(shell, /cp .*\/output\/runtime\/llama\/lib\/.*\/output\/runtime\/lib/);
+  assert.match(shell, /unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY/);
+  assert.match(shell, /unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN/);
 });
 
 test('input cache accepts only exact single-link bytes and refuses missing, tampered, or ambient entries', async (context) => {
@@ -126,33 +172,62 @@ test('input cache accepts only exact single-link bytes and refuses missing, tamp
   await assert.rejects(() => assembler.prepareInputs(cache, authority, false), (reason) => reason.code === 'runtime_input_hash_mismatch');
 });
 
-test('fixture assembly drives one network-disabled OCI build without host Python, Node, or real network', async (context) => {
-  const root = temporary(context); const cache = path.join(root, 'cache'); const output = path.join(root, 'output'); const calls = [];
+test('fixture assembly uses exact pasta only for web acquisition and network none for every build phase', async (context) => {
+  const root = temporary(context); const cache = path.join(root, 'cache'); const output = path.join(root, 'output'); const calls = []; const podmanCommands = [];
   const runCommand = (command, args, options = {}) => {
     if (command === 'podman') {
-      calls.push(args);
-      assert.equal(args.includes('--network=none'), true);
-      fs.mkdirSync(path.join(output, 'runtime'), { recursive: true, mode: 0o700 });
-      fs.mkdirSync(path.join(output, 'web'), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(path.join(output, 'runtime', 'fixture'), 'runtime');
-      fs.writeFileSync(path.join(output, 'web', 'index.html'), '<!doctype html>');
+      podmanCommands.push({ args, env: options.env });
+      if (args[1] === 'pull') {
+        const authIndex = args.indexOf('--authfile'); const authFile = args[authIndex + 1];
+        assert.equal(authIndex > 1, true); assert.equal(fs.readFileSync(authFile, 'utf8'), '{}\n'); assert.equal(fs.lstatSync(authFile).mode & 0o777, 0o600);
+        return '';
+      }
+      if (args[1] === 'image') return 'sha256:8d75fca3fc684919d806956e1fd2e197ee71a578af8106a61b4db24248fbe9be';
+      calls.push({ args, env: options.env });
+      if (args.at(-1) === 'assemble') {
+        fs.mkdirSync(path.join(output, 'runtime'), { recursive: true, mode: 0o700 });
+        fs.mkdirSync(path.join(output, 'web'), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(output, 'runtime', 'fixture'), 'runtime');
+        fs.writeFileSync(path.join(output, 'web', 'index.html'), '<!doctype html>');
+      }
       return '';
     }
     const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8', timeout: options.timeout || 30000 });
     if (result.status !== 0) throw new Error(`fixture command failed: ${command}`);
     return result.stdout.trim();
   };
-  const result = await assembler.assemble({ cache, output, fetch: false }, {
-    root: ROOT, runCommand,
+  const result = await assembler.assemble({ cache, output, fetch: true }, {
+    root: ROOT, runCommand, environment: { HOME: '/fixture/home', PATH: '/fixture/bin', HTTPS_PROXY: 'http://ambient.invalid', GITHUB_TOKEN: 'credential' },
+    inspectAcquisitionNetwork: (_runner, environment) => ({ environment: assembler.isolatedPodmanEnvironment(environment), mode: 'pasta', podmanVersion: '6.0.2' }),
     prepareInputs: async (_cache, authority) => {
       const llama = authority.inputs.find((item) => item.name === 'llama.cpp source');
       assert.equal(llama.url, LLAMA_URL); assert.equal(llama.commit, LLAMA_COMMIT);
       assert.equal(llama.size, 36775744); assert.equal(llama.sha256, '0ce0978a3310651d615159689200dd751a22fb2484ab3eb4eccc25671f6db118');
       const value = path.join(cache, 'sha256'); fs.mkdirSync(value, { recursive: true, mode: 0o700 }); return value;
     },
-    inspectBuilder() {},
   });
-  assert.equal(result.output, output); assert.equal(calls.length, 1);
-  assert.equal(calls[0].includes('--read-only'), true); assert.equal(calls[0].includes('--cap-drop=all'), true);
+  assert.equal(result.output, output); assert.equal(calls.length, 2); assert.equal(podmanCommands.length, 4);
+  const [acquire, build] = calls;
+  assert.equal(acquire.args.includes('--network=pasta'), true); assert.equal(acquire.args.includes('--network=none'), false); assert.equal(acquire.args.at(-1), 'web-acquire');
+  assert.equal(build.args.includes('--network=none'), true); assert.equal(build.args.includes('--network=pasta'), false); assert.equal(build.args.at(-1), 'assemble');
+  for (const call of calls) {
+    assert.deepEqual(call.args.slice(0, 3), ['--remote=false', 'run', '--rm']);
+    for (const flag of ['--read-only', '--env-host=false', '--http-proxy=false', '--cap-drop=all']) assert.equal(call.args.includes(flag), true);
+    for (const value of ['HOME=/work/home', 'XDG_CONFIG_HOME=/work/config', 'NPM_CONFIG_USERCONFIG=/dev/null', 'GIT_CONFIG_GLOBAL=/dev/null']) assert.equal(call.args.includes(value), true);
+    assert.equal(Object.hasOwn(call.env, 'HTTPS_PROXY'), false); assert.equal(Object.hasOwn(call.env, 'GITHUB_TOKEN'), false);
+    assert.equal(call.args.some((value) => /(?:docker|podman)\.sock/.test(value)), false);
+  }
+  const implementation = fs.readFileSync(path.join(ROOT, 'release', 'runtime-assembler.cjs'), 'utf8');
+  assert.doesNotMatch(implementation, /slirp4netns|--network=host/);
   assert.equal(fs.existsSync(path.join(output, 'web', 'index.html')), true);
+});
+
+test('unsupported rootless facts stop before input fetch or runtime output', async (context) => {
+  const root = temporary(context); const cache = path.join(root, 'cache'); const output = path.join(root, 'output'); let prepared = false;
+  await assert.rejects(() => assembler.assemble({ cache, output, fetch: true }, {
+    root: ROOT,
+    runCommand: networkRunner(podmanInformation({ host: { security: { rootless: false } } })).runner,
+    prepareInputs: async () => { prepared = true; throw new Error('must not prepare'); },
+  }), (reason) => reason.code === 'runtime_acquisition_network_unsupported');
+  assert.equal(prepared, false); assert.equal(fs.existsSync(output), false); assert.equal(fs.existsSync(cache), false);
 });
