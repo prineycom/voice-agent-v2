@@ -25,6 +25,7 @@ HERMETIC_OWNERS = (
     "tests.test_slice6_startup",
     "tests.test_operations",
     "tests.test_stand_doctor",
+    "tests.test_stand_dev",
     "tests.test_agent_config",
     "tests.test_agent_profile_runtime",
     "tests.test_agent_environment",

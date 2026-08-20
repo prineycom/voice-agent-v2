@@ -45,6 +45,21 @@ The direct pull-request path is intentionally simple: run `./verify` locally onc
 
 It never installs packages, starts services, writes files, or changes user/system configuration. A Docker package alone is not sufficient: the report requires the current user's linger-enabled user-systemd rootless Docker daemon and the registered NVIDIA runtime.
 
+### Local dev release stand
+
+Initialize the operator-owned state once, then deploy an exact clean local commit. `init` creates only external mutable state under `~/.local/share/voice-agent-v2`, private `main`/`dev` mode-`0600` data-only configuration files, and the user-systemd template; it never puts stand state in this controller clone. The generated ports are explicit loopback values and must be edited deliberately, never auto-allocated.
+
+```sh
+./stand init
+./stand deploy dev --local /path/to/voice-agent-v2 <40-lowercase-committed-sha>
+./stand status dev
+./stand logs dev
+```
+
+The local source must be clean and the SHA must name exactly a committed revision. Deployment builds an archive-only immutable external release and atomically selects it only after construction. It then starts `voice-agent-v2@dev.service`; a setup/readiness failure leaves the selected SHA visible as `not-ready` for diagnosis rather than claiming it started. `stand logs dev` reads only that unit's user journald records. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell.
+
+The first path intentionally accepts only `dev --local`; remote refs, main/version selection, and later lifecycle behavior remain separately scoped.
+
 The narrow immutable-release check remains available without the test runtime:
 
 ```sh
