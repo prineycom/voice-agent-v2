@@ -649,7 +649,6 @@ def stop(
     unit = unit_for(instance)
     _checked(command, ("systemctl", "--user", "disable", unit), failure="stand boot persistence could not be disabled")
     _checked(command, ("systemctl", "--user", "stop", unit), failure="user-systemd could not stop the selected stand")
-    _checked(command, ("systemctl", "--user", "reset-failed", unit), failure="stand failed state could not be reset")
     try:
         container = AgentEnvironment.stop_registered(
             state_root=instance_root(state_root, instance) / "agent-environment" / "private",
