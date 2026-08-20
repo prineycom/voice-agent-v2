@@ -13,6 +13,8 @@ const BUILDER = /^docker\.io\/nvidia\/cuda@sha256:([0-9a-f]{64})$/;
 const CODELOAD_HOST = 'codeload.github.com';
 const LLAMA_REPOSITORY = 'ggml-org/llama.cpp';
 const REDIRECT_HOSTS = new Set(['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'github-production-release-asset-2e65be.s3.amazonaws.com']);
+const PODMAN_MAJOR = 6;
+const PODMAN_ENVIRONMENT_KEYS = new Set(['DBUS_SESSION_BUS_ADDRESS', 'HOME', 'LANG', 'LC_ALL', 'LOGNAME', 'PATH', 'TMPDIR', 'USER', 'XDG_RUNTIME_DIR']);
 
 class AssemblyError extends Error { constructor(code, message) { super(message); this.code = code; } }
 function fail(code, message) { throw new AssemblyError(code, message); }
@@ -24,6 +26,37 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: options.cwd, env: options.env || process.env, encoding: 'utf8', timeout: options.timeout || 120000, input: options.input });
   if (result.status !== 0) fail(options.code || 'runtime_assembly_failed', options.message || 'bounded runtime assembly command failed');
   return result.stdout.trim();
+}
+
+function isolatedPodmanEnvironment(environment = process.env) {
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => PODMAN_ENVIRONMENT_KEYS.has(name) || name.startsWith('LC_')));
+}
+
+function inspectAcquisitionNetwork(runner = run, environment = process.env) {
+  const code = 'runtime_acquisition_network_unsupported';
+  const message = 'runtime acquisition requires local rootless Podman 6 with netavark and a working pasta helper';
+  const env = isolatedPodmanEnvironment(environment);
+  let raw;
+  try { raw = runner('podman', ['--remote=false', 'info', '--format=json'], { env, code, message }); }
+  catch { fail(code, message); }
+  let information;
+  try { information = JSON.parse(raw); } catch { fail(code, message); }
+  const host = information && information.host; const version = information && information.version && information.version.Version;
+  const backend = host && host.networkBackendInfo;
+  if (!host || host.security?.rootless !== true || host.networkBackend !== 'netavark'
+    || !backend || backend.backend !== 'netavark' || typeof version !== 'string'
+    || Number.parseInt(version.split('.')[0], 10) !== PODMAN_MAJOR) fail(code, message);
+  let helper;
+  try { helper = runner('pasta', ['--version'], { env, code, message }); }
+  catch { fail(code, message); }
+  if (!/^pasta\s+\S+/m.test(helper)) fail(code, message);
+  return { environment: env, mode: 'pasta', podmanVersion: version };
+}
+
+function validateAssembleOptions(values) {
+  const allowed = new Set(['cache', 'compareWith', 'fetch', 'output']);
+  if (!values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).some((name) => !allowed.has(name))
+    || (Object.hasOwn(values, 'fetch') && typeof values.fetch !== 'boolean')) fail('runtime_acquisition_network_override_refused', 'runtime acquisition network is fixed to rootless pasta and cannot be overridden');
 }
 
 function parseHttpsUrl(value, code = 'runtime_assembly_authority_invalid') {
@@ -137,33 +170,45 @@ function copyTrackedSource(root, target, runner = run) {
   }
 }
 
-function inspectBuilder(image, fetch, runner = run) {
-  if (fetch) runner('podman', ['pull', '--quiet', image], { timeout: 1800000, code: 'runtime_builder_unavailable', message: 'exact builder OCI image could not be acquired' });
-  const observed = runner('podman', ['image', 'inspect', '--format', '{{.Digest}}', image], { code: 'runtime_builder_unavailable', message: 'exact builder OCI image is absent; rerun with --fetch' });
+function inspectBuilder(image, fetch, runner = run, options = {}) {
+  const prefix = ['--remote=false']; const env = options.environment || isolatedPodmanEnvironment();
+  if (fetch) runner('podman', [...prefix, 'pull', '--quiet', '--authfile', options.authFile, image], { env, timeout: 1800000, code: 'runtime_builder_unavailable', message: 'exact builder OCI image could not be acquired' });
+  const observed = runner('podman', [...prefix, 'image', 'inspect', '--format', '{{.Digest}}', image], { env, code: 'runtime_builder_unavailable', message: 'exact builder OCI image is absent; rerun with --fetch' });
   const expected = `sha256:${BUILDER.exec(image)[1]}`;
   if (observed !== expected) fail('runtime_builder_identity_mismatch', 'local builder image differs from pinned manifest digest');
 }
 
 async function assemble(values, context) {
+  validateAssembleOptions(values);
   const root = context.root; const authority = validateAuthority(root); const cache = path.resolve(values.cache); const output = path.resolve(values.output);
   const runner = context.runCommand || run; const inputPreparer = context.prepareInputs || prepareInputs; const builderInspector = context.inspectBuilder || inspectBuilder;
+  const networkInspector = context.inspectAcquisitionNetwork || inspectAcquisitionNetwork;
   if (output === root || output.startsWith(`${root}${path.sep}`)) fail('runtime_output_invalid', 'runtime assembly output must be outside the source checkout');
   if (fs.existsSync(output)) fail('runtime_output_exists', 'runtime assembly output already exists');
-  const shaRoot = await inputPreparer(cache, authority, values.fetch === true);
-  builderInspector(authority.sources.builder.image, values.fetch === true, runner);
-  const temporary = fs.mkdtempSync(path.join(cache, '.assembly-')); const source = path.join(temporary, 'source'); const build = path.join(temporary, 'build');
+  const network = networkInspector(runner, context.environment || process.env);
+  fs.mkdirSync(cache, { recursive: true, mode: 0o700 }); fs.chmodSync(cache, 0o700);
+  const policy = fs.mkdtempSync(path.join(cache, '.podman-policy-')); const authFile = path.join(policy, 'auth.json');
+  fs.writeFileSync(authFile, '{}\n', { mode: 0o600 });
   try {
-    copyTrackedSource(root, source, runner); fs.mkdirSync(build, { mode: 0o700 }); fs.mkdirSync(output, { mode: 0o700 });
-    const npmCache = path.join(cache, 'npm'); fs.mkdirSync(npmCache, { mode: 0o700 });
-    fs.writeFileSync(path.join(build, 'input-map.tsv'), authority.inputs.map((item) => `${item.sha256}\t${item.filename}`).sort().join('\n') + '\n', { mode: 0o600 });
-    const sourceEpoch = runner('git', ['show', '-s', '--format=%ct', 'HEAD'], { cwd: root }); const sourceCommit = runner('git', ['rev-parse', 'HEAD'], { cwd: root });
-    const base = ['run', '--rm', '--userns=keep-id', '--cap-drop=all', '--security-opt=no-new-privileges', '--pids-limit=2048', '--memory=24g', '--cpus=12', '--env', `SOURCE_DATE_EPOCH=${sourceEpoch}`, '--env', `VOICE_AGENT_BUILD_ID=${sourceCommit}`,
-      '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${build}:/build:rw`, '--volume', `${npmCache}:/npm-cache:rw`, '--volume', `${output}:/output:rw`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`];
-    if (values.fetch === true) runner('podman', [...base, '--network=slirp4netns', authority.sources.builder.image, '/bin/bash', '/assembler', 'web-acquire'], { timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact Node/npm web inputs could not be acquired' });
-    runner('podman', [...base, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=4g', '--tmpfs', '/work:rw,nosuid,size=12g', authority.sources.builder.image, '/bin/bash', '/assembler', 'assemble'], { timeout: 7200000 });
-    if (!fs.existsSync(path.join(output, 'runtime')) || !fs.existsSync(path.join(output, 'web', 'index.html'))) fail('runtime_assembly_incomplete', 'builder did not emit runtime and static web closure');
-    return { authority, output, shaRoot };
-  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+    const shaRoot = await inputPreparer(cache, authority, values.fetch === true);
+    builderInspector(authority.sources.builder.image, values.fetch === true, runner, { authFile, environment: network.environment });
+    const temporary = fs.mkdtempSync(path.join(cache, '.assembly-')); const source = path.join(temporary, 'source'); const build = path.join(temporary, 'build');
+    try {
+      copyTrackedSource(root, source, runner); fs.mkdirSync(build, { mode: 0o700 }); fs.mkdirSync(output, { mode: 0o700 });
+      const npmCache = path.join(cache, 'npm'); fs.mkdirSync(npmCache, { mode: 0o700 });
+      fs.writeFileSync(path.join(build, 'input-map.tsv'), authority.inputs.map((item) => `${item.sha256}\t${item.filename}`).sort().join('\n') + '\n', { mode: 0o600 });
+      const sourceEpoch = runner('git', ['show', '-s', '--format=%ct', 'HEAD'], { cwd: root }); const sourceCommit = runner('git', ['rev-parse', 'HEAD'], { cwd: root });
+      const base = ['--remote=false', 'run', '--rm', '--userns=keep-id', '--env-host=false', '--http-proxy=false', '--cap-drop=all', '--security-opt=no-new-privileges', '--pids-limit=2048', '--memory=24g', '--cpus=12',
+        '--env', 'HOME=/work/home', '--env', 'XDG_CONFIG_HOME=/work/config', '--env', 'XDG_CACHE_HOME=/work/xdg', '--env', 'NPM_CONFIG_USERCONFIG=/dev/null', '--env', 'NPM_CONFIG_GLOBALCONFIG=/dev/null', '--env', 'GIT_CONFIG_NOSYSTEM=1', '--env', 'GIT_CONFIG_GLOBAL=/dev/null',
+        '--env', `SOURCE_DATE_EPOCH=${sourceEpoch}`, '--env', `VOICE_AGENT_BUILD_ID=${sourceCommit}`,
+        '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${build}:/build:rw`, '--volume', `${npmCache}:/npm-cache:rw`, '--volume', `${output}:/output:rw`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`];
+      const sandbox = ['--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=4g', '--tmpfs', '/work:rw,nosuid,size=12g'];
+      if (values.fetch === true) runner('podman', [...base, '--network=pasta', ...sandbox, authority.sources.builder.image, '/bin/bash', '/assembler', 'web-acquire'], { env: network.environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact Node/npm web inputs could not be acquired' });
+      runner('podman', [...base, '--network=none', ...sandbox, authority.sources.builder.image, '/bin/bash', '/assembler', 'assemble'], { env: network.environment, timeout: 7200000 });
+      if (!fs.existsSync(path.join(output, 'runtime')) || !fs.existsSync(path.join(output, 'web', 'index.html'))) fail('runtime_assembly_incomplete', 'builder did not emit runtime and static web closure');
+      return { authority, output, shaRoot };
+    } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+  } finally { fs.rmSync(policy, { recursive: true, force: true }); }
 }
 
-module.exports = { AssemblyError, assemble, copyTrackedSource, digest, fetchInput, inspectBuilder, inspectInput, prepareInputs, validateAuthority, validateInputLocator };
+module.exports = { AssemblyError, assemble, copyTrackedSource, digest, fetchInput, inspectAcquisitionNetwork, inspectBuilder, inspectInput, isolatedPodmanEnvironment, prepareInputs, validateAssembleOptions, validateAuthority, validateInputLocator };

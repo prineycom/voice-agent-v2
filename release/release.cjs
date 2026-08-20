@@ -655,7 +655,7 @@ async function main(argv = process.argv.slice(2)) {
     else fail('usage', 'expected assemble-runtime, runtime-receipt, candidate, verify, publish-assets, finalize-channel, sign-channel, or publish');
     process.stdout.write(`${canonical({ state: parsed.values.dryRun ? 'dry_run' : 'ok', ...result })}\n`); return 0;
   } catch (reason) {
-    const code = reason instanceof ReleaseError ? reason.code : 'release_failed';
+    const code = reason instanceof ReleaseError || reason instanceof runtimeAssembler.AssemblyError ? reason.code : 'release_failed';
     process.stderr.write(`${code}: command failed safely\n`); return 2;
   }
 }

@@ -22,7 +22,7 @@ Run the real build only as an explicitly authorized maintainer action, outside c
   --compare-with <new-output-directory>
 ```
 
-`--fetch` may acquire only the accepted immutable inputs and exact npm lock into that cache. The real assembly runs in the pinned OCI with network disabled and emits `runtime/`, `web/`, `runtime-receipt.json` and `assembly-receipt.json`. The second invocation proves receipt equality; retain physical byte comparison, size/file-count and recursive ELF review as separate evidence. For an independently normalized runtime, `runtime-receipt` remains available:
+`--fetch` first requires local rootless Podman 6 with netavark and an installed working `pasta`; there is no network selector, slirp or host-network fallback. It may acquire only the accepted immutable inputs, pinned builder and exact npm lock into that cache. The web acquisition container alone uses `--network=pasta` with an empty private home/config, empty registry auth and no ambient proxy/credential/socket authority. Compilation, offline wheel installation, llama/CUDA build, normalization and candidate bytes remain `--network=none`. The assembly emits `runtime/`, `web/`, `runtime-receipt.json` and `assembly-receipt.json`. The second invocation proves receipt equality; retain physical byte comparison, size/file-count and recursive ELF review as separate evidence. For an independently normalized runtime, `runtime-receipt` remains available:
 
 ```sh
 ./release-candidate runtime-receipt --runtime-root <normalized-runtime> --source-commit "$(git rev-parse HEAD)" --output <runtime-receipt.json>
