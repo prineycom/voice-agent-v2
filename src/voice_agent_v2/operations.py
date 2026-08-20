@@ -257,6 +257,11 @@ EXPECTED_CACHE_ROOTS = {
         "path": "{home}/.cache/voice-agent-v2/slice-2/raw",
         "maximum_bytes": 1_073_741_824,
     },
+    "local-lfm-cuda-runtime": {
+        "name": "local-lfm-cuda-runtime",
+        "path": "{home}/.cache/voice-agent-v2/slice-2/runtime/vllm-venv/lib/python3.14/site-packages/nvidia/cu13",
+        "maximum_bytes": 2_147_483_648,
+    },
     "local-lfm-runtime": {
         "name": "local-lfm-runtime",
         "path": "{home}/.cache/voice-agent-v2/llama-cpp-gguf-q4",

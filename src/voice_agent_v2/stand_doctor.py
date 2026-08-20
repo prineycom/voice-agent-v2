@@ -66,6 +66,13 @@ class FileFact:
     writable: bool = False
 
 
+@dataclass(frozen=True)
+class ImmutableTreeFact:
+    immutable: bool
+    detail: str
+    remedy: str | None = None
+
+
 class Probe(Protocol):
     """The diagnosis has only these inspection capabilities."""
 
@@ -77,11 +84,16 @@ class Probe(Protocol):
     def home(self) -> Path: ...
     def file(self, path: Path, *, resolve_symlink: bool = False) -> FileFact: ...
     def glob(self, pattern: str) -> Sequence[Path]: ...
-    def immutable_tree(self, path: Path) -> bool: ...
+    def immutable_tree(
+        self, path: Path, *, declared_roots: Mapping[str, Path],
+    ) -> ImmutableTreeFact: ...
 
 
 class SystemProbe:
     """Real probe: subprocess calls and filesystem reads only, never mutation."""
+
+    def __init__(self) -> None:
+        self._package_owner_cache: dict[Path, bool] = {}
 
     def command(self, arguments: Sequence[str]) -> CommandResult:
         try:
@@ -154,25 +166,185 @@ class SystemProbe:
     def glob(self, pattern: str) -> Sequence[Path]:
         return tuple(sorted(Path(value) for value in __import__("glob").glob(pattern)))
 
-    def immutable_tree(self, path: Path) -> bool:
-        """Read every cache entry's metadata without following a cache symlink."""
-        try:
-            root = path.lstat()
-        except OSError:
+    @staticmethod
+    def _identity(metadata: os.stat_result) -> tuple[int, int, int]:
+        return metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode)
+
+    @staticmethod
+    def _root_owned_path_custody(path: Path, metadata: os.stat_result) -> bool:
+        """Require a root-owned path with no group/other write authority."""
+        if metadata.st_uid != 0 or metadata.st_gid != 0 or metadata.st_mode & 0o022:
             return False
-        if not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode) or root.st_mode & 0o222:
-            return False
+        current = Path(path.anchor)
         try:
-            for directory, directories, files in os.walk(path, followlinks=False):
-                current = Path(directory)
-                for name in (*directories, *files):
-                    entry = current / name
-                    metadata = entry.lstat()
-                    if stat.S_ISLNK(metadata.st_mode) or metadata.st_mode & 0o222:
-                        return False
+            root = current.lstat()
+            if (
+                stat.S_ISLNK(root.st_mode)
+                or root.st_uid != 0
+                or root.st_gid != 0
+                or root.st_mode & 0o022
+            ):
+                return False
+            for part in path.parts[1:-1]:
+                current /= part
+                ancestor = current.lstat()
+                if (
+                    stat.S_ISLNK(ancestor.st_mode)
+                    or ancestor.st_uid != 0
+                    or ancestor.st_gid != 0
+                    or ancestor.st_mode & 0o022
+                ):
+                    return False
         except OSError:
             return False
         return True
+
+    def _root_owned_package_target(self, path: Path, metadata: os.stat_result) -> bool:
+        if not self._root_owned_path_custody(path, metadata):
+            return False
+        if path not in self._package_owner_cache:
+            result = self.command(("pacman", "-Qo", str(path)))
+            self._package_owner_cache[path] = (
+                result.returncode == 0 and f"{path} is owned by " in result.stdout
+            )
+        return self._package_owner_cache[path]
+
+    @staticmethod
+    def _declared_resolved_roots(
+        declared_roots: Mapping[str, Path],
+    ) -> dict[str, tuple[Path, Path]]:
+        safe: dict[str, tuple[Path, Path]] = {}
+        for name, declared in declared_roots.items():
+            try:
+                metadata = declared.lstat()
+                resolved = declared.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if (
+                stat.S_ISDIR(metadata.st_mode)
+                and not stat.S_ISLNK(metadata.st_mode)
+                and resolved == declared.absolute()
+            ):
+                safe[name] = declared, resolved
+        return safe
+
+    @staticmethod
+    def _symlink_target(entry: Path, link: os.stat_result) -> tuple[Path, os.stat_result] | None:
+        """Resolve one stable link without trusting a replaced link or final target."""
+        try:
+            resolved = entry.resolve(strict=True)
+            flags = (
+                getattr(os, "O_PATH", os.O_RDONLY)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(resolved, flags)
+            try:
+                opened = os.fstat(descriptor)
+                observed = resolved.lstat()
+            finally:
+                os.close(descriptor)
+            link_after = entry.lstat()
+            resolved_after = entry.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if (
+            SystemProbe._identity(link) != SystemProbe._identity(link_after)
+            or resolved_after != resolved
+            or SystemProbe._identity(opened) != SystemProbe._identity(observed)
+        ):
+            return None
+        return resolved, opened
+
+    def immutable_tree(
+        self, path: Path, *, declared_roots: Mapping[str, Path],
+    ) -> ImmutableTreeFact:
+        """Validate read-only bytes plus contained, declared, or packaged link custody."""
+        remedy = f"chmod -R a-w {shlex.quote(str(path))}"
+        try:
+            root = path.lstat()
+            resolved_root = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return ImmutableTreeFact(False, "cache root is missing or unsafe", remedy)
+        if (
+            not stat.S_ISDIR(root.st_mode)
+            or stat.S_ISLNK(root.st_mode)
+            or resolved_root != path.absolute()
+        ):
+            return ImmutableTreeFact(False, "cache root is not a safe directory", remedy)
+        if root.st_mode & 0o222:
+            return ImmutableTreeFact(False, "cache root is writable", remedy)
+
+        safe_roots = self._declared_resolved_roots(declared_roots)
+        try:
+            for directory, directories, files in os.walk(path, followlinks=False):
+                current = Path(directory)
+                current_metadata = current.lstat()
+                current_resolved = current.resolve(strict=True)
+                if (
+                    stat.S_ISLNK(current_metadata.st_mode)
+                    or not current_resolved.is_relative_to(resolved_root)
+                ):
+                    return ImmutableTreeFact(
+                        False, f"cache traversal became unsafe at {current}", remedy,
+                    )
+                for name in (*directories, *files):
+                    entry = current / name
+                    metadata = entry.lstat()
+                    if not stat.S_ISLNK(metadata.st_mode):
+                        if metadata.st_mode & 0o222:
+                            return ImmutableTreeFact(
+                                False, f"cache entry is writable: {entry}", remedy,
+                            )
+                        continue
+
+                    target = self._symlink_target(entry, metadata)
+                    if target is None:
+                        return ImmutableTreeFact(
+                            False, f"cache symlink is dangling, looping, or unstable: {entry}",
+                            "./setup-slice6  # recreate the pinned runtime cache",
+                        )
+                    resolved, target_metadata = target
+                    if resolved.is_relative_to(resolved_root):
+                        if target_metadata.st_mode & 0o222:
+                            return ImmutableTreeFact(
+                                False, f"contained symlink target is writable: {resolved}", remedy,
+                            )
+                        continue
+
+                    declared_target: tuple[str, Path] | None = None
+                    for declared_name, (declared_path, declared_resolved) in safe_roots.items():
+                        if resolved.is_relative_to(declared_resolved):
+                            declared_target = declared_name, declared_path
+                            break
+                    if declared_target is not None:
+                        declared_name, declared_path = declared_target
+                        if target_metadata.st_mode & 0o222:
+                            declared_remedy = f"chmod -R a-w {shlex.quote(str(declared_path))}"
+                            return ImmutableTreeFact(
+                                False,
+                                f"symlink target in declared cache {declared_name} is writable: {resolved}",
+                                declared_remedy,
+                            )
+                        continue
+
+                    if self._root_owned_package_target(resolved, target_metadata):
+                        continue
+                    return ImmutableTreeFact(
+                        False,
+                        f"symlink escapes to an undeclared or unsafe external target: {entry} -> {resolved}",
+                        f"declare the exact immutable cache root for {shlex.quote(str(resolved))} and remove its write permissions",
+                    )
+        except OSError:
+            return ImmutableTreeFact(False, "cache metadata cannot be read safely", remedy)
+        try:
+            root_after = path.lstat()
+            resolved_after = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return ImmutableTreeFact(False, "cache root changed during inspection", remedy)
+        if self._identity(root) != self._identity(root_after) or resolved_after != resolved_root:
+            return ImmutableTreeFact(False, "cache root changed during inspection", remedy)
+        return ImmutableTreeFact(True, "read-only with validated symlink custody")
 
 
 @dataclass(frozen=True)
@@ -405,20 +577,24 @@ def diagnose(probe: Probe | None = None, *, source_root: Path = ROOT) -> Diagnos
 
     cache_roots = disk["cache_roots"]
     assert isinstance(cache_roots, list)
+    mutable_cache_names = {"stt-service-state", "silero-state"}
+    immutable_roots = {
+        str(cache["name"]): _path(str(cache["path"]), home)
+        for cache in cache_roots
+        if isinstance(cache, dict) and str(cache.get("name")) not in mutable_cache_names
+    }
     for cache in cache_roots:
         assert isinstance(cache, dict)
         name = str(cache["name"])
         # These are operational state directories, deliberately mutable per
         # instance; every other declared cache holds a shared pinned runtime or
         # model and must be immutable before two stands can share it.
-        if name in {"stt-service-state", "silero-state"}:
+        if name in mutable_cache_names:
             continue
-        path = _path(str(cache["path"]), home)
-        immutable = probe.immutable_tree(path)
+        path = immutable_roots[name]
+        tree = probe.immutable_tree(path, declared_roots=immutable_roots)
         checks.append(Check(
-            f"immutable cache {name}", immutable,
-            "read-only" if immutable else "missing, not a directory, or writable",
-            None if immutable else f"chmod -R a-w {shlex.quote(str(path))}",
+            f"immutable cache {name}", tree.immutable, tree.detail, tree.remedy,
         ))
     return Diagnosis(tuple(checks))
 

@@ -1,14 +1,26 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
+import shutil
+import stat
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from voice_agent_v2.operations import DEFAULT_MANIFEST_RELATIVE, load_operations_manifest
-from voice_agent_v2.stand_doctor import CommandResult, Diagnosis, FileFact, diagnose, main
+from voice_agent_v2.stand_doctor import (
+    CommandResult,
+    Diagnosis,
+    FileFact,
+    ImmutableTreeFact,
+    SystemProbe,
+    diagnose,
+    main,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,9 +123,147 @@ class ReadOnlyProbe:
         self.calls.append(("glob", pattern))
         return tuple(path for path in self.artifacts if "torch/_C." in str(path))
 
-    def immutable_tree(self, path: Path) -> bool:
+    def immutable_tree(
+        self, path: Path, *, declared_roots: dict[str, Path],
+    ) -> ImmutableTreeFact:
         self.calls.append(("immutable_tree", str(path)))
-        return path in self.cache_directories
+        if path in self.cache_directories and path in declared_roots.values():
+            return ImmutableTreeFact(True, "read-only with validated symlink custody")
+        return ImmutableTreeFact(False, "cache root is missing or unsafe", f"chmod -R a-w {path}")
+
+
+class SystemProbeImmutableTreeTests(unittest.TestCase):
+    @contextmanager
+    def filesystem(self):
+        root = Path(tempfile.mkdtemp())
+        try:
+            yield root
+        finally:
+            for directory, directories, files in os.walk(root, topdown=True, followlinks=False):
+                os.chmod(directory, 0o700)
+                for name in directories:
+                    candidate = Path(directory) / name
+                    if not candidate.is_symlink():
+                        os.chmod(candidate, 0o700)
+                for name in files:
+                    candidate = Path(directory) / name
+                    if not candidate.is_symlink():
+                        os.chmod(candidate, 0o600)
+            shutil.rmtree(root, ignore_errors=True)
+
+    @staticmethod
+    def make_read_only(root: Path) -> None:
+        for directory, directories, files in os.walk(root, topdown=False, followlinks=False):
+            for name in files:
+                candidate = Path(directory) / name
+                if not candidate.is_symlink():
+                    candidate.chmod(0o444)
+            for name in directories:
+                candidate = Path(directory) / name
+                if not candidate.is_symlink():
+                    candidate.chmod(0o555)
+            Path(directory).chmod(0o555)
+
+    def test_contained_and_declared_symlinks_pass_after_the_exact_remedy(self) -> None:
+        with self.filesystem() as temporary:
+            cache = temporary / "cache"
+            dependency = temporary / "cuda"
+            cache.mkdir()
+            dependency.mkdir()
+            (cache / "contained.bin").write_bytes(b"contained")
+            (cache / "contained-link").symlink_to("contained.bin")
+            (dependency / "libcudart.so").write_bytes(b"cuda")
+            (cache / "cuda-link").symlink_to(dependency / "libcudart.so")
+            self.make_read_only(cache)
+            probe = SystemProbe()
+            declared = {"fixture": cache, "local-lfm-cuda-runtime": dependency}
+
+            before = probe.immutable_tree(cache, declared_roots=declared)
+
+            self.assertFalse(before.immutable)
+            self.assertIn("declared cache local-lfm-cuda-runtime is writable", before.detail)
+            self.assertEqual(before.remedy, f"chmod -R a-w {dependency}")
+
+            self.make_read_only(dependency)
+            self.assertTrue(
+                probe.immutable_tree(dependency, declared_roots=declared).immutable
+            )
+            after = probe.immutable_tree(cache, declared_roots=declared)
+            self.assertTrue(after.immutable)
+            self.assertEqual(after.detail, "read-only with validated symlink custody")
+
+    def test_undeclared_writable_external_target_fails_closed(self) -> None:
+        with self.filesystem() as temporary:
+            cache = temporary / "cache"
+            outside = temporary / "outside"
+            cache.mkdir()
+            outside.mkdir()
+            target = outside / "payload.bin"
+            target.write_bytes(b"writable")
+            link = cache / "escape"
+            link.symlink_to(target)
+            self.make_read_only(cache)
+
+            fact = SystemProbe().immutable_tree(cache, declared_roots={"fixture": cache})
+
+            self.assertFalse(fact.immutable)
+            self.assertIn(f"undeclared or unsafe external target: {link} -> {target}", fact.detail)
+            self.assertIn("declare the exact immutable cache root", fact.remedy or "")
+
+    def test_dangling_looping_and_symlinked_declared_roots_fail_closed(self) -> None:
+        with self.filesystem() as temporary:
+            for label in ("dangling", "loop", "unsafe-declared"):
+                with self.subTest(label=label):
+                    cache = temporary / label / "cache"
+                    cache.mkdir(parents=True)
+                    declared = {"fixture": cache}
+                    if label == "dangling":
+                        (cache / "link").symlink_to("missing")
+                    elif label == "loop":
+                        (cache / "first").symlink_to("second")
+                        (cache / "second").symlink_to("first")
+                    else:
+                        outside = temporary / label / "outside"
+                        outside.mkdir()
+                        target = outside / "payload"
+                        target.write_bytes(b"payload")
+                        alias = temporary / label / "declared-alias"
+                        alias.symlink_to(outside, target_is_directory=True)
+                        (cache / "link").symlink_to(target)
+                        declared["unsafe-alias"] = alias
+                    self.make_read_only(cache)
+
+                    fact = SystemProbe().immutable_tree(cache, declared_roots=declared)
+
+                    self.assertFalse(fact.immutable)
+                    if label in {"dangling", "loop"}:
+                        self.assertIn("dangling, looping, or unstable", fact.detail)
+                    else:
+                        self.assertIn("undeclared or unsafe external target", fact.detail)
+
+    def test_root_owned_external_target_requires_package_ownership_evidence(self) -> None:
+        probe = SystemProbe()
+        metadata = os.stat_result((stat.S_IFREG | 0o755, 1, 1, 1, 0, 0, 1, 0, 0, 0))
+        target = Path("/usr/bin/python3.14")
+        with (
+            patch.object(probe, "_root_owned_path_custody", return_value=True),
+            patch.object(
+                probe, "command",
+                return_value=CommandResult(0, f"{target} is owned by python 3.14\n"),
+            ) as command,
+        ):
+            self.assertTrue(probe._root_owned_package_target(target, metadata))
+            self.assertTrue(probe._root_owned_package_target(target, metadata))
+        command.assert_called_once_with(("pacman", "-Qo", str(target)))
+
+        unsafe = os.stat_result((stat.S_IFREG | 0o775, 1, 1, 1, 0, 0, 1, 0, 0, 0))
+        self.assertFalse(SystemProbe()._root_owned_package_target(target, unsafe))
+        unowned = SystemProbe()
+        with (
+            patch.object(unowned, "_root_owned_path_custody", return_value=True),
+            patch.object(unowned, "command", return_value=CommandResult(1)),
+        ):
+            self.assertFalse(unowned._root_owned_package_target(target, metadata))
 
 
 class StandDoctorTests(unittest.TestCase):
