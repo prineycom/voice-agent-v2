@@ -14,6 +14,10 @@ const CODELOAD_HOST = 'codeload.github.com';
 const LLAMA_REPOSITORY = 'ggml-org/llama.cpp';
 const REDIRECT_HOSTS = new Set(['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'github-production-release-asset-2e65be.s3.amazonaws.com']);
 const PODMAN_MAJOR = 6;
+const TOOL_PATH = /^\/(?:[A-Za-z0-9+._-]+\/)*[A-Za-z0-9+._-]+$/;
+const BUILDER_TOOL_NAMES = ['bash', 'sh', 'awk', 'ar', 'as', 'basename', 'cat', 'chmod', 'cp', 'cut', 'find', 'g++', 'gcc', 'grep', 'gzip', 'head', 'ld', 'ln', 'make', 'mkdir', 'mv', 'ranlib', 'readelf', 'readlink', 'rm', 'sha256sum', 'strip', 'tar', 'touch', 'uname', 'nvcc', 'cc1', 'cc1plus', 'collect2', 'lto1', 'lto-wrapper', 'cicc', 'cudafe++', 'fatbinary', 'nvlink', 'ptxas'];
+const CONTENT_TOOL_NAMES = ['node', 'npm', 'python', 'pip', 'cmake', 'patchelf'];
+const NPM_TOOL_NAMES = ['vite', 'rolldown', 'rolldown-linux-x64-gnu', 'lightningcss', 'lightningcss-linux-x64-gnu'];
 const PODMAN_ENVIRONMENT_KEYS = new Set(['DBUS_SESSION_BUS_ADDRESS', 'HOME', 'LANG', 'LC_ALL', 'LOGNAME', 'PATH', 'TMPDIR', 'USER', 'XDG_RUNTIME_DIR']);
 
 class AssemblyError extends Error { constructor(code, message) { super(message); this.code = code; } }
@@ -94,16 +98,48 @@ function validateAuthority(root) {
     || sources.node_in_application_runtime !== false || sources.ambient_cache_allowed !== false
     || sources.host_python_allowed !== false || sources.host_node_allowed !== false || sources.tool_closure !== 'builder-tools.v1.json') fail('runtime_assembly_authority_invalid', 'builder/runtime authority is invalid');
   exactKeys(tools, ['builder_image', 'builder_tools', 'content_addressed_tools', 'npm_lock_tools', 'restricted_path', 'schema']);
-  if (tools.schema !== 'voice-agent.builder-tools.v1' || tools.builder_image !== sources.builder.image || tools.restricted_path !== '/build/tool-bin'
+  if (tools.schema !== 'voice-agent.builder-tools.v2' || tools.builder_image !== sources.builder.image || tools.restricted_path !== '/build/tool-bin'
     || !Array.isArray(tools.builder_tools) || !Array.isArray(tools.content_addressed_tools) || !Array.isArray(tools.npm_lock_tools)
-    || tools.builder_tools.length < 30 || tools.content_addressed_tools.length < 6 || tools.npm_lock_tools.length < 5) fail('runtime_assembly_authority_invalid', 'builder tool closure authority is invalid');
+    || tools.builder_tools.map((item) => item.name).join('\0') !== BUILDER_TOOL_NAMES.join('\0')
+    || tools.content_addressed_tools.map((item) => item.name).join('\0') !== CONTENT_TOOL_NAMES.join('\0')
+    || tools.npm_lock_tools.map((item) => item.name).join('\0') !== NPM_TOOL_NAMES.join('\0')) fail('runtime_assembly_authority_invalid', 'builder tool closure authority is invalid');
+  const validateProbe = (probe) => {
+    exactKeys(probe, ['argv', 'exit_status', 'max_output_bytes', 'output_prefix', 'version']);
+    if (!Array.isArray(probe.argv) || probe.argv.length < 1 || probe.argv.length > 6
+      || probe.argv.some((argument) => typeof argument !== 'string' || argument.length < 1 || argument.length > 255 || /[\0\t\n\r|]/.test(argument))
+      || !Number.isInteger(probe.exit_status) || probe.exit_status < 0 || probe.exit_status > 255
+      || !Number.isInteger(probe.max_output_bytes) || probe.max_output_bytes < 64 || probe.max_output_bytes > 4096
+      || typeof probe.output_prefix !== 'string' || probe.output_prefix.length < 1 || probe.output_prefix.length > 255 || /[\0\t\n\r]/.test(probe.output_prefix)
+      || typeof probe.version !== 'string' || probe.version.length < 1 || probe.version.length > 63 || /[^A-Za-z0-9+._-]/.test(probe.version)) fail('runtime_assembly_authority_invalid', 'tool probe authority is invalid');
+  };
+  const builderByName = new Map();
   for (const item of tools.builder_tools) {
-    exactKeys(item, ['name', 'path', 'version_contains']);
-    if (!/^[A-Za-z0-9+._-]+$/.test(item.name) || !/^\/(?:[A-Za-z0-9+._-]+\/)*[A-Za-z0-9+._-]+$/.test(item.path) || typeof item.version_contains !== 'string' || !item.version_contains) fail('runtime_assembly_authority_invalid', 'builder tool closure authority is invalid');
+    if (!/^[A-Za-z0-9+._-]+$/.test(item.name) || !TOOL_PATH.test(item.path)) fail('runtime_assembly_authority_invalid', 'builder tool closure authority is invalid');
+    if (item.probe) {
+      exactKeys(item, ['name', 'owner_uid', 'path', 'probe']); validateProbe(item.probe);
+      if (item.owner_uid !== 0 || !/^\/(?:usr\/bin|usr\/libexec\/gcc\/x86_64-redhat-linux\/8|usr\/local\/cuda-12\.9\/bin)\//.test(item.path)) fail('runtime_assembly_authority_invalid', 'public builder tool custody is invalid');
+    } else {
+      exactKeys(item, ['custody', 'name', 'path']);
+      exactKeys(item.custody, ['mode', 'owner_uid', 'parent', 'parent_version', 'sha256', 'tool_root']);
+      const parent = builderByName.get(item.custody.parent);
+      if (!SHA256.test(item.custody.sha256) || item.custody.owner_uid !== 0 || item.custody.mode !== '0755'
+        || !TOOL_PATH.test(item.custody.tool_root) || !item.path.startsWith(`${item.custody.tool_root}/`) || !parent?.probe
+        || item.custody.parent_version !== parent.probe.version) fail('runtime_assembly_authority_invalid', 'internal builder tool custody is invalid');
+    }
+    builderByName.set(item.name, item);
   }
+  if (builderByName.has('false')) fail('runtime_assembly_authority_invalid', 'unused builder tool is not admitted');
+  const contentByName = new Map();
   for (const item of tools.content_addressed_tools) {
-    exactKeys(item, ['input', 'name', 'path', 'version_contains']);
-    if (!/^[A-Za-z0-9+._-]+$/.test(item.name) || typeof item.input !== 'string' || !item.input || !item.path.startsWith('/build/tools/') || typeof item.version_contains !== 'string' || !item.version_contains) fail('runtime_assembly_authority_invalid', 'content-addressed tool closure authority is invalid');
+    const keys = item.parent ? ['command', 'input', 'name', 'parent', 'parent_version', 'path', 'probe'] : ['command', 'input', 'name', 'path', 'probe'];
+    exactKeys(item, keys); validateProbe(item.probe);
+    if (!/^[A-Za-z0-9+._-]+$/.test(item.name) || typeof item.input !== 'string' || !item.input
+      || !TOOL_PATH.test(item.path) || !item.path.startsWith('/build/tools/') || !TOOL_PATH.test(item.command) || !item.command.startsWith('/build/tools/')) fail('runtime_assembly_authority_invalid', 'content-addressed tool closure authority is invalid');
+    if (item.parent) {
+      const parent = contentByName.get(item.parent);
+      if (!parent || item.parent_version !== parent.probe.version || item.command !== parent.command) fail('runtime_assembly_authority_invalid', 'content-addressed parent tool authority is invalid');
+    }
+    contentByName.set(item.name, item);
   }
   for (const item of tools.npm_lock_tools) {
     exactKeys(item, ['name', 'package', 'version']);
@@ -199,33 +235,50 @@ async function prepareInputs(cacheRoot, authority, fetch, fetcher = fetchInput, 
 
 function toolAuthorityRows(authority, root) {
   const rows = [];
-  for (const item of authority.tools.builder_tools) rows.push({ expected: item.version_contains, name: item.name, path: item.path, phase: 'builder', provenance: `builder:${authority.sources.builder.manifest_digest}` });
+  for (const item of authority.tools.builder_tools) {
+    const common = { name: item.name, path: item.path, phase: 'builder', provenance: `builder:${authority.sources.builder.manifest_digest}` };
+    if (item.probe) rows.push({ ...common, argv: item.probe.argv, command: item.path, expectedExit: item.probe.exit_status, kind: 'probe', maximum: item.probe.max_output_bytes, ownerUid: item.owner_uid, prefix: item.probe.output_prefix, version: item.probe.version });
+    else rows.push({ ...common, expectedSha: item.custody.sha256, kind: 'custody', mode: item.custody.mode, ownerUid: item.custody.owner_uid, parent: item.custody.parent, parentVersion: item.custody.parent_version, toolRoot: item.custody.tool_root, version: item.custody.parent_version });
+  }
   for (const item of authority.tools.content_addressed_tools) {
     const input = authority.inputs.find((candidate) => candidate.name === item.input);
-    rows.push({ detail: input.filename, expected: item.version_contains, name: item.name, path: item.path, phase: 'content', provenance: `sha256:${input.sha256}` });
+    rows.push({ argv: item.probe.argv, command: item.command, detail: input.filename, expectedExit: item.probe.exit_status, kind: 'probe', maximum: item.probe.max_output_bytes, name: item.name, ownerUid: '-', parent: item.parent, parentVersion: item.parent_version, path: item.path, phase: 'content', prefix: item.probe.output_prefix, provenance: `sha256:${input.sha256}`, version: item.probe.version });
   }
   const lockDigest = digest(fs.readFileSync(path.join(root, 'web', 'package-lock.json')));
-  for (const item of authority.tools.npm_lock_tools) rows.push({ expected: item.version, name: item.name, path: item.package, phase: 'web', provenance: `npm-lock:${lockDigest}` });
+  for (const item of authority.tools.npm_lock_tools) rows.push({ kind: 'lock', name: item.name, path: item.package, phase: 'web', provenance: `npm-lock:${lockDigest}`, version: item.version });
   return rows;
 }
 
 function toolAuthorityTsv(authority, root) {
-  return toolAuthorityRows(authority, root).map((item) => [item.phase, item.provenance, item.name, item.path, item.expected, item.detail || '-'].join('\t')).join('\n') + '\n';
+  const empty = '-';
+  return toolAuthorityRows(authority, root).map((item) => [item.phase, item.provenance, item.name, item.path, item.kind, item.command || empty,
+    item.argv?.join('|') || empty, item.expectedExit ?? empty, item.maximum ?? empty, item.prefix || empty, item.version, item.expectedSha || empty,
+    item.ownerUid ?? empty, item.mode || empty, item.toolRoot || empty, item.parent || empty, item.parentVersion || empty, item.detail || empty].join('\t')).join('\n') + '\n';
 }
 
+function fixtureEvidence(item) {
+  if (item.kind === 'custody') return `custody:sha256:${item.expectedSha}:parent:${item.parent}@${item.parentVersion}`;
+  if (item.kind === 'lock') return `lock:${item.version}`;
+  return `probe:${item.version}:sha256:${digest(Buffer.from(`fixture:${item.name}`))}`;
+}
 function fixtureToolReport(authority, root, phases = new Set(['builder', 'content', 'web'])) {
-  return toolAuthorityRows(authority, root).filter((item) => phases.has(item.phase)).map((item) => [item.provenance, item.name, item.path, item.expected === 'builder-image' ? 'builder-image' : item.expected, 'ok'].join('\t')).join('\n') + '\n';
+  return toolAuthorityRows(authority, root).filter((item) => phases.has(item.phase)).map((item) => [item.provenance, item.name, item.path, fixtureEvidence(item), 'ok'].join('\t')).join('\n') + '\n';
 }
 
 function inspectToolReport(filename, authority, root, phases = new Set(['builder', 'content', 'web'])) {
   const expectedRows = toolAuthorityRows(authority, root).filter((item) => phases.has(item.phase));
   const expected = new Map(expectedRows.map((item) => [item.name, item]));
   const observed = new Map(); const extra = [];
-  let text; try { text = fs.readFileSync(filename, 'utf8'); } catch { text = ''; }
+  let text = '';
+  try {
+    const metadata = fs.lstatSync(filename);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > 64 * 1024) extra.push('malformed');
+    else text = fs.readFileSync(filename, 'utf8');
+  } catch {}
   for (const line of text.split('\n').filter(Boolean)) {
-    const fields = line.split('\t');
-    if (fields.length !== 5 || observed.has(fields[1]) || !expected.has(fields[1])) { extra.push(fields[1] || 'malformed'); continue; }
-    observed.set(fields[1], { provenance: fields[0], name: fields[1], path: fields[2], version: fields[3], status: fields[4] });
+    const fields = line.split('\t'); const reportedName = /^[A-Za-z0-9+._-]+$/.test(fields[1] || '') ? fields[1] : 'malformed';
+    if (fields.length !== 5 || observed.has(fields[1]) || !expected.has(fields[1])) { extra.push(reportedName); continue; }
+    observed.set(fields[1], { evidence: fields[3], name: fields[1], path: fields[2], provenance: fields[0], status: fields[4] });
   }
   const absent = []; const mismatch = []; const blocked = [];
   for (const row of expectedRows) {
@@ -233,8 +286,10 @@ function inspectToolReport(filename, authority, root, phases = new Set(['builder
     if (!item) { absent.push(row.name); continue; }
     if (item.status === 'blocked') { blocked.push(row.name); continue; }
     if (item.status === 'absent') { absent.push(row.name); continue; }
-    if (item.status !== 'ok' || item.provenance !== row.provenance || item.path !== row.path
-      || (row.expected === 'builder-image' ? item.version !== 'builder-image' : !item.version.includes(row.expected))) mismatch.push(row.name);
+    const evidenceAccepted = row.kind === 'custody' ? item.evidence === fixtureEvidence(row)
+      : row.kind === 'lock' ? item.evidence === `lock:${row.version}`
+        : new RegExp(`^probe:${row.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:sha256:[0-9a-f]{64}$`).test(item.evidence);
+    if (item.status !== 'ok' || item.provenance !== row.provenance || item.path !== row.path || !evidenceAccepted) mismatch.push(row.name);
   }
   if (absent.length || mismatch.length || blocked.length || extra.length) {
     const list = (values) => `[${[...new Set(values)].sort().join(',')}]`;
@@ -242,7 +297,7 @@ function inspectToolReport(filename, authority, root, phases = new Set(['builder
   }
   return expectedRows.map((row) => {
     const item = observed.get(row.name);
-    return { name: row.name, path: row.path, provenance: row.provenance, version: item.version };
+    return { evidence: item.evidence, name: row.name, path: row.path, provenance: row.provenance };
   });
 }
 
@@ -280,14 +335,14 @@ async function prepareToolClosure(values, context, state) {
   const base = ['--remote=false', 'run', '--rm', '--userns=keep-id', '--env-host=false', '--http-proxy=false', '--cap-drop=all', '--security-opt=no-new-privileges', '--pids-limit=2048', '--memory=24g', '--cpus=12',
     '--env', 'HOME=/work/home', '--env', 'XDG_CONFIG_HOME=/work/config', '--env', 'XDG_CACHE_HOME=/work/xdg', '--env', 'NPM_CONFIG_USERCONFIG=/dev/null', '--env', 'NPM_CONFIG_GLOBALCONFIG=/dev/null', '--env', 'GIT_CONFIG_NOSYSTEM=1', '--env', 'GIT_CONFIG_GLOBAL=/dev/null',
     '--env', `SOURCE_DATE_EPOCH=${sourceEpoch}`, '--env', `VOICE_AGENT_BUILD_ID=${sourceCommit}`,
-    '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${npmCache}:/npm-cache:rw`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`];
+    '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${npmCache}:/npm-cache:rw`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`, '--volume', `${path.join(root, 'release', 'tool-preflight.sh')}:/tool-preflight:ro`];
   const sandbox = ['--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=4g', '--tmpfs', '/work:rw,nosuid,size=12g'];
   const image = authority.sources.builder.image; const environment = network.environment;
-  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/bin/bash', '/assembler', 'tool-preflight'], { env: environment, timeout: 600000, code: 'runtime_tool_preflight_failed', message: 'network-disabled builder tool preflight could not complete' });
+  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/usr/bin/bash', '/assembler', 'tool-preflight'], { env: environment, timeout: 600000, code: 'runtime_tool_preflight_failed', message: 'network-disabled builder tool preflight could not complete' });
   try { inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root, new Set(['builder', 'content'])); }
   catch (reason) { if (reason.code !== 'runtime_tool_closure_invalid') throw reason; inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root); }
-  if (values.fetch === true) runner('podman', [...base, '--volume', `${build}:/build:ro`, '--network=pasta', ...sandbox, image, '/bin/bash', '/assembler', 'web-acquire'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact npm lock bytes could not be acquired' });
-  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/bin/bash', '/assembler', 'web-prepare'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'network-disabled exact npm tool installation could not complete' });
+  if (values.fetch === true) runner('podman', [...base, '--volume', `${build}:/build:ro`, '--network=pasta', ...sandbox, image, '/usr/bin/bash', '/assembler', 'web-acquire'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact npm lock bytes could not be acquired' });
+  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/usr/bin/bash', '/assembler', 'web-prepare'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'network-disabled exact npm tool installation could not complete' });
   const tools = inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root);
   return { base, sandbox, sourceCommit, tools };
 }
@@ -312,7 +367,7 @@ async function runPreflight(values, context, assembleOutput) {
       await inputPreparer(cache, authority, values.fetch === true);
       fs.mkdirSync(assembleOutput, { mode: 0o700 });
       const outputBase = [...prepared.base, '--volume', `${build}:/build:ro`, '--volume', `${assembleOutput}:/output:rw`];
-      runner('podman', [...outputBase, '--network=none', ...prepared.sandbox, authority.sources.builder.image, '/bin/bash', '/assembler', 'assemble'], { env: network.environment, timeout: 7200000 });
+      runner('podman', [...outputBase, '--network=none', ...prepared.sandbox, authority.sources.builder.image, '/usr/bin/bash', '/assembler', 'assemble'], { env: network.environment, timeout: 7200000 });
       if (!fs.existsSync(path.join(assembleOutput, 'runtime')) || !fs.existsSync(path.join(assembleOutput, 'web', 'index.html'))) fail('runtime_assembly_incomplete', 'builder did not emit runtime and static web closure');
       return { authority, output: assembleOutput, shaRoot, tool_authority_sha256: digest(Buffer.from(toolAuthorityTsv(authority, root))), tools: prepared.tools };
     } finally { fs.rmSync(temporary, { recursive: true, force: true }); }

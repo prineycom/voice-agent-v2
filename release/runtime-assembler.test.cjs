@@ -59,6 +59,20 @@ function fakeHttps(responses) {
     },
   };
 }
+function executable(filename, source) { fs.writeFileSync(filename, `#!/usr/bin/bash\nset -u\n${source}\n`, { mode: 0o755 }); fs.chmodSync(filename, 0o755); }
+function probeRow({ phase = 'builder', provenance = 'builder:fixture', name, toolPath, command = toolPath, argv = ['--version'], exitStatus = 0, maximum = 128, prefix, version, ownerUid = process.getuid(), parent = '-', parentVersion = '-', detail = '-' }) {
+  return [phase, provenance, name, toolPath, 'probe', command, argv.join('|'), exitStatus, maximum, prefix, version, '-', ownerUid, '-', '-', parent, parentVersion, detail].join('\t');
+}
+function custodyRow({ name, toolPath, sha256, parent, parentVersion, ownerUid = process.getuid(), mode = '0755', toolRoot = path.dirname(toolPath) }) {
+  return ['builder', 'builder:fixture', name, toolPath, 'custody', '-', '-', '-', '-', '-', parentVersion, sha256, ownerUid, mode, toolRoot, parent, parentVersion, '-'].join('\t');
+}
+function runToolProbe(root, rows, phase = 'builder') {
+  const authority = path.join(root, `${phase}-authority.tsv`); const report = path.join(root, `${phase}-report.tsv`);
+  fs.writeFileSync(authority, `${rows.join('\n')}\n`);
+  const result = spawnSync(path.join(ROOT, 'release', 'tool-preflight.sh'), [authority, report, phase], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+  assert.equal(result.status, 0, result.stderr);
+  return fs.readFileSync(report, 'utf8');
+}
 
 test('committed runtime assembler authority pins the exact OCI/toolchain and closed immutable inputs', () => {
   const authority = assembler.validateAuthority(ROOT);
@@ -68,8 +82,11 @@ test('committed runtime assembler authority pins the exact OCI/toolchain and clo
   assert.equal(authority.sources.node_in_application_runtime, false);
   assert.equal(authority.tools.builder_image, authority.sources.builder.image);
   assert.equal(authority.tools.restricted_path, '/build/tool-bin');
-  assert.equal(authority.tools.builder_tools.some((item) => item.name === 'gzip' && item.version_contains === '1.9'), true);
-  assert.equal(authority.tools.builder_tools.some((item) => item.name === 'cicc'), true);
+  assert.equal(authority.tools.schema, 'voice-agent.builder-tools.v2');
+  assert.equal(authority.tools.builder_tools.some((item) => item.name === 'gzip' && item.probe.version === '1.9' && item.probe.exit_status === 0), true);
+  assert.equal(authority.tools.builder_tools.some((item) => item.name === 'false'), false);
+  assert.deepEqual(authority.tools.builder_tools.filter((item) => item.custody).map((item) => item.name), ['cc1', 'cc1plus', 'lto1', 'lto-wrapper', 'cicc']);
+  assert.equal(authority.tools.builder_tools.find((item) => item.name === 'cicc').path, '/usr/local/cuda-12.9/nvvm/bin/cicc');
   assert.deepEqual(authority.tools.content_addressed_tools.map((item) => item.name), ['node', 'npm', 'python', 'pip', 'cmake', 'patchelf']);
   assert.deepEqual(authority.tools.npm_lock_tools.map((item) => item.name), ['vite', 'rolldown', 'rolldown-linux-x64-gnu', 'lightningcss', 'lightningcss-linux-x64-gnu']);
   assert.equal(new Set(authority.inputs.map((item) => item.sha256)).size, authority.inputs.length);
@@ -110,13 +127,58 @@ test('the accepted exact Node gzip archive extracts without xz and retains exact
 test('tool closure reports absent, tampered, and extra tools together without host fallback data', (context) => {
   const root = temporary(context); const authority = assembler.validateAuthority(ROOT); const report = path.join(root, 'tool-report.tsv');
   const lines = assembler.fixtureToolReport(authority, ROOT).trimEnd().split('\n');
-  const altered = lines.filter((line) => !line.includes('\tbash\t')).map((line) => line.includes('\tgcc\t') ? line.replace('\t8.5.0\tok', '\twrong-version\tmismatch') : line)
+  const altered = lines.filter((line) => !line.includes('\tbash\t')).map((line) => line.includes('\tgcc\t') ? line.replace(/\tprobe:8\.5\.0:sha256:[0-9a-f]{64}\tok$/, '\tinvalid\tmismatch') : line)
     .map((line) => line.includes('\tpatchelf\t') ? line.replace(/^sha256:[^\t]+/, 'sha256:' + 'f'.repeat(64)) : line);
   altered.push(`builder:${authority.sources.builder.manifest_digest}\tambient-extra\t/host/bin/tool\t1\tok`);
   fs.writeFileSync(report, `${altered.join('\n')}\n`);
   assert.throws(() => assembler.inspectToolReport(report, authority, ROOT), (reason) => reason.code === 'runtime_tool_closure_invalid'
     && reason.message.includes('absent=[bash]') && reason.message.includes('mismatch=[gcc,patchelf]') && reason.message.includes('extra=[ambient-extra]')
     && !reason.message.includes('/host/bin/tool'));
+});
+
+test('closed tool probes accept exact argv/status/output and bind internal hashes to a successful parent', (context) => {
+  const root = temporary(context); const cli = path.join(root, 'cli'); const internal = path.join(root, 'internal');
+  executable(cli, `test "$#" -eq 1 && test "$1" = --identity || exit 64\nprintf 'Fixture CLI 1.2.3\\n'\nexit 7`);
+  executable(internal, `exit 99`);
+  const report = runToolProbe(root, [
+    probeRow({ name: 'parent', toolPath: cli, argv: ['--identity'], exitStatus: 7, prefix: 'Fixture CLI 1.2.3', version: '1.2.3' }),
+    custodyRow({ name: 'internal', toolPath: internal, sha256: assembler.digest(fs.readFileSync(internal)), parent: 'parent', parentVersion: '1.2.3' }),
+  ]);
+  assert.match(report, /\tparent\t[^\t]+\tprobe:1\.2\.3:sha256:[0-9a-f]{64}\tok\n/);
+  assert.match(report, new RegExp(`\\tinternal\\t[^\\t]+\\tcustody:sha256:${assembler.digest(fs.readFileSync(internal))}:parent:parent@1\\.2\\.3\\tok\\n`));
+  assert.doesNotMatch(report, /Fixture CLI/);
+});
+
+test('tool probes report missing, tampered, wrong-version, wrong-exit, oversized, linked, and parent-mismatched rows together without output content', (context) => {
+  const root = temporary(context); const parent = path.join(root, 'parent'); const wrongVersion = path.join(root, 'wrong-version'); const wrongExit = path.join(root, 'wrong-exit');
+  const oversized = path.join(root, 'oversized'); const linkTarget = path.join(root, 'link-target'); const linked = path.join(root, 'linked'); const tampered = path.join(root, 'tampered'); const child = path.join(root, 'child');
+  executable(parent, `printf 'Parent 1.0\\n'`);
+  executable(wrongVersion, `printf 'PRIVATE-MARKER Wrong 9.0\\n'`);
+  executable(wrongExit, `printf 'Exit 1.0\\n'\nexit 9`);
+  executable(oversized, `printf 'Large 1.0 ' \nfor ((index=0; index<256; index++)); do printf x; done`);
+  executable(linkTarget, `printf 'Linked 1.0\\n'`); fs.symlinkSync(linkTarget, linked);
+  executable(tampered, `exit 91`); executable(child, `exit 92`);
+  const report = runToolProbe(root, [
+    probeRow({ name: 'parent', toolPath: parent, prefix: 'Parent 1.0', version: '1.0' }),
+    probeRow({ name: 'missing', toolPath: path.join(root, 'missing'), prefix: 'Missing 1.0', version: '1.0' }),
+    probeRow({ name: 'wrong-version', toolPath: wrongVersion, prefix: 'Wrong 1.0', version: '1.0' }),
+    probeRow({ name: 'wrong-exit', toolPath: wrongExit, prefix: 'Exit 1.0', version: '1.0' }),
+    probeRow({ name: 'oversized', toolPath: oversized, maximum: 64, prefix: 'Large 1.0', version: '1.0' }),
+    probeRow({ name: 'linked', toolPath: linked, prefix: 'Linked 1.0', version: '1.0' }),
+    custodyRow({ name: 'tampered', toolPath: tampered, sha256: 'f'.repeat(64), parent: 'parent', parentVersion: '1.0' }),
+    custodyRow({ name: 'parent-mismatch', toolPath: child, sha256: assembler.digest(fs.readFileSync(child)), parent: 'parent', parentVersion: '9.9' }),
+  ]);
+  const facts = new Map(report.trimEnd().split('\n').map((line) => { const fields = line.split('\t'); return [fields[1], { evidence: fields[3], status: fields[4] }]; }));
+  assert.equal(facts.get('parent').status, 'ok'); assert.equal(facts.get('missing').status, 'absent'); assert.equal(facts.get('linked').status, 'absent');
+  for (const name of ['wrong-version', 'wrong-exit', 'oversized', 'tampered', 'parent-mismatch']) assert.equal(facts.get(name).status, 'mismatch');
+  assert.equal(Buffer.byteLength(report) < 4096, true); assert.doesNotMatch(report, /PRIVATE-MARKER|Wrong 9\.0|Large 1\.0/);
+});
+
+test('content-addressed probes use the same bounded exact-vector contract', (context) => {
+  const root = temporary(context); const cli = path.join(root, 'content-cli');
+  executable(cli, `test "$#" -eq 2 && test "$1" = --content && test "$2" = exact || exit 65\nprintf 'Content 4.5.6\\n'`);
+  const report = runToolProbe(root, [probeRow({ phase: 'content', provenance: 'sha256:' + 'a'.repeat(64), name: 'content', toolPath: cli, argv: ['--content', 'exact'], prefix: 'Content 4.5.6', version: '4.5.6', ownerUid: '-' })], 'content');
+  assert.match(report, /\tprobe:4\.5\.6:sha256:[0-9a-f]{64}\tok\n$/);
 });
 
 test('llama.cpp admits only the exact direct owner/repository/full-commit codeload locator', () => {
@@ -182,6 +244,14 @@ test('rootless Podman 6 netavark and pasta facts are exact and strip ambient hos
   }
 });
 
+test('builder digest pinning refuses a local image identity mismatch before tool probing', () => {
+  const calls = [];
+  assert.throws(() => assembler.inspectBuilder('docker.io/nvidia/cuda@sha256:' + 'a'.repeat(64), false, (command, args) => {
+    calls.push([command, args]); return 'sha256:' + 'b'.repeat(64);
+  }), (reason) => reason.code === 'runtime_builder_identity_mismatch');
+  assert.deepEqual(calls, [['podman', ['--remote=false', 'image', 'inspect', '--format', '{{.Digest}}', 'docker.io/nvidia/cuda@sha256:' + 'a'.repeat(64)]]]);
+});
+
 test('acquisition network fails closed for a missing helper, rootful engine, wrong backend, unsupported engine, and arbitrary override', () => {
   const cases = [
     networkRunner(podmanInformation(), new Error('missing')),
@@ -201,6 +271,7 @@ test('production assembler closes extraction, compiler, ELF, PATH, and credentia
   assert.match(shell, /'\/runtime\/llama\/lib\/' in selected\.as_posix\(\): shutil\.move\(selected,target\)/);
   assert.doesNotMatch(shell, /cp .*\/output\/runtime\/llama\/lib\/.*\/output\/runtime\/lib/);
   assert.match(shell, /pacote\.tarball\.stream/); assert.match(shell, /npm-cli\.js ci --ignore-scripts --offline/);
+  assert.match(shell, /-DCMAKE_CUDA_COMPILER=\/build\/tool-bin\/nvcc/); assert.doesNotMatch(shell, /GIT_EXECUTABLE|tool-bin\/false/);
   assert.match(shell, /unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY/);
   assert.match(shell, /unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN/);
 });
@@ -274,6 +345,8 @@ test('fixture assembly preflights the full closure, cache-installs tools offline
     assert.equal(Object.hasOwn(call.env, 'HTTPS_PROXY'), false); assert.equal(Object.hasOwn(call.env, 'GITHUB_TOKEN'), false);
     assert.equal(call.args.some((value) => /(?:docker|podman)\.sock/.test(value)), false);
     assert.equal(call.args.some((value) => value.includes('/usr/bin/xz') || value.includes('/bin/xz')), false);
+    assert.equal(call.args.includes('/usr/bin/bash'), true);
+    assert.equal(call.args.some((value) => value.endsWith('/release/tool-preflight.sh:/tool-preflight:ro')), true);
   }
   const implementation = fs.readFileSync(path.join(ROOT, 'release', 'runtime-assembler.cjs'), 'utf8');
   assert.doesNotMatch(implementation, /slirp4netns|--network=host/); assert.equal(fs.existsSync(path.join(output, 'web', 'index.html')), true);
@@ -286,7 +359,7 @@ test('one complete tool preflight error stops before remaining fetch, web acquis
       phases.push(args.at(-1));
       const mount = args.find((value) => typeof value === 'string' && value.endsWith(':/build:rw')); const build = mount.slice(0, -':/build:rw'.length);
       const lines = assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])).trimEnd().split('\n')
-        .filter((line) => !line.includes('\tbash\t')).map((line) => line.includes('\tgcc\t') ? line.replace('\t8.5.0\tok', '\ttampered\tmismatch') : line);
+        .filter((line) => !line.includes('\tbash\t')).map((line) => line.includes('\tgcc\t') ? line.replace(/\tprobe:8\.5\.0:sha256:[0-9a-f]{64}\tok$/, '\tinvalid\tmismatch') : line);
       lines.push(`builder:${authority.sources.builder.manifest_digest}\textra-tool\t/ambient/tool\t1\tok`); fs.writeFileSync(path.join(build, 'tool-report.tsv'), `${lines.join('\n')}\n`); return '';
     }
     const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' }); if (result.status !== 0) throw new Error('fixture command failed'); return result.stdout.trim();
