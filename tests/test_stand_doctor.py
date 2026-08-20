@@ -53,6 +53,11 @@ class ReadOnlyProbe:
         if arguments[:2] == ("pacman", "-Q"):
             package = arguments[2]
             return CommandResult(1) if package == self.missing_package else CommandResult(0, f"{package} 1.0\n")
+        if arguments[:2] == ("pacman", "-Qo"):
+            binary = arguments[2]
+            if self.missing_package == "shadow":
+                return CommandResult(1)
+            return CommandResult(0, f"{binary} is owned by shadow 4.20.0.arch1-1\n")
         if arguments in {
             ("node", "--version"), ("npm", "--version"), ("python3", "--version"),
             ("git", "--version"), ("nvidia-container-cli", "--version"),
@@ -132,6 +137,16 @@ class StandDoctorTests(unittest.TestCase):
         self.assertIn("sudo -n pacman -Syu --needed git", rendered)
         self.assertIn("rootless Docker: Docker is installed but the rootless daemon is not ready", rendered)
         self.assertIn("dockerd-rootless-setuptool.sh install", rendered)
+
+    def test_arch_rootless_mapping_uses_shadow_and_valid_remediation(self) -> None:
+        report = diagnose(ReadOnlyProbe(missing_package="shadow"), source_root=ROOT)
+
+        self.assertEqual(report.status, "incomplete")
+        rendered = report.render()
+        self.assertIn("rootless UID mapping", rendered)
+        self.assertIn("sudo -n pacman -Syu --needed shadow", rendered)
+        remedies = [line for line in rendered.splitlines() if "remedy:" in line]
+        self.assertTrue(all("uidmap" not in line for line in remedies))
 
     def test_diagnosis_has_no_mutation_capability_or_side_effect(self) -> None:
         probe = ReadOnlyProbe()
