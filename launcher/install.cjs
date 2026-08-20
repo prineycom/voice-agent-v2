@@ -11,10 +11,10 @@ module.exports = function createInstaller(core) {
 
   const SERVICE_UNIT = 'voice-agent.service';
   const REQUIRED_COMPONENTS = ['livekit', 'controller', 'stt', 'selected_llm', 'tts'];
-  const REQUIRED_ARCHIVE_FILES = ['bin/voice-agent-runtime', 'descriptors/local-models.json', 'descriptors/runtime.json'];
+  const REQUIRED_ARCHIVE_FILES = ['bin/voice-agent-runtime', 'descriptors/local-models.json', 'descriptors/model-sets.json', 'descriptors/runtime.json', 'descriptors/runtime-receipt.json', 'descriptors/runtime-config-template.json', 'app/src/voice_agent_v2/faster_whisper_runner.py'];
   const FREE_SPACE_RESERVE = 8 * 1024 * 1024 * 1024;
   const MINIMUM_VRAM = 10 * 1024 * 1024 * 1024;
-  const MINIMUM_NVIDIA_DRIVER = [550, 54, 0];
+  const MINIMUM_NVIDIA_DRIVER = [575, 51, 3];
   const STARTUP_DEADLINE_MS = 300000;
   const UNIT_CONTRACT = `[Unit]\nDescription=Voice Agent\nAfter=network.target\nStartLimitIntervalSec=infinity\nStartLimitBurst=2\n\n[Service]\nType=notify\nWorkingDirectory=@RELEASE@\nEnvironmentFile=@PRIVATE@/service.env\nExecStart=@RELEASE@/bin/voice-agent-runtime --config @CONFIG@/config.yaml\nRestart=on-failure\nRestartSec=5s\nTimeoutStartSec=300s\nTimeoutStopSec=75s\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=strict\nProtectHome=read-only\nReadWritePaths=@DATA@ @CACHE@ @STATE@ @RUNTIME@\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nLockPersonality=yes\nRestrictSUIDSGID=yes\n\n[Install]\nWantedBy=default.target\n`;
   const UNIT_CONTRACT_SHA256 = digest(Buffer.from(UNIT_CONTRACT));
@@ -143,8 +143,8 @@ agent_environment:
       identity: value, data, config, cache, state, runtime,
       releases: path.join(data, 'releases'), transactions: path.join(data, 'transactions'), migrations: path.join(data, 'migrations'),
       appData: path.join(data, 'data'), agent: path.join(data, 'agent-environment'), agentRootfs: path.join(data, 'agent-environment', 'rootfs-storage'),
-      private: path.join(config, 'private'), downloads: path.join(cache, 'downloads'), models: path.join(cache, 'models', 'sha256'), runtimes: path.join(cache, 'runtimes', 'sha256'),
-      launchers: path.join(cache, 'launchers', 'sha256'), logs: path.join(state, 'logs'), diagnostics: path.join(state, 'diagnostics'), serviceRuntime: path.join(runtime, 'service'),
+      private: path.join(config, 'private'), downloads: path.join(cache, 'downloads'), models: path.join(cache, 'models', 'sha256'), modelViews: path.join(cache, 'models', 'views', 'sha256'), runtimes: path.join(cache, 'runtimes', 'sha256'),
+      launchers: path.join(cache, 'launchers', 'sha256'), logs: path.join(state, 'logs'), diagnostics: path.join(state, 'diagnostics'), serviceRuntime: path.join(runtime, 'service'), runtimeConfig: path.join(config, 'runtime.json'),
       unit: path.join(value.configHome, 'systemd', 'user', SERVICE_UNIT), journal: path.join(data, 'transactions', 'install.json'),
       updateJournal: path.join(data, 'transactions', 'update.json'), uninstallJournal: path.join(data, 'transactions', 'uninstall.json'), selfUpdateJournal: path.join(data, 'transactions', 'launcher-update.json'), updateResult: path.join(state, 'last-update.json'), lifecycleResult: path.join(state, 'last-lifecycle.json'), updateLock: path.join(runtime, 'update.lock'),
       launcher: path.join(value.home, '.local', 'bin', 'voice-agent'), channelReceipt: path.join(cache, 'channel-stable.json'), installRecord: path.join(data, 'install.json'), current: path.join(data, 'current'), rollback: path.join(data, 'rollback'),
@@ -242,15 +242,55 @@ agent_environment:
     }
     if (!/^05[0-7]{2}$/.test(entries.get('bin/voice-agent-runtime').mode)) error('release_incomplete', 'the runtime entry is not executable');
     if (manifest.service_template_sha256 !== UNIT_CONTRACT_SHA256) error('service_contract_mismatch', 'the release does not accept this launcher service contract');
+    if (manifest.entries.some((entry) => entry.path.startsWith('runtime/node/') || entry.path === 'runtime/node')) error('release_incomplete', 'Node is forbidden in the application runtime');
     return {
       model_descriptor_sha256: entries.get('descriptors/local-models.json').sha256,
+      model_sets_descriptor_sha256: entries.get('descriptors/model-sets.json').sha256,
       runtime_descriptor_sha256: entries.get('descriptors/runtime.json').sha256,
+      runtime_receipt_sha256: entries.get('descriptors/runtime-receipt.json').sha256,
     };
+  }
+
+  function modelDescriptorsForRelease(document, release) {
+    if (Array.isArray(release.assets)) return release.assets;
+    if (!Array.isArray(release.asset_digests)) error('model_sets_invalid', 'release model asset custody is unavailable');
+    const descriptors = document.sets.flatMap((set) => set.files.map((file) => ({
+      authority: { origin: 'https://recorded.invalid', path_prefix: '/asset/' }, compatibility: { maximum_application_protocol: 1, maximum_launcher_protocol: core.LAUNCHER_PROTOCOL, minimum_application_protocol: 1, minimum_launcher_protocol: core.LAUNCHER_PROTOCOL },
+      digest: `sha256:${file.sha256}`, id: file.asset_id, kind: 'model', license: { acceptance: 'accepted', id: 'recorded-signed-release' }, platform: core.SUPPORTED_PLATFORM,
+      reachability: 'required', required_free_space_reserve: 0, sha256: file.sha256, size: file.size, url: `https://recorded.invalid/asset/${file.sha256}`,
+    })));
+    if (descriptors.some((item) => !release.asset_digests.includes(item.sha256))) error('model_sets_invalid', 'recorded release no longer owns a model view member');
+    return descriptors;
+  }
+
+  function loadModelSets(releaseRoot, release, uid) {
+    const bytes = core.readOwnedRegular(path.join(releaseRoot, 'descriptors', 'model-sets.json'), uid, [0o444], 256 * 1024);
+    const document = core.parseCanonicalJson(bytes, 256 * 1024);
+    core.loadAssetCache(api).validateModelSets(document, modelDescriptorsForRelease(document, release));
+    return document;
+  }
+
+  function writeRuntimeConfig(layout, releaseRoot, modelSets) {
+    const cache = core.loadAssetCache(api);
+    const models = {};
+    for (const set of modelSets.sets) {
+      if (!cache.verifyViewUnchecked(layout, set)) error('runtime_assets_unavailable', 'a canonical model view is missing or differs');
+      models[set.kind] = cache.viewPath(layout, set);
+    }
+    const document = {
+      schema: 'voice-agent.runtime-config.v1', application_protocol: 1, release_root: releaseRoot,
+      executables: { python: path.join(releaseRoot, 'runtime', 'python', 'bin', 'python3'), livekit: path.join(releaseRoot, 'runtime', 'livekit', 'bin', 'livekit-server'), llama: path.join(releaseRoot, 'runtime', 'llama', 'bin', 'llama-server') },
+      models, paths: { state: path.join(layout.state, 'runtime'), temp: layout.serviceRuntime, logs: layout.logs, web: path.join(releaseRoot, 'web'), agent_data: layout.agent },
+    };
+    writeJson(layout.runtimeConfig, document, layout.identity.uid);
+    return document;
   }
 
   function compatibilityPreflight(facts, requirements, requiredBytes) {
     if (!facts.assets || facts.assets.model_descriptor_sha256 !== requirements.model_descriptor_sha256
+        || facts.assets.model_sets_descriptor_sha256 !== requirements.model_sets_descriptor_sha256
         || facts.assets.runtime_descriptor_sha256 !== requirements.runtime_descriptor_sha256
+        || facts.assets.runtime_receipt_sha256 !== requirements.runtime_receipt_sha256
         || facts.assets.model_available !== true || facts.assets.runtime_available !== true || facts.assets.runtime_compatible !== true) {
       error('runtime_assets_unavailable', 'the exact signed local model/runtime descriptors are unavailable or incompatible');
     }
@@ -348,7 +388,7 @@ agent_environment:
     const uid = layout.identity.uid;
     for (const directory of [layout.data, layout.releases, layout.transactions, layout.migrations, layout.appData,
       layout.agent, path.join(layout.agent, 'private'), path.join(layout.agent, 'workspace'), path.join(layout.agent, 'cache'), layout.agentRootfs,
-      layout.config, layout.private, layout.cache, layout.downloads, path.dirname(layout.models), layout.models, path.dirname(layout.runtimes), layout.runtimes,
+      layout.config, layout.private, layout.cache, layout.downloads, path.dirname(layout.models), layout.models, path.dirname(layout.modelViews), layout.modelViews, path.dirname(layout.runtimes), layout.runtimes,
       path.dirname(layout.launchers), layout.launchers, layout.state, layout.logs, layout.diagnostics, layout.runtime, layout.serviceRuntime, path.dirname(layout.unit)]) ensurePrivateDirectory(directory, uid);
   }
 
@@ -480,12 +520,13 @@ agent_environment:
       const manifest = core.verifyPlatformArtifact(acquired.artifactBytes, acquired.manifestBytes, release);
       const requirements = artifactPreflight(manifest, release, acquired.archiveEntries, acquired.manifestBytes);
       const payloadBytes = manifest.entries.reduce((total, entry) => total + (entry.type === 'file' ? entry.size : 0), 0);
-      const facts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout });
+      const initialFacts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout });
       const assetManager = core.loadAssetCache(api);
       const descriptors = assetManager.validateDescriptors(release.assets);
       const requiredAssetBytes = descriptors.filter((item) => item.reachability === 'required' && item.kind !== 'agent_environment_image').reduce((sum, item) => sum + item.size, 0);
       const descriptorReserve = Math.max(0, ...descriptors.map((item) => item.required_free_space_reserve), release.launcher ? release.launcher.required_free_space_reserve : 0);
-      compatibilityPreflight(facts, requirements, FREE_SPACE_RESERVE + descriptorReserve + (release.artifact_bytes * 2) + payloadBytes + requiredAssetBytes + (release.launcher ? release.launcher.size * 2 : 0) + 4 * 1024 * 1024);
+      const requiredBytes = FREE_SPACE_RESERVE + descriptorReserve + (release.artifact_bytes * 2) + payloadBytes + requiredAssetBytes + (release.launcher ? release.launcher.size * 2 : 0) + 4 * 1024 * 1024;
+      if (!Number.isSafeInteger(initialFacts.free_bytes) || initialFacts.free_bytes < requiredBytes) error('insufficient_space', `installation needs ${requiredBytes} free bytes including reserve; ${initialFacts.free_bytes || 0} are available`);
 
       if (anyManagedState(layout)) {
         if (exists(layout.journal)) {
@@ -560,9 +601,19 @@ agent_environment:
       }
 
       if (phase === 'release_staged') {
+        const modelSets = loadModelSets(stage, release, layout.identity.uid);
+        assetManager.materializeViews(layout, modelSets, descriptors, journalBase.id);
+        const closureFacts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout, candidateRoot: stage, modelSets });
+        compatibilityPreflight(closureFacts, requirements, requiredBytes);
         if (exists(releaseRoot)) error('release_target_ambiguous', 'the immutable release target already exists; run voice-agent doctor');
         fs.renameSync(stage, releaseRoot); syncDirectory(layout.releases);
         phase = writeJournal(layout, journalBase, 'release_promoted', dependencies).phase;
+      }
+
+      if (['release_promoted', 'linger_enabled', 'unit_installed', 'service_started', 'ready_verified', 'healthy'].includes(phase)) {
+        const modelSets = loadModelSets(releaseRoot, release, layout.identity.uid);
+        assetManager.materializeViews(layout, modelSets, descriptors, journalBase.id);
+        writeRuntimeConfig(layout, releaseRoot, modelSets);
       }
 
       if (phase === 'release_promoted') {
@@ -654,11 +705,46 @@ agent_environment:
       const deviceFacts = [['gpu', '/dev/nvidia0'], ['control', '/dev/nvidiactl'], ['uvm', '/dev/nvidia-uvm']].filter(([, filename]) => { try { return fs.lstatSync(filename).isCharacterDevice(); } catch { return false; } }).map(([kind]) => kind);
       return { kernel: os.platform(), kernel_release: os.release(), architecture: os.arch(), systemd, user: { uid: process.geteuid(), name: user.username, home: user.homedir }, nvidia: { available: query.status === 0, gpu_name: first[0], runtime_compatible: query.status === 0, driver_version: first[1], vram_bytes: Math.floor(Number(first[2] || 0) * 1024 * 1024), devices: deviceFacts } };
     }
-    async inspectCompatibility({ requirements, layout }) {
+    async inspectCompatibility({ release, manifest, requirements, layout, candidateRoot = null, modelSets = null }) {
       let directory = layout.data;
       while (!exists(directory)) directory = path.dirname(directory);
       const space = fs.statfsSync(directory);
-      return { free_bytes: Number(space.bavail) * Number(space.bsize), assets: { ...requirements, model_available: false, runtime_available: false, runtime_compatible: false } };
+      const unavailable = { free_bytes: Number(space.bavail) * Number(space.bsize), assets: { ...requirements, model_available: false, runtime_available: false, runtime_compatible: false } };
+      if (!candidateRoot || !modelSets || !release || !manifest) return unavailable;
+      try {
+        const descriptorBytes = core.readOwnedRegular(path.join(candidateRoot, 'descriptors', 'runtime.json'), layout.identity.uid, [0o444], 256 * 1024);
+        const receiptBytes = core.readOwnedRegular(path.join(candidateRoot, 'descriptors', 'runtime-receipt.json'), layout.identity.uid, [0o444], 16 * 1024 * 1024);
+        const modelsBytes = core.readOwnedRegular(path.join(candidateRoot, 'descriptors', 'model-sets.json'), layout.identity.uid, [0o444], 256 * 1024);
+        const localModelsBytes = core.readOwnedRegular(path.join(candidateRoot, 'descriptors', 'local-models.json'), layout.identity.uid, [0o444], 256 * 1024);
+        if (digest(descriptorBytes) !== requirements.runtime_descriptor_sha256 || digest(receiptBytes) !== requirements.runtime_receipt_sha256
+          || digest(modelsBytes) !== requirements.model_sets_descriptor_sha256 || digest(localModelsBytes) !== requirements.model_descriptor_sha256
+          || !modelsBytes.equals(localModelsBytes)) return unavailable;
+        const descriptor = core.parseCanonicalJson(descriptorBytes, 256 * 1024);
+        const receipt = core.parseCanonicalJson(receiptBytes, 16 * 1024 * 1024);
+        if (descriptor.schema !== 'voice-agent.bundled-runtime.v1' || descriptor.platform !== core.SUPPORTED_PLATFORM
+          || descriptor.application_protocol !== 1 || descriptor.python.version !== '3.12.13' || descriptor.cuda.runtime !== 'cuda-12.9'
+          || descriptor.libc.family !== 'glibc' || descriptor.libc.minimum !== '2.28'
+          || receipt.schema !== 'voice-agent.runtime-bundle.v1' || receipt.source.sha256.length !== 64 || receipt.test_only === true
+          || manifest.application_protocol.minimum > 1 || manifest.application_protocol.maximum < 1) return unavailable;
+        core.loadAssetCache(api).validateModelSets(modelSets, release.assets);
+        if (core.canonicalJson(modelSets) !== modelsBytes.toString('utf8')) return unavailable;
+        const cache = core.loadAssetCache(api);
+        if (modelSets.sets.some((set) => !cache.verifyViewUnchecked(layout, set))) return unavailable;
+        const manifestFiles = new Map(manifest.entries.filter((item) => item.type === 'file').map((item) => [item.path, item]));
+        if (!Array.isArray(receipt.files) || receipt.files.length < 3 || receipt.files.some((item) => {
+          const entry = manifestFiles.get(`runtime/${item.path}`); return !entry || entry.sha256 !== item.sha256 || entry.size !== item.size || entry.mode !== item.mode;
+        })) return unavailable;
+        const declaredRuntime = new Set(receipt.files.map((item) => `runtime/${item.path}`));
+        if ([...manifestFiles.keys()].some((name) => name.startsWith('runtime/') && !declaredRuntime.has(name)) || [...manifestFiles.keys()].some((name) => name.startsWith('runtime/node/'))) return unavailable;
+        for (const item of receipt.files) {
+          const filename = path.join(candidateRoot, 'runtime', ...item.path.split('/'));
+          const metadata = inspectManagedPath(filename, layout.identity.uid, Number.parseInt(item.mode, 8), 'file');
+          if (!metadata || metadata.nlink !== 1 || metadata.size !== item.size || digest(core.readOwnedRegular(filename, layout.identity.uid, [Number.parseInt(item.mode, 8)], item.size)) !== item.sha256) return unavailable;
+        }
+        const glibc = process.report && process.report.getReport().header.glibcVersionRuntime;
+        if (typeof glibc !== 'string' || glibc.split('.').map(Number)[0] !== 2 || Number(glibc.split('.')[1]) < 28) return unavailable;
+        return { ...unavailable, assets: { ...requirements, model_available: true, runtime_available: true, runtime_compatible: true } };
+      } catch { return unavailable; }
     }
   }
 
@@ -716,10 +802,10 @@ agent_environment:
 
   api = {
     AGENT_CONFIG, AGENT_IMAGE, AGENT_SPEC_DIGEST, FREE_SPACE_RESERVE, MINIMUM_VRAM, REQUIRED_COMPONENTS, SERVICE_UNIT, STARTUP_DEADLINE_MS,
-    UNIT_CONTRACT, UNIT_CONTRACT_SHA256, artifactPreflight, atomicWrite, compatibilityPreflight, defaultDependencies,
+    UNIT_CONTRACT, UNIT_CONTRACT_SHA256, SystemHost, artifactPreflight, atomicWrite, compatibilityPreflight, defaultDependencies,
     ensurePrivateDirectory, extractVerifiedArchive, hostPreflight, installContractSchemaNames, installDirectories,
-    installVoiceAgent, inspectManagedPath, layoutFor, readPrivateJson, renderAgentConfig, renderUnit, safeDefaults, syncDirectory,
-    validateReadiness, verifyExtractedTree, writeJson,
+    installVoiceAgent, inspectManagedPath, layoutFor, loadModelSets, modelDescriptorsForRelease, readPrivateJson, renderAgentConfig, renderUnit, safeDefaults, syncDirectory,
+    validateReadiness, verifyExtractedTree, writeJson, writeRuntimeConfig,
   };
   return api;
 };

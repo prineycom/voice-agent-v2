@@ -10,12 +10,14 @@ const archive = require('./archive.cjs');
 const core = require('../launcher/voice-agent.cjs');
 const installer = require('../launcher/install.cjs')(core);
 const sourceModule = require('../launcher/release-source.cjs')(core);
+const runtimeAssembler = require('./runtime-assembler.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const PLATFORM = 'linux-x86_64-nvidia';
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
+const BUILDER_IMAGE = /^docker\.io\/nvidia\/cuda@sha256:[0-9a-f]{64}$/;
 const SAFE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*[\\\0])[\x20-\x7e]{1,1024}$/;
 
 class ReleaseError extends Error { constructor(code, message) { super(message); this.code = code; } }
@@ -58,7 +60,8 @@ function cleanRelative(value) {
 }
 
 function validateRuntimeReceipt(document, root, production = true) {
-  exactKeys(document, ['architecture', 'components', 'cuda', 'elf', 'files', 'libc', 'platform', 'python', 'schema', 'source', 'test_only'], 'runtime_receipt_invalid');
+  exactKeys(document, ['architecture', 'builder', 'components', 'cuda', 'elf', 'files', 'libc', 'platform', 'python', 'schema', 'source', 'test_only'], 'runtime_receipt_invalid');
+  exactKeys(document.builder, ['image', 'manifest_digest'], 'runtime_receipt_invalid');
   exactKeys(document.libc, ['family', 'minimum'], 'runtime_receipt_invalid');
   exactKeys(document.cuda, ['minimum_driver', 'runtime'], 'runtime_receipt_invalid');
   exactKeys(document.python, ['version'], 'runtime_receipt_invalid');
@@ -66,7 +69,8 @@ function validateRuntimeReceipt(document, root, production = true) {
   if (document.schema !== 'voice-agent.runtime-bundle.v1' || document.platform !== PLATFORM || document.architecture !== 'x86_64'
     || document.libc.family !== 'glibc' || !/^2\.[0-9]+$/.test(document.libc.minimum)
     || !/^[0-9]+(?:\.[0-9]+){1,2}$/.test(document.cuda.minimum_driver) || document.cuda.runtime !== 'cuda-12.9'
-    || document.python.version !== '3.12.13'
+    || document.python.version !== '3.12.13' || !BUILDER_IMAGE.test(document.builder.image)
+    || document.builder.manifest_digest !== document.builder.image.slice(document.builder.image.indexOf('@') + 1)
     || typeof document.test_only !== 'boolean' || !SHA256.test(document.source.sha256)
     || document.source.distribution_scope !== 'private-personal-noncommercial') fail('runtime_receipt_invalid', 'runtime platform identity is invalid');
   for (const name of ['immutable_url', 'license_evidence_url']) sourceModule.parseHttpsUrl(document.source[name], 'runtime_receipt_invalid');
@@ -80,7 +84,7 @@ function validateRuntimeReceipt(document, root, production = true) {
       || typeof component.license !== 'string' || !component.license || !SHA256.test(component.sha256) || !Number.isSafeInteger(component.size) || component.size < 1) fail('runtime_receipt_invalid', 'runtime component receipt is invalid');
     componentNames.add(component.name);
   }
-  if (!Array.isArray(document.files) || document.files.length < 2 || document.files.length > 20000) fail('runtime_receipt_invalid', 'runtime inventory count is invalid');
+  if (!Array.isArray(document.files) || document.files.length < 2 || document.files.length > 100000) fail('runtime_receipt_invalid', 'runtime inventory count is invalid');
   const expected = new Map();
   for (const item of document.files) {
     exactKeys(item, ['mode', 'path', 'sha256', 'size'], 'runtime_receipt_invalid');
@@ -90,14 +94,18 @@ function validateRuntimeReceipt(document, root, production = true) {
   }
   for (const required of ['python/bin/python3', 'livekit/bin/livekit-server', 'llama/bin/llama-server']) if (!expected.has(required) || expected.get(required).mode !== '0555') fail('runtime_receipt_invalid', 'runtime bundle lacks an exact executable production component');
   if (!Array.isArray(document.elf) || document.elf.length < 3 || document.elf.length > document.files.length) fail('runtime_receipt_invalid', 'ELF closure receipt is invalid');
-  const elfPaths = new Set();
+  const elfPaths = new Set(); const providedLibraries = new Set();
   for (const item of document.elf) {
-    exactKeys(item, ['needed', 'path', 'runpath', 'soname'], 'runtime_receipt_invalid');
-    if (!expected.has(item.path) || elfPaths.has(item.path) || !Array.isArray(item.needed) || item.needed.some((name) => typeof name !== 'string' || !name)
-      || typeof item.runpath !== 'string' || (item.runpath && !item.runpath.split(':').every((entry) => entry.startsWith('$ORIGIN')))
-      || (item.soname !== null && (typeof item.soname !== 'string' || !item.soname))) fail('runtime_receipt_invalid', 'ELF closure entry is invalid');
-    elfPaths.add(item.path);
+    exactKeys(item, ['needed', 'path', 'required_glibc', 'runpath', 'soname', 'uses_libcuda'], 'runtime_receipt_invalid');
+    if (!expected.has(item.path) || elfPaths.has(item.path) || !Array.isArray(item.needed) || item.needed.some((name) => typeof name !== 'string' || !/^[A-Za-z0-9_.+-]{1,255}$/.test(name))
+      || typeof item.runpath !== 'string' || (item.runpath && !item.runpath.split(':').every((entry) => entry === '$ORIGIN' || entry.startsWith('$ORIGIN/')))
+      || (item.soname !== null && (typeof item.soname !== 'string' || !item.soname)) || typeof item.uses_libcuda !== 'boolean'
+      || (item.required_glibc !== null && !/^2\.[0-9]+$/.test(item.required_glibc)) || (item.required_glibc && Number(item.required_glibc.split('.')[1]) > 28)
+      || item.uses_libcuda !== item.needed.includes('libcuda.so.1')) fail('runtime_receipt_invalid', 'ELF closure entry is invalid');
+    elfPaths.add(item.path); providedLibraries.add(path.basename(item.path)); if (item.soname) providedLibraries.add(item.soname);
   }
+  const hostLibraries = new Set(['linux-vdso.so.1', 'ld-linux-x86-64.so.2', 'libc.so.6', 'libm.so.6', 'libpthread.so.0', 'libdl.so.2', 'librt.so.1', 'libutil.so.1', 'libresolv.so.2', 'libcuda.so.1']);
+  for (const item of document.elf) for (const needed of item.needed) if (!providedLibraries.has(needed) && !hostLibraries.has(needed)) fail('runtime_elf_unresolved', 'ELF dependency escaped the closed runtime and documented host boundary');
   const observed = [];
   function walk(directory, prefix = '') {
     for (const name of fs.readdirSync(directory).sort()) {
@@ -123,7 +131,8 @@ function validateRuntimeInputAuthority(document) {
   const wheelhouse = JSON.parse(fs.readFileSync(path.join(ROOT, 'release', 'inputs', 'python-wheelhouse.v1.json')));
   const sources = JSON.parse(fs.readFileSync(path.join(ROOT, 'release', 'inputs', 'runtime-sources.v1.json')));
   if (wheelhouse.schema !== 'voice-agent.python-wheelhouse.v1' || wheelhouse.python !== '3.12.13' || !Array.isArray(wheelhouse.wheels)
-    || sources.schema !== 'voice-agent.runtime-sources.v1' || sources.node_in_application_runtime !== false || !Array.isArray(sources.inputs)) fail('runtime_input_authority_invalid', 'committed runtime input authority is invalid');
+    || sources.schema !== 'voice-agent.runtime-sources.v1' || sources.node_in_application_runtime !== false || !Array.isArray(sources.inputs)
+    || !sources.builder || document.builder.image !== sources.builder.image || document.builder.manifest_digest !== sources.builder.manifest_digest) fail('runtime_input_authority_invalid', 'committed runtime input authority is invalid');
   const components = new Map(document.components.map((item) => [item.sha256, item]));
   for (const item of wheelhouse.wheels) {
     const observed = components.get(item.sha256);
@@ -245,14 +254,39 @@ function assembleFromTree(options) {
   return { artifactName, channel, manifest, provenance, sbom };
 }
 
-function buildRuntimeTree(runtimeRoot, runtimeReceipt, webRoot) {
+function modelSetsForAssets(assets) {
+  const authority = JSON.parse(fs.readFileSync(path.join(ROOT, 'release', 'inputs', 'model-assets.v1.json')));
+  exactKeys(authority, ['distribution_scope', 'platform', 'schema', 'sets'], 'model_asset_authority_invalid');
+  if (authority.schema !== 'voice-agent.model-assets.v1' || authority.platform !== PLATFORM || authority.distribution_scope !== 'private-personal-noncommercial'
+    || !Array.isArray(authority.sets) || authority.sets.length !== 4) fail('model_asset_authority_invalid', 'committed model set authority is invalid');
+  const descriptors = new Map(assets.map((item) => [item.id, item]));
+  const sets = authority.sets.map((set) => {
+    exactKeys(set, ['aggregate_sha256', 'files', 'id', 'kind', 'license', 'license_evidence_url'], 'model_asset_authority_invalid');
+    const files = set.files.map((file) => {
+      exactKeys(file, ['asset_id', 'relative_path', 'sha256', 'size', 'url'], 'model_asset_authority_invalid');
+      const descriptor = descriptors.get(file.asset_id);
+      if (!descriptor || descriptor.kind !== 'model' || descriptor.reachability !== 'required' || descriptor.sha256 !== file.sha256 || descriptor.size !== file.size) fail('model_asset_authority_invalid', 'signed candidate model asset differs from the closed committed set');
+      return { asset_id: file.asset_id, relative_path: file.relative_path, sha256: file.sha256, size: file.size };
+    });
+    const hash = crypto.createHash('sha256'); for (const file of [...files].sort((a, b) => a.relative_path.localeCompare(b.relative_path))) hash.update(Buffer.from(`${file.relative_path}\0${file.size}\0${file.sha256}\n`));
+    if (hash.digest('hex') !== set.aggregate_sha256) fail('model_asset_authority_invalid', 'committed model aggregate differs');
+    return { aggregate_sha256: set.aggregate_sha256, files, id: set.id, kind: set.kind };
+  });
+  const document = { schema: 'voice-agent.model-sets.v1', sets };
+  core.loadAssetCache(installer).validateModelSets(document, assets);
+  return document;
+}
+
+function buildRuntimeTree(runtimeRoot, runtimeReceipt, webRoot, modelSets = null) {
   const tree = new Map();
   for (const item of runtimeReceipt.files) addTreeFile(tree, `runtime/${item.path}`, fs.readFileSync(path.join(runtimeRoot, ...item.path.split('/'))), item.mode);
   const productionExcluded = new Set(['src/voice_agent_v2/operations.py', 'src/voice_agent_v2/operations_cli.py', 'src/voice_agent_v2/local_tts.py', 'src/voice_agent_v2/cloud_llm.py']);
-  for (const relative of git('ls-files', 'src/voice_agent_v2', 'scripts/run_slice6.py', 'scripts/silero_kseniya_worker.py', 'benchmarks/slice2/runners/faster_whisper_runner.py', 'benchmarks/slice2/runners/__init__.py', 'benchmarks/slice2/__init__.py', 'benchmarks/__init__.py', 'config', 'LICENSE', 'THIRD_PARTY_NOTICES.md').split('\n').filter(Boolean)) {
-    if (productionExcluded.has(relative)) continue;
+  const productionConfig = new Set(['config/agent-capabilities-v1.json', 'config/silero-kseniya-tts-v1.json']);
+  for (const relative of git('ls-files', 'src/voice_agent_v2', 'scripts/run_slice6.py', 'scripts/silero_kseniya_worker.py', 'config', 'LICENSE', 'THIRD_PARTY_NOTICES.md').split('\n').filter(Boolean)) {
+    if (productionExcluded.has(relative) || relative.startsWith('config/') && !productionConfig.has(relative)) continue;
     addTreeFile(tree, `app/${relative}`, fs.readFileSync(path.join(ROOT, relative)), '0444');
   }
+  if (!tree.has('app/src/voice_agent_v2/faster_whisper_runner.py')) fail('runtime_source_incomplete', 'production source closure lacks its STT runner');
   function copyWeb(directory, prefix = 'web') {
     for (const name of fs.readdirSync(directory).sort()) {
       const filename = path.join(directory, name); const relative = `${prefix}/${name}`; const metadata = fs.lstatSync(filename);
@@ -262,10 +296,14 @@ function buildRuntimeTree(runtimeRoot, runtimeReceipt, webRoot) {
     }
   }
   copyWeb(webRoot);
-  const wrapper = Buffer.from('#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\n: "${XDG_CACHE_HOME:=$HOME/.cache}"\n: "${XDG_STATE_HOME:=$HOME/.local/state}"\nexport VOICE_AGENT_RELEASE_ROOT="$HERE"\nexport VOICE_AGENT_ASSET_ROOT="$XDG_CACHE_HOME/voice-agent"\nexport VOICE_AGENT_RUNTIME_ROOT="$XDG_STATE_HOME/voice-agent/runtime"\nexec "$HERE/runtime/python/bin/python3" -I -B "$HERE/app/scripts/run_slice6.py" "$@"\n');
+  const wrapper = Buffer.from('#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\n: "${XDG_CONFIG_HOME:=$HOME/.config}"\nexport VOICE_AGENT_RUNTIME_CONFIG="$XDG_CONFIG_HOME/voice-agent/runtime.json"\nexec "$HERE/runtime/python/bin/python3" -I -B "$HERE/app/scripts/run_slice6.py" "$@"\n');
   addTreeFile(tree, 'bin/voice-agent-runtime', wrapper, '0555');
-  addTreeFile(tree, 'descriptors/local-models.json', fs.readFileSync(path.join(ROOT, 'config/local-lfm-v1.json')), '0444');
-  addTreeFile(tree, 'descriptors/runtime.json', Buffer.from(canonical({ cuda: runtimeReceipt.cuda, libc: runtimeReceipt.libc, platform: PLATFORM, python: runtimeReceipt.python, schema: 'voice-agent.bundled-runtime.v1' })), '0444');
+  const closedModels = modelSets || { schema: 'voice-agent.model-sets.v1', sets: [] };
+  addTreeFile(tree, 'descriptors/local-models.json', Buffer.from(canonical(closedModels)), '0444');
+  addTreeFile(tree, 'descriptors/model-sets.json', Buffer.from(canonical(closedModels)), '0444');
+  addTreeFile(tree, 'descriptors/runtime-receipt.json', Buffer.from(canonical(runtimeReceipt)), '0444');
+  addTreeFile(tree, 'descriptors/runtime.json', Buffer.from(canonical({ application_protocol: 1, cuda: runtimeReceipt.cuda, libc: runtimeReceipt.libc, platform: PLATFORM, python: runtimeReceipt.python, schema: 'voice-agent.bundled-runtime.v1' })), '0444');
+  addTreeFile(tree, 'descriptors/runtime-config-template.json', Buffer.from(canonical({ application_protocol: 1, executables: { livekit: 'runtime/livekit/bin/livekit-server', llama: 'runtime/llama/bin/llama-server', python: 'runtime/python/bin/python3' }, model_sets: Object.fromEntries(closedModels.sets.map((set) => [set.kind, set.aggregate_sha256])), mutable_paths: { agent_data: 'xdg-data/agent-environment', logs: 'xdg-state/logs', state: 'xdg-state/runtime', temp: 'xdg-runtime/service' }, schema: 'voice-agent.runtime-config-template.v1', web: 'web' })), '0444');
   addTreeFile(tree, 'descriptors/service-compatibility.json', Buffer.from(canonical({ application_protocol: { maximum: 1, minimum: 1 }, config_schema: { maximum: 2, minimum: 2 }, data_schema: { maximum: 2, minimum: 2 }, launcher_protocol: { maximum: 1, minimum: 1 }, schema: 'voice-agent.service-compatibility.v1', service_template_sha256: installer.UNIT_CONTRACT_SHA256 })), '0444');
   return tree;
 }
@@ -285,7 +323,9 @@ function runtimeReceiptCommand(values) {
           elfMachine(filename); const dynamic = run('readelf', ['-dW', filename], { code: 'runtime_elf_invalid', message: 'runtime ELF dynamic receipt is unavailable' });
           const needed = [...dynamic.matchAll(/\(NEEDED\).*\[([^\]]+)\]/g)].map((match) => match[1]).sort();
           const soname = /\(SONAME\).*\[([^\]]+)\]/.exec(dynamic); const runpath = /\((?:RUNPATH|RPATH)\).*\[([^\]]*)\]/.exec(dynamic);
-          elf.push({ needed, path: relative, runpath: runpath ? runpath[1] : '', soname: soname ? soname[1] : null });
+          const versions = run('readelf', ['--version-info', '-W', filename], { code: 'runtime_elf_invalid', message: 'runtime ELF version receipt is unavailable' });
+          const glibc = [...versions.matchAll(/GLIBC_2\.([0-9]+)/g)].map((match) => Number(match[1])); const requiredGlibc = glibc.length ? `2.${Math.max(...glibc)}` : null;
+          elf.push({ needed, path: relative, required_glibc: requiredGlibc, runpath: runpath ? runpath[1] : '', soname: soname ? soname[1] : null, uses_libcuda: needed.includes('libcuda.so.1') });
         }
       } else fail('runtime_receipt_invalid', 'runtime tree contains a link or special file');
     }
@@ -295,7 +335,7 @@ function runtimeReceiptCommand(values) {
   const wheelhouse = JSON.parse(fs.readFileSync(path.join(ROOT, 'release', 'inputs', 'python-wheelhouse.v1.json'))); const sources = JSON.parse(fs.readFileSync(path.join(ROOT, 'release', 'inputs', 'runtime-sources.v1.json')));
   const components = [...wheelhouse.wheels.map((item) => ({ download_url: item.url, license: item.license || 'NOASSERTION', name: item.name, sha256: item.sha256, size: item.size, version: item.version })),
     ...sources.inputs.filter((item) => item.purpose !== 'web-and-sea-build-only').map((item) => ({ download_url: item.url, license: item.license, name: item.name, sha256: item.sha256, size: item.size, version: item.version }))];
-  const document = { architecture: 'x86_64', components, cuda: { minimum_driver: '575.51.03', runtime: 'cuda-12.9' }, elf, files, libc: { family: 'glibc', minimum: '2.28' }, platform: PLATFORM,
+  const document = { architecture: 'x86_64', builder: { image: sources.builder.image, manifest_digest: sources.builder.manifest_digest }, components, cuda: { minimum_driver: '575.51.03', runtime: 'cuda-12.9' }, elf, files, libc: { family: 'glibc', minimum: '2.28' }, platform: PLATFORM,
     python: { version: '3.12.13' }, schema: 'voice-agent.runtime-bundle.v1', source: { distribution_scope: 'private-personal-noncommercial', immutable_url: `https://github.com/prineycom/voice-agent-v2/tree/${commit}/release/inputs`, license_evidence_url: `https://github.com/prineycom/voice-agent-v2/blob/${commit}/THIRD_PARTY_NOTICES.md`, sha256: hash.digest('hex') }, test_only: false };
   validateRuntimeReceipt(document, root, true); validateRuntimeInputAuthority(document); writeCanonical(values.output, document); return { files: files.length, elf: elf.length, runtime_sha256: document.source.sha256 };
 }
@@ -309,6 +349,7 @@ function parseInput(filename) {
     || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.json$/.test(input.github_channel_path)) fail('release_input_invalid', 'private GitHub identity is invalid');
   sourceModule.parseHttpsUrl(input.artifact_base_url, 'release_input_invalid');
   core.loadAssetCache(installer).validateDescriptors(input.assets);
+  modelSetsForAssets(input.assets);
   if (!Array.isArray(input.asset_evidence) || input.asset_evidence.length !== input.assets.length) fail('asset_evidence_missing', 'every external asset requires one source/license receipt');
   const evidence = new Map();
   for (const item of input.asset_evidence) {
@@ -340,9 +381,9 @@ function candidateCommand(values) {
       compatibility: { maximum_application_protocol: 1, maximum_launcher_protocol: input.launcher_protocol, minimum_application_protocol: 1, minimum_launcher_protocol: input.launcher_protocol },
       digest: `sha256:${launcherSha}`, id: `launcher-${input.launcher_version.replaceAll('.', '-')}`, kind: 'launcher', license: { acceptance: 'not_required', id: 'Voice-Agent-Launcher' },
       platform: PLATFORM, reachability: 'required', required_free_space_reserve: 0, sha256: launcherSha, size: launcherBytes.length, url: launcherUrl });
-    run('npm', ['ci', '--offline', '--ignore-scripts'], { cwd: path.join(ROOT, 'web'), code: 'web_dependency_unavailable', message: 'exact locked web dependencies are unavailable offline' });
-    run('npm', ['run', 'build:production-only'], { cwd: path.join(ROOT, 'web'), env: { ...process.env, VITE_APP_VERSION: commit }, code: 'web_build_failed', message: 'production web build failed' });
-    const tree = buildRuntimeTree(values.runtimeRoot, runtimeReceipt, path.join(ROOT, 'web/dist'));
+    const webRoot = path.resolve(values.webRoot); regularFile(path.join(webRoot, 'index.html'), 16 * 1024 * 1024);
+    const modelSets = modelSetsForAssets(input.assets);
+    const tree = buildRuntimeTree(values.runtimeRoot, runtimeReceipt, webRoot, modelSets);
     addTreeFile(tree, 'descriptors/asset-evidence.json', Buffer.from(canonical({ assets: input.asset_evidence, schema: 'voice-agent.asset-source-evidence.v1' })), '0444');
     const result = assembleFromTree({ output: values.output, tree, version: input.version, commit, timestamp: input.generated_at, expiresAt: input.expires_at, sequence: input.sequence, assets: input.assets,
       artifactUrl: `${input.artifact_base_url}/voice-agent-${input.version}-linux-x86_64-nvidia.tar.zst`, sourceReceipt: runtimeReceipt, platformContract: input.platform_contract, launcher: launcherDescriptor, emitChannel: false });
@@ -577,23 +618,41 @@ function publish(values) {
   finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 }
 
+async function assembleRuntimeCommand(values) {
+  const commit = requireCleanCurrentCommit();
+  const assembled = await runtimeAssembler.assemble(values, { root: ROOT });
+  const receiptPath = path.join(assembled.output, 'runtime-receipt.json');
+  const result = runtimeReceiptCommand({ runtimeRoot: path.join(assembled.output, 'runtime'), sourceCommit: commit, output: receiptPath });
+  const web = []; const webRoot = path.join(assembled.output, 'web');
+  function walk(directory, prefix = '') { for (const name of fs.readdirSync(directory).sort()) { const filename = path.join(directory, name); const relative = prefix ? `${prefix}/${name}` : name; const metadata = fs.lstatSync(filename); if (metadata.isDirectory() && !metadata.isSymbolicLink()) walk(filename, relative); else if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1) { const bytes = fs.readFileSync(filename); pathLeakScan(bytes); web.push({ path: relative, sha256: sha256(bytes), size: bytes.length }); } else fail('web_output_invalid', 'static web output contains a link or special file'); } }
+  walk(webRoot); if (!web.some((item) => item.path === 'index.html') || web.some((item) => item.path.includes('node_modules'))) fail('web_output_invalid', 'static web closure is incomplete or contains Node');
+  const document = { schema: 'voice-agent.runtime-assembly.v1', builder_image: assembled.authority.sources.builder.image, inputs: assembled.authority.inputs.map((item) => ({ sha256: item.sha256, size: item.size })).sort((a, b) => a.sha256.localeCompare(b.sha256)), runtime_receipt_sha256: sha256(fs.readFileSync(receiptPath)), source_commit: commit, web };
+  writeCanonical(path.join(assembled.output, 'assembly-receipt.json'), document, 0o444);
+  if (values.compareWith) {
+    const prior = readCanonical(path.join(path.resolve(values.compareWith), 'assembly-receipt.json'), 16 * 1024 * 1024);
+    if (canonical(prior) !== canonical(document)) fail('runtime_reproducibility_mismatch', 'isolated runtime assembly receipts differ');
+  }
+  return { ...result, builder_image: document.builder_image, web_files: web.length, assembly_receipt_sha256: sha256(Buffer.from(canonical(document))) };
+}
+
 function args(argv) {
   const command = argv.shift(); const values = {};
-  while (argv.length) { const name = argv.shift(); if (!name.startsWith('--')) fail('usage', 'invalid release option'); if (name === '--dry-run') values.dryRun = true; else { if (!argv.length) fail('usage', 'release option value is missing'); values[name.slice(2).replace(/-([a-z])/g, (_, value) => value.toUpperCase())] = argv.shift(); } }
+  while (argv.length) { const name = argv.shift(); if (!name.startsWith('--')) fail('usage', 'invalid release option'); if (name === '--dry-run') values.dryRun = true; else if (name === '--fetch') values.fetch = true; else { if (!argv.length) fail('usage', 'release option value is missing'); values[name.slice(2).replace(/-([a-z])/g, (_, value) => value.toUpperCase())] = argv.shift(); } }
   return { command, values };
 }
 function required(values, names) { for (const name of names) if (!values[name]) fail('usage', `--${name.replace(/[A-Z]/g, (v) => `-${v.toLowerCase()}`)} is required`); }
-function main(argv = process.argv.slice(2)) {
+async function main(argv = process.argv.slice(2)) {
   try {
     const parsed = args([...argv]); let result;
-    if (parsed.command === 'candidate') { required(parsed.values, ['input', 'runtimeRoot', 'runtimeReceipt', 'publicKey', 'output']); result = candidateCommand(parsed.values); }
+    if (parsed.command === 'candidate') { required(parsed.values, ['input', 'runtimeRoot', 'runtimeReceipt', 'webRoot', 'publicKey', 'output']); result = candidateCommand(parsed.values); }
+    else if (parsed.command === 'assemble-runtime') { required(parsed.values, ['cache', 'output']); result = await assembleRuntimeCommand(parsed.values); }
     else if (parsed.command === 'runtime-receipt') { required(parsed.values, ['runtimeRoot', 'sourceCommit', 'output']); result = runtimeReceiptCommand(parsed.values); }
     else if (parsed.command === 'publish-assets') { required(parsed.values, ['candidate', 'repository', 'assetMap', 'confirm']); if (!parsed.values.dryRun) required(parsed.values, ['output']); result = publishAssets(parsed.values); }
     else if (parsed.command === 'verify') { required(parsed.values, ['candidate']); result = verifyCandidate(parsed.values.candidate); }
     else if (parsed.command === 'finalize-channel') { required(parsed.values, ['candidate', 'assetReceipt', 'repository']); result = finalizeChannel(parsed.values); }
     else if (parsed.command === 'sign-channel') { required(parsed.values, ['channel', 'privateKey', 'output']); result = signChannel(parsed.values); }
     else if (parsed.command === 'publish') { required(parsed.values, ['candidate', 'repository', 'publicKey', 'confirm']); result = publish(parsed.values); }
-    else fail('usage', 'expected runtime-receipt, candidate, verify, publish-assets, finalize-channel, sign-channel, or publish');
+    else fail('usage', 'expected assemble-runtime, runtime-receipt, candidate, verify, publish-assets, finalize-channel, sign-channel, or publish');
     process.stdout.write(`${canonical({ state: parsed.values.dryRun ? 'dry_run' : 'ok', ...result })}\n`); return 0;
   } catch (reason) {
     const code = reason instanceof ReleaseError ? reason.code : 'release_failed';
@@ -601,5 +660,5 @@ function main(argv = process.argv.slice(2)) {
   }
 }
 
-module.exports = { ReleaseError, assembleFromTree, buildRuntimeTree, candidateCommand, createSpdx, finalizeChannel, main, pathLeakScan, publicationPlan, publish, publishAssets, publishWithRemote, runtimeReceiptCommand, signChannel, validateExactDependencies, validateLocks, validateRuntimeInputAuthority, validateRuntimeReceipt, validateSourceState, validateSpdx, verifyCandidate };
-if (require.main === module) process.exitCode = main();
+module.exports = { ReleaseError, assembleFromTree, assembleRuntimeCommand, buildRuntimeTree, candidateCommand, createSpdx, finalizeChannel, main, modelSetsForAssets, pathLeakScan, publicationPlan, publish, publishAssets, publishWithRemote, runtimeReceiptCommand, signChannel, validateExactDependencies, validateLocks, validateRuntimeInputAuthority, validateRuntimeReceipt, validateSourceState, validateSpdx, verifyCandidate };
+if (require.main === module) main().then((code) => { process.exitCode = code; }, () => { process.stderr.write('release_failed: command failed safely\n'); process.exitCode = 2; });

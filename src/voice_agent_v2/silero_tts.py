@@ -26,19 +26,26 @@ from .v2_contracts import (
     pcm_duration_ms_matches_samples,
 )
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
+from .runtime_config import load_production_runtime_config
 from .tracer import CancellationToken
 from .tts_text import SHAPING_VERSION, shape_russian_tts
 
 ROOT = Path(__file__).resolve().parents[2]
-_RELEASE_ROOT = os.environ.get("VOICE_AGENT_RELEASE_ROOT")
-_ASSET_ROOT = Path(os.environ.get("VOICE_AGENT_ASSET_ROOT", str(Path.home() / ".cache" / "voice-agent")))
-_PRODUCTION_RUNTIME_ROOT = Path(os.environ.get("VOICE_AGENT_RUNTIME_ROOT", str(Path.home() / ".local" / "state" / "voice-agent" / "runtime")))
+_RUNTIME_CONFIG = load_production_runtime_config()
+_PRODUCTION = _RUNTIME_CONFIG is not None
+_RELEASE_ROOT = _RUNTIME_CONFIG["release_root"] if _PRODUCTION else None
 MANIFEST_PATH = ROOT / "config" / "silero-kseniya-tts-v1.json"
-CACHE_ROOT = _ASSET_ROOT if _RELEASE_ROOT else Path.home() / ".cache" / "voice-agent-v2" / "experiments" / "silero-baya-tts"
-MODEL_PATH = _ASSET_ROOT / "models" / "sha256" / "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437" if _RELEASE_ROOT else CACHE_ROOT / "downloads" / "v5_5_ru.pt"
-PYTHON_PATH = Path(_RELEASE_ROOT) / "runtime" / "python" / "bin" / "python3" if _RELEASE_ROOT else CACHE_ROOT / "venv" / "bin" / "python"
+if _PRODUCTION:
+    CACHE_ROOT = _RUNTIME_CONFIG["paths"]["state"]
+    MODEL_PATH = _RUNTIME_CONFIG["models"]["tts"] / "v5_5_ru.pt"
+    PYTHON_PATH = _RUNTIME_CONFIG["executables"]["python"]
+    DEFAULT_RUNTIME_ROOT = _RUNTIME_CONFIG["paths"]["state"] / "tts"
+else:
+    CACHE_ROOT = Path.home() / ".cache" / "voice-agent-v2" / "experiments" / "silero-baya-tts"
+    MODEL_PATH = CACHE_ROOT / "downloads" / "v5_5_ru.pt"
+    PYTHON_PATH = CACHE_ROOT / "venv" / "bin" / "python"
+    DEFAULT_RUNTIME_ROOT = Path.home() / ".cache" / "voice-agent-v2" / "experiments" / "silero-kseniya-48k-ship"
 WORKER_SCRIPT = ROOT / "scripts" / "silero_kseniya_worker.py"
-DEFAULT_RUNTIME_ROOT = _PRODUCTION_RUNTIME_ROOT / "tts" if _RELEASE_ROOT else Path.home() / ".cache" / "voice-agent-v2" / "experiments" / "silero-kseniya-48k-ship"
 MODEL_IDENTITY = "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru"
 MODEL_SIZE = 145_420_684
 MODEL_SHA256 = "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437"
@@ -182,14 +189,14 @@ def verify_silero_runtime() -> dict[str, object]:
     ):
         raise StageFailure("tts", "silero_manifest_mismatch")
     checks = [(MODEL_PATH, MODEL_SIZE, MODEL_SHA256, "silero_model_mismatch")]
-    if not _RELEASE_ROOT:
+    if not _PRODUCTION:
         checks.append((PYTHON_PATH.resolve(), None, PYTHON_SHA256, "silero_python_mismatch"))
     for path, expected_size, expected_hash, code in tuple(checks):
         if not path.is_file() or (expected_size is not None and path.stat().st_size != expected_size):
             raise StageFailure("tts", code)
         if _sha256(path) != expected_hash:
             raise StageFailure("tts", code)
-    torch_root = (Path(_RELEASE_ROOT) / "runtime" / "python" if _RELEASE_ROOT else CACHE_ROOT / "venv") / "lib" / "python3.12" / "site-packages" / "torch"
+    torch_root = (_RELEASE_ROOT / "runtime" / "python" if _PRODUCTION else CACHE_ROOT / "venv") / "lib" / "python3.12" / "site-packages" / "torch"
     torch_c = tuple(torch_root.glob("_C.cpython-312-*-linux-gnu.so"))
     libtorch_cpu = torch_root / "lib" / "libtorch_cpu.so"
     if len(torch_c) != 1 or _sha256(torch_c[0]) != TORCH_C_SHA256:

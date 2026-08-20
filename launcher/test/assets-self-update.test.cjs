@@ -10,6 +10,7 @@ const core = require('../voice-agent.cjs');
 const installer = require('../install.cjs')(core);
 const cache = require('../asset-cache.cjs')(core, installer);
 const selfUpdate = require('../self-update.cjs')(core, installer);
+const fixture = require('./artifact-fixture.cjs');
 const UID = process.geteuid();
 const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const exists = (filename) => { try { fs.lstatSync(filename); return true; } catch { return false; } };
@@ -102,6 +103,42 @@ test('offline acquisition uses only exact verified complete cache and optional i
   assert.equal(result.optional_agent_environment_image, 'stale_spec');
   const missing = descriptor('runtime', Buffer.from('missing'));
   await code('offline_material_insufficient', () => cache.reconcile(value.layout, [model, missing], '4'.repeat(32), null, { offline: true }));
+});
+
+test('model views materialize atomically, recover owned partials, converge after a race, and reject tamper or extras', async (context) => {
+  const value = harness(context); const closed = fixture.closedFixture(core, 'views'); const owner = 'a'.repeat(32);
+  for (const item of closed.assets.filter((entry) => entry.kind === 'model')) {
+    await finish(value.layout, item, owner, exactSource(closed.assetContents.get(item.id)));
+  }
+  const interrupted = closed.modelSets.sets[0];
+  const interruptedStage = path.join(value.layout.modelViews, `.stage-${interrupted.aggregate_sha256}.${owner}`);
+  fs.mkdirSync(interruptedStage, { mode: 0o700 }); fs.writeFileSync(path.join(interruptedStage, interrupted.files[0].relative_path), closed.assetContents.get(interrupted.files[0].asset_id), { mode: 0o400 });
+  const first = cache.materializeViews(value.layout, closed.modelSets, closed.assets, owner);
+  assert.deepEqual(Object.keys(first.roots).sort(), ['llm', 'stt', 'tts', 'vad']);
+  assert.equal(exists(interruptedStage), false);
+  const raced = cache.materializeViews(value.layout, closed.modelSets, closed.assets, 'b'.repeat(32));
+  assert.equal(raced.outcomes.every((item) => item.state === 'existing_verified'), true);
+
+  const llm = closed.modelSets.sets.find((set) => set.kind === 'llm'); const llmRoot = cache.viewPath(value.layout, llm);
+  const extra = path.join(llmRoot, 'unexpected'); fs.writeFileSync(extra, 'x', { mode: 0o400 }); fs.chmodSync(extra, 0o400);
+  assert.throws(() => cache.verifyViewUnchecked(value.layout, llm), (reason) => reason.code === 'model_view_invalid'); fs.unlinkSync(extra);
+  const model = path.join(llmRoot, llm.files[0].relative_path); fs.chmodSync(model, 0o600); fs.writeFileSync(model, Buffer.alloc(llm.files[0].size, 0x78)); fs.chmodSync(model, 0o400);
+  assert.throws(() => cache.verifyViewUnchecked(value.layout, llm));
+});
+
+test('model view cleanup retains active and rollback aggregates and refuses attacker-created partial links', async (context) => {
+  const value = harness(context); const closed = fixture.closedFixture(core, 'view-gc'); const owner = 'c'.repeat(32);
+  for (const item of closed.assets.filter((entry) => entry.kind === 'model')) await finish(value.layout, item, owner, exactSource(closed.assetContents.get(item.id)));
+  cache.materializeViews(value.layout, closed.modelSets, closed.assets, owner);
+  const keep = closed.modelSets.sets.slice(0, 2).map((set) => set.aggregate_sha256);
+  const collected = cache.collectViews(value.layout, keep);
+  assert.equal(collected.count, 2);
+  for (const set of closed.modelSets.sets.slice(0, 2)) assert.equal(cache.verifyViewUnchecked(value.layout, set), true);
+
+  const victim = path.join(value.parent, 'outside'); fs.mkdirSync(victim, { mode: 0o700 }); fs.writeFileSync(path.join(victim, 'keep'), 'keep');
+  const stage = path.join(value.layout.modelViews, `.stage-${'d'.repeat(64)}.${'e'.repeat(32)}`); fs.symlinkSync(victim, stage);
+  assert.throws(() => cache.collectViewPartials(value.layout, new Set()), (reason) => reason.code === 'path_custody_invalid');
+  assert.equal(fs.readFileSync(path.join(victim, 'keep'), 'utf8'), 'keep');
 });
 
 test('partial and LRU GC remove only exact unreferenced reconstructible owned bytes and revalidate references', async (context) => {

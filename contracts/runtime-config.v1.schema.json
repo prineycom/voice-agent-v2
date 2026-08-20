@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/runtime-config.v1.schema.json",
+  "oneOf": [
+    {"$ref": "#/$defs/template"},
+    {"$ref": "#/$defs/generated"}
+  ],
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]*$"},
+    "template": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "application_protocol", "executables", "model_sets", "mutable_paths", "web"],
+      "properties": {
+        "schema": {"const": "voice-agent.runtime-config-template.v1"}, "application_protocol": {"const": 1},
+        "executables": {"type": "object", "additionalProperties": false, "required": ["python", "livekit", "llama"], "properties": {"python": {"const": "runtime/python/bin/python3"}, "livekit": {"const": "runtime/livekit/bin/livekit-server"}, "llama": {"const": "runtime/llama/bin/llama-server"}}},
+        "model_sets": {"type": "object", "additionalProperties": false, "required": ["stt", "llm", "tts", "vad"], "properties": {"stt": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "llm": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "tts": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "vad": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "mutable_paths": {"type": "object", "additionalProperties": false, "required": ["agent_data", "logs", "state", "temp"], "properties": {"agent_data": {"const": "xdg-data/agent-environment"}, "logs": {"const": "xdg-state/logs"}, "state": {"const": "xdg-state/runtime"}, "temp": {"const": "xdg-runtime/service"}}},
+        "web": {"const": "web"}
+      }
+    },
+    "generated": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "application_protocol", "release_root", "executables", "models", "paths"],
+      "properties": {
+        "schema": {"const": "voice-agent.runtime-config.v1"}, "application_protocol": {"const": 1}, "release_root": {"$ref": "#/$defs/absolutePath"},
+        "executables": {"type": "object", "additionalProperties": false, "required": ["python", "livekit", "llama"], "properties": {"python": {"$ref": "#/$defs/absolutePath"}, "livekit": {"$ref": "#/$defs/absolutePath"}, "llama": {"$ref": "#/$defs/absolutePath"}}},
+        "models": {"type": "object", "additionalProperties": false, "required": ["stt", "llm", "tts", "vad"], "properties": {"stt": {"$ref": "#/$defs/absolutePath"}, "llm": {"$ref": "#/$defs/absolutePath"}, "tts": {"$ref": "#/$defs/absolutePath"}, "vad": {"$ref": "#/$defs/absolutePath"}}},
+        "paths": {"type": "object", "additionalProperties": false, "required": ["agent_data", "logs", "state", "temp", "web"], "properties": {"agent_data": {"$ref": "#/$defs/absolutePath"}, "logs": {"$ref": "#/$defs/absolutePath"}, "state": {"$ref": "#/$defs/absolutePath"}, "temp": {"$ref": "#/$defs/absolutePath"}, "web": {"$ref": "#/$defs/absolutePath"}}}
+      }
+    }
+  }
+}

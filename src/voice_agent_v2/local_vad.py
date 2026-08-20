@@ -11,15 +11,18 @@ import os
 import sys
 from typing import Callable, Protocol
 
+from .runtime_config import load_production_runtime_config
+
 SAMPLE_RATE_HZ = 16_000
 SAMPLE_WIDTH_BYTES = 2
 SILERO_WINDOW_SAMPLES = 512
 SILERO_CONTEXT_SAMPLES = 64
 SILERO_MODEL_SHA256 = "4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2"
 SILERO_MODEL_SIZE = 1_245_151
+_RUNTIME_CONFIG = load_production_runtime_config()
 DEFAULT_MODEL_PATH = (
-    Path(os.environ["VOICE_AGENT_ASSET_ROOT"]) / "models" / "sha256" / SILERO_MODEL_SHA256
-    if os.environ.get("VOICE_AGENT_RELEASE_ROOT") and os.environ.get("VOICE_AGENT_ASSET_ROOT")
+    _RUNTIME_CONFIG["models"]["vad"] / "silero_vad_v6.onnx"
+    if _RUNTIME_CONFIG is not None
     else Path.home() / ".cache" / "voice-agent-v2" / "slice-6" / "models" / "silero-vad-v6.onnx"
 )
 

@@ -36,6 +36,7 @@ from .local_stt import WhisperSTT
 from .real_turn import RealTurnController
 from .silero_tts import SileroKseniyaTTS, SileroVoiceProfile
 from .local_vad import SileroOnnxModel, SileroSpeechEndpoint
+from .runtime_config import load_production_runtime_config
 from .observability import ComponentHealth, HealthReport, ResourceSampler
 from .realtime import (
     CLIENT_CONTROL_TOPIC,
@@ -53,7 +54,12 @@ AUDIO_FRAME_BYTES = OUTPUT_FRAME_BYTES
 AUDIO_QUEUE_MS = 100
 BROWSER_CONTROL_QUEUE_SIZE = 32
 MAX_SESSION_OBSERVATIONS = 128
-TRACE_ROOT = Path.home() / ".cache/voice-agent-v2/slice-6/diagnostics"
+_RUNTIME_CONFIG = load_production_runtime_config()
+TRACE_ROOT = (
+    _RUNTIME_CONFIG["paths"]["logs"] / "diagnostics"
+    if _RUNTIME_CONFIG is not None
+    else Path.home() / ".cache/voice-agent-v2/slice-6/diagnostics"
+)
 OPERATIONAL_PROBE_TIMEOUT_SECONDS = 0.1
 OPERATIONAL_PROBE_BODY_LIMIT_BYTES = 4_096
 LOCAL_LFM_HOST = "127.0.0.1"
@@ -125,11 +131,12 @@ class LiveTurnRunner:
         del settings
         runtime = agent_runtime or AgentRuntime.startup()
         if runtime.config is not None and runtime.config.model.agent.enabled:
-            home = AgentUserContext.effective().home
-            self.llm = AgentRunProvider(
-                runtime.config,
-                installation_root=home / ".cache" / "voice-agent-v2" / "agent-environment",
+            installation_root = (
+                _RUNTIME_CONFIG["paths"]["agent_data"]
+                if _RUNTIME_CONFIG is not None
+                else AgentUserContext.effective().home / ".cache" / "voice-agent-v2" / "agent-environment"
             )
+            self.llm = AgentRunProvider(runtime.config, installation_root=installation_root)
         else:
             # Configuration failure disables tools only; ordinary voice stays on
             # the exact same local provider with no fallback.

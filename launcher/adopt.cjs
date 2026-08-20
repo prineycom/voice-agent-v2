@@ -248,8 +248,9 @@ module.exports = function createAdopter(core, installer, updater) {
     const requirements = installer.artifactPreflight(manifest, release, acquired.archiveEntries, acquired.manifestBytes);
     const facts = await dependencies.host.inspectCompatibility({ release, manifest, requirements, layout });
     const payload = manifest.entries.reduce((total, entry) => total + (entry.type === 'file' ? entry.size : 0), 0);
-    installer.compatibilityPreflight(facts, requirements, installer.FREE_SPACE_RESERVE + release.artifact_bytes + payload);
-    return { channel, release, acquired, manifest, signed, authoritySha256 };
+    const requiredBytes = installer.FREE_SPACE_RESERVE + release.artifact_bytes + payload + release.assets.filter((item) => item.reachability === 'required' && item.kind !== 'agent_environment_image').reduce((total, item) => total + item.size, 0);
+    if (!Number.isSafeInteger(facts.free_bytes) || facts.free_bytes < requiredBytes) error('insufficient_space', 'legacy adoption lacks space for the verified candidate and retained prior release');
+    return { channel, release, acquired, manifest, requirements, requiredBytes, signed, authoritySha256 };
   }
 
   async function stageCandidate(layout, candidate, dependencies) {
@@ -411,8 +412,15 @@ module.exports = function createAdopter(core, installer, updater) {
         const programDescriptor = cache.programDescriptor(acquired.release); let programOutcome;
         do { programOutcome = await cache.acquire(layout, programDescriptor, journal.id, dependencies.source, { applicationProtocol: 1 }); } while (programOutcome.state === 'partial');
         if (digest(core.readOwnedRegular(cache.cachePath(layout, programDescriptor), layout.identity.uid, [0o400], acquired.release.artifact_bytes)) !== acquired.release.artifact_sha256) error('artifact_cache_invalid', 'cached program artifact digest differs');
-        candidate = await stageCandidate(layout, acquired, dependencies); fault(dependencies, 'action', 'candidate_staged'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { candidate_staged: true } });
+        candidate = await stageCandidate(layout, acquired, dependencies);
+        const modelSets = installer.loadModelSets(candidate.root, acquired.release, layout.identity.uid);
+        cache.materializeViews(layout, modelSets, acquired.release.assets, journal.id);
+        const closureFacts = await dependencies.host.inspectCompatibility({ release: acquired.release, manifest: acquired.manifest, requirements: acquired.requirements, layout, candidateRoot: candidate.root, modelSets });
+        installer.compatibilityPreflight(closureFacts, acquired.requirements, acquired.requiredBytes);
+        fault(dependencies, 'action', 'candidate_staged'); journal = writeJournal(layout, journal, journal.phase, dependencies, { receipts: { candidate_staged: true } });
       }
+      const candidateModelSets = installer.loadModelSets(candidate.root, acquired ? acquired.release : candidate.record, layout.identity.uid);
+      core.loadAssetCache(installer).materializeViews(layout, candidateModelSets, installer.modelDescriptorsForRelease(candidateModelSets, acquired ? acquired.release : candidate.record), journal.id);
       if (!journal.receipts.user_service_prepared) {
         const unitBytes = installer.renderUnit(layout, candidate.root);
         const unitExact = exists(layout.unit) && core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024).equals(unitBytes);
@@ -444,7 +452,9 @@ module.exports = function createAdopter(core, installer, updater) {
         journal = writeJournal(layout, journal, 'legacy_stopped', dependencies, { receipts: { legacy_stopped: true } });
       }
       if (!journal.receipts.candidate_activated) {
-        atomicPointer(layout, layout.current, candidate.id, journal.id); fault(dependencies, 'action', 'candidate_activated');
+        atomicPointer(layout, layout.current, candidate.id, journal.id);
+        installer.writeRuntimeConfig(layout, candidate.root, candidateModelSets);
+        fault(dependencies, 'action', 'candidate_activated');
         journal = writeJournal(layout, journal, 'legacy_stopped', dependencies, { receipts: { candidate_activated: true } });
       }
       if (!journal.receipts.candidate_started) {

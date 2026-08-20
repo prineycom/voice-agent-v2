@@ -12,26 +12,13 @@ const installer = require('../install.cjs')(launcher);
 const updater = require('../update.cjs')(launcher, installer);
 const archive = require('../../release/archive.cjs');
 const releaseSource = require('../release-source.cjs')(launcher);
+const fixture = require('./artifact-fixture.cjs');
 const UID = process.geteuid();
 const NOW = new Date('2026-08-21T00:00:00Z');
 
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 function exists(filename) { try { fs.lstatSync(filename); return true; } catch { return false; } }
 function code(expected, action) { return assert.rejects(action, (reason) => reason && reason.code === expected); }
-function assetDescriptor(id, kind, bytes, overrides = {}) {
-  const sha256 = hash(bytes);
-  const image = kind === 'agent_environment_image';
-  return {
-    authority: { origin: 'https://assets.example.invalid', path_prefix: '/voice-agent/' },
-    compatibility: { minimum_launcher_protocol: 1, maximum_launcher_protocol: 1, minimum_application_protocol: 1, maximum_application_protocol: 1 },
-    digest: `sha256:${sha256}`, id, kind, license: { id: image ? 'OCI-fixture' : 'Fixture-Test-Only', acceptance: 'accepted' },
-    platform: launcher.SUPPORTED_PLATFORM, reachability: image ? 'optional' : 'required', required_free_space_reserve: 1024,
-    sha256, size: bytes.length,
-    url: image ? `https://assets.example.invalid/voice-agent/images/environment@sha256:${sha256}` : `https://assets.example.invalid/voice-agent/${kind}/${sha256}`,
-    ...overrides,
-  };
-}
-
 function migration(overrides) {
   const value = { id: 'config-v2-v3', from: 2, to: 3, scope: 'config', operation: 'schema-version', reversible: true, destructive: false, product_choice: false, ...overrides };
   value.sha256 = hash(Buffer.from(launcher.canonicalJson(value)));
@@ -40,18 +27,10 @@ function migration(overrides) {
 
 function artifact(version, sequence, options = {}) {
   const configSchema = options.configSchema || 2;
-  const contents = new Map([
-    ['bin/voice-agent-runtime', Buffer.from('#!/bin/sh\nexit 0\n')],
-    ['descriptors/local-models.json', Buffer.from('{"models":"exact"}')],
-    ['descriptors/runtime.json', Buffer.from('{"runtime":"exact"}')],
-  ]);
+  const closed = fixture.closedFixture(launcher, `update-${version.replaceAll('.', '-')}`);
+  const contents = closed.contents;
   if (options.migrations) contents.set('descriptors/config-migrations.json', Buffer.from(launcher.canonicalJson({ schema: 'voice-agent.config-migrations.v1', migrations: options.migrations })));
-  const entries = [
-    { path: 'bin', type: 'directory', mode: '0555', size: 0, sha256: null, target: null },
-    { path: 'bin/voice-agent-runtime', type: 'file', mode: '0555', size: contents.get('bin/voice-agent-runtime').length, sha256: hash(contents.get('bin/voice-agent-runtime')), target: null },
-    { path: 'descriptors', type: 'directory', mode: '0555', size: 0, sha256: null, target: null },
-    ...[...contents.entries()].filter(([name]) => name.startsWith('descriptors/')).map(([name, bytes]) => ({ path: name, type: 'file', mode: '0444', size: bytes.length, sha256: hash(bytes), target: null })),
-  ];
+  const entries = fixture.entriesFor(contents);
   const manifest = {
     application_protocol: { minimum: 1, maximum: 1 }, build_id: hash(Buffer.from(`build-${version}`)).slice(0, 40),
     config_schema: { minimum: configSchema, maximum: configSchema }, data_schema: { minimum: 2, maximum: 2 }, entries,
@@ -63,12 +42,8 @@ function artifact(version, sequence, options = {}) {
     { path: 'release-manifest.json', type: 'file', mode: '0444', bytes: manifestBytes, target: null },
     ...entries.map((entry) => ({ ...entry, bytes: entry.type === 'file' ? contents.get(entry.path) : Buffer.alloc(0) })),
   ], 1787184000);
-  const assetContents = new Map([
-    ['model', Buffer.from(`model-${version}`)], ['runtime', Buffer.from(`runtime-${version}`)], ['agent_environment_image', Buffer.from(`image-${version}`)],
-  ]);
-  const assets = [assetDescriptor(`model-${version.replaceAll('.', '-')}`, 'model', assetContents.get('model')),
-    assetDescriptor(`runtime-${version.replaceAll('.', '-')}`, 'runtime', assetContents.get('runtime')),
-    assetDescriptor(`environment-${version.replaceAll('.', '-')}`, 'agent_environment_image', assetContents.get('agent_environment_image'))];
+  const assetContents = closed.assetContents;
+  const assets = closed.assets;
   const release = {
     artifact_bytes: artifactBytes.length, artifact_sha256: hash(artifactBytes), artifact_url: `https://releases.example.invalid/${version}.tar.zst`, assets,
     build_id: manifest.build_id, launcher: options.launcher || null, manifest_sha256: hash(manifestBytes), maximum_data_schema: 2, minimum_data_schema: 2,
@@ -82,7 +57,7 @@ function artifact(version, sequence, options = {}) {
     signatureBytes: Buffer.from(`${crypto.sign(null, channelBytes, keys.privateKey).toString('base64')}\n`),
     publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }),
     archiveEntries: [{ path: 'release-manifest.json', type: 'file', mode: '0444', size: manifestBytes.length, sha256: hash(manifestBytes), target: null }, ...entries],
-    readEntry: async (name) => contents.get(name),
+    readEntry: async (name) => contents.get(name), bytesForDescriptor: closed.bytesForDescriptor, modelSets: closed.modelSets,
   };
 }
 
@@ -160,7 +135,7 @@ function harness(options = {}) {
     },
     acquireArtifact: async (release, request = {}) => ({ artifactBytes: sourceArtifact.artifactBytes, ...releaseSource.indexArchive(sourceArtifact.artifactBytes), cached: request.offline === true, url: release.artifact_url }),
     downloadAsset: async ({ descriptor, offset }) => {
-      const bytes = (descriptor.kind === 'program' ? sourceArtifact.artifactBytes : sourceArtifact.assetContents.get(descriptor.kind)).subarray(offset);
+      const bytes = sourceArtifact.bytesForDescriptor(descriptor, sourceArtifact.artifactBytes).subarray(offset);
       return { status: offset ? 206 : 200, bytes, validator: `fixture-${descriptor.sha256}`, content_range: offset ? `bytes ${offset}-${descriptor.size - 1}/${descriptor.size}` : null, redirected: false, url: descriptor.url };
     },
   };
@@ -179,6 +154,15 @@ function harness(options = {}) {
   function cleanup(context) { context.after(() => { function writable(file) { if (!exists(file)) return; const meta = fs.lstatSync(file); if (meta.isSymbolicLink()) return; if (meta.isDirectory()) { fs.chmodSync(file, 0o700); for (const name of fs.readdirSync(file)) writable(path.join(file, name)); } else fs.chmodSync(file, 0o600); } writable(parent); fs.rmSync(parent, { recursive: true, force: true }); }); }
   return { parent, identity, initial, candidate, dependencies, layout, calls, lines, seed, update, cleanup, setSource(value) { sourceArtifact = value; }, setFailureVersions(values) { failVersions.clear(); for (const value of values) failVersions.add(value); }, resetStopMarker() { stoppedOnce = false; } };
 }
+
+function removeModelViews(layout, releaseArtifact) {
+  for (const set of releaseArtifact.modelSets.sets) {
+    const root = path.join(layout.modelViews, set.aggregate_sha256);
+    if (exists(root)) fs.rmSync(root, { recursive: true });
+  }
+}
+
+function runtimeConfig(layout) { return JSON.parse(fs.readFileSync(layout.runtimeConfig, 'utf8')); }
 
 function cacheChannel(value, source, sequence = 10, expiresAt = '2026-09-20T00:00:00Z') {
   installer.writeJson(value.layout.channelReceipt, { schema: 'voice-agent.cached-channel.v1', channel_base64: source.channelBytes.toString('base64'), signature_base64: source.signatureBytes.toString('base64'), public_key_base64: Buffer.from(source.publicKeyPem).toString('base64'), authority_sha256: hash(Buffer.from(source.publicKeyPem)), sequence, expires_at: expiresAt, verified_at: '2026-08-21T00:00:00Z' }, UID);
@@ -202,10 +186,13 @@ test('canonical update stages fully, quiesces once, proves exact candidate, comm
 test('candidate failure automatically restores exact prior release/config/unit and returns failed-safe; double failure retains recovery material', async (context) => {
   const safe = harness({ candidateFailure: true }); safe.cleanup(context); await safe.seed();
   const beforeConfig = fs.readFileSync(path.join(safe.layout.config, 'config.yaml'));
+  removeModelViews(safe.layout, safe.initial);
   await code('update_failed_safe', () => safe.update());
   assert.match(fs.readlinkSync(safe.layout.current), /1\.0\.0-/);
   for (const item of safe.candidate.release.assets.filter((asset) => asset.reachability === 'required')) assert.equal(launcher.loadAssetCache(installer).verifyCached(safe.layout, item), true);
   assert.deepEqual(fs.readFileSync(path.join(safe.layout.config, 'config.yaml')), beforeConfig);
+  assert.match(runtimeConfig(safe.layout).release_root, /1\.0\.0-/);
+  for (const root of Object.values(runtimeConfig(safe.layout).models)) assert.equal(exists(root), true);
   assert.equal(exists(safe.layout.updateJournal), false);
 
   const broken = harness({ candidateFailure: true, priorFailureAfterStop: true }); broken.cleanup(context); await broken.seed();
@@ -379,12 +366,15 @@ test('reachability GC refuses unsafe/unowned targets without deleting user/confi
 test('recorded-prior-only rollback revalidates, swaps active and rollback, and retains displaced newer release', async (context) => {
   const value = harness(); value.cleanup(context); await value.seed();
   const updated = await value.update();
+  removeModelViews(value.layout, value.initial);
   const result = await updater.rollbackVoiceAgent({ testMode: true, dependencies: value.dependencies });
   assert.equal(result.state, 'rolled_back_healthy');
   assert.match(fs.readlinkSync(value.layout.current), /1\.0\.0-/);
   assert.equal(fs.readlinkSync(value.layout.rollback), `releases/${updated.release_id}`);
   assert.equal(fs.readdirSync(value.layout.releases).length, 2);
   assert.equal(exists(value.layout.updateJournal), false);
+  assert.match(runtimeConfig(value.layout).release_root, /1\.0\.0-/);
+  for (const root of Object.values(runtimeConfig(value.layout).models)) assert.equal(exists(root), true);
   const lifecycle = JSON.parse(fs.readFileSync(value.layout.lifecycleResult));
   assert.deepEqual({ operation: lifecycle.operation, state: lifecycle.state, recovery_required: lifecycle.recovery_required }, { operation: 'rollback', state: 'rolled_back_healthy', recovery_required: false });
 });

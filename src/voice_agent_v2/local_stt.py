@@ -9,17 +9,24 @@ import time
 import wave
 
 from .contracts import AudioFormat, STT_VERSION, StageFailure, valid_correlation_id
+from .runtime_config import load_production_runtime_config
 from .v2_audio import INPUT_AUDIO_FORMAT
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 
-_RELEASE_ROOT = os.environ.get("VOICE_AGENT_RELEASE_ROOT")
-_ASSET_ROOT = Path(os.environ.get("VOICE_AGENT_ASSET_ROOT", str(Path.home() / ".cache" / "voice-agent")))
-_PRODUCTION_RUNTIME_ROOT = Path(os.environ.get("VOICE_AGENT_RUNTIME_ROOT", str(Path.home() / ".local" / "state" / "voice-agent" / "runtime")))
-CACHE = _ASSET_ROOT if _RELEASE_ROOT else Path.home() / ".cache" / "voice-agent-v2" / "slice-2"
-MODEL = _PRODUCTION_RUNTIME_ROOT / "stt-model" if _RELEASE_ROOT else CACHE / "artifacts" / "stt-whisper-large-v3-turbo"
-VENV = Path(_RELEASE_ROOT) / "runtime" / "python" if _RELEASE_ROOT else CACHE / "runtime" / "stt-tts-venv"
-_TASK_RUNTIME_ROOT = os.environ.get("VOICE_AGENT_TASK_RUNTIME_ROOT") or (str(_PRODUCTION_RUNTIME_ROOT) if _RELEASE_ROOT else None)
+_RUNTIME_CONFIG = load_production_runtime_config()
+_PRODUCTION = _RUNTIME_CONFIG is not None
+if _PRODUCTION:
+    CACHE = _RUNTIME_CONFIG["paths"]["state"]
+    MODEL = _RUNTIME_CONFIG["models"]["stt"]
+    VENV = _RUNTIME_CONFIG["release_root"] / "runtime" / "python"
+    _PRODUCTION_RUNTIME_ROOT = _RUNTIME_CONFIG["paths"]["state"]
+else:
+    CACHE = Path.home() / ".cache" / "voice-agent-v2" / "slice-2"
+    MODEL = CACHE / "artifacts" / "stt-whisper-large-v3-turbo"
+    VENV = CACHE / "runtime" / "stt-tts-venv"
+    _PRODUCTION_RUNTIME_ROOT = CACHE / "runtime"
+_TASK_RUNTIME_ROOT = os.environ.get("VOICE_AGENT_TASK_RUNTIME_ROOT") or (str(_PRODUCTION_RUNTIME_ROOT) if _PRODUCTION else None)
 TEMP = (
     Path(_TASK_RUNTIME_ROOT) / "stt-temp"
     if _TASK_RUNTIME_ROOT
@@ -62,12 +69,12 @@ def _cleanup_temporary_audio(path: Path) -> None:
 
 
 def _environment() -> dict[str, str]:
-    packages = VENV / "lib" / ("python3.12" if _RELEASE_ROOT else "python3.14") / "site-packages"
+    packages = VENV / "lib" / ("python3.12" if _PRODUCTION else "python3.14") / "site-packages"
     libraries = [packages / "nvidia" / name / "lib" for name in ("cublas", "cudnn", "cuda_nvrtc")]
     return {
         "HOME": str(Path(_TASK_RUNTIME_ROOT) / "stt-home") if _TASK_RUNTIME_ROOT else str(CACHE / "home"),
         "XDG_CACHE_HOME": str(Path(_TASK_RUNTIME_ROOT) / "stt-xdg") if _TASK_RUNTIME_ROOT else str(CACHE / "xdg"),
-        "HF_HOME": str(CACHE / "huggingface"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+        "HF_HOME": str(Path(_TASK_RUNTIME_ROOT) / "huggingface" if _TASK_RUNTIME_ROOT else CACHE / "huggingface"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
         "PYTHONPYCACHEPREFIX": str(
             Path(_TASK_RUNTIME_ROOT) / "stt-pycache"
@@ -128,7 +135,7 @@ class WhisperSTT:
                 raise StageFailure("stt", "selected_stt_cancelled")
             return dict(self.ready_metadata or {})
         command = [
-            str(VENV / "bin" / ("python3" if _RELEASE_ROOT else "python")), "-m", "benchmarks.slice2.runners.faster_whisper_runner",
+            str(VENV / "bin" / ("python3" if _PRODUCTION else "python")), "-m", "voice_agent_v2.faster_whisper_runner",
             "--model", str(MODEL), "--device", "cuda", "--compute-type", "float16",
         ]
         log = LOGS / f"whisper-{time.monotonic_ns()}.stderr.log"

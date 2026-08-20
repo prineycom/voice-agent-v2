@@ -19,6 +19,7 @@ HERMETIC_OWNERS = (
     "tests.test_tracer",
     "tests.test_local_lfm",
     "tests.test_local_vad.SileroSpeechEndpointTests",
+    "tests.test_runtime_config",
     "tests.test_silero_tts",
     "tests.test_slice6_realtime",
     "tests.test_slice6_livekit_runtime",

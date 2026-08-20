@@ -112,6 +112,7 @@ def main() -> int:
                 str(ROOT / "launcher/test/launcher.test.cjs"),
                 str(ROOT / "launcher/test/release-source.test.cjs"),
                 str(ROOT / "release/release.test.cjs"),
+                str(ROOT / "release/runtime-assembler.test.cjs"),
                 str(ROOT / "launcher/test/install.test.cjs"),
                 str(ROOT / "launcher/test/update.test.cjs"),
                 str(ROOT / "launcher/test/adopt.test.cjs"),
