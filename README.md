@@ -55,15 +55,22 @@ Initialize the operator-owned state once. It creates external mutable state unde
 ./stand deploy dev <remote-branch|tag|40-lowercase-sha>
 # The exact local committed-SHA path remains development-only:
 ./stand deploy dev --local /path/to/voice-agent-v2 <40-lowercase-committed-sha>
+./stand start main
+./stand start dev
+./stand stop main
+./stand stop dev
 ./stand status main
 ./stand status dev
 ./stand logs main
 ./stand logs dev
+./stand list
 ```
 
 Main deployment accepts only one explicit exact tag matching `vMAJOR.MINOR.PATCH`; it never accepts a branch, SHA, malformed/tag-qualified ref, omitted version, or implicit latest selection. The remote tag is peeled to one full commit SHA and its first observed target is stored durably outside Git. A later different target for that tag is refused. Dev remote deployment continues to accept one explicit permitted branch, tag, or full SHA. Both paths build only the resolved commit's `git archive` snapshot, with no `.git`; the temporary release contains the production frontend build, a per-release Python environment from `requirements-stand-production.lock`, and a manifest before atomic promotion. A completed release for the same SHA is reused. Frontend `node_modules` are removed after a successful build and releases are never deleted automatically. A fetch, resolution, build, or manifest failure leaves completed releases and the target instance's `current` pointer unchanged.
 
-Before activation, deployment validates the target release, strict external configuration, isolated listener/credential contract, and exact launcher environment; failure preserves the prior `current` pointer. It then explicitly switches only that instance and starts only `voice-agent-v2@<instance>.service`. A post-switch readiness failure intentionally leaves the bad SHA selected and visible as `not-ready` for diagnosis. Main rollback is the same deliberate command with an older already accepted tag, for example `./stand deploy main v1.2.3`; there is no automatic latest selection, automatic rollback, or hidden pointer restoration. Status and logs include the requested instance and exact selected commit and query only its systemd unit. The launcher exports `VOICE_AGENT_INSTANCE_ROOT` and fail-closed explicit listener/path values before starting a complete LLM, LiveKit, gateway, STT, and two-worker TTS stack. Runtime process-tree RSS/count measurements are written to that unit's journal with `shared_inference=false`. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell. Later lifecycle completion remains separately scoped.
+Before activation, deployment validates the target release, strict external configuration, isolated listener/credential contract, and exact launcher environment; failure preserves the prior `current` pointer. It then switches only that instance and restarts its unit only when that unit was running before deployment. A stopped stand remains stopped. A post-switch readiness failure intentionally leaves the bad SHA selected and visible as `not-ready` for diagnosis. Main rollback is the same deliberate command with an older already accepted tag, for example `./stand deploy main v1.2.3`; there is no automatic latest selection, automatic rollback, or hidden pointer restoration.
+
+`stand start <instance>` enables the template unit, enables linger for the current user, clears an operator-recoverable failed state, and starts the selected release. `stand stop <instance>` disables and stops the unit, then stops the exact registered instance container without removing it or any data, rootfs, credentials, workspace, release, or instance state. `status` reports exact version, lifecycle state, persistence, and readiness; `list` inventories both instances; `logs` reads only the requested unit from journald. The same-user template explicitly requires and follows the rootless user `docker.service`. Its sole foreground launcher owns the complete LLM, LiveKit, gateway, STT, and two-worker TTS child tree and readiness. Expected configuration exits are not restarted, while runtime exits receive at most the unit's bounded quick-failure restart allowance before a visible `failed` state. Runtime process-tree RSS/count measurements remain in that unit's journal with `shared_inference=false`. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell.
 
 The narrow immutable-release check remains available without the test runtime:
 
