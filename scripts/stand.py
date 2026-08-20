@@ -16,6 +16,7 @@ from voice_agent_v2.stand_dev import (  # noqa: E402
     StandError,
     SystemCommandRunner,
     deploy_local_dev,
+    deploy_remote_dev,
     exec_launcher,
     initialize,
     logs,
@@ -27,7 +28,7 @@ from voice_agent_v2.stand_doctor import main as doctor_main  # noqa: E402
 
 
 def usage() -> int:
-    print("usage: stand doctor | init | deploy dev --local <repo> <committed-sha> | status dev | logs dev")
+    print("usage: stand doctor | init | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | status dev | logs dev")
     return 2
 
 
@@ -41,13 +42,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
         if arguments == ("init",):
             configured_units = os.environ.get("VOICE_AGENT_STAND_USER_UNIT_DIRECTORY")
             units = Path(configured_units).expanduser() if configured_units else DEFAULT_USER_UNIT_DIRECTORY
-            initialize(state_root=root, user_unit_directory=units, stand_executable=ROOT / "stand")
+            initialize(
+                state_root=root, user_unit_directory=units, stand_executable=ROOT / "stand",
+                controller_repository=ROOT, command=command,
+            )
             print("stand init: complete")
             return 0
         if len(arguments) == 5 and arguments[:3] == ("deploy", "dev", "--local"):
             commit = deploy_local_dev(
                 state_root=root, repository=Path(arguments[3]), commit=arguments[4], command=command,
             )
+            print(f"stand deploy dev: selected {commit}")
+            return 0
+        if len(arguments) == 3 and arguments[:2] == ("deploy", "dev"):
+            commit = deploy_remote_dev(state_root=root, ref=arguments[2], command=command)
             print(f"stand deploy dev: selected {commit}")
             return 0
         if arguments == ("status", "dev"):

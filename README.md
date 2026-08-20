@@ -47,18 +47,20 @@ It never installs packages, starts services, writes files, or changes user/syste
 
 ### Local dev release stand
 
-Initialize the operator-owned state once, then deploy an exact clean local commit. `init` creates only external mutable state under `~/.local/share/voice-agent-v2`, private `main`/`dev` mode-`0600` data-only configuration files, and the user-systemd template; it never puts stand state in this controller clone. The generated ports are explicit loopback values and must be edited deliberately, never auto-allocated.
+Initialize the operator-owned state once. It creates external mutable state under `~/.local/share/voice-agent-v2`, including one ordinary user Git clone at `source/`, private `main`/`dev` mode-`0600` data-only configuration files, and the user-systemd template. The clone uses the controller's existing `origin` and ordinary user Git authentication; the command neither creates nor stores an access token. The generated ports are explicit loopback values and must be edited deliberately, never auto-allocated.
 
 ```sh
 ./stand init
+./stand deploy dev <remote-branch|tag|40-lowercase-sha>
+# The Issue #66 local committed-SHA path remains available:
 ./stand deploy dev --local /path/to/voice-agent-v2 <40-lowercase-committed-sha>
 ./stand status dev
 ./stand logs dev
 ```
 
-The local source must be clean and the SHA must name exactly a committed revision. Deployment builds an archive-only immutable external release and atomically selects it only after construction. It then starts `voice-agent-v2@dev.service`; a setup/readiness failure leaves the selected SHA visible as `not-ready` for diagnosis rather than claiming it started. `stand logs dev` reads only that unit's user journald records. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell.
+Remote deployment fetches one permitted branch, tag, or full SHA and resolves it to one full commit SHA before construction or selection. Both paths build only that commit's `git archive` snapshot, with no `.git`; the temporary release contains the production frontend build, a per-release Python environment from `requirements-stand-production.lock`, and a manifest before atomic promotion. A completed release for the same SHA is reused. Frontend `node_modules` are removed after a successful build and releases are never deleted automatically. A fetch, resolution, build, or manifest failure leaves completed releases and `instances/dev/current` unchanged.
 
-The first path intentionally accepts only `dev --local`; remote refs, main/version selection, and later lifecycle behavior remain separately scoped.
+It then starts `voice-agent-v2@dev.service`; a setup/readiness failure leaves the selected SHA visible as `not-ready` for diagnosis rather than claiming it started. `stand logs dev` reads only that unit's user journald records. Private stand configuration is parsed as strict `KEY=VALUE` data and is never sourced by a shell. Main/version selection and later lifecycle behavior remain separately scoped.
 
 The narrow immutable-release check remains available without the test runtime:
 

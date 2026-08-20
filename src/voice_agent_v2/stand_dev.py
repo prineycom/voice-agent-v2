@@ -1,13 +1,14 @@
 """Local immutable development stand lifecycle with explicit host-command seams.
 
-This module owns only the first dev path.  It deliberately does not resolve remote
-refs, select main releases, or manage the host beyond the requested user-systemd
+This module owns the local-commit and ordinary-private-remote dev paths. It does
+not select main releases or manage the host beyond the requested user-systemd
 commands.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,9 @@ INSTANCE_NAMES = ("main", "dev")
 CONFIG_NAME = "private.env"
 UNIT_NAME = "voice-agent-v2@.service"
 SHA256_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+REMOTE_REF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+RELEASE_SCHEMA = "voice-agent-stand-release.v2"
+PRODUCTION_LOCK = "requirements-stand-production.lock"
 CONFIG_LINE = re.compile(r"([A-Z][A-Z0-9_]*)=([A-Za-z0-9._:/-]+)\Z")
 CONFIG_KEYS = frozenset({
     "STAND_NAME",
@@ -201,10 +205,16 @@ def unit_template(*, stand_executable: Path, state_root: Path) -> str:
     ))
 
 
+def controller_source_path(state_root: Path) -> Path:
+    """The one ordinary user-owned clone used for remote dev deployments."""
+    return state_root / "source"
+
+
 def initialize(
     *, state_root: Path, user_unit_directory: Path, stand_executable: Path,
+    controller_repository: Path | None = None, command: CommandRunner | None = None,
 ) -> None:
-    """Create only operator-owned mutable state outside the controller clone."""
+    """Create external state and, for the CLI, its one ordinary controller clone."""
     _mkdir_private(state_root)
     _mkdir_private(state_root / "releases")
     _mkdir_private(state_root / "instances")
@@ -215,6 +225,26 @@ def initialize(
         ):
             _mkdir_private(root / relative)
         _write_private_config(config_path(state_root, instance), _config_values(instance))
+    if controller_repository is not None:
+        if command is None:
+            raise StandError("controller clone requires the Git command boundary")
+        source = controller_source_path(state_root)
+        if source.exists():
+            _checked(command, ("git", "rev-parse", "--is-inside-work-tree"), cwd=source,
+                     failure="controller source clone is unavailable")
+        else:
+            origin = _checked(
+                command, ("git", "config", "--get", "remote.origin.url"),
+                cwd=controller_repository.resolve(),
+                failure="controller repository has no ordinary origin remote",
+            ).stdout.strip()
+            if not origin:
+                raise StandError("controller repository has no ordinary origin remote")
+            _checked(
+                command, ("git", "clone", "--no-checkout", origin, str(source)),
+                failure="ordinary controller source clone failed",
+            )
+            _mkdir_private(source)
     _mkdir_private(user_unit_directory)
     unit = user_unit_directory / UNIT_NAME
     temporary = user_unit_directory / f".{UNIT_NAME}.{uuid.uuid4().hex}.tmp"
@@ -239,8 +269,21 @@ def _release_manifest(release: Path) -> dict[str, object]:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StandError("existing release is incomplete") from error
-    if not isinstance(payload, dict) or not isinstance(payload.get("commit"), str):
+    if not isinstance(payload, dict) or not (
+        payload.get("schema") == RELEASE_SCHEMA
+        and isinstance(payload.get("commit"), str)
+        and SHA256_COMMIT.fullmatch(str(payload["commit"]))
+        and payload.get("source") == "git-archive"
+        and payload.get("frontend") == "source/web/dist"
+        and payload.get("python_environment") == "python"
+        and payload.get("python_lock") == PRODUCTION_LOCK
+        and isinstance(payload.get("python_lock_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", str(payload["python_lock_sha256"]))
+    ):
         raise StandError("existing release manifest is invalid")
+    source = release / "source"
+    if (source / ".git").exists() or not (source / "web/dist/index.html").is_file() or not (release / "python/bin/python").is_file():
+        raise StandError("existing release is incomplete")
     return payload
 
 
@@ -256,20 +299,99 @@ def _make_immutable(path: Path) -> None:
             os.chmod(entry, 0o555 if mode & 0o111 else 0o444)
 
 
-def build_local_release(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> Path:
-    """Archive a clean exact commit, then promote it only after completion."""
-    if SHA256_COMMIT.fullmatch(commit) is None:
-        raise StandError("local deployment requires one full lowercase committed SHA")
-    repository = repository.resolve()
+def _safe_remote_ref_name(name: str) -> bool:
+    return bool(
+        REMOTE_REF_NAME.fullmatch(name)
+        and "//" not in name
+        and "/./" not in name
+        and ".." not in name
+        and not name.endswith(("/", ".", ".lock"))
+        and "@{" not in name
+    )
+
+
+def _advertised_remote_ref(*, repository: Path, ref: str, command: CommandRunner) -> str:
+    """Admit one branch, tag, or full SHA without exposing Git refspec syntax."""
+    if SHA256_COMMIT.fullmatch(ref):
+        return ref
+    if ref.startswith("refs/heads/"):
+        candidates = (ref,) if _safe_remote_ref_name(ref.removeprefix("refs/heads/")) else ()
+    elif ref.startswith("refs/tags/"):
+        candidates = (ref,) if _safe_remote_ref_name(ref.removeprefix("refs/tags/")) else ()
+    elif ref.startswith("refs/") or not _safe_remote_ref_name(ref):
+        candidates = ()
+    else:
+        candidates = (f"refs/heads/{ref}", f"refs/tags/{ref}")
+    if not candidates:
+        raise StandError("remote deployment requires a permitted branch, tag, or full lowercase SHA")
+    advertised = _checked(
+        command, ("git", "ls-remote", "--refs", "origin", *candidates), cwd=repository,
+        failure="remote ref cannot be inspected",
+    ).stdout.splitlines()
+    found: list[str] = []
+    for line in advertised:
+        identity, separator, remote_name = line.partition("\t")
+        if separator and SHA256_COMMIT.fullmatch(identity) and remote_name in candidates:
+            found.append(remote_name)
+    if len(found) != 1:
+        raise StandError("remote ref is unresolved or ambiguous")
+    return found[0]
+
+
+def resolve_remote_dev_ref(*, state_root: Path, ref: str, command: CommandRunner) -> str:
+    """Fetch one permitted remote object and return only its full commit identity."""
+    source = controller_source_path(state_root)
+    _checked(command, ("git", "rev-parse", "--is-inside-work-tree"), cwd=source,
+             failure="controller source clone is unavailable")
+    requested = _advertised_remote_ref(repository=source, ref=ref, command=command)
+    _checked(command, ("git", "fetch", "--no-tags", "origin", requested), cwd=source,
+             failure="remote ref fetch failed")
     observed = _checked(
-        command, ("git", "rev-parse", "--verify", f"{commit}^{{commit}}"), cwd=repository,
-        failure="the requested local SHA is not a committed revision",
+        command, ("git", "rev-parse", "--verify", "FETCH_HEAD^{commit}"), cwd=source,
+        failure="remote ref did not resolve to a commit",
     ).stdout.strip()
-    if observed != commit:
-        raise StandError("the requested local SHA did not resolve exactly")
-    dirty = _checked(command, ("git", "status", "--porcelain"), cwd=repository, failure="local repository cannot be inspected")
-    if dirty.stdout:
-        raise StandError("local deployment refuses dirty repository changes")
+    if SHA256_COMMIT.fullmatch(observed) is None:
+        raise StandError("remote ref did not resolve to one full lowercase commit SHA")
+    return observed
+
+
+def _build_release_payload(*, stage: Path, source: Path, command: CommandRunner) -> str:
+    lock = source / PRODUCTION_LOCK
+    if not lock.is_file():
+        raise StandError("immutable release lacks the dedicated production Python lock")
+    web = source / "web"
+    if not (web / "package.json").is_file() or not (web / "package-lock.json").is_file():
+        raise StandError("immutable release lacks the production frontend lock")
+    dependencies = web / "node_modules"
+    try:
+        _checked(command, ("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"), cwd=web,
+                 failure="production frontend dependencies could not be installed")
+        _checked(command, ("npm", "run", "build:production-only"), cwd=web,
+                 failure="production frontend build failed")
+        if not (web / "dist/index.html").is_file():
+            raise StandError("production frontend build is incomplete")
+    finally:
+        if dependencies.is_symlink():
+            dependencies.unlink()
+        elif dependencies.exists():
+            shutil.rmtree(dependencies)
+    environment = stage / "python"
+    _checked(command, ("python3", "-m", "venv", str(environment)),
+             failure="production Python environment creation failed")
+    python = environment / "bin/python"
+    if not python.is_file():
+        raise StandError("production Python environment creation is incomplete")
+    _checked(
+        command, (str(python), "-m", "pip", "install", "--disable-pip-version-check", "--requirement", str(lock)),
+        cwd=source, failure="production Python dependencies could not be installed",
+    )
+    return hashlib.sha256(lock.read_bytes()).hexdigest()
+
+
+def build_release(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> Path:
+    """Build a full immutable release in a temporary directory before promotion."""
+    if SHA256_COMMIT.fullmatch(commit) is None:
+        raise StandError("release construction requires one full lowercase committed SHA")
     releases = state_root / "releases"
     release = releases / commit
     if release.exists():
@@ -287,10 +409,17 @@ def build_local_release(*, state_root: Path, repository: Path, commit: str, comm
         archive.unlink()
         if (source / ".git").exists():
             raise StandError("immutable release archive unexpectedly contains Git metadata")
-        (stage / "release.json").write_text(
-            json.dumps({"schema": "voice-agent-stand-release.v1", "commit": commit}, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        lock_digest = _build_release_payload(stage=stage, source=source, command=command)
+        try:
+            (stage / "release.json").write_text(
+                json.dumps({
+                    "schema": RELEASE_SCHEMA, "commit": commit, "source": "git-archive",
+                    "frontend": "source/web/dist", "python_environment": "python",
+                    "python_lock": PRODUCTION_LOCK, "python_lock_sha256": lock_digest,
+                }, sort_keys=True) + "\n", encoding="utf-8",
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise StandError("immutable release manifest construction failed") from error
         _make_immutable(stage)
         try:
             os.replace(stage, release)
@@ -301,6 +430,24 @@ def build_local_release(*, state_root: Path, repository: Path, commit: str, comm
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
         raise
+
+
+def build_local_release(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> Path:
+    """Preserve the issue #66 local committed-SHA admission path."""
+    if SHA256_COMMIT.fullmatch(commit) is None:
+        raise StandError("local deployment requires one full lowercase committed SHA")
+    repository = repository.resolve()
+    observed = _checked(
+        command, ("git", "rev-parse", "--verify", f"{commit}^{{commit}}"), cwd=repository,
+        failure="the requested local SHA is not a committed revision",
+    ).stdout.strip()
+    if observed != commit:
+        raise StandError("the requested local SHA did not resolve exactly")
+    dirty = _checked(command, ("git", "status", "--porcelain"), cwd=repository,
+                     failure="local repository cannot be inspected")
+    if dirty.stdout:
+        raise StandError("local deployment refuses dirty repository changes")
+    return build_release(state_root=state_root, repository=repository, commit=commit, command=command)
 
 
 def select_release(*, state_root: Path, instance: str, release: Path) -> None:
@@ -367,11 +514,11 @@ def logs(*, instance: str, command: CommandRunner) -> str:
     return result.stdout.rstrip("\n")
 
 
-def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> str:
+def _deploy_dev_release(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> str:
     values = parse_private_config(config_path(state_root, "dev"))
     if values["STAND_NAME"] != "dev":
         raise StandError("dev configuration identifies another stand")
-    release = build_local_release(state_root=state_root, repository=repository, commit=commit, command=command)
+    release = build_release(state_root=state_root, repository=repository, commit=commit, command=command)
     select_release(state_root=state_root, instance="dev", release=release)
     try:
         start(instance="dev", command=command)
@@ -379,6 +526,28 @@ def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command
         # The selected release intentionally remains visible for diagnosis.
         raise StandError(f"release selected but readiness failed: {error}") from error
     return commit
+
+
+def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command: CommandRunner) -> str:
+    """Issue #66's clean local SHA selection remains available unchanged."""
+    values = parse_private_config(config_path(state_root, "dev"))
+    if values["STAND_NAME"] != "dev":
+        raise StandError("dev configuration identifies another stand")
+    local_release = build_local_release(state_root=state_root, repository=repository, commit=commit, command=command)
+    return _deploy_dev_release(
+        state_root=state_root, repository=repository, commit=str(_release_manifest(local_release)["commit"]), command=command,
+    )
+
+
+def deploy_remote_dev(*, state_root: Path, ref: str, command: CommandRunner) -> str:
+    """Resolve remote Git state before any release construction or selection."""
+    values = parse_private_config(config_path(state_root, "dev"))
+    if values["STAND_NAME"] != "dev":
+        raise StandError("dev configuration identifies another stand")
+    commit = resolve_remote_dev_ref(state_root=state_root, ref=ref, command=command)
+    return _deploy_dev_release(
+        state_root=state_root, repository=controller_source_path(state_root), commit=commit, command=command,
+    )
 
 
 def exec_launcher(*, state_root: Path, instance: str) -> None:
