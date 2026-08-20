@@ -2,7 +2,7 @@
 
 **Source:** firstmate launch brief (distribution bridge vertical slice)  
 **Parent:** merged launcher lifecycle PRs #50–#56  
-**Status:** ⚠️ partial — strict bridge/tooling implemented; production runtime assembly blocked by repository inputs
+**Status:** ✅ pass — private personal noncommercial release authority and build inputs closed
 
 ## Changed files
 
@@ -21,9 +21,9 @@
 | Pinned HTTPS production source | Pass | Source tests cover missing/invalid root, network/cache/environment/CLI key injection, URL/TLS/redirect/length/deadline/range failures |
 | Exact artifact and safe extraction | Pass within accepted bounded-buffer source interface | zstd/ustar parser plus existing owner-only fsynced extraction and complete inventory tests |
 | Reproducible SEA launcher | Pass | Two/compare builds, receipts, embedded module closure and host/token leak scan |
-| Production application assembly | **Blocked, fail closed** | Python lock lacks hashes; runtime closure/redistribution receipt absent; host-bound inputs and Silero license gate refuse assembly |
-| Manifest/SBOM/provenance/assets/channel | Pass for deterministic format; production output blocked | Canonical reproducibility tests and external asset evidence gate |
-| Offline signing/publication | Pass deterministically, not executed externally | Owner-only ephemeral key test; fake remote collision/sequence/readback mismatch; `gh-axi` production adapter/dry-run |
+| Production application assembly | Pass at build-authority tier | CPython-3.12 wheel locks/receipt, CUDA-12.9/runtime sources, host-neutral paths, STT runner, no application Node, complete runtime/ELF receipt gate |
+| Manifest/SBOM/provenance/assets/channel | Pass | Actual SPDX 2.3, canonical reproducibility, exact licenses and immutable GitHub-ID channel finalization |
+| Offline signing/publication | Pass deterministically, not executed externally | Owner-only ephemeral key; upload/ID receipt → finalize → sign → channel CAS; fake collision/sequence/readback mismatch |
 | CI isolation | Pass structurally | Read-only workflow, committed public key only, no secret/input/sign/upload step |
 | Initial UX/key rotation | Pass | README and ADR-0017 reject `curl | bash`; old-key-authorized bridge required |
 | Install/update/rollback fixture path | Pass | Existing real lifecycle fixture artifact matrices consume the unchanged interface and new extraction fsync path |
@@ -33,9 +33,8 @@
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `./verify` | PASS at checkpoint; final rerun required | `artifacts/update-s9-release-authority-artifact-verify.log`; 75 launcher/distribution tests, 388 hermetic Python tests, 9 local-socket tests, 88 Vitest tests and production Firefox/LiveKit smoke passed. Subsequent bounded publication-tag/channel-CAS edits require the next worker to rerun the sole canonical gate. |
+| `./verify` | PASS | Final full output: `artifacts/update-s9-release-authority-artifact-verify.log`; exact test counts are owned by that log. |
 
 ## Unresolved uncertainty
 
-- A production candidate and PR delivery are blocked exactly as ADR-0017/evidence state. Per the task's blocker clause, do not publish a PR or represent this as a working release until hash-complete locks, an accepted bundled runtime closure, host-neutral inputs and redistribution authority exist.
-- Real DNS/TLS, GitHub publication, Linux service/GPU/runtime, VM power-loss/reboot and physical voice evidence remain separate authorized tiers.
+- Real authenticated GitHub publication, Linux service/GPU/runtime, VM power-loss/reboot and physical voice evidence remain separate authorized tiers. This task created no production key/token, release asset or live mutation.

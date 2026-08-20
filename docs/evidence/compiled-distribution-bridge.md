@@ -20,22 +20,24 @@ The canonical `./verify` launcher phase owns:
 
 The complete canonical output is stored in the branch artifact named by the implementation report. No production key, external URL, GitHub release, model weight, user systemd unit, Docker object, XDG installation or live stand participates.
 
-## Production assembly blocker
+## Private personal release closure
 
-A production `release-candidate candidate` invocation deliberately cannot succeed from this repository state:
+The prior production-input blocker is resolved for the accepted private personal noncommercial scope:
 
-1. `requirements-slice6.lock` pins versions but contains no exact artifact `--hash=sha256:` entries.
-2. There is no accepted complete Linux `x86_64` redistributable runtime-bundle receipt containing bundled Python, Node and all native dependency closure with exact file hashes, immutable source/license receipts, glibc/CUDA compatibility and affirmative redistribution authority.
-3. Active configuration still contains canonical-host cache locators; the release leak gate refuses them.
-4. Silero `v5_5_ru` / `kseniya` is explicitly private noncommercial evaluation-only and requires legal review before production/commercial redistribution.
+1. `requirements-release/{gateway,stt,tts}.lock` and `release/inputs/python-wheelhouse.v1.json` identify exact CPython-3.12 Linux wheels, including PyAV/FFmpeg, CUDA-12.9 and Torch CPU inputs.
+2. `release/inputs/runtime-sources.v1.json` fixes relocatable CPython 3.12.13, build-only Node 26.7.0, LiveKit 1.13.5 and llama.cpp commit `689e227…`; a candidate runtime receipt must enumerate every byte and ELF edge. Host authority is only kernel/glibc/NVIDIA driver/`libcuda.so.1`.
+3. Production code derives paths from immutable release and XDG roots. The faster-whisper runner is included and Node cannot enter the application runtime.
+4. `LICENSE`, `THIRD_PARTY_NOTICES.md` and exact asset receipts separate MIT project source from CC BY-NC-SA Kseniya and other upstream terms. Kseniya is explicit private-personal-noncommercial only.
+5. The launcher binds private GitHub API identity and a mode-`0600` token file outside release identity. One closed asset redirect strips Authorization. Two-phase publication obtains immutable numeric IDs before stable bytes are finalized and signed.
+6. Candidate SBOM output is actual SPDX 2.3 rather than a custom file using an SPDX filename.
 
-The tool therefore neither falls back to host Python/Node nor emits a stub labelled as working. Resolution requires new accepted inputs/evidence, not weakening a guard. No model weight was invented, downloaded or republished.
+No production key/token was created, no model weight was downloaded or republished, and no live installation was changed.
 
 ## Nonclaims
 
-- No working production application artifact or signed production candidate exists.
+- No production application bytes were assembled or signed in this task; the exact external runtime receipt and physical runtime proof are supplied only when an operator builds a candidate.
 - Synthetic archive bytes do not prove application startup, GPU/CUDA behavior, five-component readiness, voice, service or rollback on a physical host.
-- HTTPS logic was tested with injected responses; no live production endpoint or DNS/TLS service was contacted.
+- Private GitHub logic was tested with injected API/content/redirect/range responses; no production token or authenticated endpoint was used.
 - Offline signing tests use disposable test keys only; production key generation/storage remains an operator decision.
 - Publication tests use a fake remote boundary/dry-run only; no authentication or upload occurred.
 - VM power loss, reboot, real systemd/Docker/network, model redistribution/legal approval and physical acceptance remain pending.

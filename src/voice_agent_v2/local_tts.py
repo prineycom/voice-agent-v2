@@ -14,7 +14,7 @@ from .contracts import AudioFormat, StageFailure, TTS_VERSION, valid_correlation
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 
-CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
+CACHE = Path.home() / ".cache" / "voice-agent-v2" / "slice-2"
 VENV = CACHE / "runtime" / "qwen-tts-venv"
 RUNNER = Path(__file__).resolve().parents[2] / "benchmarks" / "slice2" / "runners" / "qwen3_tts_runner.py"
 LOGS = CACHE / "raw" / "service-logs"

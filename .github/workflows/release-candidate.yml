@@ -21,13 +21,13 @@ jobs:
         uses: actions/setup-node@v4
         timeout-minutes: 1
         with:
-          node-version: "26"
+          node-version: "26.7.0"
       - name: Build test-root launcher twice and prove reproducibility
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/voice-agent-rc"
-          common=(--public-key launcher/keys/release-fixture-ed25519-public.pem --channel-url https://releases.example.invalid/voice-agent/stable.json --launcher-version 0.8.0 --launcher-protocol 1 --source-timestamp 2026-08-20T00:00:00Z --source-commit "$(git rev-parse HEAD)")
+          common=(--public-key launcher/keys/release-fixture-ed25519-public.pem --github-repository prineycom/voice-agent-v2 --github-ref release-channel --github-channel-path stable.json --launcher-version 0.8.0 --launcher-protocol 1 --source-timestamp 2026-08-20T00:00:00Z --source-commit "$(git rev-parse HEAD)")
           launcher/build --output "$RUNNER_TEMP/voice-agent-rc/voice-agent.one" "${common[@]}"
           launcher/build --output "$RUNNER_TEMP/voice-agent-rc/voice-agent.two" "${common[@]}" --compare "$RUNNER_TEMP/voice-agent-rc/voice-agent.one"
           cmp "$RUNNER_TEMP/voice-agent-rc/voice-agent.one.provenance.json" "$RUNNER_TEMP/voice-agent-rc/voice-agent.two.provenance.json"

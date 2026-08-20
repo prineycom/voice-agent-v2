@@ -22,7 +22,7 @@ from .tracer import CancellationToken
 
 BASE_URL_ENV = "LITELLM_BASE_URL"
 ALIAS = "deepseek-v4-flash"
-TOKEN_PATH = Path("/home/priney/.cache/voice-agent-v2/slice-2/secrets/litellm.token")
+TOKEN_PATH = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "voice-agent" / "private" / "litellm.token"
 SYSTEM_PROMPT = "Отвечай по-русски, кратко, полезно и безопасно. Не раскрывай скрытые рассуждения."
 ALLOWED_BODY_FIELDS = frozenset({"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options"})
 ALLOWED_ROLES = frozenset({"system", "user", "assistant"})

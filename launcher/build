@@ -5,21 +5,25 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 NODE=${VOICE_AGENT_SEA_NODE:-node}
 OUTPUT=
 PUBLIC_KEY=
-CHANNEL_URL=
+GITHUB_REPOSITORY=
+GITHUB_REF=release-channel
+GITHUB_CHANNEL_PATH=stable.json
 LAUNCHER_VERSION=
 LAUNCHER_PROTOCOL=
 SOURCE_TIMESTAMP=
 SOURCE_COMMIT=
 COMPARE=
 usage() {
-  echo "usage: launcher/build --output PATH --public-key PATH --channel-url HTTPS_URL --launcher-version X.Y.Z --launcher-protocol N --source-timestamp RFC3339 --source-commit SHA [--compare PATH]" >&2
+  echo "usage: launcher/build --output PATH --public-key PATH --github-repository OWNER/REPO [--github-ref REF] [--github-channel-path PATH] --launcher-version X.Y.Z --launcher-protocol N --source-timestamp RFC3339 --source-commit SHA [--compare PATH]" >&2
   exit 2
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) [ "$#" -ge 2 ] || usage; OUTPUT=$2; shift 2 ;;
     --public-key) [ "$#" -ge 2 ] || usage; PUBLIC_KEY=$2; shift 2 ;;
-    --channel-url) [ "$#" -ge 2 ] || usage; CHANNEL_URL=$2; shift 2 ;;
+    --github-repository) [ "$#" -ge 2 ] || usage; GITHUB_REPOSITORY=$2; shift 2 ;;
+    --github-ref) [ "$#" -ge 2 ] || usage; GITHUB_REF=$2; shift 2 ;;
+    --github-channel-path) [ "$#" -ge 2 ] || usage; GITHUB_CHANNEL_PATH=$2; shift 2 ;;
     --launcher-version) [ "$#" -ge 2 ] || usage; LAUNCHER_VERSION=$2; shift 2 ;;
     --launcher-protocol) [ "$#" -ge 2 ] || usage; LAUNCHER_PROTOCOL=$2; shift 2 ;;
     --source-timestamp) [ "$#" -ge 2 ] || usage; SOURCE_TIMESTAMP=$2; shift 2 ;;
@@ -28,7 +32,7 @@ while [ "$#" -gt 0 ]; do
     *) usage ;;
   esac
 done
-[ -n "$OUTPUT" ] && [ -n "$PUBLIC_KEY" ] && [ -n "$CHANNEL_URL" ] && [ -n "$LAUNCHER_VERSION" ] \
+[ -n "$OUTPUT" ] && [ -n "$PUBLIC_KEY" ] && [ -n "$GITHUB_REPOSITORY" ] && [ -n "$GITHUB_REF" ] && [ -n "$GITHUB_CHANNEL_PATH" ] && [ -n "$LAUNCHER_VERSION" ] \
   && [ -n "$LAUNCHER_PROTOCOL" ] && [ -n "$SOURCE_TIMESTAMP" ] && [ -n "$SOURCE_COMMIT" ] || usage
 case "$OUTPUT" in /*) ;; *) OUTPUT="$PWD/$OUTPUT" ;; esac
 case "$PUBLIC_KEY" in /*) ;; *) PUBLIC_KEY="$PWD/$PUBLIC_KEY" ;; esac
@@ -41,11 +45,10 @@ NODE=$("$NODE" -p 'require("node:fs").realpathSync(process.execPath)')
 mkdir -p "$(dirname -- "$OUTPUT")"
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voice-agent-sea.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-PUBLIC_KEY="$PUBLIC_KEY" CHANNEL_URL="$CHANNEL_URL" LAUNCHER_VERSION="$LAUNCHER_VERSION" LAUNCHER_PROTOCOL="$LAUNCHER_PROTOCOL" SOURCE_TIMESTAMP="$SOURCE_TIMESTAMP" SOURCE_COMMIT="$SOURCE_COMMIT" \
+PUBLIC_KEY="$PUBLIC_KEY" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" GITHUB_CHANNEL_PATH="$GITHUB_CHANNEL_PATH" LAUNCHER_VERSION="$LAUNCHER_VERSION" LAUNCHER_PROTOCOL="$LAUNCHER_PROTOCOL" SOURCE_TIMESTAMP="$SOURCE_TIMESTAMP" SOURCE_COMMIT="$SOURCE_COMMIT" \
   "$NODE" <<'NODE' > "$TEMP/build-config.json"
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const net = require('node:net');
 const keyBytes = fs.readFileSync(process.env.PUBLIC_KEY);
 let key;
 try {
@@ -54,15 +57,11 @@ try {
   if (key.asymmetricKeyType !== 'ed25519' || canonical !== keyBytes.toString()
       || (canonical.match(/BEGIN PUBLIC KEY/g) || []).length !== 1) throw new Error('key');
 } catch { process.stderr.write('public key input must contain exactly one canonical Ed25519 SPKI public key\n'); process.exit(2); }
-let url;
-try { url = new URL(process.env.CHANNEL_URL); } catch { process.stderr.write('stable channel URL is invalid\n'); process.exit(2); }
-const labels = url.hostname.split('.');
-if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search || url.port
-    || url.href !== process.env.CHANNEL_URL || net.isIP(url.hostname) || labels.length < 2
-    || labels.some((value) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value))
-    || !url.pathname.endsWith('/stable.json') || url.pathname.includes('//') || url.pathname.includes('\\')
-    || url.pathname.split('/').some((part) => part === '.' || part === '..' || /%2f|%5c|%00/i.test(part))) {
-  process.stderr.write('stable channel URL must be one canonical HTTPS DNS URL ending in /stable.json\n'); process.exit(2);
+if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(process.env.GITHUB_REPOSITORY)
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(process.env.GITHUB_REF) || process.env.GITHUB_REF.includes('..')
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.json$/.test(process.env.GITHUB_CHANNEL_PATH)
+    || process.env.GITHUB_CHANNEL_PATH.split('/').some((part) => part === '.' || part === '..')) {
+  process.stderr.write('private GitHub repository, ref, or channel path is invalid\n'); process.exit(2);
 }
 if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(process.env.LAUNCHER_VERSION)
     || !/^[1-9][0-9]*$/.test(process.env.LAUNCHER_PROTOCOL) || Number(process.env.LAUNCHER_PROTOCOL) > Number.MAX_SAFE_INTEGER
@@ -72,7 +71,11 @@ if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.t
   process.stderr.write('launcher version, protocol, timestamp, or source commit input is invalid\n'); process.exit(2);
 }
 const value = {
-  channel_url: url.href,
+  github_api_origin: 'https://api.github.com/',
+  github_asset_origins: ['https://objects.githubusercontent.com/', 'https://release-assets.githubusercontent.com/'],
+  github_channel_path: process.env.GITHUB_CHANNEL_PATH,
+  github_ref: process.env.GITHUB_REF,
+  github_repository: process.env.GITHUB_REPOSITORY,
   launcher_protocol: Number(process.env.LAUNCHER_PROTOCOL),
   launcher_version: process.env.LAUNCHER_VERSION,
   public_key_pem: key.export({ type: 'spki', format: 'pem' }).toString(),
@@ -101,7 +104,11 @@ const fs = require('node:fs');
 const configuration = JSON.parse(fs.readFileSync(process.env.BUILD_CONFIG));
 const key = crypto.createPublicKey(configuration.public_key_pem);
 const value = {
-  channel_url: configuration.channel_url,
+  github_api_origin: configuration.github_api_origin,
+  github_asset_origins: configuration.github_asset_origins,
+  github_channel_path: configuration.github_channel_path,
+  github_ref: configuration.github_ref,
+  github_repository: configuration.github_repository,
   executable_sha256: process.env.OUTPUT_SHA256,
   launcher_protocol: configuration.launcher_protocol,
   launcher_version: configuration.launcher_version,

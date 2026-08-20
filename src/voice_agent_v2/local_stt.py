@@ -13,10 +13,13 @@ from .v2_audio import INPUT_AUDIO_FORMAT
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
 
-CACHE = Path("/home/priney/.cache/voice-agent-v2/slice-2")
-MODEL = CACHE / "artifacts" / "stt-whisper-large-v3-turbo"
-VENV = CACHE / "runtime" / "stt-tts-venv"
-_TASK_RUNTIME_ROOT = os.environ.get("VOICE_AGENT_TASK_RUNTIME_ROOT")
+_RELEASE_ROOT = os.environ.get("VOICE_AGENT_RELEASE_ROOT")
+_ASSET_ROOT = Path(os.environ.get("VOICE_AGENT_ASSET_ROOT", str(Path.home() / ".cache" / "voice-agent")))
+_PRODUCTION_RUNTIME_ROOT = Path(os.environ.get("VOICE_AGENT_RUNTIME_ROOT", str(Path.home() / ".local" / "state" / "voice-agent" / "runtime")))
+CACHE = _ASSET_ROOT if _RELEASE_ROOT else Path.home() / ".cache" / "voice-agent-v2" / "slice-2"
+MODEL = _PRODUCTION_RUNTIME_ROOT / "stt-model" if _RELEASE_ROOT else CACHE / "artifacts" / "stt-whisper-large-v3-turbo"
+VENV = Path(_RELEASE_ROOT) / "runtime" / "python" if _RELEASE_ROOT else CACHE / "runtime" / "stt-tts-venv"
+_TASK_RUNTIME_ROOT = os.environ.get("VOICE_AGENT_TASK_RUNTIME_ROOT") or (str(_PRODUCTION_RUNTIME_ROOT) if _RELEASE_ROOT else None)
 TEMP = (
     Path(_TASK_RUNTIME_ROOT) / "stt-temp"
     if _TASK_RUNTIME_ROOT
@@ -59,7 +62,7 @@ def _cleanup_temporary_audio(path: Path) -> None:
 
 
 def _environment() -> dict[str, str]:
-    packages = VENV / "lib" / "python3.14" / "site-packages"
+    packages = VENV / "lib" / ("python3.12" if _RELEASE_ROOT else "python3.14") / "site-packages"
     libraries = [packages / "nvidia" / name / "lib" for name in ("cublas", "cudnn", "cuda_nvrtc")]
     return {
         "HOME": str(Path(_TASK_RUNTIME_ROOT) / "stt-home") if _TASK_RUNTIME_ROOT else str(CACHE / "home"),
@@ -125,7 +128,7 @@ class WhisperSTT:
                 raise StageFailure("stt", "selected_stt_cancelled")
             return dict(self.ready_metadata or {})
         command = [
-            str(VENV / "bin" / "python"), "-m", "benchmarks.slice2.runners.faster_whisper_runner",
+            str(VENV / "bin" / ("python3" if _RELEASE_ROOT else "python")), "-m", "benchmarks.slice2.runners.faster_whisper_runner",
             "--model", str(MODEL), "--device", "cuda", "--compute-type", "float16",
         ]
         log = LOGS / f"whisper-{time.monotonic_ns()}.stderr.log"

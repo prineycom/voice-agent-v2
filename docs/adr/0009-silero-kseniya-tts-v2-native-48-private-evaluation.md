@@ -1,6 +1,6 @@
 # ADR-0009: Fix Silero/Kseniya behind TTS v2 for native-48 private evaluation
 
-- **Status:** Accepted for a private, unmerged test branch
+- **Status:** Accepted for Pasha's private personal noncommercial release
 - **Date:** 2026-08-14
 - **Decision owner:** Pasha
 
@@ -20,7 +20,7 @@ Add the backend-neutral `voice-agent.tts.v2` interface and compatible `event-env
 - model `v5_5_ru.pt`, 145,420,684 bytes, SHA-256 `50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437`;
 - exact speaker `kseniya`;
 - native mono `pcm_s16le/48000` output;
-- private local noncommercial evaluation under CC BY-NC-SA 4.0.
+- private personal noncommercial release use under CC BY-NC-SA 4.0, separately identified from MIT-licensed Voice Agent source.
 
 Microphone, VAD, and Whisper remain explicitly mono `pcm_s16le/16000`. The persistent LiveKit agent source becomes `AudioSource(48000, 1)` with 20-ms/1,920-byte frames. Delivery uses 60-ms/5,760-byte blocks, a two-block pump, exact final-partial padding/accounting, a process-wide two-segment capacity reserved before synthesis and held through bounded segment buffering, 15-second/1,440,000-byte segment limits, and 180-second/17,280,000-byte turn limits.
 
@@ -46,7 +46,7 @@ There is no active Qwen import/readiness/start path, TTS selector, hidden backen
 
 - Two resident CPU models use materially more RAM/CPU than one. Focused evidence must measure the full pool, not extrapolate one worker.
 - Complete-waveform synthesis is not native streaming. Segment scheduling, punctuation quality, and joins still require physical acceptance.
-- CC BY-NC-SA 4.0 does not authorize ordinary commercial use. No merge, production use, commercial recommendation, or commercial deployment is authorized without separate licensing and legal review.
+- CC BY-NC-SA 4.0 does not authorize ordinary commercial use. The accepted private personal noncommercial release includes attribution/provenance/size/digest and does not imply commercial rights; any commercial scope would require separate authority.
 - Automated LiveKit frames, counters, and subscription events do not prove audibility, naturalness, or physical barge-in timing.
 
 ## Alternatives considered

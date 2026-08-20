@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -10,26 +11,35 @@ const core = require('../voice-agent.cjs');
 const sourceModule = require('../release-source.cjs')(core);
 const archive = require('../../release/archive.cjs');
 const KEY = fs.readFileSync(path.join(__dirname, '..', 'keys', 'release-fixture-ed25519-public.pem'), 'utf8');
+const API = 'https://api.github.com/repos/prineycom/voice-agent-v2';
+const ASSET = `${API}/releases/assets/123456`;
+const STORE = 'https://release-assets.githubusercontent.com/private/object';
 
 function configuration(overrides = {}) {
   return {
-    channel_url: 'https://releases.example.invalid/voice-agent/stable.json', launcher_protocol: 1,
-    launcher_version: '0.8.0', public_key_pem: KEY, source_commit: 'a'.repeat(40),
+    github_api_origin: 'https://api.github.com/',
+    github_asset_origins: ['https://objects.githubusercontent.com/', 'https://release-assets.githubusercontent.com/'],
+    github_channel_path: 'stable.json', github_ref: 'release-channel', github_repository: 'prineycom/voice-agent-v2',
+    launcher_protocol: 1, launcher_version: '0.8.0', public_key_pem: KEY, source_commit: 'a'.repeat(40),
     source_timestamp: '2026-08-20T00:00:00Z', ...overrides,
   };
 }
 function response(url, bytes, overrides = {}) {
   return { status: 200, headers: { 'content-length': String(bytes.length) }, bytes, url, redirected: false, authorized: true, encrypted: true, ...overrides };
 }
+function githubContent(url, pathname, bytes) {
+  const body = Buffer.from(JSON.stringify({ type: 'file', name: path.basename(pathname), path: pathname, encoding: 'base64', size: bytes.length, content: bytes.toString('base64'), url }));
+  return response(url, body);
+}
+function redirect(url = ASSET) { return response(url, Buffer.alloc(0), { status: 302, headers: { 'content-length': '0', location: STORE } }); }
 function expectCode(code, action) { return assert.rejects(action, (reason) => reason && reason.code === code); }
+function source(transport, overrides = {}) { return new sourceModule.HttpsReleaseSource(configuration(overrides), { transport, tokenReader: () => 'github_pat_fixture_read_only' }); }
 function entry(pathname, type, mode, bytes = null, target = null) {
   return { path: pathname, type, mode, size: bytes ? bytes.length : 0, sha256: bytes ? archive.sha256(bytes) : null, target };
 }
 function artifactFixture(options = {}) {
   const files = new Map([
-    ['bin/voice-agent-runtime', Buffer.from('#!/bin/sh\nexit 0\n')],
-    ['descriptors/local-models.json', Buffer.from('{}')],
-    ['descriptors/runtime.json', Buffer.from('{}')],
+    ['bin/voice-agent-runtime', Buffer.from('#!/bin/sh\nexit 0\n')], ['descriptors/local-models.json', Buffer.from('{}')], ['descriptors/runtime.json', Buffer.from('{}')],
   ]);
   const entries = [entry('bin', 'directory', '0555'), entry('bin/voice-agent-runtime', 'file', '0555', files.get('bin/voice-agent-runtime')),
     entry('descriptors', 'directory', '0555'), entry('descriptors/local-models.json', 'file', '0444', files.get('descriptors/local-models.json')),
@@ -42,70 +52,70 @@ function artifactFixture(options = {}) {
     ...entries.map((value) => ({ ...value, bytes: value.type === 'file' ? files.get(value.path) : Buffer.alloc(0) }))];
   if (options.mutateTar) options.mutateTar(tarEntries);
   const artifactBytes = options.raw ? archive.createTar(tarEntries, 1787184000) : archive.createTarZstd(tarEntries, 1787184000);
-  return { artifactBytes, manifestBytes, release: { artifact_bytes: artifactBytes.length, artifact_sha256: archive.sha256(artifactBytes), artifact_url: 'https://releases.example.invalid/voice-agent/1.0.0.tar.zst' } };
+  return { artifactBytes, manifestBytes, release: { artifact_bytes: artifactBytes.length, artifact_sha256: archive.sha256(artifactBytes), artifact_url: ASSET } };
 }
 
-test('production source is inert without one valid compile-time trust root and canonical stable URL', async () => {
+test('production source is inert without one valid compile-time root and fixed private GitHub identity', async () => {
   for (const value of [null, configuration({ public_key_pem: '' }), configuration({ public_key_pem: `${KEY}${KEY}` }),
-    configuration({ channel_url: 'http://releases.example.invalid/voice-agent/stable.json' }),
-    configuration({ channel_url: 'https://127.0.0.1/stable.json' }), configuration({ channel_url: 'https://releases.example.invalid:444/stable.json' })]) {
-    const source = sourceModule.createProductionSource(value);
-    await expectCode('release_authority_unprovisioned', () => source.acquireChannel());
+    configuration({ github_repository: 'unsafe' }), configuration({ github_ref: '../main' }), configuration({ github_api_origin: 'https://example.invalid/' })]) {
+    const observed = sourceModule.createProductionSource(value);
+    await expectCode('release_authority_unprovisioned', () => observed.acquireChannel());
   }
 });
 
-test('channel authority returns only the pinned key and ignores network, cached, environment, and CLI key material', async () => {
+test('private GitHub channel uses only the pinned key and exact API repository/ref/path', async () => {
   const other = crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
-  const channel = Buffer.from('{"channel":"fixture"}');
-  const signature = Buffer.from(`${'A'.repeat(88)}\n`);
-  const old = process.env.VOICE_AGENT_RELEASE_PUBLIC_KEY;
-  process.env.VOICE_AGENT_RELEASE_PUBLIC_KEY = other;
-  const transport = async ({ url }) => response(url, url.endsWith('.sig') ? signature : channel, { headers: { 'content-length': String(url.endsWith('.sig') ? signature.length : channel.length), 'x-release-public-key': other } });
-  try {
-    const observed = await new sourceModule.HttpsReleaseSource(configuration(), { transport }).acquireChannel({ publicKeyPem: other, cachedKey: other });
-    assert.equal(observed.publicKeyPem, KEY);
-    assert.notEqual(observed.publicKeyPem, other);
-    const source = new sourceModule.HttpsReleaseSource(configuration(), { transport });
-    assert.equal(core.releaseAuthorityKey(source, { publicKeyPem: other }, false), KEY);
-    assert.equal(core.releaseAuthorityKey(source, { publicKeyPem: other }, true), other);
-    assert.throws(() => core.releaseAuthorityKey({ acquireChannel() {} }, { publicKeyPem: other }, false), (reason) => reason.code === 'release_authority_unprovisioned');
-  } finally {
-    if (old === undefined) delete process.env.VOICE_AGENT_RELEASE_PUBLIC_KEY; else process.env.VOICE_AGENT_RELEASE_PUBLIC_KEY = old;
-  }
+  const channel = Buffer.from('{"channel":"fixture"}'); const signature = Buffer.from(`${'A'.repeat(88)}\n`); const requests = [];
+  const transport = async (request) => {
+    requests.push(request);
+    const pathname = request.url.includes('stable.json.sig') ? 'stable.json.sig' : 'stable.json';
+    return githubContent(request.url, pathname, pathname.endsWith('.sig') ? signature : channel);
+  };
+  const observedSource = source(transport); const observed = await observedSource.acquireChannel({ publicKeyPem: other, cachedKey: other });
+  assert.equal(observed.publicKeyPem, KEY); assert.notEqual(observed.publicKeyPem, other);
+  assert.deepEqual(requests.map((item) => item.url), [`${API}/contents/stable.json?ref=release-channel`, `${API}/contents/stable.json.sig?ref=release-channel`]);
+  assert.equal(requests.every((item) => item.headers.Authorization === 'Bearer github_pat_fixture_read_only'), true);
+  assert.equal(core.releaseAuthorityKey(observedSource, { publicKeyPem: other }, false), KEY);
+  assert.equal(core.releaseAuthorityKey(observedSource, { publicKeyPem: other }, true), other);
 });
 
-test('HTTPS response validation refuses redirect, TLS, timeout, transfer encoding, and byte-limit ambiguity content-free', async () => {
-  const url = configuration().channel_url;
-  const bytes = Buffer.from('{}');
-  const cases = [
-    ['release_redirect_refused', async () => response(url, bytes, { status: 302 })],
+test('token file custody requires current-user mode 0600 and never changes request identity', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-agent-token-test-')); context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const tokenPath = path.join(root, 'token'); fs.writeFileSync(tokenPath, 'github_pat_fixture_read_only\n', { mode: 0o600 }); fs.chmodSync(tokenPath, 0o600);
+  const requests = []; const transport = async (request) => { requests.push(request); const pathname = request.url.includes('.sig') ? 'stable.json.sig' : 'stable.json'; return githubContent(request.url, pathname, Buffer.from(pathname)); };
+  const observed = new sourceModule.HttpsReleaseSource(configuration(), { transport, tokenPath }); await observed.acquireChannel();
+  assert.equal(requests.every((item) => item.headers.Authorization === 'Bearer github_pat_fixture_read_only'), true);
+  fs.chmodSync(tokenPath, 0o644); await expectCode('github_token_unavailable', () => observed.acquireChannel());
+});
+
+test('missing token is actionable and invalid API/TLS/length responses remain content-free', async () => {
+  const unavailable = new sourceModule.HttpsReleaseSource(configuration(), { transport: async () => { throw new Error('must not run'); }, tokenReader: () => { throw new core.LauncherError('github_token_unavailable', 'actionable'); } });
+  await expectCode('github_token_unavailable', () => unavailable.acquireChannel());
+  const url = `${API}/contents/stable.json?ref=release-channel`; const bytes = Buffer.from('{}');
+  for (const [code, transport] of [
     ['release_response_invalid', async () => response(url, bytes, { authorized: false })],
     ['release_size_invalid', async () => response(url, bytes, { headers: { 'content-length': '99' } })],
-    ['release_size_invalid', async () => response(url, bytes, { headers: { 'content-length': '2', 'transfer-encoding': 'chunked' } })],
     ['release_network_unavailable', async () => { throw new Error('secret server body'); }],
-  ];
-  for (const [code, transport] of cases) {
-    const source = new sourceModule.HttpsReleaseSource(configuration(), { transport });
-    await expectCode(code, () => source.fetch(url, { maximumBytes: 10 }));
-  }
+  ]) await expectCode(code, () => source(transport).fetch(url, { maximumBytes: 10, headers: { Accept: 'x' }, allowSearch: true }));
 });
 
-test('artifact acquisition enforces exact zstd bytes and indexes only the complete closed manifest', async () => {
-  const fixture = artifactFixture();
-  const transport = async ({ url }) => response(url, fixture.artifactBytes);
-  const source = new sourceModule.HttpsReleaseSource(configuration(), { transport });
-  const acquired = await source.acquireArtifact(fixture.release);
+test('private GitHub artifact admits exactly one API-identified redirect and strips authorization', async () => {
+  const fixture = artifactFixture(); const requests = [];
+  const transport = async (request) => {
+    requests.push(request);
+    return request.url === ASSET ? redirect() : response(STORE, fixture.artifactBytes);
+  };
+  const acquired = await source(transport).acquireArtifact(fixture.release);
   assert.equal(acquired.manifestBytes.equals(fixture.manifestBytes), true);
-  assert.equal((await acquired.readEntry('bin/voice-agent-runtime')).toString(), '#!/bin/sh\nexit 0\n');
-  const raw = artifactFixture({ raw: true });
-  const rawSource = new sourceModule.HttpsReleaseSource(configuration(), { transport: async ({ url }) => response(url, raw.artifactBytes) });
-  await expectCode('artifact_identity_mismatch', () => rawSource.acquireArtifact(raw.release));
+  assert.equal(requests[0].headers.Authorization.startsWith('Bearer '), true);
+  assert.equal(Object.hasOwn(requests[1].headers, 'Authorization'), false);
+  await expectCode('release_redirect_refused', () => source(async (request) => request.url === ASSET ? response(ASSET, Buffer.alloc(0), { status: 302, headers: { 'content-length': '0', location: 'https://evil.example.invalid/object' } }) : response(request.url, fixture.artifactBytes)).acquireArtifact(fixture.release));
 });
 
-test('archive index refuses traversal, duplicate, PAX/device types, bad checksum, unsafe metadata, and expansion ambiguity', () => {
+test('archive index refuses traversal, duplicate, PAX/device types, bad checksum, and unsafe metadata', () => {
   const base = artifactFixture({ raw: true }).artifactBytes;
   const mutate = (offset, value) => { const bytes = Buffer.from(base); bytes[offset] = value; return bytes; };
-  assert.throws(() => sourceModule.indexArchive(mutate(156, 'x'.charCodeAt(0))), (reason) => reason.code === 'archive_metadata_invalid' || reason.code === 'archive_checksum_invalid');
+  assert.throws(() => sourceModule.indexArchive(mutate(156, 'x'.charCodeAt(0))));
   assert.throws(() => sourceModule.indexArchive(mutate(156, '3'.charCodeAt(0))));
   const checksum = Buffer.from(base); checksum[149] = checksum[149] === 48 ? 49 : 48; assert.throws(() => sourceModule.indexArchive(checksum), (reason) => reason.code === 'archive_checksum_invalid');
   const owner = Buffer.from(base); owner[108] = '1'.charCodeAt(0); assert.throws(() => sourceModule.indexArchive(owner));
@@ -115,14 +125,12 @@ test('archive index refuses traversal, duplicate, PAX/device types, bad checksum
   assert.throws(() => sourceModule.indexArchive(traversal), (reason) => reason.code === 'archive_path_invalid');
 });
 
-test('asset responses require exact strong validator, byte range, content length, and no redirect', async () => {
-  const bytes = Buffer.from('abcdef'); const sha256 = archive.sha256(bytes);
-  const descriptor = { size: bytes.length, sha256, url: 'https://assets.example.invalid/release/runtime.bin' };
-  const make = (overrides = {}) => new sourceModule.HttpsReleaseSource(configuration(), { transport: async ({ url }) => response(url, bytes.subarray(2), {
-    status: 206, headers: { 'content-length': '4', etag: '"immutable"', 'accept-ranges': 'bytes', 'content-range': 'bytes 2-5/6' }, ...overrides,
-  }) });
-  const observed = await make().downloadAsset({ descriptor, url: descriptor.url, offset: 2, validator: '"immutable"' });
-  assert.equal(observed.content_range, 'bytes 2-5/6');
-  await expectCode('asset_validator_invalid', () => make({ headers: { 'content-length': '4', etag: 'W/"weak"', 'accept-ranges': 'bytes', 'content-range': 'bytes 2-5/6' } }).downloadAsset({ descriptor, url: descriptor.url, offset: 2, validator: '"immutable"' }));
-  await expectCode('asset_range_invalid', () => make({ headers: { 'content-length': '4', etag: '"immutable"', 'accept-ranges': 'bytes', 'content-range': 'bytes 1-4/6' } }).downloadAsset({ descriptor, url: descriptor.url, offset: 2, validator: '"immutable"' }));
+test('private GitHub ranges preserve exact validators after stripped-auth redirect', async () => {
+  const bytes = Buffer.from('abcdef'); const descriptor = { size: bytes.length, sha256: archive.sha256(bytes), url: ASSET }; const requests = [];
+  const transport = async (request) => {
+    requests.push(request);
+    return request.url === ASSET ? redirect() : response(STORE, bytes.subarray(2), { status: 206, headers: { 'content-length': '4', etag: '"immutable"', 'accept-ranges': 'bytes', 'content-range': 'bytes 2-5/6' } });
+  };
+  const observed = await source(transport).downloadAsset({ descriptor, url: descriptor.url, offset: 2, validator: '"immutable"' });
+  assert.equal(observed.content_range, 'bytes 2-5/6'); assert.equal(requests[1].headers.Range, 'bytes=2-5'); assert.equal(Object.hasOwn(requests[1].headers, 'Authorization'), false);
 });

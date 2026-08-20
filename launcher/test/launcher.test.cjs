@@ -240,8 +240,8 @@ test('Node 26 SEA packaging is deterministic and executable without another host
   const first = path.join(temporary, 'voice-agent-one');
   const second = path.join(temporary, 'voice-agent-two');
   const buildArguments = (output) => [
-    '--output', output, '--public-key', path.join(ROOT, 'launcher', 'keys', 'release-fixture-ed25519-public.pem'), '--channel-url', 'https://releases.example.invalid/voice-agent/stable.json',
-    '--launcher-version', '0.8.0', '--launcher-protocol', '1', '--source-timestamp', '2026-08-20T00:00:00Z', '--source-commit', 'a'.repeat(40),
+    '--output', output, '--public-key', path.join(ROOT, 'launcher', 'keys', 'release-fixture-ed25519-public.pem'), '--github-repository', 'prineycom/voice-agent-v2',
+    '--github-ref', 'release-channel', '--github-channel-path', 'stable.json', '--launcher-version', '0.8.0', '--launcher-protocol', '1', '--source-timestamp', '2026-08-20T00:00:00Z', '--source-commit', 'a'.repeat(40),
   ];
   for (const output of [first, second]) {
     const result = spawnSync(path.join(ROOT, 'launcher', 'build'), buildArguments(output), {

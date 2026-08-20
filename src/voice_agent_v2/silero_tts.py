@@ -30,14 +30,15 @@ from .tracer import CancellationToken
 from .tts_text import SHAPING_VERSION, shape_russian_tts
 
 ROOT = Path(__file__).resolve().parents[2]
+_RELEASE_ROOT = os.environ.get("VOICE_AGENT_RELEASE_ROOT")
+_ASSET_ROOT = Path(os.environ.get("VOICE_AGENT_ASSET_ROOT", str(Path.home() / ".cache" / "voice-agent")))
+_PRODUCTION_RUNTIME_ROOT = Path(os.environ.get("VOICE_AGENT_RUNTIME_ROOT", str(Path.home() / ".local" / "state" / "voice-agent" / "runtime")))
 MANIFEST_PATH = ROOT / "config" / "silero-kseniya-tts-v1.json"
-CACHE_ROOT = Path("~/.cache/voice-agent-v2/experiments/silero-baya-tts").expanduser()
-MODEL_PATH = CACHE_ROOT / "downloads" / "v5_5_ru.pt"
-PYTHON_PATH = CACHE_ROOT / "venv" / "bin" / "python"
+CACHE_ROOT = _ASSET_ROOT if _RELEASE_ROOT else Path.home() / ".cache" / "voice-agent-v2" / "experiments" / "silero-baya-tts"
+MODEL_PATH = _ASSET_ROOT / "models" / "sha256" / "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437" if _RELEASE_ROOT else CACHE_ROOT / "downloads" / "v5_5_ru.pt"
+PYTHON_PATH = Path(_RELEASE_ROOT) / "runtime" / "python" / "bin" / "python3" if _RELEASE_ROOT else CACHE_ROOT / "venv" / "bin" / "python"
 WORKER_SCRIPT = ROOT / "scripts" / "silero_kseniya_worker.py"
-DEFAULT_RUNTIME_ROOT = Path(
-    "~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship"
-).expanduser()
+DEFAULT_RUNTIME_ROOT = _PRODUCTION_RUNTIME_ROOT / "tts" if _RELEASE_ROOT else Path.home() / ".cache" / "voice-agent-v2" / "experiments" / "silero-kseniya-48k-ship"
 MODEL_IDENTITY = "snakers4/silero-models@d9355348e2781dc8fa25a135d1602c530afae24c#v5_5_ru"
 MODEL_SIZE = 145_420_684
 MODEL_SHA256 = "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437"
@@ -167,30 +168,28 @@ def verify_silero_runtime() -> dict[str, object]:
         and manifest.get("model_identity") == MODEL_IDENTITY
         and manifest.get("model", {}).get("speaker") == SPEAKER
         and manifest.get("model", {}).get("native_sample_rates_hz") == [8_000, 24_000, 48_000]
-        and manifest.get("runtime", {}).get("state_root")
-        == "~/.cache/voice-agent-v2/experiments/silero-kseniya-48k-ship"
+        and manifest.get("runtime", {}).get("state_root") == "xdg-runtime/tts"
         and manifest.get("runtime", {}).get("worker_protocol")
         == WORKER_PROTOCOL_VERSION
         and manifest.get("runtime", {}).get("workers") == POOL_SIZE
         and manifest.get("runtime", {}).get("automatic_retry") is False
         and manifest.get("runtime", {}).get("automatic_fallback") is False
-        and manifest.get("runtime", {}).get("download_allowed") is False
+        and manifest.get("runtime", {}).get("download_allowed") is True
         and all(
             manifest.get("output_audio", {}).get(name) == value
             for name, value in TTS_OUTPUT_AUDIO_FORMAT.as_dict().items()
         )
     ):
         raise StageFailure("tts", "silero_manifest_mismatch")
-    checks = (
-        (MODEL_PATH, MODEL_SIZE, MODEL_SHA256, "silero_model_mismatch"),
-        (PYTHON_PATH.resolve(), None, PYTHON_SHA256, "silero_python_mismatch"),
-    )
-    for path, expected_size, expected_hash, code in checks:
+    checks = [(MODEL_PATH, MODEL_SIZE, MODEL_SHA256, "silero_model_mismatch")]
+    if not _RELEASE_ROOT:
+        checks.append((PYTHON_PATH.resolve(), None, PYTHON_SHA256, "silero_python_mismatch"))
+    for path, expected_size, expected_hash, code in tuple(checks):
         if not path.is_file() or (expected_size is not None and path.stat().st_size != expected_size):
             raise StageFailure("tts", code)
         if _sha256(path) != expected_hash:
             raise StageFailure("tts", code)
-    torch_root = CACHE_ROOT / "venv" / "lib" / "python3.12" / "site-packages" / "torch"
+    torch_root = (Path(_RELEASE_ROOT) / "runtime" / "python" if _RELEASE_ROOT else CACHE_ROOT / "venv") / "lib" / "python3.12" / "site-packages" / "torch"
     torch_c = tuple(torch_root.glob("_C.cpython-312-*-linux-gnu.so"))
     libtorch_cpu = torch_root / "lib" / "libtorch_cpu.so"
     if len(torch_c) != 1 or _sha256(torch_c[0]) != TORCH_C_SHA256:

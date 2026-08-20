@@ -8,7 +8,7 @@
     "file": "LFM2.5-2.6B-Q4_K_M.gguf",
     "size_bytes": 1674454848,
     "sha256": "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14",
-    "cache_root": "/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4",
+    "cache_root": "xdg-cache/models/sha256/79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14",
     "license": "LFM Open License v1.0"
   },
   "runtime": {

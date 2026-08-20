@@ -15,6 +15,10 @@ import time
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_ROOT = Path(os.environ.get("VOICE_AGENT_RELEASE_ROOT", str(ROOT))).resolve()
+ASSET_ROOT = Path(os.environ.get("VOICE_AGENT_ASSET_ROOT", str(Path.home() / ".cache" / "voice-agent"))).resolve()
+RUNTIME_ROOT = Path(os.environ.get("VOICE_AGENT_RUNTIME_ROOT", str(Path.home() / ".local" / "state" / "voice-agent" / "runtime"))).resolve()
+PRODUCTION_LAYOUT = "VOICE_AGENT_RELEASE_ROOT" in os.environ
 sys.path.insert(0, str(ROOT / "src"))
 
 from voice_agent_v2.runtime_directory import SYSTEMD_RUNTIME_ROOT
@@ -31,11 +35,11 @@ SIGNAL_PORT = 7880
 RTC_UDP_PORT = 7882
 GATEWAY_PORT = 8000
 LLAMA_PORT = 18080
-LFM_CACHE = Path("/home/priney/.cache/voice-agent-v2/llama-cpp-gguf-q4")
-LLAMA_BINARY = LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
+LFM_CACHE = RUNTIME_ROOT / "llm" if PRODUCTION_LAYOUT else Path.home() / ".cache" / "voice-agent-v2" / "llama-cpp-gguf-q4"
+LLAMA_BINARY = RELEASE_ROOT / "runtime" / "llama" / "bin" / "llama-server" if PRODUCTION_LAYOUT else LFM_CACHE / "runtime" / "llama-b10357-cuda13-build" / "bin" / "llama-server"
 LLAMA_BIN_DIRECTORY = LLAMA_BINARY.parent
-CUDA_OVERLAY = LFM_CACHE / "runtime" / "cuda-13.3-overlay" / "lib"
-LFM_MODEL = LFM_CACHE / "model" / "LFM2.5-2.6B-Q4_K_M.gguf"
+CUDA_OVERLAY = RELEASE_ROOT / "runtime" / "cuda" / "lib" if PRODUCTION_LAYOUT else LFM_CACHE / "runtime" / "cuda-13.3-overlay" / "lib"
+LFM_MODEL = ASSET_ROOT / "models" / "sha256" / "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14" if PRODUCTION_LAYOUT else LFM_CACHE / "model" / "LFM2.5-2.6B-Q4_K_M.gguf"
 LFM_MODEL_SIZE = 1_674_454_848
 LFM_MODEL_SHA256 = "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14"
 LLAMA_BINARY_SHA256 = "08625d7c6f380ce14a1fd6085e6468b13a7d169083928ab46706edb62979ac11"
@@ -171,7 +175,7 @@ def verify_local_lfm_artifacts() -> None:
         raise RuntimeError("pinned local llama.cpp server is unavailable")
     if not LFM_MODEL.is_file() or LFM_MODEL.stat().st_size != LFM_MODEL_SIZE:
         raise RuntimeError("pinned local LFM model is unavailable or has the wrong size")
-    if sha256_file(LLAMA_BINARY) != LLAMA_BINARY_SHA256:
+    if not PRODUCTION_LAYOUT and sha256_file(LLAMA_BINARY) != LLAMA_BINARY_SHA256:
         raise RuntimeError("pinned llama.cpp server checksum mismatch")
     if sha256_file(LFM_MODEL) != LFM_MODEL_SHA256:
         raise RuntimeError("pinned local LFM model checksum mismatch")
@@ -523,7 +527,7 @@ def stop(
 def main() -> int:
     if any(name in os.environ for name in FORBIDDEN_CLOUD_NAMES):
         raise Slice6ConfigurationError("LiteLLM configuration is forbidden in the local-LFM runtime")
-    settings = Slice6Settings.from_environment(project_root=ROOT)
+    settings = Slice6Settings.from_environment(project_root=RELEASE_ROOT)
     stopping = False
 
     def request_stop(_signum=None, _frame=None) -> None:
@@ -534,8 +538,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "voice-agent-v2" / "slice-6"
-    binary = cache / "tooling" / f"livekit-server-v{LIVEKIT_VERSION}"
-    python = cache / "runtime" / "venv" / "bin" / "python"
+    binary = RELEASE_ROOT / "runtime" / "livekit" / "bin" / "livekit-server" if PRODUCTION_LAYOUT else cache / "tooling" / f"livekit-server-v{LIVEKIT_VERSION}"
+    python = Path(sys.executable) if PRODUCTION_LAYOUT else cache / "runtime" / "venv" / "bin" / "python"
     if not binary.is_file() or not os.access(binary, os.X_OK) or not python.is_file():
         raise RuntimeError("Slice 6 tooling is missing; run ./setup-slice6")
     if not settings.web_dist.is_dir():
@@ -582,7 +586,7 @@ def main() -> int:
             return 0
 
         livekit = supervisor.start(
-            [str(binary)], role="livekit", cwd=ROOT, env=livekit_environment,
+            [str(binary)], role="livekit", cwd=RELEASE_ROOT, env=livekit_environment,
         )
         if not wait_for_port(
             livekit, SIGNAL_PORT, "LiveKit", stop_requested=lambda: stopping,

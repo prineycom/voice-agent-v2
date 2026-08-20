@@ -102,7 +102,7 @@ A separately built launcher can contain one immutable Ed25519 verifier and stabl
 
 ### Production blocker and required incoming evidence
 
-`requirements-slice6.lock` names versions but no exact distribution hashes; there is no accepted complete redistributable Python/Node/native CUDA closure receipt; active configuration contains canonical-host cache locators; and Silero is explicitly private noncommercial evaluation-only pending legal approval. D1 must refuse rather than use host runtimes or synthetic stubs. Resolution requires an exact closed runtime-bundle inventory with immutable source/license receipts, hash-complete locks, host-neutral release inputs and explicit redistribution authority. No model weights are acquired by this slice.
+Pasha fixed D1's scope to a private personal noncommercial release, MIT source and separately CC BY-NC-SA Kseniya. `requirements-release/` and `release/inputs/` now close CPython 3.12.13, gateway/STT/TTS wheels, build-only Node 26.7.0, CUDA 12.9, LiveKit/llama.cpp and license/model receipts. Application paths are release/XDG-relative, the STT runner is shipped, Node is excluded from the payload, and SPDX 2.3 plus two-phase private GitHub IDs are enforced. No model weights are acquired by repository verification; physical runtime acceptance remains pending.
 
 ### Acceptance and evidence
 

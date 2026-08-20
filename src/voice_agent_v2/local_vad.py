@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import math
+import os
 import sys
 from typing import Callable, Protocol
 
@@ -17,8 +18,9 @@ SILERO_CONTEXT_SAMPLES = 64
 SILERO_MODEL_SHA256 = "4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2"
 SILERO_MODEL_SIZE = 1_245_151
 DEFAULT_MODEL_PATH = (
-    Path.home()
-    / ".cache/voice-agent-v2/slice-6/models/silero-vad-v6.onnx"
+    Path(os.environ["VOICE_AGENT_ASSET_ROOT"]) / "models" / "sha256" / SILERO_MODEL_SHA256
+    if os.environ.get("VOICE_AGENT_RELEASE_ROOT") and os.environ.get("VOICE_AGENT_ASSET_ROOT")
+    else Path.home() / ".cache" / "voice-agent-v2" / "slice-6" / "models" / "silero-vad-v6.onnx"
 )
 
 
