@@ -1,46 +1,70 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import stat
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from voice_agent_v2.stand_dev import (
     CommandResult,
+    PRODUCTION_LOCK,
+    RELEASE_SCHEMA,
     StandError,
-    build_local_release,
     config_path,
+    controller_source_path,
     deploy_local_dev,
-    exec_launcher,
+    deploy_remote_dev,
     initialize,
-    logs,
     parse_private_config,
     selected_release,
-    status,
 )
 
 
 class RecordingCommand:
-    """Only Git/tar are real in a disposable fixture; systemd/journal stay fake."""
+    """Real disposable Git/tar with fake build tools and user-systemd."""
 
-    def __init__(self, *, ready: bool = True, journal: str = "dev launcher record\n") -> None:
-        self.ready = ready
-        self.journal = journal
+    def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.fail_fetch_ref: str | None = None
+        self.fail_build = False
+        self.before_build = None
 
-    def run(self, arguments: tuple[str, ...], *, cwd: Path | None = None) -> CommandResult:
+    def run(self, arguments, *, cwd: Path | None = None) -> CommandResult:
         command = tuple(arguments)
         self.calls.append(command)
         if command[:2] == ("systemctl", "--user"):
             if command[2] == "is-active":
-                return CommandResult(0 if self.ready else 3, "active\n" if self.ready else "inactive\n")
+                return CommandResult(0, "active\n")
             return CommandResult(0)
         if command[:1] == ("journalctl",):
-            return CommandResult(0, self.journal)
+            return CommandResult(0, "dev launcher record\n")
+        if command[:3] == ("git", "fetch", "--no-tags") and command[-1] == self.fail_fetch_ref:
+            return CommandResult(1, stderr="deliberate fetch failure")
+        if command[:3] == ("python3", "-m", "venv"):
+            python = Path(command[3]) / "bin/python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\n", encoding="utf-8")
+            return CommandResult(0)
+        if command[:1] == ("npm",):
+            assert cwd is not None
+            if command[1] == "ci":
+                if self.before_build is not None:
+                    self.before_build()
+                (cwd / "node_modules").mkdir()
+                return CommandResult(0)
+            if command[1:3] == ("run", "build:production-only"):
+                if self.fail_build:
+                    return CommandResult(1, stderr="deliberate build failure")
+                dist = cwd / "dist"
+                dist.mkdir()
+                (dist / "index.html").write_text("production build\n", encoding="utf-8")
+                return CommandResult(0)
+        if command[0].endswith("/python") and command[1:4] == ("-m", "pip", "install"):
+            return CommandResult(0)
         completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
@@ -54,135 +78,163 @@ class StandDevTests(unittest.TestCase):
     def make_source_repository(self, parent: Path) -> tuple[Path, str]:
         repository = parent / "controller"
         repository.mkdir()
-        git(repository, "init", "-q")
+        git(repository, "init", "-q", "-b", "main")
         git(repository, "config", "user.email", "stand@example.test")
         git(repository, "config", "user.name", "Stand Test")
         (repository / "scripts").mkdir()
         (repository / "scripts/run_slice6.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        (repository / "web").mkdir()
+        (repository / "web/package.json").write_text(
+            '{"scripts":{"build:production-only":"vite build"}}\n', encoding="utf-8",
+        )
+        (repository / "web/package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+        (repository / PRODUCTION_LOCK).write_text("runtime-package==1.0\n", encoding="utf-8")
         (repository / "tracked.txt").write_text("committed release\n", encoding="utf-8")
         git(repository, "add", ".")
         git(repository, "commit", "-qm", "fixture")
-        return repository, git(repository, "rev-parse", "HEAD")
+        commit = git(repository, "rev-parse", "HEAD")
+        remote = parent / "private-origin.git"
+        git(parent, "init", "--bare", "-q", str(remote))
+        git(repository, "remote", "add", "origin", str(remote))
+        git(repository, "push", "-qu", "origin", "main")
+        git(repository, "tag", "remote-tag")
+        git(repository, "push", "-q", "origin", "remote-tag")
+        return repository, commit
 
-    def initialize_state(self, root: Path, controller: Path) -> tuple[Path, Path]:
+    def commit_remote_revision(self, repository: Path, name: str) -> str:
+        (repository / "tracked.txt").write_text(f"{name}\n", encoding="utf-8")
+        git(repository, "add", "tracked.txt")
+        git(repository, "commit", "-qm", name)
+        git(repository, "push", "-q", "origin", "main")
+        return git(repository, "rev-parse", "HEAD")
+
+    def initialize_state(self, root: Path, controller: Path, command: RecordingCommand) -> tuple[Path, Path]:
         state = root / "outside-controller-state"
         units = root / "user-units"
-        initialize(state_root=state, user_unit_directory=units, stand_executable=controller / "stand")
+        initialize(
+            state_root=state, user_unit_directory=units, stand_executable=controller / "stand",
+            controller_repository=controller, command=command,
+        )
         return state, units
 
-    def test_init_creates_external_private_state_strict_configs_and_unique_credentials(self) -> None:
+    def test_init_creates_external_private_state_and_one_ordinary_controller_clone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             controller, _ = self.make_source_repository(root)
-            state, units = self.initialize_state(root, controller)
+            command = RecordingCommand()
+            state, units = self.initialize_state(root, controller, command)
 
+            source = controller_source_path(state)
             self.assertFalse((controller / "instances").exists())
+            self.assertTrue((source / ".git").is_dir())
+            self.assertEqual(git(source, "config", "--get", "remote.origin.url"), str(root / "private-origin.git"))
             self.assertTrue((state / "releases").is_dir())
-            main = config_path(state, "main")
-            dev = config_path(state, "dev")
-            self.assertEqual(stat.S_IMODE(main.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(dev.stat().st_mode), 0o600)
-            main_values = parse_private_config(main)
-            dev_values = parse_private_config(dev)
-            self.assertNotEqual(main_values["LIVEKIT_API_KEY"], dev_values["LIVEKIT_API_KEY"])
-            self.assertNotEqual(main_values["LIVEKIT_API_SECRET"], dev_values["LIVEKIT_API_SECRET"])
-            self.assertEqual(dev_values["VOICE_AGENT_LIVEKIT_PORT"], "7880")
+            self.assertEqual(stat.S_IMODE(config_path(state, "dev").stat().st_mode), 0o600)
+            self.assertEqual(parse_private_config(config_path(state, "dev"))["STAND_NAME"], "dev")
             template = (units / "voice-agent-v2@.service").read_text(encoding="utf-8")
             self.assertIn("Requires=docker.service", template)
             self.assertIn("launcher %i", template)
-            self.assertIn(str(state), template)
+            self.assertIn(("git", "clone", "--no-checkout", str(root / "private-origin.git"), str(source)), command.calls)
 
-    def test_private_configuration_is_strict_data_and_never_shell_input(self) -> None:
+    def test_remote_branch_resolves_full_sha_and_promotes_complete_archive_release_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            controller, _ = self.make_source_repository(root)
-            state, _ = self.initialize_state(root, controller)
-            config = config_path(state, "dev")
-            marker = root / "must-not-exist"
-            config.write_text(config.read_text(encoding="utf-8").replace(
-                "LIVEKIT_API_KEY=", f"LIVEKIT_API_KEY=$(touch {marker})"
-            ), encoding="utf-8")
-            os.chmod(config, 0o600)
-
-            with self.assertRaisesRegex(StandError, "invalid KEY=VALUE"):
-                parse_private_config(config)
-            self.assertFalse(marker.exists())
-            config.write_text("STAND_NAME=dev\n", encoding="utf-8")
-            os.chmod(config, 0o644)
-            with self.assertRaisesRegex(StandError, "mode-0600"):
-                parse_private_config(config)
-
-    def test_committed_sha_release_is_archive_only_and_current_changes_atomically_after_build(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            repository, commit = self.make_source_repository(root)
-            state, _ = self.initialize_state(root, repository)
+            controller, commit = self.make_source_repository(root)
             command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            release = state / "releases" / commit
 
-            deployed = deploy_local_dev(state_root=state, repository=repository, commit=commit, command=command)
+            def during_frontend_install() -> None:
+                self.assertFalse(release.exists())
+                self.assertFalse((state / "instances/dev/current").exists())
+
+            command.before_build = during_frontend_install
+            deployed = deploy_remote_dev(state_root=state, ref="main", command=command)
 
             self.assertEqual(deployed, commit)
+            self.assertEqual(len(deployed), 40)
             selected = selected_release(state, "dev")
             self.assertIsNotNone(selected)
             assert selected is not None
             self.assertEqual(selected[0], commit)
             release = selected[1]
+            manifest = json.loads((release / "release.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema"], RELEASE_SCHEMA)
+            self.assertEqual(manifest["commit"], commit)
+            self.assertEqual(manifest["source"], "git-archive")
+            self.assertEqual(manifest["frontend"], "source/web/dist")
+            self.assertEqual(manifest["python_lock"], PRODUCTION_LOCK)
             self.assertFalse((release / "source/.git").exists())
             self.assertEqual((release / "source/tracked.txt").read_text(encoding="utf-8"), "committed release\n")
+            self.assertTrue((release / "source/web/dist/index.html").is_file())
+            self.assertTrue((release / "python/bin/python").is_file())
+            self.assertFalse((release / "source/web/node_modules").exists())
             self.assertEqual(stat.S_IMODE((release / "release.json").stat().st_mode), 0o444)
-            self.assertIn(("systemctl", "--user", "start", "voice-agent-v2@dev.service"), command.calls)
-            self.assertIn("readiness: ready", status(state_root=state, instance="dev", command=command))
+            self.assertIn(("git", "fetch", "--no-tags", "origin", "refs/heads/main"), command.calls)
+            self.assertIn(("npm", "run", "build:production-only"), command.calls)
 
-    def test_foreground_launcher_execs_the_selected_release_with_data_only_environment(self) -> None:
+    def test_remote_tag_and_full_sha_reuse_the_completed_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            repository, commit = self.make_source_repository(root)
-            state, _ = self.initialize_state(root, repository)
-            deploy_local_dev(state_root=state, repository=repository, commit=commit, command=RecordingCommand())
-
-            with patch.dict(os.environ, {"LITELLM_BASE_URL": "forbidden"}, clear=False), patch(
-                "voice_agent_v2.stand_dev.os.execve", side_effect=RuntimeError("exec intercepted")
-            ) as execve:
-                with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
-                    exec_launcher(state_root=state, instance="dev")
-
-            executable, arguments, environment = execve.call_args.args
-            self.assertEqual(executable, sys.executable)
-            self.assertEqual(arguments[-1], str(selected_release(state, "dev")[1] / "source/scripts/run_slice6.py"))
-            self.assertNotIn("LITELLM_BASE_URL", environment)
-            self.assertEqual(environment["VOICE_AGENT_INSTANCE_ROOT"], str(state / "instances/dev"))
-
-    def test_rejects_dirty_or_nonexact_sha_without_moving_existing_pointer(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            repository, commit = self.make_source_repository(root)
-            state, _ = self.initialize_state(root, repository)
+            controller, commit = self.make_source_repository(root)
             command = RecordingCommand()
-            deploy_local_dev(state_root=state, repository=repository, commit=commit, command=command)
-            before = os.readlink(state / "instances/dev/current")
-            (repository / "uncommitted.txt").write_text("dirty\n", encoding="utf-8")
+            state, _ = self.initialize_state(root, controller, command)
 
-            with self.assertRaisesRegex(StandError, "dirty"):
-                build_local_release(state_root=state, repository=repository, commit=commit, command=command)
-            with self.assertRaisesRegex(StandError, "full lowercase"):
-                build_local_release(state_root=state, repository=repository, commit=commit[:12], command=command)
-            self.assertEqual(os.readlink(state / "instances/dev/current"), before)
+            self.assertEqual(deploy_remote_dev(state_root=state, ref="main", command=command), commit)
+            self.assertEqual(deploy_remote_dev(state_root=state, ref="remote-tag", command=command), commit)
+            self.assertEqual(deploy_remote_dev(state_root=state, ref=commit, command=command), commit)
 
-    def test_failed_readiness_stays_selected_and_status_and_logs_are_honest(self) -> None:
+            self.assertEqual(sum(call[:2] == ("npm", "ci") for call in command.calls), 1)
+            self.assertEqual(len([entry for entry in (state / "releases").iterdir() if not entry.name.startswith(".")]), 1)
+            self.assertEqual(selected_release(state, "dev")[0], commit)
+
+    def test_remote_resolution_and_build_or_manifest_failures_preserve_completed_release_and_pointer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            repository, commit = self.make_source_repository(root)
-            state, _ = self.initialize_state(root, repository)
-            command = RecordingCommand(ready=False, journal="launcher readiness failed\n")
+            controller, commit = self.make_source_repository(root)
+            git(controller, "branch", "fetch-fails")
+            git(controller, "push", "-q", "origin", "fetch-fails")
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            deploy_remote_dev(state_root=state, ref="main", command=command)
+            before = os.readlink(state / "instances/dev/current")
+            releases_before = sorted(path.name for path in (state / "releases").iterdir() if not path.name.startswith("."))
 
-            with self.assertRaisesRegex(StandError, "release selected but readiness failed"):
-                deploy_local_dev(state_root=state, repository=repository, commit=commit, command=command)
+            command.fail_fetch_ref = "refs/heads/fetch-fails"
+            with self.assertRaisesRegex(StandError, "fetch failed"):
+                deploy_remote_dev(state_root=state, ref="fetch-fails", command=command)
+            with self.assertRaisesRegex(StandError, "unresolved"):
+                deploy_remote_dev(state_root=state, ref="does-not-exist", command=command)
 
-            report = status(state_root=state, instance="dev", command=command)
-            self.assertIn(f"version: {commit}", report)
-            self.assertIn("readiness: not-ready", report)
-            self.assertEqual(logs(instance="dev", command=command), "launcher readiness failed")
-            self.assertIn(("journalctl", "--user", "-u", "voice-agent-v2@dev.service", "--no-pager"), command.calls)
+            next_commit = self.commit_remote_revision(controller, "build-fails")
+            command.fail_build = True
+            with self.assertRaisesRegex(StandError, "frontend build failed"):
+                deploy_remote_dev(state_root=state, ref="main", command=command)
+            command.fail_build = False
+
+            manifest_commit = self.commit_remote_revision(controller, "manifest-fails")
+            with patch("voice_agent_v2.stand_dev.json.dumps", side_effect=TypeError("deliberate manifest failure")):
+                with self.assertRaisesRegex(StandError, "manifest construction failed"):
+                    deploy_remote_dev(state_root=state, ref="main", command=command)
+
+            self.assertNotEqual(next_commit, manifest_commit)
+            self.assertEqual(os.readlink(state / "instances/dev/current"), before)
+            self.assertEqual(sorted(path.name for path in (state / "releases").iterdir() if not path.name.startswith(".")), releases_before)
+            self.assertFalse(any(path.name.startswith(".") for path in (state / "releases").iterdir()))
+            self.assertEqual(selected_release(state, "dev")[0], commit)
+
+    def test_local_committed_sha_path_remains_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+
+            self.assertEqual(deploy_local_dev(state_root=state, repository=controller, commit=commit, command=command), commit)
+            self.assertEqual(selected_release(state, "dev")[0], commit)
+            (controller / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(StandError, "dirty"):
+                deploy_local_dev(state_root=state, repository=controller, commit=commit, command=command)
 
 
 if __name__ == "__main__":
