@@ -125,6 +125,28 @@ class RecordingCommand:
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+class GarbageCollectingCommand(RecordingCommand):
+    """Model systemd unloading an inactive disabled template instance."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.garbage_collected: set[str] = set()
+
+    def run(self, arguments, *, cwd: Path | None = None) -> CommandResult:
+        command = tuple(arguments)
+        if command[:3] == ("systemctl", "--user", "reset-failed"):
+            unit = command[-1]
+            if unit in self.garbage_collected:
+                self.calls.append(command)
+                return CommandResult(1, stderr=f"Unit {unit} not loaded")
+        result = super().run(arguments, cwd=cwd)
+        if command[:2] == ("systemctl", "--user") and command[2] in {"disable", "stop"}:
+            unit = command[-1]
+            if not self.enabled.get(unit, False) and not self.active.get(unit, False):
+                self.garbage_collected.add(unit)
+        return result
+
+
 class StopDocker:
     """Minimal exact Docker truth for the non-destructive stop seam."""
 
@@ -305,6 +327,93 @@ class StandDevTests(unittest.TestCase):
                     f"unit: {unit}", logs(state_root=state, instance=instance, command=command),
                 )
                 self.assertIn(("journalctl", "--user", "-u", unit, "--no-pager"), command.calls)
+
+    def test_stop_survives_template_gc_and_reaches_exact_container_without_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, commit = self.make_source_repository(root)
+            command = GarbageCollectingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            unit = "voice-agent-v2@dev.service"
+            command.enabled[unit] = True
+            self.assertEqual(
+                deploy_local_dev(
+                    state_root=state, repository=controller, commit=commit, command=command,
+                ),
+                commit,
+            )
+
+            instance = state / "instances/dev"
+            selected = selected_release(state, "dev")
+            assert selected is not None
+            release = selected[1]
+            pointer_before = os.readlink(instance / "current")
+            config_before = config_path(state, "dev").read_bytes()
+            sentinels = [
+                instance / relative / "preserved"
+                for relative in ("data", "workspace", "credentials")
+            ]
+            for path in sentinels:
+                path.write_text("preserved\n", encoding="utf-8")
+
+            private = instance / "agent-environment/private"
+            private.mkdir(mode=0o700)
+            installation = "12345678-1234-5678-1234-567812345678"
+            owner = owner_key(installation)
+            container_id = "a" * 64
+            spec = "s" * 52
+            registry = {
+                "schema_version": REGISTRY_SCHEMA,
+                "installation_uuid": installation,
+                "owner_key": owner,
+                "endpoint_fingerprint": hashlib.sha256(b"default\0stand-engine").hexdigest(),
+                "selected_container_id": container_id,
+                "generation": 1,
+                "spec": spec,
+                "retained": [],
+                "calls": {},
+                "processes": {},
+                "logical_cwd": "/workspace",
+                "state": "running",
+                "reason_code": None,
+            }
+            (private / "registry.json").write_text(json.dumps(registry), encoding="utf-8")
+            os.chmod(private / "registry.json", 0o600)
+            (private / "installation.lock").write_text("", encoding="utf-8")
+            os.chmod(private / "installation.lock", 0o600)
+            rootfs_marker = private / "rootfs-preserved"
+            rootfs_marker.write_text("preserved\n", encoding="utf-8")
+            docker = StopDocker(container_id, owner=owner, generation=1, spec=spec)
+            calls_before = len(command.calls)
+
+            self.assertEqual(
+                stop(
+                    state_root=state, instance="dev", command=command,
+                    docker_runner=docker,
+                ),
+                "stopped",
+            )
+
+            lifecycle_calls = command.calls[calls_before:]
+            self.assertEqual(lifecycle_calls, [
+                ("systemctl", "--user", "disable", unit),
+                ("systemctl", "--user", "stop", unit),
+            ])
+            self.assertIn(unit, command.garbage_collected)
+            self.assertFalse(any(call[2] == "reset-failed" for call in lifecycle_calls))
+            self.assertIn(("container", "stop", "--time", "10", container_id), docker.calls)
+            self.assertFalse(any(call[:2] == ("container", "rm") for call in docker.calls))
+            self.assertEqual(docker.container_id, container_id)
+            self.assertEqual(docker.state, "exited")
+            after = json.loads((private / "registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(after["selected_container_id"], container_id)
+            self.assertEqual(after["state"], "stopped")
+            self.assertEqual(rootfs_marker.read_text(encoding="utf-8"), "preserved\n")
+            self.assertTrue(release.is_dir())
+            self.assertEqual(os.readlink(instance / "current"), pointer_before)
+            self.assertEqual(config_path(state, "dev").read_bytes(), config_before)
+            for path in sentinels:
+                self.assertEqual(path.read_text(encoding="utf-8"), "preserved\n")
 
     def test_stop_registered_container_rechecks_identity_and_never_removes_rootfs_or_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
