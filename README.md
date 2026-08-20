@@ -35,6 +35,16 @@ Canonical-host exact-cache commands are `./verify-local-lfm`, `./verify-silero-k
 
 The direct pull-request path is intentionally simple: run `./verify` locally once, push the feature branch, open or update its pull request, and let GitHub CI run the same command at the exact head. Do not add a parallel repository-owned review/fix pipeline or rerun cumulative slice gates.
 
+## Local versioned stand preflight
+
+`stand doctor` is the read-only preflight for the supported Arch Linux/EndeavourOS x86_64 NVIDIA host. It reports `READY`, `INCOMPLETE`, or `UNSUPPORTED`, validates the pinned artifacts/runtimes and shared immutable caches declared in [`config/operations-v1.json`](config/operations-v1.json), and prints remediation commands without executing them:
+
+```sh
+./stand doctor
+```
+
+It never installs packages, starts services, writes files, or changes user/system configuration. A Docker package alone is not sufficient: the report requires the current user's linger-enabled user-systemd rootless Docker daemon and the registered NVIDIA runtime.
+
 The narrow immutable-release check remains available without the test runtime:
 
 ```sh
