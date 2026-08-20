@@ -378,6 +378,51 @@ class AgentEnvironment:
         self.lock_path = state_root / "installation.lock"
         self._thread_lock = threading.RLock()
 
+    @classmethod
+    def stop_registered(
+        cls, *, state_root: Path, runner: DockerRunner | None = None,
+    ) -> str:
+        """Stop the exact registered container without removing any persistent state.
+
+        This deliberately does not need the current application configuration: an
+        operator must still be able to stop a container after configuration has
+        become invalid.  Registry custody, the pinned Docker endpoint, labels,
+        generation, spec, and exact container identity are all rechecked under the
+        installation lock before and after the stop.
+        """
+        registry_path = state_root / "registry.json"
+        if not registry_path.exists():
+            return "absent"
+        environment = cls.__new__(cls)
+        environment.state_root = state_root
+        environment.registry_path = registry_path
+        environment.lock_path = state_root / "installation.lock"
+        environment.runner = runner or DockerCLI(state_root / "docker-client")
+        environment._thread_lock = threading.RLock()
+        with environment._locked(create=False):
+            registry = environment._registry(create=False)
+            if registry.get("selected_container_id") is None:
+                return "absent"
+            facts = environment._exact_current(registry, allow_stale=True)
+            if facts.spec != registry.get("spec"):
+                raise AgentEnvironmentError("environment_identity_conflict")
+            if facts.state in {"running", "restarting", "paused"}:
+                stopped = environment._docker(
+                    "container", "stop", "--time", "10", facts.container_id,
+                )
+                if stopped.returncode != 0:
+                    raise AgentEnvironmentError("lifecycle_action_failed")
+            fresh = environment._exact_current(registry, allow_stale=True)
+            if fresh.spec != registry.get("spec") or fresh.state in {
+                "running", "restarting", "paused",
+            }:
+                raise AgentEnvironmentError("lifecycle_action_failed")
+            environment._mark_container_processes_gone(registry, fresh.container_id)
+            registry["state"] = "stopped"
+            registry["reason_code"] = None
+            _atomic_private(environment.registry_path, registry)
+            return "stopped"
+
     @staticmethod
     def _paths_overlap(first: str, second: str) -> bool:
         left = Path(first).parts

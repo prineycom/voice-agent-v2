@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import stat
 import subprocess
 import tempfile
@@ -10,6 +12,17 @@ import unittest
 from unittest.mock import patch
 
 from scripts import stand as stand_cli
+from voice_agent_v2.agent_environment import (
+    AgentEnvironment,
+    DockerResult,
+    GENERATION_LABEL,
+    MANAGED_LABEL,
+    OWNER_LABEL,
+    REGISTRY_SCHEMA,
+    SCHEMA_LABEL,
+    SPEC_LABEL,
+    owner_key,
+)
 from voice_agent_v2.stand_dev import (
     CommandResult,
     PRODUCTION_LOCK,
@@ -23,10 +36,13 @@ from voice_agent_v2.stand_dev import (
     deploy_remote_dev,
     initialize,
     launcher_environment,
+    list_instances,
     logs,
     parse_private_config,
     selected_release,
+    start,
     status,
+    stop,
 )
 
 
@@ -39,16 +55,49 @@ class RecordingCommand:
         self.fail_build = False
         self.before_build = None
         self.ready = True
+        self.active = {"voice-agent-v2@main.service": True, "voice-agent-v2@dev.service": True}
+        self.enabled = {"voice-agent-v2@main.service": False, "voice-agent-v2@dev.service": False}
+        self.failed = {"voice-agent-v2@main.service": False, "voice-agent-v2@dev.service": False}
+        self.exit_status = {"voice-agent-v2@main.service": 0, "voice-agent-v2@dev.service": 0}
+        self.restart_count = {"voice-agent-v2@main.service": 0, "voice-agent-v2@dev.service": 0}
 
     def run(self, arguments, *, cwd: Path | None = None) -> CommandResult:
         command = tuple(arguments)
         self.calls.append(command)
         if command[:2] == ("systemctl", "--user"):
-            if command[2] == "is-active":
-                return CommandResult(0, "active\n") if self.ready else CommandResult(3, "inactive\n")
+            action = command[2]
+            unit = command[3] if action == "show" else command[-1]
+            if action == "is-active":
+                if self.active.get(unit, False):
+                    return CommandResult(0, "active\n")
+                if self.failed.get(unit, False):
+                    return CommandResult(3, "failed\n")
+                return CommandResult(3, "inactive\n")
+            if action == "is-enabled":
+                return CommandResult(0, "enabled\n") if self.enabled.get(unit, False) else CommandResult(1, "disabled\n")
+            if action == "enable":
+                self.enabled[unit] = True
+            elif action == "disable":
+                self.enabled[unit] = False
+            elif action in {"start", "restart"}:
+                self.active[unit] = self.ready
+                self.failed[unit] = not self.ready
+                self.exit_status[unit] = 0 if self.ready else 1
+                return CommandResult(0 if self.ready else 1)
+            elif action == "stop":
+                self.active[unit] = False
+                self.failed[unit] = False
+                self.exit_status[unit] = 0
+            elif action == "reset-failed":
+                self.failed[unit] = False
+            elif action == "show":
+                value = self.restart_count if "--property=NRestarts" in command else self.exit_status
+                return CommandResult(0, f"{value.get(unit, 0)}\n")
             return CommandResult(0)
         if command[:1] == ("journalctl",):
             return CommandResult(0, "dev launcher record\n")
+        if command[:4] == ("sudo", "-n", "loginctl", "enable-linger"):
+            return CommandResult(0)
         if command[:3] == ("git", "fetch", "--no-tags") and command[-1] == self.fail_fetch_ref:
             return CommandResult(1, stderr="deliberate fetch failure")
         if command[:3] == ("python3", "-m", "venv"):
@@ -74,6 +123,42 @@ class RecordingCommand:
             return CommandResult(0)
         completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+class StopDocker:
+    """Minimal exact Docker truth for the non-destructive stop seam."""
+
+    def __init__(self, container_id: str, *, owner: str, generation: int, spec: str) -> None:
+        self.container_id = container_id
+        self.owner = owner
+        self.generation = generation
+        self.spec = spec
+        self.state = "running"
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, arguments, *, stdin: bytes = b"", timeout: float = 15.0) -> DockerResult:
+        del stdin, timeout
+        command = tuple(arguments)
+        self.calls.append(command)
+        if command == ("context", "show"):
+            return DockerResult(0, b"default\n")
+        if command == ("version", "--format", "{{json .Server}}"):
+            return DockerResult(0, b'{"ID":"stand-engine"}\n')
+        if command[:3] == ("container", "ls", "-a"):
+            return DockerResult(0, f"{self.container_id}\n".encode("ascii"))
+        if command == ("container", "inspect", self.container_id):
+            return DockerResult(0, json.dumps([{
+                "Id": self.container_id,
+                "Config": {"Labels": {
+                    MANAGED_LABEL: "1", SCHEMA_LABEL: "1", OWNER_LABEL: self.owner,
+                    SPEC_LABEL: self.spec, GENERATION_LABEL: str(self.generation),
+                }},
+                "State": {"Status": self.state},
+            }]).encode("utf-8"))
+        if command == ("container", "stop", "--time", "10", self.container_id):
+            self.state = "exited"
+            return DockerResult(0)
+        return DockerResult(1)
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -144,9 +229,153 @@ class StandDevTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(config_path(state, "dev").stat().st_mode), 0o600)
             self.assertEqual(parse_private_config(config_path(state, "dev"))["STAND_NAME"], "dev")
             template = (units / "voice-agent-v2@.service").read_text(encoding="utf-8")
+            self.assertIn("After=docker.service", template)
             self.assertIn("Requires=docker.service", template)
-            self.assertIn("launcher %i", template)
+            self.assertIn("WantedBy=default.target", template)
+            self.assertIn("Type=notify", template)
+            self.assertIn("NotifyAccess=main", template)
+            self.assertIn("KillMode=control-group", template)
+            self.assertIn("ExecStart=" + str(controller / "stand") + " launcher %i", template)
+            self.assertEqual(template.count("ExecStart="), 1)
+            self.assertNotIn("ExecStartPost=", template)
+            self.assertIn("Restart=on-failure", template)
+            self.assertIn("RestartPreventExitStatus=2", template)
+            self.assertIn("StartLimitIntervalSec=60", template)
+            self.assertIn("StartLimitBurst=3", template)
+            self.assertIn("StandardOutput=journal", template)
+            self.assertIn("StandardError=journal", template)
             self.assertIn(("git", "clone", "--no-checkout", str(root / "private-origin.git"), str(source)), command.calls)
+
+    def test_explicit_lifecycle_toggles_persistence_preserves_state_and_lists_both_stands(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, _ = self.initialize_state(root, controller, command)
+            units = {
+                instance: f"voice-agent-v2@{instance}.service" for instance in ("main", "dev")
+            }
+            for unit in units.values():
+                command.active[unit] = False
+
+            self.assertEqual(
+                deploy_remote(state_root=state, instance="main", ref="v1.0.0", command=command),
+                commit,
+            )
+            self.assertEqual(
+                deploy_local_dev(
+                    state_root=state, repository=controller, commit=commit, command=command,
+                ),
+                commit,
+            )
+            for unit in units.values():
+                self.assertNotIn(("systemctl", "--user", "restart", unit), command.calls)
+            sentinel_paths = [
+                state / f"instances/{instance}/{relative}/kept"
+                for instance in ("main", "dev")
+                for relative in ("data", "workspace", "credentials", "agent-environment")
+            ]
+            for path in sentinel_paths:
+                path.write_text("preserved\n", encoding="utf-8")
+
+            for instance, unit in units.items():
+                start(state_root=state, instance=instance, command=command)
+                self.assertTrue(command.enabled[unit])
+                self.assertTrue(command.active[unit])
+                detail = status(state_root=state, instance=instance, command=command)
+                self.assertIn("state: running", detail)
+                self.assertIn("persistence: enabled", detail)
+            linger = ("sudo", "-n", "loginctl", "enable-linger", pwd.getpwuid(os.getuid()).pw_name)
+            self.assertEqual(command.calls.count(linger), 2)
+
+            for instance, unit in units.items():
+                self.assertEqual(
+                    stop(state_root=state, instance=instance, command=command), "absent",
+                )
+                self.assertFalse(command.enabled[unit])
+                self.assertFalse(command.active[unit])
+            for path in sentinel_paths:
+                self.assertEqual(path.read_text(encoding="utf-8"), "preserved\n")
+            inventory = list_instances(state_root=state, command=command)
+            self.assertIn("stand list\nmain:", inventory)
+            self.assertIn("\ndev:\n", inventory)
+            self.assertEqual(inventory.count(f"version: {commit}"), 2)
+            for instance, unit in units.items():
+                self.assertIn(
+                    f"unit: {unit}", logs(state_root=state, instance=instance, command=command),
+                )
+                self.assertIn(("journalctl", "--user", "-u", unit, "--no-pager"), command.calls)
+
+    def test_stop_registered_container_rechecks_identity_and_never_removes_rootfs_or_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private = root / "agent-environment/private"
+            private.mkdir(parents=True, mode=0o700)
+            os.chmod(private, 0o700)
+            installation = "12345678-1234-5678-1234-567812345678"
+            owner = owner_key(installation)
+            container_id = "a" * 64
+            spec = "s" * 52
+            endpoint = hashlib.sha256(b"default\0stand-engine").hexdigest()
+            registry = {
+                "schema_version": REGISTRY_SCHEMA,
+                "installation_uuid": installation,
+                "owner_key": owner,
+                "endpoint_fingerprint": endpoint,
+                "selected_container_id": container_id,
+                "generation": 1,
+                "spec": spec,
+                "retained": [],
+                "calls": {},
+                "processes": {},
+                "logical_cwd": "/workspace",
+                "state": "running",
+                "reason_code": None,
+            }
+            (private / "registry.json").write_text(json.dumps(registry), encoding="utf-8")
+            os.chmod(private / "registry.json", 0o600)
+            (private / "installation.lock").write_text("", encoding="utf-8")
+            os.chmod(private / "installation.lock", 0o600)
+            rootfs_marker = private / "rootfs-preserved"
+            rootfs_marker.write_text("kept\n", encoding="utf-8")
+            docker = StopDocker(container_id, owner=owner, generation=1, spec=spec)
+
+            self.assertEqual(
+                AgentEnvironment.stop_registered(state_root=private, runner=docker),
+                "stopped",
+            )
+            self.assertEqual(docker.state, "exited")
+            self.assertIn(("container", "stop", "--time", "10", container_id), docker.calls)
+            self.assertFalse(any(call[:2] == ("container", "rm") for call in docker.calls))
+            self.assertEqual(rootfs_marker.read_text(encoding="utf-8"), "kept\n")
+            after = json.loads((private / "registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(after["selected_container_id"], container_id)
+            self.assertEqual(after["state"], "stopped")
+
+    def test_launcher_configuration_exit_is_not_restartable_and_failed_runtime_is_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            command = RecordingCommand()
+            unit = "voice-agent-v2@dev.service"
+            command.active[unit] = False
+            command.failed[unit] = True
+            command.exit_status[unit] = 1
+            command.restart_count[unit] = 2
+            runtime_failure = status(state_root=state, instance="dev", command=command)
+            self.assertIn("state: failed", runtime_failure)
+            self.assertIn("readiness: not-ready", runtime_failure)
+            self.assertIn("automatic retries bounded; restarts=2", runtime_failure)
+            command.exit_status[unit] = 2
+            self.assertIn(
+                "state: configuration-failed",
+                status(state_root=state, instance="dev", command=command),
+            )
+            self.assertIn(
+                "automatic restart suppressed",
+                status(state_root=state, instance="dev", command=command),
+            )
+            with patch.object(stand_cli, "exec_launcher", side_effect=StandError("invalid external configuration")):
+                self.assertEqual(stand_cli.main(("launcher", "dev")), 2)
 
     def test_remote_branch_resolves_full_sha_and_promotes_complete_archive_release_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -482,8 +711,8 @@ class StandDevTests(unittest.TestCase):
                 f"stand logs dev\nversion: {second_commit}\nunit: voice-agent-v2@dev.service",
                 logs(state_root=state, instance="dev", command=command),
             )
-            self.assertIn(("systemctl", "--user", "start", "voice-agent-v2@main.service"), command.calls)
-            self.assertIn(("systemctl", "--user", "start", "voice-agent-v2@dev.service"), command.calls)
+            self.assertIn(("systemctl", "--user", "restart", "voice-agent-v2@main.service"), command.calls)
+            self.assertIn(("systemctl", "--user", "restart", "voice-agent-v2@dev.service"), command.calls)
 
     def test_selected_instance_never_falls_back_to_legacy_mutable_paths_or_ports(self) -> None:
         from voice_agent_v2.agent_config import AgentUserContext

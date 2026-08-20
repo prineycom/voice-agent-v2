@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import secrets
 import shutil
@@ -20,6 +21,8 @@ import subprocess
 import tempfile
 from typing import Mapping, Protocol, Sequence
 import uuid
+
+from .agent_environment import AgentEnvironment, AgentEnvironmentError, DockerRunner
 
 
 DEFAULT_STATE_ROOT = Path.home() / ".local/share/voice-agent-v2"
@@ -203,15 +206,24 @@ def unit_template(*, stand_executable: Path, state_root: Path) -> str:
     return "\n".join((
         "[Unit]",
         "Description=Voice Agent v2 local stand %i",
+        "# stand start enables user linger so this user manager survives logout and boots.",
         "After=docker.service",
         "Requires=docker.service",
+        "StartLimitIntervalSec=60",
+        "StartLimitBurst=3",
         "",
         "[Service]",
         "Type=notify",
+        "NotifyAccess=main",
+        "KillMode=control-group",
         "Environment=PYTHONUNBUFFERED=1",
         f"Environment=VOICE_AGENT_STAND_STATE_ROOT={state_root}",
         f"ExecStart={stand_executable} launcher %i",
-        "Restart=no",
+        "Restart=on-failure",
+        "RestartPreventExitStatus=2",
+        "RestartSec=5",
+        "StandardOutput=journal",
+        "StandardError=journal",
         "",
         "[Install]",
         "WantedBy=default.target",
@@ -588,23 +600,124 @@ def unit_for(instance: str) -> str:
     return f"voice-agent-v2@{instance}.service"
 
 
-def start(*, instance: str, command: CommandRunner) -> None:
+def _service_state(*, instance: str, command: CommandRunner) -> str:
+    result = command.run(("systemctl", "--user", "is-active", unit_for(instance)))
+    state = result.stdout.strip()
+    if state in {"active", "activating", "deactivating", "inactive", "failed"}:
+        return state
+    if result.returncode == 4:
+        return "inactive"
+    raise StandError("user-systemd state for the selected stand is unavailable")
+
+
+def _service_running(*, instance: str, command: CommandRunner) -> bool:
+    return _service_state(instance=instance, command=command) == "active"
+
+
+def _ensure_active(*, instance: str, command: CommandRunner, action: str) -> None:
     unit = unit_for(instance)
+    _checked(
+        command, ("systemctl", "--user", action, unit),
+        failure=f"user-systemd could not {action} the selected stand",
+    )
+    if not _service_running(instance=instance, command=command):
+        raise StandError(f"selected release remains not-ready after user-systemd {action}")
+
+
+def start(*, state_root: Path, instance: str, command: CommandRunner) -> None:
+    selected = selected_release(state_root, instance)
+    if selected is None:
+        raise StandError("start requires one selected immutable release")
+    # Fail before persistence changes when external configuration is already known bad.
+    launcher_environment(state_root=state_root, instance=instance, environment={})
+    unit = unit_for(instance)
+    user = pwd.getpwuid(os.getuid()).pw_name
+    _checked(
+        command, ("sudo", "-n", "loginctl", "enable-linger", user),
+        failure="user-systemd linger could not be enabled",
+    )
     _checked(command, ("systemctl", "--user", "daemon-reload"), failure="user-systemd daemon reload failed")
-    _checked(command, ("systemctl", "--user", "start", unit), failure="user-systemd could not start the selected stand")
-    active = command.run(("systemctl", "--user", "is-active", unit))
-    if active.returncode != 0 or active.stdout.strip() != "active":
-        raise StandError("selected release remains not-ready after user-systemd start")
+    _checked(command, ("systemctl", "--user", "enable", unit), failure="stand boot persistence could not be enabled")
+    _checked(command, ("systemctl", "--user", "reset-failed", unit), failure="stand failed state could not be reset")
+    _ensure_active(instance=instance, command=command, action="start")
+
+
+def stop(
+    *, state_root: Path, instance: str, command: CommandRunner,
+    docker_runner: DockerRunner | None = None,
+) -> str:
+    unit = unit_for(instance)
+    _checked(command, ("systemctl", "--user", "disable", unit), failure="stand boot persistence could not be disabled")
+    _checked(command, ("systemctl", "--user", "stop", unit), failure="user-systemd could not stop the selected stand")
+    _checked(command, ("systemctl", "--user", "reset-failed", unit), failure="stand failed state could not be reset")
+    try:
+        container = AgentEnvironment.stop_registered(
+            state_root=instance_root(state_root, instance) / "agent-environment" / "private",
+            runner=docker_runner,
+        )
+    except AgentEnvironmentError as error:
+        raise StandError(f"instance container stop failed: {error.code}") from error
+    return container
+
+
+def _persistence_state(*, instance: str, command: CommandRunner) -> str:
+    result = command.run(("systemctl", "--user", "is-enabled", unit_for(instance)))
+    value = result.stdout.strip()
+    if value in {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias"}:
+        return "enabled"
+    if value in {"disabled", "static", "indirect", "masked", "not-found"} or result.returncode in {1, 3, 4}:
+        return "disabled"
+    return "unknown"
 
 
 def status(*, state_root: Path, instance: str, command: CommandRunner) -> str:
     selected = selected_release(state_root, instance)
+    commit = selected[0] if selected is not None else "none"
+    active = _service_state(instance=instance, command=command)
+    persistence = _persistence_state(instance=instance, command=command)
+    failure = None
+    if active == "active":
+        lifecycle = "running"
+        readiness = "ready" if selected is not None else "not-ready"
+    elif active == "failed":
+        exit_status = command.run((
+            "systemctl", "--user", "show", unit_for(instance),
+            "--property=ExecMainStatus", "--value",
+        ))
+        restarts = command.run((
+            "systemctl", "--user", "show", unit_for(instance),
+            "--property=NRestarts", "--value",
+        )).stdout.strip()
+        if exit_status.stdout.strip() == "2":
+            lifecycle = "configuration-failed"
+            failure = "configuration; automatic restart suppressed"
+        else:
+            lifecycle = "failed"
+            failure = f"runtime/startup; automatic retries bounded; restarts={restarts if restarts.isdecimal() else 'unknown'}"
+        readiness = "not-ready"
+    elif active == "activating":
+        lifecycle, readiness = "starting", "not-ready"
+    elif active == "deactivating":
+        lifecycle, readiness = "stopping", "not-ready"
+    else:
+        lifecycle, readiness = "stopped", "not-ready"
     if selected is None:
-        return f"stand status {instance}\nversion: none\nreadiness: not-ready (no selected release)"
-    commit, _ = selected
-    active = command.run(("systemctl", "--user", "is-active", unit_for(instance)))
-    readiness = "ready" if active.returncode == 0 and active.stdout.strip() == "active" else "not-ready"
-    return f"stand status {instance}\nversion: {commit}\nreadiness: {readiness}"
+        readiness += " (no selected release)"
+    lines = [
+        f"stand status {instance}", f"version: {commit}", f"state: {lifecycle}",
+        f"persistence: {persistence}", f"readiness: {readiness}",
+    ]
+    if failure is not None:
+        lines.append(f"failure: {failure}")
+    return "\n".join(lines)
+
+
+def list_instances(*, state_root: Path, command: CommandRunner) -> str:
+    records = []
+    for instance in INSTANCE_NAMES:
+        detail = status(state_root=state_root, instance=instance, command=command).splitlines()[1:]
+        records.append(f"{instance}:\n" + "\n".join(f"  {line}" for line in detail))
+    return "stand list\n" + "\n".join(records)
 
 
 def logs(*, state_root: Path, instance: str, command: CommandRunner) -> str:
@@ -635,18 +748,23 @@ def validate_release_external_configuration(
 
 def _deploy_instance_release(
     *, state_root: Path, instance: str, repository: Path, commit: str,
-    command: CommandRunner,
+    was_running: bool, command: CommandRunner,
 ) -> str:
     release = build_release(state_root=state_root, repository=repository, commit=commit, command=command)
     validate_release_external_configuration(
         state_root=state_root, instance=instance, release=release,
     )
     select_release(state_root=state_root, instance=instance, release=release)
-    try:
-        start(instance=instance, command=command)
-    except StandError as error:
-        # The selected release intentionally remains visible for diagnosis.
-        raise StandError(f"release selected but readiness failed: {error}") from error
+    if was_running:
+        try:
+            _checked(
+                command, ("systemctl", "--user", "daemon-reload"),
+                failure="user-systemd daemon reload failed",
+            )
+            _ensure_active(instance=instance, command=command, action="restart")
+        except StandError as error:
+            # The selected release intentionally remains visible for diagnosis.
+            raise StandError(f"release selected but readiness failed: {error}") from error
     return commit
 
 
@@ -657,6 +775,7 @@ def deploy_local(
     """Select an exact local commit for dev; main is tag-only."""
     if instance != "dev":
         raise StandError("main deployment requires one exact vMAJOR.MINOR.PATCH tag")
+    was_running = _service_running(instance=instance, command=command)
     values = parse_private_config(config_path(state_root, instance))
     if values["STAND_NAME"] != instance:
         raise StandError("instance configuration identifies another stand")
@@ -665,7 +784,8 @@ def deploy_local(
     )
     return _deploy_instance_release(
         state_root=state_root, instance=instance, repository=repository,
-        commit=str(_release_manifest(local_release)["commit"]), command=command,
+        commit=str(_release_manifest(local_release)["commit"]),
+        was_running=was_running, command=command,
     )
 
 
@@ -679,15 +799,17 @@ def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command
 
 def deploy_remote(*, state_root: Path, instance: str, ref: str, command: CommandRunner) -> str:
     """Apply the strict main-tag or permissive explicit dev remote policy."""
+    if instance not in INSTANCE_NAMES:
+        raise StandError("only the declared stand instance is accepted")
+    was_running = _service_running(instance=instance, command=command)
     if instance == "main":
         commit = resolve_remote_main_tag(state_root=state_root, tag=ref, command=command)
     elif instance == "dev":
         commit = resolve_remote_dev_ref(state_root=state_root, ref=ref, command=command)
-    else:
-        raise StandError("only the declared stand instance is accepted")
     return _deploy_instance_release(
         state_root=state_root, instance=instance,
-        repository=controller_source_path(state_root), commit=commit, command=command,
+        repository=controller_source_path(state_root), commit=commit,
+        was_running=was_running, command=command,
     )
 
 
