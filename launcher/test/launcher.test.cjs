@@ -261,12 +261,15 @@ test('all launcher schemas, protocol, public keys, and signed fixtures are bound
     'legacy-config-migration.v1.schema.json', 'docker-endpoint.v1.schema.json', 'config-migrations.v1.schema.json', 'installation.v1.schema.json',
     'launcher-status.v1.schema.json', 'launcher-doctor.v1.schema.json', 'legacy-discovery.v1.schema.json',
     'agent-environment-preservation.v1.schema.json', 'asset-descriptor.v1.schema.json', 'cached-channel.v1.schema.json',
-    'launcher-self-update.v1.schema.json', 'update-result.v1.schema.json',
+    'launcher-self-update.v1.schema.json', 'update-result.v1.schema.json', 'lifecycle-result.v1.schema.json',
+    'uninstall-transaction.v1.schema.json', 'uninstall-inventory.v1.schema.json', 'support-last-operation.v1.schema.json',
+    'support-journal-metadata.v1.schema.json', 'support-service-policy.v1.schema.json',
   ]) JSON.parse(fs.readFileSync(path.join(ROOT, 'contracts', name), 'utf8'));
   const protocol = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'launcher-protocol-v1.json'), 'utf8'));
   assert.equal(protocol.protocol, 1);
   assert.deepEqual(protocol.read_only_commands, ['status', 'doctor']);
-  assert.deepEqual(protocol.mutation_commands, ['install', 'update']);
+  assert.deepEqual(protocol.diagnostic_commands, ['support-bundle']);
+  assert.deepEqual(protocol.mutation_commands, ['install', 'update', 'rollback', 'uninstall']);
   const releaseRecord = launcher.validateReleaseRecord({
     schema: 'voice-agent.release-record.v1', release_id: '1.2.3-abcdef012345', version: '1.2.3',
     build_id: 'a'.repeat(40), platform: 'linux-x86_64-nvidia', channel: 'stable', channel_sequence: 7,

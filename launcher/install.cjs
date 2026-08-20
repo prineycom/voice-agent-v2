@@ -146,7 +146,7 @@ agent_environment:
       private: path.join(config, 'private'), downloads: path.join(cache, 'downloads'), models: path.join(cache, 'models', 'sha256'), runtimes: path.join(cache, 'runtimes', 'sha256'),
       launchers: path.join(cache, 'launchers', 'sha256'), logs: path.join(state, 'logs'), diagnostics: path.join(state, 'diagnostics'), serviceRuntime: path.join(runtime, 'service'),
       unit: path.join(value.configHome, 'systemd', 'user', SERVICE_UNIT), journal: path.join(data, 'transactions', 'install.json'),
-      updateJournal: path.join(data, 'transactions', 'update.json'), selfUpdateJournal: path.join(data, 'transactions', 'launcher-update.json'), updateResult: path.join(state, 'last-update.json'), updateLock: path.join(runtime, 'update.lock'),
+      updateJournal: path.join(data, 'transactions', 'update.json'), uninstallJournal: path.join(data, 'transactions', 'uninstall.json'), selfUpdateJournal: path.join(data, 'transactions', 'launcher-update.json'), updateResult: path.join(state, 'last-update.json'), lifecycleResult: path.join(state, 'last-lifecycle.json'), updateLock: path.join(runtime, 'update.lock'),
       launcher: path.join(value.home, '.local', 'bin', 'voice-agent'), channelReceipt: path.join(cache, 'channel-stable.json'), installRecord: path.join(data, 'install.json'), current: path.join(data, 'current'), rollback: path.join(data, 'rollback'),
     };
   }

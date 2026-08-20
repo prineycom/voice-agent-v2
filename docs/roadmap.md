@@ -4,7 +4,7 @@
 >
 > **Owner:** Voice Agent v2 product delivery
 >
-> **Last updated:** 2026-08-21
+> **Last updated:** 2026-08-22
 
 This roadmap is a sequence of independently deliverable vertical slices. It contains no calendar estimates. A slice starts only when its dependencies and incoming evidence gate are satisfied; it finishes only with the stated user-visible behavior and evidence.
 
@@ -41,7 +41,7 @@ The architecture and contract ownership are defined in [`architecture.md`](archi
                                     └─ I4 Legacy adoption
                                        └─ I5 AgentEnvironment/config preservation
                                           └─ I6 Assets/cache/offline hardening
-                                             └─ I7 Uninstall/support bundle
+                                             └─ I7 Rollback/uninstall/support bundle
                                                 └─ I8 Host/power-loss/reboot/physical acceptance
 ```
 
@@ -78,7 +78,7 @@ Production signing-key provisioning, publication or downloads; install/update/ro
 3. **I4 legacy adoption — implemented deterministically:** journal the exact discovered healthy running release, import private configuration/rootless endpoint, activate a signed candidate and retire the old system service only after success; real-host execution remains I8.
 4. **I5 AgentEnvironment/config preservation — implemented deterministically:** durable XDG-data migration, explicit owner-only rootless authority, content-free exact inventory and before/after identity proof across install/update/rollback/recovery/adoption; real Docker/host evidence remains I8.
 5. **I6 assets/cache/offline/self-update — implemented deterministically:** resumable exact downloads, signed content-addressed dependencies, verified cached-only policy, genuine-space-only refusal and application-health-gated launcher replacement; real network/filesystem power-loss evidence remains I8.
-6. **I7 rollback/uninstall/support bundle:** complete user surfaces, exact destructive confirmation and privacy scanner.
+6. **I7 rollback/uninstall/support bundle — implemented deterministically:** recorded-prior-only exact-ready rollback, preservation-first closed-category uninstall, and fixed local privacy-scanned diagnostics; real host/deletion/voice evidence remains I8.
 7. **I8 acceptance:** disposable real-host install, VM phase/power loss, reboot, update/rollback voice turn and physical/full-stack gates before stable publication. macOS native support remains later.
 
 ## Installation evolution I2 — Fresh supported-Linux install
@@ -207,6 +207,30 @@ Production signing keys/channel/artifact/model/image publication; real downloads
 ### Acceptance and evidence
 
 The Node.js launcher phase in `./verify` uses injected network/filesystem/service/process facts and covers complete/resumed/range-reset/oversize/hash/signature/redirect failures, offline complete/insufficient/expired/rollback metadata, active/rollback/journal reachability, 0/1/2/3/100 inventories, partial/LRU/foreign-symlink boundaries, genuine space success/shortage, candidate failed-safe preservation, unchanged AgentEnvironment identity, launcher success and interruption after every receipt/rename/fsync/exec/validation phase, wrong-hash/backup ambiguity, idempotent recovery and privacy. [`assets-offline-self-update.md`](evidence/assets-offline-self-update.md) owns deterministic evidence and nonclaims.
+
+## Installation evolution I7 — Final rollback, uninstall and local support surfaces
+
+> **Implemented contract:** ADR-0016 closes the v1 user surface without adding another lifecycle, deletion, Docker-discovery or diagnostic-upload authority.
+
+### User-visible outcome
+
+`voice-agent rollback` can select only the recorded prior healthy release and succeeds only after the same exact five-component readiness proof; failure automatically restores and proves the release healthy at entry. `voice-agent uninstall` states what remains, inventories exact selected categories, and defaults to program-only removal. `voice-agent support-bundle` creates one owner-only local archive after listing its fixed privacy-safe categories and reports only checksum, size and category names.
+
+### Included scope
+
+- Existing lock and release transaction reused with `operation=rollback`, signed immutable release/asset and current host/config/data compatibility, reversible snapshot, exact service/unit custody, active↔rollback swap, one start, readiness-gated commit, automatic restoration, double-failure retention and interruption recovery.
+- Default exact owned service/unit, launcher/one backup, releases/metadata/transaction and program download/partial removal, ordered disable-before-bytes, no linger change, durable selected-category retry and already-removed truth.
+- Separate typed program-cache, model, AgentEnvironment and all-data purge flags/confirmations; closed canonical roots, no-follow owner/type race checks, and mandatory exact rootless endpoint/container/owner reinspection before environment removal.
+- Fixed deterministic support archive containing validated status/doctor, normalized last operation, redacted service policy and bounded journal metadata; closed entry/path allowlist and fail-closed secret-name/value/token/private-key/high-entropy scan; no upload.
+- Privacy-safe lifecycle result plus status/doctor recovery facts and stable error codes.
+
+### Excluded scope
+
+Production signing/publication; arbitrary historical version/import; real systemd/Docker/filesystem deletion or live deployment; broad prune, ambient Docker context, external-mount deletion or unrelated container/volume authority; remote upload; secret collection/rotation; AgentEnvironment rebuild; unsupported-protocol rollback; VM/reboot/physical voice/full-stack/macOS acceptance.
+
+### Acceptance and evidence
+
+The launcher phase of `./verify` uses disposable XDG roots and injected service/Docker/journal/output owners. It covers rollback success, target/prior double failure, missing/incompatible prior, selector denial, active↔rollback retention and durable interruptions; default preservation, dry-run/confirmation, every purge category, rootless denial, exact-ID removal, symlink/foreign/race/retry/service ordering and no-linger truth; deterministic archive bytes/mode/checksum/categories, forbidden content/scanner cases, unsafe destinations and zero upload. Real-host deletion and voice after rollback remain I8.
 
 ## Agent evolution E2.4 — Production multi-step work in one persistent Docker environment
 

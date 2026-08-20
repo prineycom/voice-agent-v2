@@ -3,11 +3,12 @@
   "$id": "https://voice-agent-v2.local/contracts/update-transaction.v1.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "id", "requested_channel", "phase", "prior_selected", "prior_running", "prior_healthy", "candidate", "config_snapshot", "agent_environment", "assets", "launcher", "offline", "space", "service", "receipts", "failure_code", "started_at", "updated_at"],
+  "required": ["schema", "id", "requested_channel", "operation", "phase", "prior_selected", "prior_running", "prior_healthy", "candidate", "config_snapshot", "agent_environment", "assets", "launcher", "offline", "space", "service", "receipts", "failure_code", "started_at", "updated_at"],
   "properties": {
     "schema": {"const": "voice-agent.update-transaction.v1"},
     "id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "requested_channel": {"const": "stable"},
+    "operation": {"enum": ["update", "rollback"]},
     "phase": {"enum": ["recovering", "checking", "staging", "verified", "migrations_prepared", "prior_custody", "quiescing", "activating", "starting", "ready", "committing", "healthy", "cleanup", "rolling_back", "restoring", "starting_prior", "prior_ready", "failed_safe", "failed_needs_repair"]},
     "prior_selected": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},
     "prior_running": {"oneOf": [{"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$"}, {"type": "null"}]},

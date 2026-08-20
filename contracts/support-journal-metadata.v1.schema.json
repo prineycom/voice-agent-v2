@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/support-journal-metadata.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "transactions", "excerpts"],
+  "properties": {
+    "schema": {"const": "voice-agent.support-journal-metadata.v1"},
+    "transactions": {"type": "array", "maxItems": 2, "items": {"type": "object", "additionalProperties": false, "required": ["operation", "phase", "error_code", "completed_receipts"], "properties": {"operation": {"enum": ["update", "rollback", "uninstall"]}, "phase": {"type": "string"}, "error_code": {}, "completed_receipts": {"type": "array", "maxItems": 32, "items": {"type": "string"}}}}},
+    "excerpts": {"type": "array", "maxItems": 32, "items": {"type": "object", "additionalProperties": false, "required": ["code", "priority", "timestamp"], "properties": {"code": {"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}, "priority": {"type": "integer", "minimum": 0, "maximum": 7}, "timestamp": {"type": "string"}}}}
+  }
+}

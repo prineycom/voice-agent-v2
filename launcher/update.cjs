@@ -23,7 +23,7 @@ module.exports = function createUpdater(core, installer) {
     'release_staged', 'service_started', 'service_stopped', 'space_preflight', 'terminal', 'unit_reloaded',
   ];
   const JOURNAL_KEYS = [
-    'agent_environment', 'assets', 'candidate', 'config_snapshot', 'failure_code', 'id', 'launcher', 'offline', 'phase', 'prior_healthy',
+    'agent_environment', 'assets', 'candidate', 'config_snapshot', 'failure_code', 'id', 'launcher', 'offline', 'operation', 'phase', 'prior_healthy',
     'prior_running', 'prior_selected', 'receipts', 'requested_channel', 'schema', 'service', 'space',
     'started_at', 'updated_at',
   ];
@@ -84,6 +84,7 @@ module.exports = function createUpdater(core, installer) {
     if (HISTORICAL_JOURNAL_KEYS.every((key) => observed.has(key)) && [...observed].every((key) => JOURNAL_KEYS.includes(key))) {
       return {
         ...document,
+        operation: document.operation || 'update',
         agent_environment: document.agent_environment || { before: null, after: null },
         assets: document.assets || [], launcher: document.launcher || null, offline: document.offline === true,
         space: document.space || null,
@@ -97,7 +98,7 @@ module.exports = function createUpdater(core, installer) {
     document = normalizeJournal(document);
     exactKeys(document, JOURNAL_KEYS, 'update_journal_invalid');
     if (document.schema !== UPDATE_SCHEMA || !/^[0-9a-f]{32}$/.test(document.id) || document.requested_channel !== 'stable'
-      || !PHASES.has(document.phase) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.started_at)
+      || !['update', 'rollback'].includes(document.operation) || !PHASES.has(document.phase) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.started_at)
       || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(document.updated_at)
       || ![document.prior_selected, document.prior_running, document.prior_healthy, document.candidate].every((value) => value === null || /^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$/.test(value))
       || document.prior_running !== document.prior_healthy
@@ -259,7 +260,7 @@ module.exports = function createUpdater(core, installer) {
       else if (metadata.isFile() && metadata.nlink === 1) { fs.unlinkSync(target); installer.syncDirectory(parent); }
       else error('partial_target_invalid', 'a transaction partial has an unsafe type');
     }
-    if (!keepCandidate && journal.candidate && ![journal.prior_selected, journal.prior_running, journal.prior_healthy].includes(journal.candidate)) {
+    if (!keepCandidate && journal.operation !== 'rollback' && journal.candidate && ![journal.prior_selected, journal.prior_running, journal.prior_healthy].includes(journal.candidate)) {
       const candidateRoot = path.join(layout.releases, journal.candidate);
       if (exists(candidateRoot)) {
         try { readRelease(layout, journal.candidate); removeExactTree(candidateRoot, layout.releases, layout.identity.uid); } catch (reason) { if (!(reason instanceof core.LauncherError)) throw reason; }
@@ -425,7 +426,7 @@ module.exports = function createUpdater(core, installer) {
       try { await dependencies.service.stop({ unit: installer.SERVICE_UNIT, graceful_deadline_ms: 75000 }); } catch {}
       installer.atomicWrite(path.join(layout.config, 'config.yaml'), snapshot.config, 0o600, layout.identity.uid);
       atomicPointer(layout, layout.current, prior.id, next.id);
-      atomicPointer(layout, layout.rollback, prior.id, next.id);
+      atomicPointer(layout, layout.rollback, next.operation === 'rollback' ? next.candidate : prior.id, next.id);
       if (!core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024).equals(snapshot.unit)) await dependencies.service.installUnit({ path: layout.unit, bytes: snapshot.unit, mode: 0o600, uid: layout.identity.uid });
       installer.atomicWrite(layout.installRecord, snapshot.install, 0o600, layout.identity.uid);
       fault(dependencies, 'action', 'prior_restored');
@@ -440,17 +441,20 @@ module.exports = function createUpdater(core, installer) {
       agentEnvironment.writePreservation(layout, environmentAfter, installer.writeJson);
       next = persistJournal(layout, next, 'prior_ready', dependencies, { agent_environment: { ...next.agent_environment, after: environmentAfter }, receipts: { environment_after: true, prior_ready: true } });
       next = persistJournal(layout, next, 'failed_safe', dependencies, { receipts: { terminal: true } });
-      installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: 'failed_safe', error_code: originalCode, offline: next.offline, latest_known: !next.offline, release_id: next.prior_healthy, rollback_release: next.prior_healthy, assets: { referenced: next.assets.length, reclaimed: 0 }, space: next.space || { required: 0, available: 0, reclaimable: 0 }, self_update: 'not_attempted' }, layout.identity.uid);
+      const failureResult = { schema: 'voice-agent.lifecycle-result.v1', operation: next.operation, state: 'failed_safe', error_code: originalCode, active_release: next.prior_healthy, rollback_release: next.candidate, recovery_required: false };
+      if (next.operation === 'rollback') installer.writeJson(layout.lifecycleResult, failureResult, layout.identity.uid);
+      else installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: 'failed_safe', error_code: originalCode, offline: next.offline, latest_known: !next.offline, release_id: next.prior_healthy, rollback_release: next.prior_healthy, assets: { referenced: next.assets.length, reclaimed: 0 }, space: next.space || { required: 0, available: 0, reclaimable: 0 }, self_update: 'not_attempted' }, layout.identity.uid);
       removeTransactionPartials(layout, next, false); removeSnapshot(layout, next);
       fs.unlinkSync(layout.updateJournal); installer.syncDirectory(layout.transactions);
-      error('update_failed_safe', `candidate failed (${originalCode}); the exact prior release was restored and proved ready`);
+      error(next.operation === 'rollback' ? 'rollback_failed_safe' : 'update_failed_safe', `candidate failed (${originalCode}); the exact prior release was restored and proved ready`);
     } catch (reason) {
-      if (reason instanceof core.LauncherError && reason.code === 'update_failed_safe') throw reason;
+      if (reason instanceof core.LauncherError && ['update_failed_safe', 'rollback_failed_safe'].includes(reason.code)) throw reason;
       try {
         next = persistJournal(layout, next, 'failed_needs_repair', dependencies, { failure_code: originalCode, receipts: { terminal: true } });
-        installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: 'failed_needs_repair', error_code: originalCode, offline: next.offline, latest_known: !next.offline, release_id: next.candidate, rollback_release: next.prior_healthy, assets: { referenced: next.assets.length, reclaimed: 0 }, space: next.space || { required: 0, available: 0, reclaimable: 0 }, self_update: 'not_attempted' }, layout.identity.uid);
+        if (next.operation === 'rollback') installer.writeJson(layout.lifecycleResult, { schema: 'voice-agent.lifecycle-result.v1', operation: 'rollback', state: 'failed_needs_repair', error_code: originalCode, active_release: next.candidate, rollback_release: next.prior_healthy, recovery_required: true }, layout.identity.uid);
+        else installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: 'failed_needs_repair', error_code: originalCode, offline: next.offline, latest_known: !next.offline, release_id: next.candidate, rollback_release: next.prior_healthy, assets: { referenced: next.assets.length, reclaimed: 0 }, space: next.space || { required: 0, available: 0, reclaimable: 0 }, self_update: 'not_attempted' }, layout.identity.uid);
       } catch {}
-      error('update_failed_needs_repair', `candidate failed (${originalCode}) and prior readiness could not be restored; recovery material was retained`);
+      error(next.operation === 'rollback' ? 'rollback_failed_needs_repair' : 'update_failed_needs_repair', `candidate failed (${originalCode}) and prior readiness could not be restored; recovery material was retained`);
     }
   }
 
@@ -479,8 +483,9 @@ module.exports = function createUpdater(core, installer) {
     fault(dependencies, 'action', 'post_gc_complete');
     removeTransactionPartials(layout, next, true); removeSnapshot(layout, next);
     fs.unlinkSync(layout.updateJournal); installer.syncDirectory(layout.transactions);
-    const result = { state: 'updated_healthy', release_id: candidate.id, version: candidate.record.version, rollback_release: next.prior_healthy, gc, asset_gc: assetGc, transaction_id: next.id, offline: next.offline, latest_known: !next.offline, space: next.space, self_update: next.launcher ? 'staged_after_application_health' : 'not_required' };
-    installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: result.state, error_code: null, offline: result.offline, latest_known: result.latest_known, release_id: result.release_id, rollback_release: result.rollback_release, assets: { referenced: next.assets.length, reclaimed: assetGc.count }, space: next.space, self_update: result.self_update }, layout.identity.uid);
+    const result = { state: next.operation === 'rollback' ? 'rolled_back_healthy' : 'updated_healthy', release_id: candidate.id, version: candidate.record.version, rollback_release: next.prior_healthy, gc, asset_gc: assetGc, transaction_id: next.id, offline: next.offline, latest_known: !next.offline, space: next.space, self_update: next.launcher ? 'staged_after_application_health' : 'not_required' };
+    if (next.operation === 'rollback') installer.writeJson(layout.lifecycleResult, { schema: 'voice-agent.lifecycle-result.v1', operation: 'rollback', state: result.state, error_code: null, active_release: result.release_id, rollback_release: result.rollback_release, recovery_required: false }, layout.identity.uid);
+    else installer.writeJson(layout.updateResult, { schema: 'voice-agent.update-result.v1', state: result.state, error_code: null, offline: result.offline, latest_known: result.latest_known, release_id: result.release_id, rollback_release: result.rollback_release, assets: { referenced: next.assets.length, reclaimed: assetGc.count }, space: next.space, self_update: result.self_update }, layout.identity.uid);
     return result;
   }
 
@@ -556,6 +561,129 @@ module.exports = function createUpdater(core, installer) {
     return selected;
   }
 
+  function verifyRollbackAssets(layout, target) {
+    const verified = new Set();
+    for (const digestValue of target.record.asset_digests || []) {
+      for (const root of [layout.models, layout.runtimes]) {
+        const filename = path.join(root, digestValue);
+        if (!exists(filename)) continue;
+        const bytes = core.readOwnedRegular(filename, layout.identity.uid, [0o400], 1024 * 1024 * 1024);
+        if (digest(bytes) !== digestValue) error('rollback_asset_incompatible', 'a recorded rollback asset differs from exact content-addressed custody');
+        verified.add(digestValue);
+      }
+    }
+    if (verified.size < 2) error('rollback_asset_incompatible', 'the recorded prior release lacks exact local model/runtime custody');
+    return [...verified].sort();
+  }
+
+  function prepareRollbackSnapshot(layout, journal, current, target, dependencies) {
+    const uid = layout.identity.uid;
+    if (!target.manifest || target.kind !== 'signed_artifact' || target.record.readiness.state !== 'ready') error('rollback_prior_incompatible', 'only the one recorded signed prior healthy release can be selected');
+    const config = core.readOwnedRegular(path.join(layout.config, 'config.yaml'), uid, [0o600], 4 * 1024 * 1024);
+    const configVersion = parseConfigSchema(config);
+    if (configVersion < target.manifest.config_schema.minimum || configVersion > target.manifest.config_schema.maximum) error('rollback_config_incompatible', 'current configuration is outside the recorded prior release range');
+    const dataVersion = current.record.data_schema.maximum;
+    if (dataVersion < target.manifest.data_schema.minimum || dataVersion > target.manifest.data_schema.maximum) error('rollback_data_incompatible', 'current application data protocol is outside the recorded prior release range');
+    const root = path.join(layout.migrations, journal.id);
+    if (exists(root)) error('migration_snapshot_ambiguous', 'the rollback snapshot already exists without its durable receipt');
+    fs.mkdirSync(root, { mode: 0o700 }); fs.chmodSync(root, 0o700); installer.syncDirectory(layout.migrations);
+    installer.atomicWrite(path.join(root, 'config.before'), config, 0o600, uid);
+    installer.atomicWrite(path.join(root, 'config.candidate'), config, 0o600, uid);
+    installer.atomicWrite(path.join(root, 'install.before'), core.readOwnedRegular(layout.installRecord, uid, [0o600], 256 * 1024), 0o600, uid);
+    const unit = core.readOwnedRegular(layout.unit, uid, [0o600], 256 * 1024);
+    installer.atomicWrite(path.join(root, 'unit.before'), unit, 0o600, uid);
+    installer.writeJson(path.join(root, 'receipt.json'), {
+      schema: 'voice-agent.migration-snapshot.v1', config_before_sha256: digest(config), config_candidate_sha256: digest(config),
+      config_from: configVersion, config_to: configVersion, data_from: dataVersion, data_to: dataVersion, prior_backward_readable: true,
+    }, uid);
+    fault(dependencies, 'action', 'rollback_snapshot_prepared');
+    return unit;
+  }
+
+  async function rollbackVoiceAgent(options = {}) {
+    const testMode = options.testMode === true;
+    if (!testMode && options.dependencies) error('test_injection_forbidden', 'rollback injection is test-only');
+    const dependencies = options.dependencies || installer.defaultDependencies();
+    const layout = installer.layoutFor(testMode ? dependencies.identity : undefined, testMode);
+    const output = dependencies.output || { info() {} };
+    if (!exists(layout.installRecord) || !exists(layout.current)) error('canonical_install_required', 'voice-agent rollback requires a completed canonical installation');
+    for (const directory of [layout.data, layout.releases, layout.transactions, layout.migrations, layout.config, layout.cache, layout.models, layout.runtimes]) installer.inspectManagedPath(directory, layout.identity.uid, 0o700);
+    installer.inspectManagedPath(layout.runtime, layout.identity.uid, 0o700);
+    installer.inspectManagedPath(path.join(layout.config, 'config.yaml'), layout.identity.uid, 0o600, 'file');
+    installer.inspectManagedPath(layout.unit, layout.identity.uid, 0o600, 'file');
+    const lock = acquireExclusiveLock(layout, dependencies);
+    let journal = null;
+    try {
+      const recovered = await recover(layout, dependencies);
+      if (recovered && recovered.state !== 'pre_quiesce_recovered') return recovered;
+      const selectedId = pointerId(layout, layout.current);
+      const rollbackId = pointerId(layout, layout.rollback);
+      if (!rollbackId) error('rollback_not_available', 'no recorded prior healthy release is available');
+      if (rollbackId === selectedId) error('rollback_not_available', 'the recorded rollback is already active');
+      const selected = readRelease(layout, selectedId);
+      const target = readRelease(layout, rollbackId);
+      const { snapshot: runningSnapshot, running } = await observeHealthyRunning(layout, dependencies.service);
+      if (running.id !== selected.id) error('rollback_current_not_ready', 'selected and running healthy release custody differs');
+      if (!dependencies.host || typeof dependencies.host.inspectBase !== 'function') error('rollback_host_incompatible', 'current host compatibility facts are unavailable');
+      const hostFacts = installer.hostPreflight(await dependencies.host.inspectBase());
+      if (hostFacts.user.uid !== layout.identity.uid || hostFacts.user.name !== layout.identity.username || hostFacts.user.home !== layout.identity.home) error('rollback_host_incompatible', 'current host identity differs from the installation');
+      verifyRollbackAssets(layout, target);
+      if (dependencies.host && typeof dependencies.host.inspectRollbackCompatibility === 'function') {
+        const compatible = await dependencies.host.inspectRollbackCompatibility({ layout, current: selected, target });
+        if (!compatible || compatible.platform !== true || compatible.host !== true) error('rollback_host_incompatible', 'the recorded prior release is incompatible with current host facts');
+      }
+      const id = dependencies.randomBytes(16).toString('hex');
+      journal = {
+        schema: UPDATE_SCHEMA, id, requested_channel: 'stable', operation: 'rollback', phase: 'checking',
+        prior_selected: selected.id, prior_running: running.id, prior_healthy: running.id, candidate: target.id, config_snapshot: id,
+        service: serviceState(runningSnapshot, core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024)),
+        agent_environment: { before: null, after: null }, assets: [...target.record.asset_digests].sort(), launcher: null,
+        offline: true, space: { required: 0, available: 0, reclaimable: 0 }, receipts: emptyReceipts(), failure_code: null,
+        started_at: timestamp(dependencies.clock), updated_at: timestamp(dependencies.clock),
+      };
+      installer.writeJson(layout.updateJournal, journal, layout.identity.uid); fault(dependencies, 'write', 'checking');
+      const environmentBefore = await agentEnvironment.capture(layout, dependencies, { phase: 'rollback_before' });
+      agentEnvironment.writePreservation(layout, environmentBefore, installer.writeJson);
+      journal = persistJournal(layout, journal, 'checking', dependencies, { agent_environment: { before: environmentBefore, after: null }, receipts: { environment_before: true, channel_checked: true, artifact_verified: true, assets_verified: true, space_preflight: true } });
+      prepareRollbackSnapshot(layout, journal, selected, target, dependencies);
+      journal = persistJournal(layout, journal, 'migrations_prepared', dependencies, { receipts: { migration_prepared: true, release_staged: true, prior_custody: true } });
+      journal = persistJournal(layout, journal, 'quiescing', dependencies);
+      await stopAndProve(dependencies.service, { unit: installer.SERVICE_UNIT, prior_release_id: selected.id, deadline_ms: 75000 });
+      fault(dependencies, 'action', 'service_stopped');
+      journal = persistJournal(layout, journal, 'quiescing', dependencies, { receipts: { service_stopped: true } });
+      atomicPointer(layout, layout.rollback, selected.id, journal.id);
+      atomicPointer(layout, layout.current, target.id, journal.id);
+      fault(dependencies, 'action', 'pointer_activated');
+      journal = persistJournal(layout, journal, 'activating', dependencies, { receipts: { pointer_activated: true } });
+      const unit = installer.renderUnit(layout, target.root);
+      if (!core.readOwnedRegular(layout.unit, layout.identity.uid, [0o600], 256 * 1024).equals(unit)) {
+        await dependencies.service.installUnit({ path: layout.unit, bytes: unit, mode: 0o600, uid: layout.identity.uid });
+        fault(dependencies, 'action', 'unit_reloaded');
+        journal = persistJournal(layout, journal, 'activating', dependencies, { receipts: { unit_reloaded: true } });
+      }
+      journal = persistJournal(layout, journal, 'starting', dependencies);
+      await startOnce(dependencies.service, { unit: installer.SERVICE_UNIT, release_id: target.id, start_once: true });
+      fault(dependencies, 'action', 'candidate_started');
+      journal = persistJournal(layout, journal, 'starting', dependencies, { receipts: { service_started: true } });
+      await waitReady(dependencies.service, target, layout, dependencies);
+      fault(dependencies, 'action', 'candidate_readiness_proved');
+      journal = persistJournal(layout, journal, 'ready', dependencies, { receipts: { candidate_ready: true } });
+      const installRecord = installer.readPrivateJson(layout.installRecord, layout.identity.uid);
+      const result = await commitCandidate(layout, journal, target, installRecord.channel_sequence, installRecord.channel_authority_sha256, dependencies);
+      output.info(`Rollback complete: Voice Agent ${target.record.version} is exact-ready; displaced ${selected.record.version} is the single rollback release.`);
+      return result;
+    } catch (reason) {
+      if (reason && ['update_interrupted', 'rollback_failed_safe', 'rollback_failed_needs_repair'].includes(reason.code)) throw reason;
+      if (journal && exists(layout.updateJournal)) {
+        const currentJournal = readJournal(layout);
+        const priorUnchanged = !currentJournal.receipts.service_stopped && await priorStillExactReady(layout, currentJournal, dependencies);
+        if (currentJournal.receipts.service_stopped || (POST_QUIESCE.has(currentJournal.phase) && !priorUnchanged)) return rollback(layout, currentJournal, dependencies, reason.code || 'rollback_failed');
+        try { removeSnapshot(layout, currentJournal); fs.unlinkSync(layout.updateJournal); installer.syncDirectory(layout.transactions); } catch {}
+      }
+      throw reason;
+    } finally { lock.release(); }
+  }
+
   async function updateVoiceAgent(options = {}) {
     const testMode = options.testMode === true;
     if (!testMode && options.dependencies) error('test_injection_forbidden', 'update injection is test-only');
@@ -611,7 +739,7 @@ module.exports = function createUpdater(core, installer) {
       }
 
       journal = {
-        schema: UPDATE_SCHEMA, id: dependencies.randomBytes(16).toString('hex'), requested_channel: 'stable', phase: 'checking',
+        schema: UPDATE_SCHEMA, id: dependencies.randomBytes(16).toString('hex'), requested_channel: 'stable', operation: 'update', phase: 'checking',
         prior_selected: selected.id, prior_running: prior.id, prior_healthy: prior.id, candidate: releaseId(release), config_snapshot: null,
         service: { was_active: priorSnapshot.service_active === true, was_enabled: priorSnapshot.service_enabled === true, unit_sha256: null },
         agent_environment: { before: null, after: null }, assets: [release.artifact_sha256, ...release.assets.map((item) => item.sha256)].sort(), launcher: release.launcher ? release.launcher.sha256 : null,
@@ -731,7 +859,7 @@ module.exports = function createUpdater(core, installer) {
       output.info(`Voice Agent ${candidate.record.version} is healthy; rollback ${prior.record.version} retained; removed ${result.gc.removed + preGc.removed} older owned program releases and ${result.asset_gc.count} unreferenced reconstructible assets.`);
       return result;
     } catch (reason) {
-      if (reason && ['update_interrupted', 'update_failed_safe', 'update_failed_needs_repair'].includes(reason.code)) throw reason;
+      if (reason && ['update_interrupted', 'update_failed_safe', 'update_failed_needs_repair', 'rollback_failed_safe', 'rollback_failed_needs_repair'].includes(reason.code)) throw reason;
       if (journal && exists(layout.updateJournal)) {
         const currentJournal = readJournal(layout);
         const priorUnchanged = !currentJournal.receipts.service_stopped && await priorStillExactReady(layout, currentJournal, dependencies);
@@ -748,6 +876,6 @@ module.exports = function createUpdater(core, installer) {
 
   return {
     PHASES, POST_QUIESCE, RECEIPT_KEYS, UPDATE_SCHEMA, acquireExclusiveLock, collectReleases,
-    loadMigrationDescriptors, migrationPlan, normalizeJournal, parseConfigSchema, readRelease, updateVoiceAgent, validateJournal,
+    loadMigrationDescriptors, migrationPlan, normalizeJournal, parseConfigSchema, readRelease, rollbackVoiceAgent, updateVoiceAgent, validateJournal,
   };
 };

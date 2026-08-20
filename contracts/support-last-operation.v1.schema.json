@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/support-last-operation.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "operation", "state", "error_code", "active_release", "rollback_release", "recovery_required"],
+  "properties": {
+    "schema": {"enum": ["voice-agent.support-last-operation.v1", "voice-agent.lifecycle-result.v1"]},
+    "operation": {"enum": ["none", "update", "rollback", "uninstall"]}, "state": {"type": "string"},
+    "error_code": {}, "active_release": {}, "rollback_release": {}, "recovery_required": {"type": "boolean"}
+  }
+}

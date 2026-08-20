@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/uninstall-inventory.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "categories"],
+  "properties": {
+    "schema": {"const": "voice-agent.uninstall-inventory.v1"},
+    "categories": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "object", "additionalProperties": false, "required": ["name", "selected", "entries", "bytes"], "properties": {
+      "name": {"enum": ["program", "program_cache", "models", "agent_environment", "application_data"]}, "selected": {"type": "boolean"}, "entries": {"type": "integer", "minimum": 0}, "bytes": {"type": "integer", "minimum": 0}
+    }} }
+  }
+}

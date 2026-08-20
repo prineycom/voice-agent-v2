@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/lifecycle-result.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "operation", "state", "error_code", "active_release", "rollback_release", "recovery_required"],
+  "properties": {
+    "schema": {"const": "voice-agent.lifecycle-result.v1"},
+    "operation": {"enum": ["rollback", "uninstall"]},
+    "state": {"enum": ["rolled_back_healthy", "failed_safe", "failed_needs_repair", "uninstalled"]},
+    "error_code": {"oneOf": [{"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}, {"type": "null"}]},
+    "active_release": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+    "rollback_release": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+    "recovery_required": {"type": "boolean"}
+  }
+}

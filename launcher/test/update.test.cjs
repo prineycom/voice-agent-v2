@@ -126,6 +126,7 @@ function harness(options = {}) {
   let active = false;
   let running = initial;
   let stoppedOnce = false;
+  const failVersions = new Set(options.failVersions || []);
   let monotonic = 0;
   const calls = [];
   const lines = [];
@@ -141,7 +142,7 @@ function harness(options = {}) {
     probe: async () => {
       if (!active) return ready(running, false, { accepting: false });
       const isCandidate = running === candidate;
-      const fail = isCandidate ? options.candidateFailure : options.priorFailureAfterStop && stoppedOnce;
+      const fail = (failVersions.has(running.release.version) && stoppedOnce) || (isCandidate ? options.candidateFailure : options.priorFailureAfterStop && stoppedOnce);
       const mismatch = isCandidate && options.candidateMismatch;
       return ready(running, true, fail ? { accepting: false, component: 'unavailable', overall: 'unready' } : mismatch ? { build_id: 'f'.repeat(40) } : options.priorIdentityMismatch && !seeding && !stoppedOnce ? { process_uid: UID + 1 } : {});
     },
@@ -171,7 +172,7 @@ function harness(options = {}) {
   async function seed() { sourceArtifact = initial; seeding = true; await installer.installVoiceAgent({ testMode: true, dependencies }); seeding = false; environmentCapture = 0; sourceArtifact = candidate; calls.length = 0; lines.length = 0; }
   async function update(extra = {}) { return updater.updateVoiceAgent({ testMode: true, dependencies, ...extra }); }
   function cleanup(context) { context.after(() => { function writable(file) { if (!exists(file)) return; const meta = fs.lstatSync(file); if (meta.isSymbolicLink()) return; if (meta.isDirectory()) { fs.chmodSync(file, 0o700); for (const name of fs.readdirSync(file)) writable(path.join(file, name)); } else fs.chmodSync(file, 0o600); } writable(parent); fs.rmSync(parent, { recursive: true, force: true }); }); }
-  return { parent, identity, initial, candidate, dependencies, layout, calls, lines, seed, update, cleanup, setSource(value) { sourceArtifact = value; } };
+  return { parent, identity, initial, candidate, dependencies, layout, calls, lines, seed, update, cleanup, setSource(value) { sourceArtifact = value; }, setFailureVersions(values) { failVersions.clear(); for (const value of values) failVersions.add(value); }, resetStopMarker() { stoppedOnce = false; } };
 }
 
 function cacheChannel(value, source, sequence = 10, expiresAt = '2026-09-20T00:00:00Z') {
@@ -370,9 +371,66 @@ test('reachability GC refuses unsafe/unowned targets without deleting user/confi
 
 });
 
-test('CLI exposes only canonical update/offline surface and records/output are content-free', () => {
+test('recorded-prior-only rollback revalidates, swaps active and rollback, and retains displaced newer release', async (context) => {
+  const value = harness(); value.cleanup(context); await value.seed();
+  const updated = await value.update();
+  const result = await updater.rollbackVoiceAgent({ testMode: true, dependencies: value.dependencies });
+  assert.equal(result.state, 'rolled_back_healthy');
+  assert.match(fs.readlinkSync(value.layout.current), /1\.0\.0-/);
+  assert.equal(fs.readlinkSync(value.layout.rollback), `releases/${updated.release_id}`);
+  assert.equal(fs.readdirSync(value.layout.releases).length, 2);
+  assert.equal(exists(value.layout.updateJournal), false);
+  const lifecycle = JSON.parse(fs.readFileSync(value.layout.lifecycleResult));
+  assert.deepEqual({ operation: lifecycle.operation, state: lifecycle.state, recovery_required: lifecycle.recovery_required }, { operation: 'rollback', state: 'rolled_back_healthy', recovery_required: false });
+});
+
+test('rollback target failure restores exact healthy newer release; double failure retains all evidence', async (context) => {
+  const safe = harness(); safe.cleanup(context); await safe.seed(); await safe.update(); safe.calls.length = 0; safe.resetStopMarker();
+  safe.setFailureVersions(['1.0.0']);
+  await code('rollback_failed_safe', () => updater.rollbackVoiceAgent({ testMode: true, dependencies: safe.dependencies }));
+  assert.match(fs.readlinkSync(safe.layout.current), /1\.1\.0-/);
+  assert.match(fs.readlinkSync(safe.layout.rollback), /1\.0\.0-/);
+  assert.equal(exists(safe.layout.updateJournal), false);
+
+  const broken = harness(); broken.cleanup(context); await broken.seed(); await broken.update(); broken.resetStopMarker();
+  broken.setFailureVersions(['1.0.0', '1.1.0']);
+  await code('rollback_failed_needs_repair', () => updater.rollbackVoiceAgent({ testMode: true, dependencies: broken.dependencies }));
+  const journal = JSON.parse(fs.readFileSync(broken.layout.updateJournal));
+  assert.equal(journal.operation, 'rollback'); assert.equal(journal.phase, 'failed_needs_repair');
+  assert.equal(exists(path.join(broken.layout.migrations, journal.id)), true);
+  assert.equal(fs.readdirSync(broken.layout.releases).length, 2);
+});
+
+test('rollback interruption converges idempotently and incompatible/missing prior fail before service mutation', async (context) => {
+  for (const phase of ['checking', 'migrations_prepared', 'quiescing', 'starting', 'ready', 'committing']) {
+    const value = harness(); value.cleanup(context); await value.seed(); await value.update(); value.calls.length = 0;
+    let fired = false;
+    value.dependencies.fault = { afterDurablePhase(name) { if (!fired && name === phase) { fired = true; throw new launcher.LauncherError('update_interrupted', 'fixture'); } } };
+    await code('update_interrupted', () => updater.rollbackVoiceAgent({ testMode: true, dependencies: value.dependencies }));
+    value.dependencies.fault = null;
+    try { await updater.rollbackVoiceAgent({ testMode: true, dependencies: value.dependencies }); }
+    catch (reason) {
+      if (reason.code === 'rollback_failed_safe') await updater.rollbackVoiceAgent({ testMode: true, dependencies: value.dependencies });
+      else if (reason.code !== 'rollback_not_available') throw reason;
+    }
+    assert.equal(exists(value.layout.updateJournal), false, phase);
+    assert.match(fs.readlinkSync(value.layout.current), /1\.[01]\.0-/, phase);
+  }
+  const missing = harness(); missing.cleanup(context); await missing.seed();
+  await code('rollback_not_available', () => updater.rollbackVoiceAgent({ testMode: true, dependencies: missing.dependencies }));
+  assert.equal(missing.calls.length, 0);
+
+  const incompatible = harness(); incompatible.cleanup(context); await incompatible.seed(); await incompatible.update(); incompatible.calls.length = 0;
+  fs.writeFileSync(path.join(incompatible.layout.config, 'config.yaml'), 'schema_version: voice-agent.config.v99\n', { mode: 0o600 });
+  await code('rollback_config_incompatible', () => updater.rollbackVoiceAgent({ testMode: true, dependencies: incompatible.dependencies }));
+  assert.equal(incompatible.calls.length, 0);
+});
+
+test('CLI exposes selector-free rollback and canonical update/offline surface', () => {
   assert.deepEqual(launcher.parseCli(['update']), { command: 'update', json: false, offline: false });
   assert.deepEqual(launcher.parseCli(['update', '--offline']), { command: 'update', json: false, offline: true });
+  assert.deepEqual(launcher.parseCli(['rollback']), { command: 'rollback', json: false, offline: false });
+  assert.throws(() => launcher.parseCli(['rollback', '1.0.0']));
   assert.deepEqual(launcher.parseCli(['__post-self-update', 'a'.repeat(32)]), { command: '__post-self-update', json: false, offline: false, transactionId: 'a'.repeat(32) });
   assert.throws(() => launcher.parseCli(['update', '--root', '/tmp/x']));
   assert.throws(() => launcher.parseCli(['update', '--channel', 'beta']));

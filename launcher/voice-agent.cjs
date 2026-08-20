@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const LAUNCHER_VERSION = '0.6.0';
+const LAUNCHER_VERSION = '0.7.0';
 const LAUNCHER_PROTOCOL = 1;
 const SUPPORTED_PLATFORM = 'linux-x86_64-nvidia';
 const SERVICE_NAME = 'voice-agent-v2.service';
@@ -634,21 +634,21 @@ function readCanonicalReleaseById(root, releaseId, uid) {
 }
 
 function canonicalState(installRoot, uid) {
-  if (!lstatExists(installRoot)) return { state: 'absent', selected: null, rollback: null, transaction: { state: 'none', phase: null }, agent_environment: { state: 'disabled', action: 'configure_agent', reason_code: 'not_configured', identity_digest: null, container_id_prefix: null, runtime_state: null } };
+  if (!lstatExists(installRoot)) return { state: 'absent', selected: null, rollback: null, transaction: { state: 'none', operation: null, phase: null }, agent_environment: { state: 'disabled', action: 'configure_agent', reason_code: 'not_configured', identity_digest: null, container_id_prefix: null, runtime_state: null } };
   try {
     noSymlinkComponents(installRoot);
     ownedDirectory(installRoot, uid, 0o700);
     ownedDirectory(path.join(installRoot, 'releases'), uid, 0o700);
     const selected = readCanonicalRelease(installRoot, 'current', uid);
     const rollback = readCanonicalRelease(installRoot, 'rollback', uid);
-    let transaction = { state: 'none', phase: null };
+    let transaction = { state: 'none', operation: null, phase: null };
     const transactionPath = path.join(installRoot, 'transactions', 'update.json');
     if (lstatExists(transactionPath)) {
       const document = JSON.parse(readOwnedRegular(transactionPath, uid, [0o600], 256 * 1024).toString('utf8'));
       if (document.schema !== 'voice-agent.update-transaction.v1' || typeof document.phase !== 'string') {
         fail('transaction_invalid', 'transaction record is invalid');
       }
-      transaction = { state: 'present', phase: document.phase };
+      transaction = { state: 'present', operation: ['update', 'rollback'].includes(document.operation) ? document.operation : 'update', phase: document.phase };
     }
     let agent_environment = { state: 'disabled', action: 'configure_agent', reason_code: 'not_configured', identity_digest: null, container_id_prefix: null, runtime_state: null };
     const preservation = agentEnvironmentPreserver().readPreservation(installRoot, uid);
@@ -659,7 +659,7 @@ function canonicalState(installRoot, uid) {
     };
     return { state: selected ? 'canonical' : 'incomplete', selected, rollback, transaction, agent_environment };
   } catch (error) {
-    return { state: 'invalid', selected: null, rollback: null, transaction: { state: 'invalid', phase: null }, agent_environment: { state: 'degraded_identity_mismatch', action: 'restore_exact_environment', reason_code: 'install_state_invalid', identity_digest: null, container_id_prefix: null, runtime_state: null }, error_code: error instanceof LauncherError ? error.code : 'install_state_invalid' };
+    return { state: 'invalid', selected: null, rollback: null, transaction: { state: 'invalid', operation: null, phase: null }, agent_environment: { state: 'degraded_identity_mismatch', action: 'restore_exact_environment', reason_code: 'install_state_invalid', identity_digest: null, container_id_prefix: null, runtime_state: null }, error_code: error instanceof LauncherError ? error.code : 'install_state_invalid' };
   }
 }
 
@@ -857,6 +857,26 @@ async function collectStatus(options = {}) {
     }
     if (lstatExists(path.join(installRoot, 'transactions', 'launcher-update.json'))) lifecycle.self_update = { state: 'recovery_required' };
   } catch { lifecycle = { assets: { state: 'invalid', referenced: null, reclaimed: null }, offline: { used: false, latest_known: null }, space: { required: null, available: null, reclaimable: null }, self_update: { state: 'invalid' } }; }
+  let recovery = { operation: null, state: 'not_recorded', error_code: null, recovery_required: false };
+  try {
+    const lifecyclePath = path.join(stateRoot, 'last-lifecycle.json');
+    if (lstatExists(lifecyclePath)) {
+      const value = JSON.parse(readOwnedRegular(lifecyclePath, uid, [0o600], 256 * 1024).toString('utf8'));
+      exactKeys(value, ['active_release', 'error_code', 'operation', 'recovery_required', 'rollback_release', 'schema', 'state'], 'lifecycle_result_invalid');
+      if (value.schema !== 'voice-agent.lifecycle-result.v1' || !['rollback', 'uninstall'].includes(value.operation)
+        || !['rolled_back_healthy', 'failed_safe', 'failed_needs_repair', 'uninstalled'].includes(value.state)
+        || (value.error_code !== null && !/^[a-z0-9_]{1,64}$/.test(value.error_code))
+        || typeof value.recovery_required !== 'boolean') fail('lifecycle_result_invalid', 'last lifecycle result is invalid');
+      recovery = { operation: value.operation, state: value.state, error_code: value.error_code, recovery_required: value.recovery_required };
+    }
+    const uninstallPath = path.join(installRoot, 'transactions', 'uninstall.json');
+    if (lstatExists(uninstallPath)) {
+      const value = JSON.parse(readOwnedRegular(uninstallPath, uid, [0o600], 256 * 1024).toString('utf8'));
+      if (value.schema !== 'voice-agent.uninstall-transaction.v1' || typeof value.phase !== 'string') fail('lifecycle_result_invalid', 'uninstall recovery record is invalid');
+      canonical.transaction = { state: 'present', operation: 'uninstall', phase: value.phase };
+      recovery = { operation: 'uninstall', state: 'interrupted', error_code: null, recovery_required: true };
+    }
+  } catch { recovery = { operation: null, state: 'invalid', error_code: 'lifecycle_result_invalid', recovery_required: true }; }
   return {
     schema_version: 'voice-agent.launcher-status.v1',
     launcher: { version: LAUNCHER_VERSION, protocol: LAUNCHER_PROTOCOL },
@@ -874,7 +894,7 @@ async function collectStatus(options = {}) {
     },
     agent_environment: canonical.agent_environment,
     docker: canonicalDocker || legacy.docker,
-    assets: lifecycle.assets, offline: lifecycle.offline, space: lifecycle.space, self_update: lifecycle.self_update,
+    assets: lifecycle.assets, offline: lifecycle.offline, space: lifecycle.space, self_update: lifecycle.self_update, recovery,
     legacy: { state: legacy.state, adoption_eligible: legacy.adoption_eligible, runtime_custody: legacy.runtime_custody },
     read_only: true,
   };
@@ -895,6 +915,7 @@ async function collectDoctor(options = {}) {
     { code: 'disk_preflight', state: status.space.required === null ? 'not_recorded' : 'ok' },
     { code: 'offline_authority', state: status.offline.used ? 'cached_verified_latest_unknown' : 'online_or_not_recorded' },
     { code: 'launcher_self_update', state: status.self_update.state },
+    { code: 'lifecycle_recovery', state: status.recovery.recovery_required ? 'recovery_required' : status.recovery.state },
   ];
   return {
     schema_version: 'voice-agent.launcher-doctor.v1', launcher: status.launcher,
@@ -917,6 +938,7 @@ function humanStatus(status) {
     `Offline: ${status.offline.used ? 'verified cache; latest unknown' : 'not used'}`,
     `Space preflight: ${status.space.required === null ? 'not recorded' : 'recorded'}`,
     `Launcher self-update: ${status.self_update.state}`,
+    `Lifecycle recovery: ${status.recovery.operation || 'none'}/${status.recovery.state}`,
     'Read only: yes',
   ].join('\n');
 }
@@ -927,13 +949,29 @@ function humanDoctor(doctor) {
 
 function parseCli(argv) {
   if (argv[0] === '__post-self-update' && argv.length === 2 && /^[0-9a-f]{32}$/.test(argv[1])) return { command: '__post-self-update', json: false, offline: false, transactionId: argv[1] };
-  if (argv.length < 1 || !['install', 'update', 'status', 'doctor'].includes(argv[0])) fail('usage', 'expected install, update, status, or doctor');
+  if (argv.length < 1 || !['install', 'update', 'rollback', 'uninstall', 'support-bundle', 'status', 'doctor'].includes(argv[0])) fail('usage', 'expected install, update, rollback, uninstall, support-bundle, status, or doctor');
   const result = { command: argv[0], json: false, offline: false };
+  if (result.command === 'uninstall') Object.assign(result, { yes: false, dryRun: false, purgeProgramCache: false, purgeModels: false, purgeAgentEnvironment: false, confirmAgentDataLoss: false, purgeAll: false, confirmDataLoss: false });
+  if (result.command === 'support-bundle') result.output = null;
   for (let index = 1; index < argv.length; index += 1) {
     const item = argv[index];
     if (item === '--json' && ['status', 'doctor'].includes(result.command)) result.json = true;
     else if (item === '--offline' && result.command === 'update') result.offline = true;
+    else if (result.command === 'uninstall' && item === '--yes') result.yes = true;
+    else if (result.command === 'uninstall' && item === '--dry-run') result.dryRun = true;
+    else if (result.command === 'uninstall' && item === '--purge-program-cache') result.purgeProgramCache = true;
+    else if (result.command === 'uninstall' && item === '--purge-models') result.purgeModels = true;
+    else if (result.command === 'uninstall' && item === '--purge-agent-environment') result.purgeAgentEnvironment = true;
+    else if (result.command === 'uninstall' && item === '--confirm-agent-data-loss') result.confirmAgentDataLoss = true;
+    else if (result.command === 'uninstall' && item === '--purge-all') result.purgeAll = true;
+    else if (result.command === 'uninstall' && item === '--confirm-data-loss') result.confirmDataLoss = true;
+    else if (result.command === 'support-bundle' && item === '--output' && index + 1 < argv.length && result.output === null) result.output = argv[++index];
     else fail('usage', 'unknown option; production installation roots are fixed by XDG');
+  }
+  if (result.command === 'uninstall') {
+    if ((result.purgeAgentEnvironment || result.purgeAll) !== result.confirmAgentDataLoss && !result.purgeAll) fail('usage', '--purge-agent-environment requires --confirm-agent-data-loss and neither flag is accepted alone');
+    if (result.purgeAll !== result.confirmDataLoss) fail('usage', '--purge-all requires --confirm-data-loss and neither flag is accepted alone');
+    if (result.purgeAll && !result.confirmAgentDataLoss) fail('usage', '--purge-all also requires --confirm-agent-data-loss');
   }
   return result;
 }
@@ -982,6 +1020,15 @@ function loadAdopter() {
   return embedded.exports(module.exports, installer, updater);
 }
 
+function loadLifecycle() {
+  const installer = loadInstaller(); const updater = loadUpdater();
+  if (!require('node:sea').isSea()) return require('./lifecycle.cjs')(module.exports, installer, updater);
+  const source = require('node:sea').getAsset('lifecycle.cjs', 'utf8');
+  const embedded = { exports: {} };
+  Function('require', 'module', 'exports', source)(require, embedded, embedded.exports);
+  return embedded.exports(module.exports, installer, updater);
+}
+
 async function main(argv = process.argv.slice(2)) {
   try {
     const arguments_ = parseCli(argv);
@@ -990,7 +1037,7 @@ async function main(argv = process.argv.slice(2)) {
       loadSelfUpdater().postSelfUpdate(installer.layoutFor(), arguments_.transactionId);
       return 0;
     }
-    if (['install', 'update'].includes(arguments_.command)) {
+    if (['install', 'update', 'rollback'].includes(arguments_.command)) {
       const installer = loadInstaller(); const layout = installer.layoutFor();
       if (lstatExists(layout.selfUpdateJournal)) loadSelfUpdater().recover(layout);
     }
@@ -1002,13 +1049,28 @@ async function main(argv = process.argv.slice(2)) {
       await loadUpdater().updateVoiceAgent({ offline: arguments_.offline });
       return 0;
     }
+    if (arguments_.command === 'rollback') {
+      await loadUpdater().rollbackVoiceAgent();
+      return 0;
+    }
+    if (arguments_.command === 'uninstall') {
+      await loadLifecycle().uninstallVoiceAgent({ arguments: arguments_ });
+      return 0;
+    }
+    if (arguments_.command === 'support-bundle') {
+      await loadLifecycle().supportBundle({ output: arguments_.output });
+      return 0;
+    }
     const document = arguments_.command === 'status' ? await collectStatus() : await collectDoctor();
     process.stdout.write(arguments_.json ? `${JSON.stringify(document, null, 2)}\n` : `${arguments_.command === 'status' ? humanStatus(document) : humanDoctor(document)}\n`);
     return 0;
   } catch (error) {
     const code = error instanceof LauncherError ? error.code : 'launcher_failed';
     const actionable = (argv[0] === 'install' && ['host_unsupported', 'linger_privilege_unavailable', 'release_authority_unprovisioned', 'update_failed_safe', 'update_failed_needs_repair', 'canonical_config_conflict', 'legacy_split_not_eligible'].includes(code))
-      || (argv[0] === 'update' && ['update_failed_safe', 'update_failed_needs_repair', 'update_in_progress', 'migration_requires_decision', 'insufficient_space', 'offline_material_insufficient', 'launcher_update_failed_safe', 'asset_unavailable', 'asset_hash_mismatch', 'asset_oversize', 'asset_redirect_refused'].includes(code));
+      || (argv[0] === 'update' && ['update_failed_safe', 'update_failed_needs_repair', 'update_in_progress', 'migration_requires_decision', 'insufficient_space', 'offline_material_insufficient', 'launcher_update_failed_safe', 'asset_unavailable', 'asset_hash_mismatch', 'asset_oversize', 'asset_redirect_refused'].includes(code))
+      || (argv[0] === 'rollback' && ['rollback_not_available', 'rollback_prior_incompatible', 'rollback_config_incompatible', 'rollback_data_incompatible', 'rollback_host_incompatible', 'rollback_failed_safe', 'rollback_failed_needs_repair', 'update_in_progress'].includes(code))
+      || (argv[0] === 'uninstall' && ['confirmation_required', 'uninstall_target_invalid', 'uninstall_target_changed', 'uninstall_service_policy_changed', 'rootless_docker_required', 'agent_environment_delete_denied'].includes(code))
+      || (argv[0] === 'support-bundle' && ['support_secret_suspected', 'support_schema_invalid', 'support_category_invalid', 'support_output_unsafe', 'support_output_exists'].includes(code));
     process.stderr.write(actionable ? `${code}: ${error.message}\n` : `${code}: command failed safely; no healthy installation was claimed\n`);
     return 2;
   }
@@ -1017,7 +1079,7 @@ async function main(argv = process.argv.slice(2)) {
 module.exports = {
   LAUNCHER_PROTOCOL, LAUNCHER_VERSION, SUPPORTED_PLATFORM, LauncherError, SystemServiceProbe,
   canonicalJson, collectDoctor, collectStatus, discoverLegacy, dockerEvidence, humanDoctor, humanStatus, readOwnedRegular,
-  legacyReleaseId, legacyTreeDigest, loadAdopter, loadAssetCache, loadInstaller, loadSelfUpdater, loadUpdater, main, noSymlinkComponents, ownedDirectory, parseCanonicalJson, parseCli,
+  legacyReleaseId, legacyTreeDigest, loadAdopter, loadAssetCache, loadInstaller, loadLifecycle, loadSelfUpdater, loadUpdater, main, noSymlinkComponents, ownedDirectory, parseCanonicalJson, parseCli,
   safePointer, signCanonicalFixture, validateArchiveEntries, validateArtifactManifest, validateChannel, validateLegacyImportRecord,
   validateLegacyRelease, validateLegacyRunning, validateReleaseRecord, verifyPlatformArtifact, verifySignedChannel,
 };

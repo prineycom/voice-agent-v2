@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://voice-agent-v2.local/contracts/launcher-status.v1.schema.json",
   "type": "object", "additionalProperties": false,
-  "required": ["schema_version", "launcher", "installation", "selected", "running", "alignment", "rollback", "transaction", "service", "agent_environment", "docker", "assets", "offline", "space", "self_update", "legacy", "read_only"],
+  "required": ["schema_version", "launcher", "installation", "selected", "running", "alignment", "rollback", "transaction", "service", "agent_environment", "docker", "assets", "offline", "space", "self_update", "recovery", "legacy", "read_only"],
   "properties": {
     "schema_version": {"const": "voice-agent.launcher-status.v1"},
     "launcher": {"type": "object", "additionalProperties": false, "required": ["version", "protocol"], "properties": {"version": {"type": "string"}, "protocol": {"const": 1}}},
@@ -10,7 +10,7 @@
     "selected": {"$ref": "#/$defs/identity"}, "running": {"$ref": "#/$defs/identity"},
     "alignment": {"enum": ["selected-running-ready", "selected-new-running-old", "running-only", "selected-not-running", "not-installed", "unknown"]},
     "rollback": {"type": "object", "additionalProperties": false, "required": ["state", "release_id", "version", "build_id"], "properties": {"state": {"enum": ["verified", "verified_legacy", "missing", "invalid"]}, "release_id": {}, "version": {}, "build_id": {}}},
-    "transaction": {"type": "object", "additionalProperties": false, "required": ["state", "phase"], "properties": {"state": {"enum": ["none", "present", "invalid"]}, "phase": {}}},
+    "transaction": {"type": "object", "additionalProperties": false, "required": ["state", "operation", "phase"], "properties": {"state": {"enum": ["none", "present", "invalid"]}, "operation": {"oneOf": [{"enum": ["update", "rollback", "uninstall"]}, {"type": "null"}]}, "phase": {}}},
     "service": {"type": "object", "additionalProperties": false, "required": ["state", "enabled", "main_pid_present", "custody"], "properties": {"state": {"enum": ["active", "inactive", "unavailable"]}, "enabled": {}, "main_pid_present": {"type": "boolean"}, "custody": {"enum": ["verified", "unavailable"]}}},
     "agent_environment": {"type": "object", "additionalProperties": false, "required": ["state", "action", "reason_code", "identity_digest", "container_id_prefix", "runtime_state"], "properties": {
       "state": {"enum": ["disabled", "ready", "degraded_endpoint_unavailable", "degraded_identity_mismatch", "stale_spec"]},
@@ -22,6 +22,7 @@
     "offline": {"type": "object", "additionalProperties": false, "required": ["used", "latest_known"], "properties": {"used": {"type": "boolean"}, "latest_known": {}}},
     "space": {"type": "object", "additionalProperties": false, "required": ["required", "available", "reclaimable"], "properties": {"required": {}, "available": {}, "reclaimable": {}}},
     "self_update": {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"type": "string"}}},
+    "recovery": {"type": "object", "additionalProperties": false, "required": ["operation", "state", "error_code", "recovery_required"], "properties": {"operation": {}, "state": {"type": "string"}, "error_code": {}, "recovery_required": {"type": "boolean"}}},
     "legacy": {"type": "object", "additionalProperties": false, "required": ["state", "adoption_eligible", "runtime_custody"], "properties": {"state": {"enum": ["absent", "legacy_unsupported", "invalid"]}, "adoption_eligible": {"type": "boolean"}, "runtime_custody": {"enum": ["verified_ready", "unavailable"]}}},
     "read_only": {"const": true}
   },
