@@ -58,6 +58,11 @@ function validateAssembleOptions(values) {
   if (!values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).some((name) => !allowed.has(name))
     || (Object.hasOwn(values, 'fetch') && typeof values.fetch !== 'boolean')) fail('runtime_acquisition_network_override_refused', 'runtime acquisition network is fixed to rootless pasta and cannot be overridden');
 }
+function validatePreflightOptions(values) {
+  const allowed = new Set(['cache', 'fetch']);
+  if (!values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).some((name) => !allowed.has(name))
+    || (Object.hasOwn(values, 'fetch') && typeof values.fetch !== 'boolean')) fail('runtime_acquisition_network_override_refused', 'runtime acquisition network is fixed to rootless pasta and cannot be overridden');
+}
 
 function parseHttpsUrl(value, code = 'runtime_assembly_authority_invalid') {
   let url; try { url = new URL(value); } catch { fail(code, 'immutable runtime input URL is invalid'); }
@@ -78,7 +83,8 @@ function validateInputLocator(item) {
 function validateAuthority(root) {
   const sources = JSON.parse(fs.readFileSync(path.join(root, 'release', 'inputs', 'runtime-sources.v1.json')));
   const wheels = JSON.parse(fs.readFileSync(path.join(root, 'release', 'inputs', 'python-wheelhouse.v1.json')));
-  exactKeys(sources, ['ambient_cache_allowed', 'builder', 'host_boundary', 'host_node_allowed', 'host_python_allowed', 'inputs', 'node_in_application_runtime', 'platform', 'schema', 'wheelhouse']);
+  const tools = JSON.parse(fs.readFileSync(path.join(root, 'release', 'inputs', 'builder-tools.v1.json')));
+  exactKeys(sources, ['ambient_cache_allowed', 'builder', 'host_boundary', 'host_node_allowed', 'host_python_allowed', 'inputs', 'node_in_application_runtime', 'platform', 'schema', 'tool_closure', 'wheelhouse']);
   exactKeys(sources.builder, ['ambient_mounts', 'cuda_toolchain', 'glibc_floor', 'image', 'manifest_digest', 'network_during_build', 'platform', 'upstream_tag']);
   const match = BUILDER.exec(sources.builder.image);
   if (sources.schema !== 'voice-agent.runtime-sources.v1' || sources.platform !== 'linux-x86_64-nvidia' || !match
@@ -86,7 +92,33 @@ function validateAuthority(root) {
     || sources.builder.glibc_floor !== '2.28' || sources.builder.cuda_toolchain !== '12.9.1'
     || sources.builder.network_during_build !== false || sources.builder.ambient_mounts !== false
     || sources.node_in_application_runtime !== false || sources.ambient_cache_allowed !== false
-    || sources.host_python_allowed !== false || sources.host_node_allowed !== false) fail('runtime_assembly_authority_invalid', 'builder/runtime authority is invalid');
+    || sources.host_python_allowed !== false || sources.host_node_allowed !== false || sources.tool_closure !== 'builder-tools.v1.json') fail('runtime_assembly_authority_invalid', 'builder/runtime authority is invalid');
+  exactKeys(tools, ['builder_image', 'builder_tools', 'content_addressed_tools', 'npm_lock_tools', 'restricted_path', 'schema']);
+  if (tools.schema !== 'voice-agent.builder-tools.v1' || tools.builder_image !== sources.builder.image || tools.restricted_path !== '/build/tool-bin'
+    || !Array.isArray(tools.builder_tools) || !Array.isArray(tools.content_addressed_tools) || !Array.isArray(tools.npm_lock_tools)
+    || tools.builder_tools.length < 30 || tools.content_addressed_tools.length < 6 || tools.npm_lock_tools.length < 5) fail('runtime_assembly_authority_invalid', 'builder tool closure authority is invalid');
+  for (const item of tools.builder_tools) {
+    exactKeys(item, ['name', 'path', 'version_contains']);
+    if (!/^[A-Za-z0-9+._-]+$/.test(item.name) || !/^\/(?:[A-Za-z0-9+._-]+\/)*[A-Za-z0-9+._-]+$/.test(item.path) || typeof item.version_contains !== 'string' || !item.version_contains) fail('runtime_assembly_authority_invalid', 'builder tool closure authority is invalid');
+  }
+  for (const item of tools.content_addressed_tools) {
+    exactKeys(item, ['input', 'name', 'path', 'version_contains']);
+    if (!/^[A-Za-z0-9+._-]+$/.test(item.name) || typeof item.input !== 'string' || !item.input || !item.path.startsWith('/build/tools/') || typeof item.version_contains !== 'string' || !item.version_contains) fail('runtime_assembly_authority_invalid', 'content-addressed tool closure authority is invalid');
+  }
+  for (const item of tools.npm_lock_tools) {
+    exactKeys(item, ['name', 'package', 'version']);
+    if (!/^[A-Za-z0-9+._-]+$/.test(item.name) || !/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(item.package) || !/^\d+\.\d+\.\d+$/.test(item.version)) fail('runtime_assembly_authority_invalid', 'npm tool closure authority is invalid');
+  }
+  const toolNames = [...tools.builder_tools, ...tools.content_addressed_tools, ...tools.npm_lock_tools].map((item) => item.name);
+  if (new Set(toolNames).size !== toolNames.length) fail('runtime_assembly_authority_invalid', 'runtime tool name is duplicated');
+  const npmLock = JSON.parse(fs.readFileSync(path.join(root, 'web', 'package-lock.json')));
+  if (!npmLock || npmLock.lockfileVersion !== 3 || !npmLock.packages || typeof npmLock.packages !== 'object') fail('runtime_assembly_authority_invalid', 'npm tool lock authority is invalid');
+  for (const item of Object.values(npmLock.packages)) {
+    if (!item || !item.resolved) continue;
+    const url = parseHttpsUrl(item.resolved);
+    if (url.hostname !== 'registry.npmjs.org' || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.integrity || '')) fail('runtime_assembly_authority_invalid', 'npm tool lock authority is invalid');
+  }
+  for (const item of tools.npm_lock_tools) if (npmLock.packages[`node_modules/${item.package}`]?.version !== item.version) fail('runtime_assembly_authority_invalid', 'npm tool version differs from exact lock');
   if (wheels.schema !== 'voice-agent.python-wheelhouse.v1' || wheels.python !== '3.12.13' || !Array.isArray(wheels.wheels) || wheels.wheels.length < 10) fail('runtime_assembly_authority_invalid', 'wheelhouse authority is invalid');
   const inputs = [];
   for (const item of [...sources.inputs, ...wheels.wheels]) {
@@ -99,7 +131,18 @@ function validateAuthority(root) {
   }
   const digests = new Set();
   for (const item of inputs) { if (digests.has(item.sha256)) fail('runtime_assembly_authority_invalid', 'runtime input digest is duplicated'); digests.add(item.sha256); }
-  return { sources, wheels, inputs };
+  for (const tool of tools.content_addressed_tools) if (!inputs.some((item) => item.name === tool.input)) fail('runtime_assembly_authority_invalid', 'content-addressed tool input is absent');
+  const node = sources.inputs.find((item) => item.name === 'Node.js');
+  if (!node || node.version !== '26.7.0' || node.url !== 'https://nodejs.org/download/release/v26.7.0/node-v26.7.0-linux-x64.tar.gz'
+    || node.size !== 62014253 || node.sha256 !== 'bd6b6c31e377bad9ad579bed72e5bc11f4c879ac9452ad51d30e646ea3d828df'
+    || node.license !== 'MIT' || node.license_url !== 'https://github.com/nodejs/node/blob/v26.7.0/LICENSE') fail('runtime_assembly_authority_invalid', 'Node build input authority is invalid');
+  exactKeys(node.signed_checksum, ['sha256', 'signature_sha256', 'signature_size', 'signature_url', 'signer_fingerprint', 'size', 'url']);
+  if (node.signed_checksum.url !== 'https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt' || node.signed_checksum.size !== 2943
+    || node.signed_checksum.sha256 !== '4533f0a43b9ba7f78a48230a0511b9dd5c931f20c3b3cac281ff9b7a2080fb2e'
+    || node.signed_checksum.signature_url !== 'https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt.sig' || node.signed_checksum.signature_size !== 119
+    || node.signed_checksum.signature_sha256 !== '7bb1dfdce6e58b8659b3e7f3e148c8165ad715358fd4876be49aa656fc8b8224'
+    || node.signed_checksum.signer_fingerprint !== '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356') fail('runtime_assembly_authority_invalid', 'Node signed checksum authority is invalid');
+  return { sources, wheels, tools, inputs };
 }
 
 function inspectInput(filename, item) {
@@ -140,11 +183,11 @@ function fetchInput(item, target, options = {}) {
   return requestUrl(initialUrl, 0, initialUrl.hostname);
 }
 
-async function prepareInputs(cacheRoot, authority, fetch, fetcher = fetchInput) {
+async function prepareInputs(cacheRoot, authority, fetch, fetcher = fetchInput, selectedInputs = authority.inputs) {
   fs.mkdirSync(cacheRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(cacheRoot, 0o700);
   const shaRoot = path.join(cacheRoot, 'sha256'); fs.mkdirSync(shaRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(shaRoot, 0o700);
   for (const name of fs.readdirSync(shaRoot)) if (!SHA256.test(name) || !authority.inputs.some((item) => item.sha256 === name)) fail('ambient_cache_refused', 'assembly cache contains bytes outside release input authority');
-  for (const item of authority.inputs) {
+  for (const item of selectedInputs) {
     const filename = path.join(shaRoot, item.sha256);
     if (inspectInput(filename, item)) continue;
     if (!fetch) fail('runtime_input_missing', 'an accepted immutable runtime input is absent; rerun with --fetch');
@@ -152,6 +195,55 @@ async function prepareInputs(cacheRoot, authority, fetch, fetcher = fetchInput) 
     inspectInput(filename, item);
   }
   return shaRoot;
+}
+
+function toolAuthorityRows(authority, root) {
+  const rows = [];
+  for (const item of authority.tools.builder_tools) rows.push({ expected: item.version_contains, name: item.name, path: item.path, phase: 'builder', provenance: `builder:${authority.sources.builder.manifest_digest}` });
+  for (const item of authority.tools.content_addressed_tools) {
+    const input = authority.inputs.find((candidate) => candidate.name === item.input);
+    rows.push({ detail: input.filename, expected: item.version_contains, name: item.name, path: item.path, phase: 'content', provenance: `sha256:${input.sha256}` });
+  }
+  const lockDigest = digest(fs.readFileSync(path.join(root, 'web', 'package-lock.json')));
+  for (const item of authority.tools.npm_lock_tools) rows.push({ expected: item.version, name: item.name, path: item.package, phase: 'web', provenance: `npm-lock:${lockDigest}` });
+  return rows;
+}
+
+function toolAuthorityTsv(authority, root) {
+  return toolAuthorityRows(authority, root).map((item) => [item.phase, item.provenance, item.name, item.path, item.expected, item.detail || '-'].join('\t')).join('\n') + '\n';
+}
+
+function fixtureToolReport(authority, root, phases = new Set(['builder', 'content', 'web'])) {
+  return toolAuthorityRows(authority, root).filter((item) => phases.has(item.phase)).map((item) => [item.provenance, item.name, item.path, item.expected === 'builder-image' ? 'builder-image' : item.expected, 'ok'].join('\t')).join('\n') + '\n';
+}
+
+function inspectToolReport(filename, authority, root, phases = new Set(['builder', 'content', 'web'])) {
+  const expectedRows = toolAuthorityRows(authority, root).filter((item) => phases.has(item.phase));
+  const expected = new Map(expectedRows.map((item) => [item.name, item]));
+  const observed = new Map(); const extra = [];
+  let text; try { text = fs.readFileSync(filename, 'utf8'); } catch { text = ''; }
+  for (const line of text.split('\n').filter(Boolean)) {
+    const fields = line.split('\t');
+    if (fields.length !== 5 || observed.has(fields[1]) || !expected.has(fields[1])) { extra.push(fields[1] || 'malformed'); continue; }
+    observed.set(fields[1], { provenance: fields[0], name: fields[1], path: fields[2], version: fields[3], status: fields[4] });
+  }
+  const absent = []; const mismatch = []; const blocked = [];
+  for (const row of expectedRows) {
+    const item = observed.get(row.name);
+    if (!item) { absent.push(row.name); continue; }
+    if (item.status === 'blocked') { blocked.push(row.name); continue; }
+    if (item.status === 'absent') { absent.push(row.name); continue; }
+    if (item.status !== 'ok' || item.provenance !== row.provenance || item.path !== row.path
+      || (row.expected === 'builder-image' ? item.version !== 'builder-image' : !item.version.includes(row.expected))) mismatch.push(row.name);
+  }
+  if (absent.length || mismatch.length || blocked.length || extra.length) {
+    const list = (values) => `[${[...new Set(values)].sort().join(',')}]`;
+    fail('runtime_tool_closure_invalid', `complete runtime tool preflight failed: absent=${list(absent)} mismatch=${list(mismatch)} blocked=${list(blocked)} extra=${list(extra)}`);
+  }
+  return expectedRows.map((row) => {
+    const item = observed.get(row.name);
+    return { name: row.name, path: row.path, provenance: row.provenance, version: item.version };
+  });
 }
 
 function copyTrackedSource(root, target, runner = run) {
@@ -178,37 +270,66 @@ function inspectBuilder(image, fetch, runner = run, options = {}) {
   if (observed !== expected) fail('runtime_builder_identity_mismatch', 'local builder image differs from pinned manifest digest');
 }
 
-async function assemble(values, context) {
-  validateAssembleOptions(values);
-  const root = context.root; const authority = validateAuthority(root); const cache = path.resolve(values.cache); const output = path.resolve(values.output);
+async function prepareToolClosure(values, context, state) {
+  const { authority, authFile, build, cache, network, root, runner, shaRoot, source } = state;
+  const npmCache = path.join(cache, 'npm'); fs.mkdirSync(npmCache, { mode: 0o700 }); fs.chmodSync(npmCache, 0o700);
+  copyTrackedSource(root, source, runner); fs.mkdirSync(build, { mode: 0o700 });
+  fs.writeFileSync(path.join(build, 'input-map.tsv'), authority.inputs.map((item) => `${item.sha256}\t${item.filename}`).sort().join('\n') + '\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(build, 'tool-authority.tsv'), toolAuthorityTsv(authority, root), { mode: 0o600 });
+  const sourceEpoch = runner('git', ['show', '-s', '--format=%ct', 'HEAD'], { cwd: root }); const sourceCommit = runner('git', ['rev-parse', 'HEAD'], { cwd: root });
+  const base = ['--remote=false', 'run', '--rm', '--userns=keep-id', '--env-host=false', '--http-proxy=false', '--cap-drop=all', '--security-opt=no-new-privileges', '--pids-limit=2048', '--memory=24g', '--cpus=12',
+    '--env', 'HOME=/work/home', '--env', 'XDG_CONFIG_HOME=/work/config', '--env', 'XDG_CACHE_HOME=/work/xdg', '--env', 'NPM_CONFIG_USERCONFIG=/dev/null', '--env', 'NPM_CONFIG_GLOBALCONFIG=/dev/null', '--env', 'GIT_CONFIG_NOSYSTEM=1', '--env', 'GIT_CONFIG_GLOBAL=/dev/null',
+    '--env', `SOURCE_DATE_EPOCH=${sourceEpoch}`, '--env', `VOICE_AGENT_BUILD_ID=${sourceCommit}`,
+    '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${npmCache}:/npm-cache:rw`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`];
+  const sandbox = ['--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=4g', '--tmpfs', '/work:rw,nosuid,size=12g'];
+  const image = authority.sources.builder.image; const environment = network.environment;
+  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/bin/bash', '/assembler', 'tool-preflight'], { env: environment, timeout: 600000, code: 'runtime_tool_preflight_failed', message: 'network-disabled builder tool preflight could not complete' });
+  try { inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root, new Set(['builder', 'content'])); }
+  catch (reason) { if (reason.code !== 'runtime_tool_closure_invalid') throw reason; inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root); }
+  if (values.fetch === true) runner('podman', [...base, '--volume', `${build}:/build:ro`, '--network=pasta', ...sandbox, image, '/bin/bash', '/assembler', 'web-acquire'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact npm lock bytes could not be acquired' });
+  runner('podman', [...base, '--volume', `${build}:/build:rw`, '--network=none', ...sandbox, image, '/bin/bash', '/assembler', 'web-prepare'], { env: environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'network-disabled exact npm tool installation could not complete' });
+  const tools = inspectToolReport(path.join(build, 'tool-report.tsv'), authority, root);
+  return { base, sandbox, sourceCommit, tools };
+}
+
+async function runPreflight(values, context, assembleOutput) {
+  const root = context.root; const authority = validateAuthority(root); const cache = path.resolve(values.cache);
   const runner = context.runCommand || run; const inputPreparer = context.prepareInputs || prepareInputs; const builderInspector = context.inspectBuilder || inspectBuilder;
   const networkInspector = context.inspectAcquisitionNetwork || inspectAcquisitionNetwork;
-  if (output === root || output.startsWith(`${root}${path.sep}`)) fail('runtime_output_invalid', 'runtime assembly output must be outside the source checkout');
-  if (fs.existsSync(output)) fail('runtime_output_exists', 'runtime assembly output already exists');
   const network = networkInspector(runner, context.environment || process.env);
   fs.mkdirSync(cache, { recursive: true, mode: 0o700 }); fs.chmodSync(cache, 0o700);
   const policy = fs.mkdtempSync(path.join(cache, '.podman-policy-')); const authFile = path.join(policy, 'auth.json');
   fs.writeFileSync(authFile, '{}\n', { mode: 0o600 });
   try {
-    const shaRoot = await inputPreparer(cache, authority, values.fetch === true);
     builderInspector(authority.sources.builder.image, values.fetch === true, runner, { authFile, environment: network.environment });
-    const temporary = fs.mkdtempSync(path.join(cache, '.assembly-')); const source = path.join(temporary, 'source'); const build = path.join(temporary, 'build');
+    const selectedNames = new Set(authority.tools.content_addressed_tools.map((item) => item.input));
+    const selected = authority.inputs.filter((item) => selectedNames.has(item.name));
+    const shaRoot = await inputPreparer(cache, authority, values.fetch === true, fetchInput, selected);
+    const temporary = fs.mkdtempSync(path.join(cache, '.preflight-')); const source = path.join(temporary, 'source'); const build = path.join(temporary, 'build');
     try {
-      copyTrackedSource(root, source, runner); fs.mkdirSync(build, { mode: 0o700 }); fs.mkdirSync(output, { mode: 0o700 });
-      const npmCache = path.join(cache, 'npm'); fs.mkdirSync(npmCache, { mode: 0o700 });
-      fs.writeFileSync(path.join(build, 'input-map.tsv'), authority.inputs.map((item) => `${item.sha256}\t${item.filename}`).sort().join('\n') + '\n', { mode: 0o600 });
-      const sourceEpoch = runner('git', ['show', '-s', '--format=%ct', 'HEAD'], { cwd: root }); const sourceCommit = runner('git', ['rev-parse', 'HEAD'], { cwd: root });
-      const base = ['--remote=false', 'run', '--rm', '--userns=keep-id', '--env-host=false', '--http-proxy=false', '--cap-drop=all', '--security-opt=no-new-privileges', '--pids-limit=2048', '--memory=24g', '--cpus=12',
-        '--env', 'HOME=/work/home', '--env', 'XDG_CONFIG_HOME=/work/config', '--env', 'XDG_CACHE_HOME=/work/xdg', '--env', 'NPM_CONFIG_USERCONFIG=/dev/null', '--env', 'NPM_CONFIG_GLOBALCONFIG=/dev/null', '--env', 'GIT_CONFIG_NOSYSTEM=1', '--env', 'GIT_CONFIG_GLOBAL=/dev/null',
-        '--env', `SOURCE_DATE_EPOCH=${sourceEpoch}`, '--env', `VOICE_AGENT_BUILD_ID=${sourceCommit}`,
-        '--volume', `${shaRoot}:/inputs:ro`, '--volume', `${source}:/source:ro`, '--volume', `${build}:/build:rw`, '--volume', `${npmCache}:/npm-cache:rw`, '--volume', `${output}:/output:rw`, '--volume', `${path.join(root, 'release', 'assemble-runtime.sh')}:/assembler:ro`];
-      const sandbox = ['--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=4g', '--tmpfs', '/work:rw,nosuid,size=12g'];
-      if (values.fetch === true) runner('podman', [...base, '--network=pasta', ...sandbox, authority.sources.builder.image, '/bin/bash', '/assembler', 'web-acquire'], { env: network.environment, timeout: 1800000, code: 'web_dependency_unavailable', message: 'exact Node/npm web inputs could not be acquired' });
-      runner('podman', [...base, '--network=none', ...sandbox, authority.sources.builder.image, '/bin/bash', '/assembler', 'assemble'], { env: network.environment, timeout: 7200000 });
-      if (!fs.existsSync(path.join(output, 'runtime')) || !fs.existsSync(path.join(output, 'web', 'index.html'))) fail('runtime_assembly_incomplete', 'builder did not emit runtime and static web closure');
-      return { authority, output, shaRoot };
+      const prepared = await prepareToolClosure(values, context, { authority, authFile, build, cache, network, root, runner, shaRoot, source });
+      if (!assembleOutput) return { authority, builder_image: authority.sources.builder.image, tool_authority_sha256: digest(Buffer.from(toolAuthorityTsv(authority, root))), tools: prepared.tools };
+      await inputPreparer(cache, authority, values.fetch === true);
+      fs.mkdirSync(assembleOutput, { mode: 0o700 });
+      const outputBase = [...prepared.base, '--volume', `${build}:/build:ro`, '--volume', `${assembleOutput}:/output:rw`];
+      runner('podman', [...outputBase, '--network=none', ...prepared.sandbox, authority.sources.builder.image, '/bin/bash', '/assembler', 'assemble'], { env: network.environment, timeout: 7200000 });
+      if (!fs.existsSync(path.join(assembleOutput, 'runtime')) || !fs.existsSync(path.join(assembleOutput, 'web', 'index.html'))) fail('runtime_assembly_incomplete', 'builder did not emit runtime and static web closure');
+      return { authority, output: assembleOutput, shaRoot, tool_authority_sha256: digest(Buffer.from(toolAuthorityTsv(authority, root))), tools: prepared.tools };
     } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
   } finally { fs.rmSync(policy, { recursive: true, force: true }); }
 }
 
-module.exports = { AssemblyError, assemble, copyTrackedSource, digest, fetchInput, inspectAcquisitionNetwork, inspectBuilder, inspectInput, isolatedPodmanEnvironment, prepareInputs, validateAssembleOptions, validateAuthority, validateInputLocator };
+async function preflight(values, context) {
+  validatePreflightOptions(values);
+  return runPreflight(values, context, null);
+}
+
+async function assemble(values, context) {
+  validateAssembleOptions(values);
+  const root = context.root; const output = path.resolve(values.output);
+  if (output === root || output.startsWith(`${root}${path.sep}`)) fail('runtime_output_invalid', 'runtime assembly output must be outside the source checkout');
+  if (fs.existsSync(output)) fail('runtime_output_exists', 'runtime assembly output already exists');
+  return runPreflight(values, context, output);
+}
+
+module.exports = { AssemblyError, assemble, copyTrackedSource, digest, fetchInput, fixtureToolReport, inspectAcquisitionNetwork, inspectBuilder, inspectInput, inspectToolReport, isolatedPodmanEnvironment, preflight, prepareInputs, toolAuthorityTsv, validateAssembleOptions, validateAuthority, validateInputLocator, validatePreflightOptions };

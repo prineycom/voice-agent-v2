@@ -17,6 +17,7 @@
     "network_during_build": false,
     "ambient_mounts": false
   },
+  "tool_closure": "builder-tools.v1.json",
   "inputs": [
     {
       "name": "CPython",
@@ -32,9 +33,18 @@
     {
       "name": "Node.js",
       "version": "26.7.0",
-      "url": "https://nodejs.org/download/release/v26.7.0/node-v26.7.0-linux-x64.tar.xz",
-      "size": 33539588,
-      "sha256": "982aa24dd8be4c889c6a8ab337ddff3b0896645b20f4239356e80552c16277ee",
+      "url": "https://nodejs.org/download/release/v26.7.0/node-v26.7.0-linux-x64.tar.gz",
+      "size": 62014253,
+      "sha256": "bd6b6c31e377bad9ad579bed72e5bc11f4c879ac9452ad51d30e646ea3d828df",
+      "signed_checksum": {
+        "url": "https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt",
+        "sha256": "4533f0a43b9ba7f78a48230a0511b9dd5c931f20c3b3cac281ff9b7a2080fb2e",
+        "size": 2943,
+        "signature_url": "https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt.sig",
+        "signature_sha256": "7bb1dfdce6e58b8659b3e7f3e148c8165ad715358fd4876be49aa656fc8b8224",
+        "signature_size": 119,
+        "signer_fingerprint": "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356"
+      },
       "license": "MIT",
       "license_url": "https://github.com/nodejs/node/blob/v26.7.0/LICENSE",
       "purpose": "web-and-sea-build-only"
