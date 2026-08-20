@@ -550,7 +550,7 @@ async def main() -> int:
         driver.set_script_timeout(5)
         driver.set_window_size(1280, 900)
         # GitHub's uncached Firefox/GeckoDriver launch can dominate wall time.
-        # It remains inside ./verify's 90-second process deadline, but the
+        # It remains inside ./verify's 120-second process deadline, but the
         # accepted 15-second browser-smoke budget begins only when the real
         # browser and owned LiveKit fixture are ready to exercise behavior.
         startup_elapsed = time.monotonic() - started

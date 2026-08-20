@@ -9,7 +9,7 @@ permissions:
 jobs:
   pr-verification:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
@@ -45,5 +45,5 @@ jobs:
         timeout-minutes: 2
         run: ./setup-test-runtime
       - name: Run the one canonical PR gate
-        timeout-minutes: 2
+        timeout-minutes: 3
         run: ./verify

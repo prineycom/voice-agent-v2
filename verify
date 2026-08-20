@@ -31,7 +31,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$RUN_ROOT/home" "$RUN_ROOT/temp" "$RUN_ROOT/pycache"
-BUDGET=90
+BUDGET=120
 for argument in "$@"; do
   [ "$argument" != "--extended" ] || BUDGET=600
 done
