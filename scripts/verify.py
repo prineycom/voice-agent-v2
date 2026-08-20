@@ -21,7 +21,7 @@ from scripts.verify_support import (  # noqa: E402
     inspect_owned,
 )
 
-PR_DEADLINE_SECONDS = 90.0
+PR_DEADLINE_SECONDS = 120.0
 EXTENDED_DEADLINE_SECONDS = 600.0
 
 

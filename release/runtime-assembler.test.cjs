@@ -82,12 +82,20 @@ test('committed runtime assembler authority pins the exact OCI/toolchain and clo
   assert.equal(authority.sources.node_in_application_runtime, false);
   assert.equal(authority.tools.builder_image, authority.sources.builder.image);
   assert.equal(authority.tools.restricted_path, '/build/tool-bin');
-  assert.equal(authority.tools.schema, 'voice-agent.builder-tools.v2');
+  assert.equal(authority.tools.schema, 'voice-agent.builder-tools.v3');
   assert.equal(authority.tools.builder_tools.some((item) => item.name === 'gzip' && item.probe.version === '1.9' && item.probe.exit_status === 0), true);
   assert.equal(authority.tools.builder_tools.some((item) => item.name === 'false'), false);
-  assert.deepEqual(authority.tools.builder_tools.filter((item) => item.custody).map((item) => item.name), ['cc1', 'cc1plus', 'lto1', 'lto-wrapper', 'cicc']);
+  assert.deepEqual(authority.tools.builder_tools.filter((item) => item.custody).map((item) => item.name), ['node-loader', 'rpm2archive', 'cc1', 'cc1plus', 'lto1', 'lto-wrapper', 'cicc']);
+  assert.equal(authority.tools.builder_tools.some((item) => item.name === 'sort' && item.probe.version === '8.30'), true);
   assert.equal(authority.tools.builder_tools.find((item) => item.name === 'cicc').path, '/usr/local/cuda-12.9/nvvm/bin/cicc');
   assert.deepEqual(authority.tools.content_addressed_tools.map((item) => item.name), ['node', 'npm', 'python', 'pip', 'cmake', 'patchelf']);
+  assert.equal(authority.tools.content_addressed_tools[0].command, '/build/tools/node-command');
+  assert.equal(authority.tools.node_runtime.input, 'Rocky Linux libatomic');
+  assert.equal(authority.tools.node_runtime.raw_failure.exit_status, 127);
+  assert.equal(authority.tools.node_runtime.raw_failure.stderr_sha256, '1f8d90ae432ea9b5bff473c68cfe44196b2320aed67980959217a76f4d011ea0');
+  assert.equal(authority.tools.node_runtime.elf.needed.includes('libatomic.so.1'), true);
+  assert.equal(authority.tools.node_runtime.elf.required_glibc.at(-1), 'GLIBC_2.28');
+  assert.equal(authority.tools.node_runtime.elf.required_glibcxx.at(-1), 'GLIBCXX_3.4.21');
   assert.deepEqual(authority.tools.npm_lock_tools.map((item) => item.name), ['vite', 'rolldown', 'rolldown-linux-x64-gnu', 'lightningcss', 'lightningcss-linux-x64-gnu']);
   assert.equal(new Set(authority.inputs.map((item) => item.sha256)).size, authority.inputs.length);
   const node = authority.sources.inputs.find((item) => item.name === 'Node.js');
@@ -98,6 +106,10 @@ test('committed runtime assembler authority pins the exact OCI/toolchain and clo
     signature_url: 'https://nodejs.org/download/release/v26.7.0/SHASUMS256.txt.sig', signature_sha256: '7bb1dfdce6e58b8659b3e7f3e148c8165ad715358fd4876be49aa656fc8b8224', signature_size: 119,
     signer_fingerprint: '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356',
   });
+  const libatomic = authority.sources.inputs.find((item) => item.name === 'Rocky Linux libatomic');
+  assert.equal(libatomic.url, 'https://download.rockylinux.org/pub/rocky/8.10/BaseOS/x86_64/os/Packages/l/libatomic-8.5.0-26.el8_10.x86_64.rpm');
+  assert.equal(libatomic.size, 25724); assert.equal(libatomic.sha256, '6fa29bd69543e3b817cf50824d8a34a20f59ace733fd373379798674f2f6f28a');
+  assert.equal(libatomic.license, 'GPL-3.0-or-later WITH GCC-exception-3.1');
   const llama = authority.inputs.find((item) => item.name === 'llama.cpp source');
   const receipt = authority.sources.inputs.find((item) => item.name === 'llama.cpp source');
   assert.equal(llama.url, LLAMA_URL); assert.equal(llama.commit, LLAMA_COMMIT);
@@ -179,6 +191,46 @@ test('content-addressed probes use the same bounded exact-vector contract', (con
   executable(cli, `test "$#" -eq 2 && test "$1" = --content && test "$2" = exact || exit 65\nprintf 'Content 4.5.6\\n'`);
   const report = runToolProbe(root, [probeRow({ phase: 'content', provenance: 'sha256:' + 'a'.repeat(64), name: 'content', toolPath: cli, argv: ['--content', 'exact'], prefix: 'Content 4.5.6', version: '4.5.6', ownerUid: '-' })], 'content');
   assert.match(report, /\tprobe:4\.5\.6:sha256:[0-9a-f]{64}\tok\n$/);
+});
+
+test('Node compatibility receipt binds the actual exit-127 cause and corrected exact-loader boundary reproducibly', (context) => {
+  const root = temporary(context); const authority = assembler.validateAuthority(ROOT); const report = path.join(root, 'node-compatibility.tsv');
+  const first = assembler.fixtureNodeCompatibilityReport(authority); const second = assembler.fixtureNodeCompatibilityReport(authority);
+  assert.equal(first, second); assert.equal(assembler.nodeCompatibilityAuthorityTsv(authority), assembler.nodeCompatibilityAuthorityTsv(authority));
+  fs.writeFileSync(report, first);
+  const observed = assembler.inspectNodeCompatibilityReport(report, authority);
+  assert.match(observed.provenance, /^node:sha256:[0-9a-f]{64}\+runtime:sha256:[0-9a-f]{64}\+builder:sha256:[0-9a-f]{64}$/);
+  const facts = new Map(observed.facts.map((item) => [item.name, item.evidence]));
+  assert.equal(facts.get('raw-exit'), '127');
+  assert.equal(facts.get('raw-stderr'), 'missing-libatomic:sha256:1f8d90ae432ea9b5bff473c68cfe44196b2320aed67980959217a76f4d011ea0');
+  assert.match(facts.get('needed'), /(?:^|,)libatomic\.so\.1(?:,|$)/);
+  assert.equal(facts.get('required-glibc').endsWith('GLIBC_2.28'), true);
+  assert.equal(facts.get('required-glibcxx').endsWith('GLIBCXX_3.4.21'), true);
+  assert.equal(facts.get('corrected-exit'), '0');
+  assert.match(facts.get('corrected-output'), /^v26\.7\.0:sha256:/);
+  assert.equal(facts.get('environment'), 'LD_LIBRARY_PATH-and-LD_PRELOAD-denied');
+});
+
+test('Node compatibility reports missing and tampered loader/library plus symbol, architecture, interpreter, raw-cause, and environment differences together', (context) => {
+  const root = temporary(context); const authority = assembler.validateAuthority(ROOT); const report = path.join(root, 'node-compatibility.tsv');
+  const lines = assembler.fixtureNodeCompatibilityReport(authority).trimEnd().split('\n')
+    .filter((line) => !line.includes('\tloader\t'))
+    .map((line) => /\t(library-layout|required-glibc|required-glibcxx|architecture|interpreter|raw-exit|environment)\t/.test(line)
+      ? line.replace(/\t[^\t]+\tok$/, '\tmismatch\tmismatch') : line);
+  lines.push(`invalid\textra-fact\tvalue\tok`); fs.writeFileSync(report, `${lines.join('\n')}\n`);
+  assert.throws(() => assembler.inspectNodeCompatibilityReport(report, authority), (reason) => reason.code === 'runtime_node_compatibility_invalid'
+    && reason.message.includes('absent=[loader]')
+    && reason.message.includes('architecture') && reason.message.includes('environment') && reason.message.includes('interpreter')
+    && reason.message.includes('library-layout') && reason.message.includes('raw-exit')
+    && reason.message.includes('required-glibc') && reason.message.includes('required-glibcxx')
+    && reason.message.includes('extra=[extra-fact]') && reason.message.length < 512);
+
+  const missingLibrary = assembler.fixtureNodeCompatibilityReport(authority).trimEnd().split('\n')
+    .filter((line) => !/\t(library-layout|library-needed|library-glibc)\t/.test(line))
+    .map((line) => line.includes('\tloader\t') ? line.replace(/\t[^\t]+\tok$/, '\tmismatch\tmismatch') : line);
+  fs.writeFileSync(report, `${missingLibrary.join('\n')}\n`);
+  assert.throws(() => assembler.inspectNodeCompatibilityReport(report, authority), (reason) => reason.code === 'runtime_node_compatibility_invalid'
+    && reason.message.includes('absent=[library-glibc,library-layout,library-needed]') && reason.message.includes('mismatch=[loader]'));
 });
 
 test('llama.cpp admits only the exact direct owner/repository/full-commit codeload locator', () => {
@@ -266,6 +318,8 @@ test('acquisition network fails closed for a missing helper, rootful engine, wro
 test('production assembler closes extraction, compiler, ELF, PATH, and credential tool authority', () => {
   const shell = fs.readFileSync(path.join(ROOT, 'release', 'assemble-runtime.sh'), 'utf8');
   assert.match(shell, /input node-v26\.7\.0-linux-x64\.tar\.gz/); assert.doesNotMatch(shell, /tar -xJf|node-v26\.7\.0-linux-x64\.tar\.xz/);
+  assert.match(shell, /input libatomic-8\.5\.0-26\.el8_10\.x86_64\.rpm/); assert.match(shell, /rpm --checksig --verbose/);
+  assert.match(shell, /rpm2archive -n libatomic\.rpm/); assert.match(shell, /node-compatibility-preflight/);
   assert.match(shell, /export PATH=\/build\/tool-bin/); assert.match(shell, /builder_tool_preflight/);
   assert.match(shell, /readelf -dW "\$file"[^\n]+grep -q 'Dynamic section'/);
   assert.match(shell, /'\/runtime\/llama\/lib\/' in selected\.as_posix\(\): shutil\.move\(selected,target\)/);
@@ -274,6 +328,11 @@ test('production assembler closes extraction, compiler, ELF, PATH, and credentia
   assert.match(shell, /-DCMAKE_CUDA_COMPILER=\/build\/tool-bin\/nvcc/); assert.doesNotMatch(shell, /GIT_EXECUTABLE|tool-bin\/false/);
   assert.match(shell, /unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY/);
   assert.match(shell, /unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN/);
+  const compatibility = fs.readFileSync(path.join(ROOT, 'release', 'node-compatibility-preflight.sh'), 'utf8');
+  assert.match(compatibility, /unset LD_LIBRARY_PATH LD_PRELOAD/); assert.match(compatibility, /--inhibit-cache --library-path \/build\/tools\/node-runtime\/lib:\/lib64:\/usr\/lib64/);
+  assert.match(compatibility, /raw-exit/); assert.match(compatibility, /missing-libatomic:sha256/); assert.match(compatibility, /required-glibcxx/);
+  assert.doesNotMatch(compatibility, /\/usr\/bin\/node|command -v node|which node/);
+  assert.equal(spawnSync('bash', ['-n', path.join(ROOT, 'release', 'node-compatibility-preflight.sh')]).status, 0);
 });
 
 test('input cache accepts only exact single-link bytes and refuses missing, tampered, or ambient entries', async (context) => {
@@ -309,7 +368,10 @@ test('fixture assembly preflights the full closure, cache-installs tools offline
       }
       if (args[1] === 'image') return authority.sources.builder.manifest_digest;
       calls.push({ args, env: options.env });
-      if (args.at(-1) === 'tool-preflight') fs.writeFileSync(path.join(buildRoot(args), 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])));
+      if (args.at(-1) === 'tool-preflight') {
+        fs.writeFileSync(path.join(buildRoot(args), 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['builder', 'content'])));
+        fs.writeFileSync(path.join(buildRoot(args), 'node-compatibility-report.tsv'), assembler.fixtureNodeCompatibilityReport(authority));
+      }
       if (args.at(-1) === 'web-prepare') fs.appendFileSync(path.join(buildRoot(args), 'tool-report.tsv'), assembler.fixtureToolReport(authority, ROOT, new Set(['web'])));
       if (args.at(-1) === 'assemble') {
         fs.mkdirSync(path.join(output, 'runtime'), { recursive: true, mode: 0o700 }); fs.mkdirSync(path.join(output, 'web'), { recursive: true, mode: 0o700 });
@@ -329,8 +391,9 @@ test('fixture assembly preflights the full closure, cache-installs tools offline
       const shaRoot = path.join(cache, 'sha256'); fs.mkdirSync(shaRoot, { recursive: true, mode: 0o700 }); return shaRoot;
     },
   });
-  assert.equal(prepared.length, 2); assert.equal(prepared[0].includes('Node.js'), true); assert.equal(prepared[0].includes('llama.cpp source'), false); assert.equal(prepared[1].includes('llama.cpp source'), true);
+  assert.equal(prepared.length, 2); assert.equal(prepared[0].includes('Node.js'), true); assert.equal(prepared[0].includes('Rocky Linux libatomic'), true); assert.equal(prepared[0].includes('llama.cpp source'), false); assert.equal(prepared[1].includes('llama.cpp source'), true);
   assert.equal(result.output, output); assert.equal(result.tools.length, authority.tools.builder_tools.length + authority.tools.content_addressed_tools.length + authority.tools.npm_lock_tools.length);
+  assert.equal(result.node_runtime.facts.length, 16); assert.match(result.node_runtime.provenance, /runtime:sha256:/);
   assert.equal(calls.length, 4); assert.equal(podmanCommands.length, 6);
   assert.deepEqual(calls.map((call) => call.args.at(-1)), ['tool-preflight', 'web-acquire', 'web-prepare', 'assemble']);
   const [toolPreflight, acquire, webPrepare, build] = calls;
@@ -347,6 +410,7 @@ test('fixture assembly preflights the full closure, cache-installs tools offline
     assert.equal(call.args.some((value) => value.includes('/usr/bin/xz') || value.includes('/bin/xz')), false);
     assert.equal(call.args.includes('/usr/bin/bash'), true);
     assert.equal(call.args.some((value) => value.endsWith('/release/tool-preflight.sh:/tool-preflight:ro')), true);
+    assert.equal(call.args.some((value) => value.endsWith('/release/node-compatibility-preflight.sh:/node-compatibility-preflight:ro')), true);
   }
   const implementation = fs.readFileSync(path.join(ROOT, 'release', 'runtime-assembler.cjs'), 'utf8');
   assert.doesNotMatch(implementation, /slirp4netns|--network=host/); assert.equal(fs.existsSync(path.join(output, 'web', 'index.html')), true);

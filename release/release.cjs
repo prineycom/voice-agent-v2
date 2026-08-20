@@ -621,7 +621,7 @@ function publish(values) {
 async function preflightRuntimeCommand(values) {
   requireCleanCurrentCommit();
   const result = await runtimeAssembler.preflight(values, { root: ROOT });
-  return { builder_image: result.builder_image, tool_authority_sha256: result.tool_authority_sha256, tools: result.tools };
+  return { builder_image: result.builder_image, node_runtime: result.node_runtime, tool_authority_sha256: result.tool_authority_sha256, tools: result.tools };
 }
 
 async function assembleRuntimeCommand(values) {
@@ -632,7 +632,7 @@ async function assembleRuntimeCommand(values) {
   const web = []; const webRoot = path.join(assembled.output, 'web');
   function walk(directory, prefix = '') { for (const name of fs.readdirSync(directory).sort()) { const filename = path.join(directory, name); const relative = prefix ? `${prefix}/${name}` : name; const metadata = fs.lstatSync(filename); if (metadata.isDirectory() && !metadata.isSymbolicLink()) walk(filename, relative); else if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1) { const bytes = fs.readFileSync(filename); pathLeakScan(bytes); web.push({ path: relative, sha256: sha256(bytes), size: bytes.length }); } else fail('web_output_invalid', 'static web output contains a link or special file'); } }
   walk(webRoot); if (!web.some((item) => item.path === 'index.html') || web.some((item) => item.path.includes('node_modules'))) fail('web_output_invalid', 'static web closure is incomplete or contains Node');
-  const document = { schema: 'voice-agent.runtime-assembly.v1', builder_image: assembled.authority.sources.builder.image, inputs: assembled.authority.inputs.map((item) => ({ sha256: item.sha256, size: item.size })).sort((a, b) => a.sha256.localeCompare(b.sha256)), runtime_receipt_sha256: sha256(fs.readFileSync(receiptPath)), source_commit: commit, tool_authority_sha256: assembled.tool_authority_sha256, tools: assembled.tools, web };
+  const document = { schema: 'voice-agent.runtime-assembly.v1', builder_image: assembled.authority.sources.builder.image, inputs: assembled.authority.inputs.map((item) => ({ sha256: item.sha256, size: item.size })).sort((a, b) => a.sha256.localeCompare(b.sha256)), node_runtime: assembled.node_runtime, runtime_receipt_sha256: sha256(fs.readFileSync(receiptPath)), source_commit: commit, tool_authority_sha256: assembled.tool_authority_sha256, tools: assembled.tools, web };
   writeCanonical(path.join(assembled.output, 'assembly-receipt.json'), document, 0o444);
   if (values.compareWith) {
     const prior = readCanonical(path.join(path.resolve(values.compareWith), 'assembly-receipt.json'), 16 * 1024 * 1024);
