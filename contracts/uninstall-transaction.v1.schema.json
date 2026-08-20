@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/uninstall-transaction.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "id", "categories", "phase", "receipts", "started_at", "updated_at"],
+  "properties": {
+    "schema": {"const": "voice-agent.uninstall-transaction.v1"},
+    "id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "categories": {"type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true, "items": {"enum": ["program", "program_cache", "models", "agent_environment", "application_data"]}},
+    "phase": {"enum": ["planned", "service_removed", "program_removed", "program_cache_removed", "models_removed", "agent_container_removed", "agent_environment_removed", "application_data_removed", "launcher_removed", "complete"]},
+    "receipts": {"type": "object", "additionalProperties": false, "required": ["program", "program_cache", "models", "agent_environment", "application_data", "agent_container"], "properties": {
+      "program": {"type": "boolean"}, "program_cache": {"type": "boolean"}, "models": {"type": "boolean"}, "agent_environment": {"type": "boolean"}, "application_data": {"type": "boolean"}, "agent_container": {"type": "boolean"}
+    }},
+    "started_at": {"type": "string"}, "updated_at": {"type": "string"}
+  }
+}

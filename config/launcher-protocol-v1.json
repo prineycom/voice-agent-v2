@@ -1,6 +1,6 @@
 {
   "schema": "voice-agent.launcher-protocol.v1",
-  "launcher_version": "0.6.0",
+  "launcher_version": "0.7.0",
   "protocol": 1,
   "channels": ["stable"],
   "platforms": ["linux-x86_64-nvidia"],
@@ -11,8 +11,11 @@
   "cached_channel_schema": "voice-agent.cached-channel.v1",
   "launcher_self_update_schema": "voice-agent.launcher-self-update.v1",
   "update_result_schema": "voice-agent.update-result.v1",
+  "lifecycle_result_schema": "voice-agent.lifecycle-result.v1",
   "install_transaction_schema": "voice-agent.install-transaction.v1",
   "update_transaction_schema": "voice-agent.update-transaction.v1",
+  "uninstall_transaction_schema": "voice-agent.uninstall-transaction.v1",
+  "uninstall_inventory_schema": "voice-agent.uninstall-inventory.v1",
   "legacy_adoption_schema": "voice-agent.legacy-adoption.v1",
   "legacy_import_release_schema": "voice-agent.legacy-import-release.v1",
   "legacy_config_migration_schema": "voice-agent.legacy-config-migration.v1",
@@ -23,6 +26,10 @@
   "status_schema": "voice-agent.launcher-status.v1",
   "doctor_schema": "voice-agent.launcher-doctor.v1",
   "legacy_discovery_schema": "voice-agent.legacy-discovery.v1",
+  "support_last_operation_schema": "voice-agent.support-last-operation.v1",
+  "support_journal_metadata_schema": "voice-agent.support-journal-metadata.v1",
+  "support_service_policy_schema": "voice-agent.support-service-policy.v1",
   "read_only_commands": ["status", "doctor"],
-  "mutation_commands": ["install", "update"]
+  "diagnostic_commands": ["support-bundle"],
+  "mutation_commands": ["install", "update", "rollback", "uninstall"]
 }

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-agent-v2.local/contracts/support-service-policy.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "unit", "loopback_only", "no_new_privileges", "private_tmp", "protect_system", "protect_home", "restart", "unit_contract_sha256"],
+  "properties": {
+    "schema": {"const": "voice-agent.support-service-policy.v1"}, "unit": {"const": "voice-agent.service"},
+    "loopback_only": {"const": true}, "no_new_privileges": {"const": true}, "private_tmp": {"const": true},
+    "protect_system": {"const": "strict"}, "protect_home": {"const": "read_only"}, "restart": {"const": "on_failure"},
+    "unit_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
