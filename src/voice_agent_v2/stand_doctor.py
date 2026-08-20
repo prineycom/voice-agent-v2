@@ -30,7 +30,6 @@ REQUIRED_PACKAGES = (
     "docker-buildx",
     "fuse-overlayfs",
     "slirp4netns",
-    "uidmap",
     "nvidia-utils",
     "nvidia-container-toolkit",
 )
@@ -40,11 +39,10 @@ PACKAGE_REMEDIES = {
     "npm": "sudo -n pacman -Syu --needed nodejs npm",
     "python": "sudo -n pacman -Syu --needed python",
     "git": "sudo -n pacman -Syu --needed git",
-    "docker": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns uidmap",
-    "docker-buildx": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns uidmap",
-    "fuse-overlayfs": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns uidmap",
-    "slirp4netns": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns uidmap",
-    "uidmap": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns uidmap",
+    "docker": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns shadow",
+    "docker-buildx": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns shadow",
+    "fuse-overlayfs": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns shadow",
+    "slirp4netns": "sudo -n pacman -Syu --needed docker docker-buildx fuse-overlayfs slirp4netns shadow",
     "nvidia-utils": "sudo -n pacman -Syu --needed nvidia-utils",
     "nvidia-container-toolkit": "sudo -n pacman -Syu --needed nvidia-container-toolkit",
 }
@@ -265,6 +263,21 @@ def _artifact_check(artifact: Mapping[str, object], probe: Probe, home: Path) ->
     return Check(f"artifact {name}", True, "selected artifact matches the pinned manifest")
 
 
+def _rootless_mapping_check(probe: Probe) -> Check:
+    """Verify Arch's newuidmap/newgidmap binaries and their owning package."""
+    expected = ("/usr/bin/newuidmap", "/usr/bin/newgidmap")
+    for binary in expected:
+        result = probe.command(("pacman", "-Qo", binary))
+        detail = result.stdout.strip()
+        if result.returncode != 0 or " is owned by shadow " not in detail:
+            return Check(
+                "rootless UID mapping", False,
+                f"{binary} is unavailable or is not owned by shadow",
+                "sudo -n pacman -Syu --needed shadow",
+            )
+    return Check("rootless UID mapping", True, "newuidmap and newgidmap are owned by shadow")
+
+
 def _runtime_check(runtime: Mapping[str, object], probe: Probe, home: Path) -> Check:
     name = str(runtime["name"])
     python = _path(str(runtime["python"]), home)
@@ -326,6 +339,7 @@ def diagnose(probe: Probe | None = None, *, source_root: Path = ROOT) -> Diagnos
             version if present else "not installed",
             None if present else PACKAGE_REMEDIES[package],
         ))
+    checks.append(_rootless_mapping_check(probe))
 
     for name, command, remedy in (
         ("Node.js", ("node", "--version"), "sudo -n pacman -Syu --needed nodejs npm"),
