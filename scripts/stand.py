@@ -19,16 +19,18 @@ from voice_agent_v2.stand_dev import (  # noqa: E402
     deploy_remote,
     exec_launcher,
     initialize,
+    list_instances,
     logs,
     start,
     state_root_from_environment,
     status,
+    stop,
 )
 from voice_agent_v2.stand_doctor import main as doctor_main  # noqa: E402
 
 
 def usage() -> int:
-    print("usage: stand doctor | init | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | status <main|dev> | logs <main|dev>")
+    print("usage: stand doctor | init | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | start <main|dev> | stop <main|dev> | status <main|dev> | logs <main|dev> | list")
     return 2
 
 
@@ -63,14 +65,29 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             print(f"stand deploy {instance}: selected {commit}")
             return 0
+        if len(arguments) == 2 and arguments[0] == "start" and arguments[1] in {"main", "dev"}:
+            start(state_root=root, instance=arguments[1], command=command)
+            print(f"stand start {arguments[1]}: running and enabled")
+            return 0
+        if len(arguments) == 2 and arguments[0] == "stop" and arguments[1] in {"main", "dev"}:
+            container = stop(state_root=root, instance=arguments[1], command=command)
+            print(f"stand stop {arguments[1]}: stopped and disabled; container: {container}")
+            return 0
         if len(arguments) == 2 and arguments[0] == "status" and arguments[1] in {"main", "dev"}:
             print(status(state_root=root, instance=arguments[1], command=command))
             return 0
         if len(arguments) == 2 and arguments[0] == "logs" and arguments[1] in {"main", "dev"}:
             print(logs(state_root=root, instance=arguments[1], command=command))
             return 0
+        if arguments == ("list",):
+            print(list_instances(state_root=root, command=command))
+            return 0
         if len(arguments) == 2 and arguments[0] == "launcher" and arguments[1] in {"main", "dev"}:
-            exec_launcher(state_root=root, instance=arguments[1])
+            try:
+                exec_launcher(state_root=root, instance=arguments[1])
+            except StandError as error:
+                print(f"stand launcher configuration failed: {error}", file=sys.stderr)
+                return 2
             raise AssertionError("foreground launcher unexpectedly returned")
     except StandError as error:
         print(f"stand: {error}", file=sys.stderr)
