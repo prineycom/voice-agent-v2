@@ -1,12 +1,34 @@
 #!/usr/bin/bash
 set -euo pipefail
-export HOME=/work/home XDG_CONFIG_HOME=/work/config XDG_CACHE_HOME=/work/xdg
-export PIP_CONFIG_FILE=/dev/null NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/dev/null
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
-unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy
+# Remove ambient package-manager, Node-option, registry, credential, certificate and
+# proxy authority even when this script is exercised outside --env-host=false.
+while IFS= read -r variable; do
+  lower=${variable,,}
+  case "$lower" in
+    npm_*|yarn_*|pnpm_*|corepack_*|node_options|node_path|node_extra_ca_certs|node_tls_reject_unauthorized|*registry*|*auth*|*token*|*cert*|*proxy*|*no_proxy*|*ca_bundle*|ssl_cert_file|ssl_cert_dir|cafile)
+      unset "$variable"
+      ;;
+  esac
+done < <(compgen -e)
 unset SSH_AUTH_SOCK GIT_ASKPASS GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS
-/usr/bin/mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+unset LD_LIBRARY_PATH LD_PRELOAD
+
+umask 077
+export HOME=/work/npm-home XDG_CONFIG_HOME=/work/xdg-config XDG_CACHE_HOME=/work/xdg-cache TMPDIR=/work/npm-temp
+export NPM_CONFIG_USERCONFIG=/work/npm-user/npmrc NPM_CONFIG_GLOBALCONFIG=/work/npm-global/npmrc
+export NPM_CONFIG_CACHE=/npm-cache NPM_CONFIG_PREFIX=/work/npm-prefix NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
+export PIP_CONFIG_FILE=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+/usr/bin/mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$TMPDIR" "$NPM_CONFIG_PREFIX" /work/npm-user /work/npm-global /work/npm-logs
+/usr/bin/chmod 0700 "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$TMPDIR" "$NPM_CONFIG_PREFIX" /work/npm-user /work/npm-global /work/npm-logs
+(set -o noclobber; : >"$NPM_CONFIG_USERCONFIG")
+(set -o noclobber; : >"$NPM_CONFIG_GLOBALCONFIG")
+/usr/bin/chmod 0600 "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG"
+
+require_npm_boundary() {
+  /build/tools/node-command /npm-boundary-preflight.cjs /build/npm-boundary-authority.json "${1:-/work/npm-boundary-report.tsv}"
+}
 
 input() {
   local name=$1 digest
@@ -67,6 +89,9 @@ builder_tool_preflight() {
   located=$(find /build/tools/patchelf-unpacked -type f -name patchelf -print -quit)
   if test "$located"; then cp "$located" /build/tools/patchelf/patchelf; else extraction_failed=1; fi
 
+  if test "$extraction_failed" -eq 0; then
+    require_npm_boundary /build/npm-boundary-report.tsv || :
+  fi
   if test "$extraction_failed" -ne 0; then
     while IFS=$'\t' read -r phase provenance name tool_path kind command argv expected_exit maximum prefix version expected_sha owner_uid mode tool_root parent parent_version detail; do
       test "$phase" = content || continue
@@ -90,31 +115,40 @@ builder_tool_preflight() {
   fi
 }
 
-acquire_web_cache() {
-  export PATH=/build/tool-bin
-  cat >/work/acquire-web-cache.cjs <<'NODE'
+write_web_cache_program() {
+  cat >/work/exact-web-cache.cjs <<'NODE'
 'use strict';
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const pacote = require('/build/tools/node/lib/node_modules/npm/node_modules/pacote');
-const lock = JSON.parse(fs.readFileSync('/source/web/package-lock.json'));
-const accepted = new Map();
-for (const item of Object.values(lock.packages || {})) {
-  if (!item || !item.resolved) continue;
-  const url = new URL(item.resolved);
-  if (url.protocol !== 'https:' || url.hostname !== 'registry.npmjs.org' || url.username || url.password || url.port || url.search || url.hash || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.integrity || '')) throw new Error('npm lock authority is not closed');
-  const prior = accepted.get(item.resolved);
-  if (prior && prior !== item.integrity) throw new Error('npm lock locator is ambiguous');
-  accepted.set(item.resolved, item.integrity);
-}
+const authority = JSON.parse(fs.readFileSync('/build/npm-acquisition-authority.json'));
+const lockBytes = fs.readFileSync('/source/web/package-lock.json');
+if (authority.schema !== 'voice-agent.npm-acquisition.v1' || authority.registry !== 'https://registry.npmjs.org/'
+  || crypto.createHash('sha256').update(lockBytes).digest('hex') !== authority.package_lock_sha256 || !Array.isArray(authority.packages)) process.exit(65);
+const mode = process.argv[2];
 (async () => {
-  for (const [resolved, integrity] of [...accepted].sort(([a], [b]) => a.localeCompare(b))) {
-    await pacote.tarball.stream(resolved, (stream) => new Promise((resolve, reject) => {
+  for (const item of authority.packages) {
+    if (!item || typeof item.resolved !== 'string' || typeof item.integrity !== 'string') throw new Error('invalid');
+    await pacote.tarball.stream(item.resolved, (stream) => new Promise((resolve, reject) => {
       stream.on('data', () => {}); stream.on('end', resolve); stream.on('error', reject);
-    }), { cache: '/npm-cache', integrity, preferOnline: true });
+    }), { cache: '/npm-cache', integrity: item.integrity, offline: mode === 'check', preferOnline: mode === 'acquire', registry: authority.registry });
   }
 })().catch(() => { process.exitCode = 1; });
 NODE
-  /build/tools/node/bin/node /work/acquire-web-cache.cjs
+}
+
+check_web_cache() {
+  export PATH=/build/tool-bin
+  require_npm_boundary
+  write_web_cache_program
+  if /build/tools/node-command /work/exact-web-cache.cjs check; then printf 'complete\n' >/build/npm-cache-status; else printf 'missing\n' >/build/npm-cache-status; fi
+}
+
+acquire_web_cache() {
+  export PATH=/build/tool-bin
+  require_npm_boundary
+  write_web_cache_program
+  /build/tools/node-command /work/exact-web-cache.cjs acquire
 }
 
 prepare_web_tools() {
@@ -123,8 +157,9 @@ prepare_web_tools() {
   cp -a /source/web /build/web
   chmod -R u+rwX /build/web
   cd /build/web
-  /build/tools/node/bin/node /build/tools/node/lib/node_modules/npm/bin/npm-cli.js ci --ignore-scripts --offline --cache /npm-cache
-  /build/tools/node/bin/node <<'NODE' >>/build/tool-report.tsv
+  require_npm_boundary
+  /build/tools/node-command /build/tools/node/lib/node_modules/npm/bin/npm-cli.js ci --ignore-scripts --offline --cache /npm-cache --registry https://registry.npmjs.org/ --audit=false --fund=false --update-notifier=false --logs-max=0 --logs-dir /work/npm-logs
+  /build/tools/node-command <<'NODE' >>/build/tool-report.tsv
 'use strict';
 const fs = require('node:fs');
 for (const line of fs.readFileSync('/build/tool-authority.tsv', 'utf8').trimEnd().split('\n')) {
@@ -147,6 +182,10 @@ case "${1:-}" in
     builder_tool_preflight
     exit 0
     ;;
+  web-cache-check)
+    check_web_cache
+    exit 0
+    ;;
   web-acquire)
     acquire_web_cache
     exit 0
@@ -156,7 +195,7 @@ case "${1:-}" in
     exit 0
     ;;
   assemble) ;;
-  *) echo 'usage: assemble-runtime.sh tool-preflight|web-acquire|web-prepare|assemble' >&2; exit 64 ;;
+  *) echo 'usage: assemble-runtime.sh tool-preflight|web-cache-check|web-acquire|web-prepare|assemble' >&2; exit 64 ;;
 esac
 
 export PATH=/build/tool-bin
@@ -164,7 +203,8 @@ rm -rf /output/runtime /output/web /work/runtime /work/wheels /work/llama
 mkdir -p /output/runtime /output/web /work/wheels /work/llama
 cp -a /build/web /work/web
 cd /work/web
-VITE_APP_VERSION="$VOICE_AGENT_BUILD_ID" /build/tools/node/bin/node /build/tools/node/lib/node_modules/npm/bin/npm-cli.js run build:production-only
+require_npm_boundary
+VITE_APP_VERSION="$VOICE_AGENT_BUILD_ID" /build/tools/node-command /build/tools/node/lib/node_modules/npm/bin/npm-cli.js --registry https://registry.npmjs.org/ --audit=false --fund=false --update-notifier=false --logs-max=0 --logs-dir /work/npm-logs run build:production-only
 cp -a dist/. /output/web/
 rm -rf /work/web /output/web/node_modules
 

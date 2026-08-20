@@ -1,0 +1,216 @@
+=== phase: deterministic tracer (remaining=120.0s) ===
+Voice Agent v2 deterministic tracer
+network: IP sockets denied; local AF_UNIX wake-up only
+correlation: session=session-synthetic-0001 turn=turn-synthetic-0001
+transcript: Привет, это синтетический тест.
+response: Здравствуйте! Детерминированный голосовой ответ готов.
+terminal: turn.completed count=1
+normalized_trace_sha256: 9b607f8f17878c9d1caf3caf85b106c896140a2f9ecd44e33dd39ef47d2f305f
+input_pcm_sha256: 9ee9638a619b160078dc8d86ca32a01bc5c32536eb9698c59b01b16c789ac844 bytes=6400
+output_pcm_sha256: 69935a91444eaca69d96477a0de66aea7640fd476ea5858fcdd1f2143a46131e bytes=6400
+repeatability: run1 == run2 for normalized trace and PCM
+case stt_failure: terminal=turn.failed detail=injected_stt_failure terminal_count=1
+case llm_failure: terminal=turn.failed detail=injected_selected_provider_failure terminal_count=1
+case tts_failure: terminal=turn.failed detail=injected_tts_failure terminal_count=1
+case cancel_after_first_audio: terminal=turn.interrupted detail=interrupted terminal_count=1
+tracer: PASS
+=== phase: signed release and read-only launcher behaviors (remaining=119.6s) ===
+✔ interrupted pre-preservation adoption journal upgrades with exact prior/candidate custody intact (2.470415ms)
+✔ exact selected-new/running-old split adopts healthy prior, uncommitted legacy candidate, private config, rootless endpoint, and signed candidate (93.830267ms)
+✔ historical manifest shape does not erase custody, while process/unit/readiness/release mismatches fail before service action (115.980276ms)
+✔ canonical config conflict and rootful/foreign Docker are refused; absent Docker records no endpoint and never creates a container (87.632978ms)
+✔ legacy adoption preserves the exact existing AgentEnvironment identity without lifecycle mutation (37.134312ms)
+✔ candidate failure restores exact old service; double failure remains explicit with recovery evidence (64.135066ms)
+✔ interruption after every durable write/action converges without duplicate service actions, config copy, release, or container (546.866369ms)
+✔ closed descriptors reject changed authority, mutable image identity, platform, compatibility, and unknown fields (2.630365ms)
+✔ complete and resumed downloads converge to one owner-only verified content-addressed asset (19.769487ms)
+✔ changed range validator resets exactly; oversize, hash, redirect, and malformed range fail closed (37.517401ms)
+✔ offline acquisition uses only exact verified complete cache and optional image remains stale_spec without pull (10.337673ms)
+✔ model views materialize atomically, recover owned partials, converge after a race, and reject tamper or extras (38.576215ms)
+✔ model view cleanup retains active and rollback aggregates and refuses attacker-created partial links (19.733214ms)
+✔ partial and LRU GC remove only exact unreferenced reconstructible owned bytes and revalidate references (8.594699ms)
+✔ asset reachability admits 0/1/2/3/100 inventories and collects every unreferenced exact runtime without count refusal (43.762088ms)
+✔ disk preflight reports one exact required/available/reclaimable summary and no inventory count blocker (0.391291ms)
+✔ launcher replaces only after durable application health, validates post-exec identities, then removes one backup (9.302861ms)
+✔ launcher interruption after every rename/fsync/exec/validation phase recovers idempotently to exact old or new without touching healthy app (102.098527ms)
+✔ launcher wrong hash, foreign symlink, backup ambiguity, and unhealthy application fail without disturbing application bytes (13.228434ms)
+✔ asset/offline/space/self-update records and errors are privacy-safe (5.220536ms)
+✔ pristine install creates safe XDG defaults, immutable exact release, user unit, and five-component ready truth (84.621763ms)
+✔ optional AgentEnvironment and Telegram absence degrades independently after ordinary voice success (37.699544ms)
+✔ repeated identical install probes and reports already healthy without another service action (48.911128ms)
+✔ unsupported host stops with one actionable class and zero managed mutation (10.688657ms)
+✔ forged signature, unsafe archive, incomplete release, and genuine space shortage fail before mutation (41.460999ms)
+✔ missing noninteractive linger privilege leaves no selected/healthy install or service unit (27.787789ms)
+✔ failed readiness stops/disables candidate and retains only diagnosable unselected staged evidence (30.311622ms)
+✔ interruptions before and after durable service phases resume exactly once and converge healthy (170.674811ms)
+✔ partial/foreign/symlinked state routes to doctor and preserves pre-existing data (20.536505ms)
+✔ production SystemHost derives compatibility only from the staged runtime receipt and exact four-set views (17.183462ms)
+✔ production CLI accepts no arbitrary install root and install output/records leak no secret or content bytes (25.663176ms)
+✔ signed stable channel is canonical, Ed25519-authenticated, fresh, and monotonic (6.723285ms)
+✔ forged, wrong-key, expired, rollback, and noncanonical channel metadata fail closed (6.23278ms)
+✔ artifact verification binds exact bytes, manifest, platform, and launcher protocol (3.017211ms)
+✔ archive index admits only declared paths and safe regular/directory/internal-link types (2.758165ms)
+✔ legacy discovery retains exact ready running-old custody despite selected-new and missing rollback (36.750144ms)
+✔ invalid, unowned, or unrelated runtime candidate is never adoption eligible (31.302905ms)
+✔ status and doctor are zero-mutation and their JSON/human output is content-free (340.630803ms)
+✔ Node 26 SEA packaging is deterministic and executable without another host runtime (3567.473892ms)
+✔ all launcher schemas, protocol, public keys, and signed fixtures are bounded public material (4.967558ms)
+✔ default uninstall inventories first, orders service disable before owned bytes, and preserves every durable category and linger (22.37453ms)
+✔ uninstall explicit typed CLI flags are closed and confirmations are non-ambiguous (0.753045ms)
+✔ dry run and rejected typed confirmation perform no mutation (14.813826ms)
+✔ program cache and model purge delete only their exact roots (20.135171ms)
+✔ AgentEnvironment purge requires immediate exact rootless endpoint/container owner reinspection (21.073482ms)
+✔ purge-all deletes only closed data roots and never constructs ambient, wildcard, prune, or external deletion (12.281639ms)
+✔ interrupted uninstall resumes only selected categories; foreign/symlink/race state fails closed (20.980436ms)
+✔ support bundle is deterministic, owner-only, local-only, and reports checksum/size/category names (12.35193ms)
+✔ support scanner fails closed for every forbidden content class while allowing schema hashes and ordinary error codes (0.653267ms)
+✔ support bundle rejects unsafe output and leaves no archive on suspected secret or unexpected category (5.877855ms)
+✔ production source is inert without one valid compile-time root and fixed private GitHub identity (5.438312ms)
+✔ private GitHub channel uses only the pinned key and exact API repository/ref/path (10.900634ms)
+✔ token file custody requires current-user mode 0600 and never changes request identity (3.070452ms)
+✔ missing token is actionable and invalid API/TLS/length responses remain content-free (1.872314ms)
+✔ private GitHub artifact admits exactly one API-identified redirect and strips authorization (6.266216ms)
+✔ archive index refuses traversal, duplicate, PAX/device types, bad checksum, and unsafe metadata (2.939226ms)
+✔ private GitHub ranges preserve exact validators after stripped-auth redirect (1.747192ms)
+✔ canonical update stages fully, quiesces once, proves exact candidate, commits rollback, and clears durable journal (138.915889ms)
+✔ candidate failure automatically restores exact prior release/config/unit and returns failed-safe; double failure retains recovery material (145.497922ms)
+✔ safe ordered migration preserves explicit values; destructive/product-choice migration stops before quiesce (114.496742ms)
+✔ all durable phase/action interruption points converge on retry to candidate or proved prior without duplicate blind start (1532.100175ms)
+✔ offline cached candidate reconciliation succeeds only with exact verified material and keeps latest unknown (88.717341ms)
+✔ already-current online/offline and unavailable metadata are honest and service-action free (62.12112ms)
+✔ concurrent updater, channel rollback/expiry, disk shortage, prior identity mismatch, and exact candidate mismatch fail honestly (272.840086ms)
+✔ interrupted pre-preservation update journal is upgraded without discarding prior transaction custody (0.350578ms)
+✔ exact AgentEnvironment identity survives candidate success/failure rollback and replacement is detected without container lifecycle calls (162.003618ms)
+✔ stopped/unhealthy/missing and stale-spec capability states never fail ordinary update when identity is stable (207.567601ms)
+✔ reachability GC admits 0/1/2/3/100 release inventories and removes only exact unreachable owned releases (736.06643ms)
+✔ reachability GC refuses unsafe/unowned targets without deleting user/config/model/AgentEnvironment state (56.386108ms)
+✔ recorded-prior-only rollback revalidates, swaps active and rollback, and retains displaced newer release (71.712699ms)
+✔ rollback target failure restores exact healthy newer release; double failure retains all evidence (138.69269ms)
+✔ rollback interruption converges idempotently and incompatible/missing prior fail before service mutation (535.053645ms)
+✔ CLI exposes selector-free rollback and canonical update/offline surface (0.473024ms)
+✔ application candidate archive, manifest, SBOM, provenance, and unsigned channel are canonical and reproducible (43.474611ms)
+✔ runtime receipt refuses undeclared, unhashed, wrong-platform, wrong-architecture, and license-missing closures (11.22709ms)
+✔ production source and lock gates refuse dirty, floating, and unhashed inputs (2.860271ms)
+✔ offline Ed25519 signing requires owner-only key and emits no key bytes or path (12.673677ms)
+✔ publication dry-run requires signed exact confirmation and remote collision/readback fail closed (16.95363ms)
+✔ release output leak scanner refuses checkout paths, private keys, and token markers (0.459922ms)
+✔ channel finalization requires immutable private GitHub IDs before offline signing (12.794826ms)
+✔ production payload contract includes the STT runner and excludes application Node (0.27115ms)
+✔ committed runtime assembler authority pins the exact OCI/toolchain and closed immutable inputs (19.130731ms)
+✔ private npm boundary accepts exact distinct empty configs and separate owner-only directories with npm 11 (2.15358ms)
+✔ observed npm 11 double-loading refusal remains a regression for identical private config paths (2.06576ms)
+✔ private npm boundary refuses inode aliases, symlinks, wrong mode or owner, path escape, and ambient package authority (9.291126ms)
+✔ npm lock authority refuses arbitrary registries, missing integrity, incomplete dependencies, and unexpected packages (13.183935ms)
+✔ the accepted exact Node gzip archive extracts without xz and retains exact file bytes (8.799766ms)
+✔ tool closure reports absent, tampered, and extra tools together without host fallback data (8.11863ms)
+✔ closed tool probes accept exact argv/status/output and bind internal hashes to a successful parent (14.986451ms)
+✔ tool probes report missing, tampered, wrong-version, wrong-exit, oversized, linked, and parent-mismatched rows together without output content (31.197729ms)
+✔ content-addressed probes use the same bounded exact-vector contract (9.978973ms)
+✔ Node compatibility receipt binds the actual exit-127 cause and corrected exact-loader boundary reproducibly (5.38872ms)
+✔ Node compatibility reports missing and tampered loader/library plus symbol, architecture, interpreter, raw-cause, and environment differences together (4.594914ms)
+✔ npm boundary preflight errors are complete and privacy-safe (4.292599ms)
+✔ llama.cpp admits only the exact direct owner/repository/full-commit codeload locator (0.763371ms)
+✔ direct codeload fetch is credential-free, digest-checked, and repeat cache custody is exact (14.523623ms)
+✔ codeload refuses redirects and a downloaded digest mismatch leaves no cache byte (2.136322ms)
+✔ rootless Podman 6 netavark and pasta facts are exact and strip ambient host authority (0.754333ms)
+✔ builder digest pinning refuses a local image identity mismatch before tool probing (0.555649ms)
+✔ acquisition network fails closed for a missing helper, rootful engine, wrong backend, unsupported engine, and arbitrary override (0.585355ms)
+✔ production assembler closes extraction, compiler, ELF, PATH, and credential tool authority (3.356777ms)
+✔ input cache accepts only exact single-link bytes and refuses missing, tampered, or ambient entries (1.474182ms)
+✔ fixture assembly preflights the full closure, cache-installs tools offline, and builds only with network none (31.639657ms)
+✔ a complete exact npm cache reruns with network none and byte-identical cache custody (53.67585ms)
+✔ npm identity or npm 11 preflight failure stops before cache inspection, acquisition, or output (26.285915ms)
+✔ one complete tool preflight error stops before remaining fetch, web acquisition, or runtime output (26.939985ms)
+✔ unsupported rootless facts stop before input fetch or runtime output (3.378201ms)
+ℹ tests 107
+ℹ suites 0
+ℹ pass 107
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4379.979605
+=== phase: bounded operation custody/failure matrix (remaining=115.1s) ===
+----------------------------------------------------------------------
+Ran 10 tests in 0.374s
+
+OK
+operation_custody_matrix: PASS cases=10 network=denied elapsed_ms=812
+=== phase: hermetic current Python behaviors (remaining=114.1s) ===
+=== phase: injected-timeout (remaining=0.2s) ===
+python_hermetic: PASS tests=390 unexpected_skips=0
+=== phase: bounded local-socket readiness (remaining=101.2s) ===
+python_local_socket: PASS tests=9 unexpected_skips=0
+=== phase: installed SDK/capability/composition contract (remaining=97.9s) ===
+Slice 6 installed-runtime contract: PASS
+SDK pins: livekit=1.1.14, livekit-api=1.2.0, fastapi=0.141.1, uvicorn=0.52.1, pydantic=2.13.4, PyYAML=6.0.3
+capability: one room, microphone publish, agent subscribe/data; no management grants
+room lifecycle: startup cancellation drains; incomplete cleanup retains capacity
+local VAD: pinned Silero v6 CPU artifact shape=verified
+Silero TTS: v2 manifest/composition fixed to kseniya/native48/two workers; exact-cache identity belongs to ./verify-silero-kseniya; CC-BY-NC-SA-4.0 private noncommercial evaluation only; no fallback
+local LFM: manifest/provider wiring verified; exact-cache identity belongs to ./verify-local-lfm; loopback endpoint, 2 x 32768-token slots, no fallback
+network: no sockets opened; no model inference, microphone, or physical browser used
+=== phase: full Vitest surface (remaining=96.6s) ===
+
+> voice-agent-v2-web@0.0.0 test
+> vitest run
+
+
+ RUN  v4.1.10 /home/priney/.treehouse/voice-agent-v2-c11fbd/3/voice-agent-v2/web
+
+
+ Test Files  9 passed (9)
+      Tests  88 passed (88)
+   Start at  13:14:47
+   Duration  2.80s (transform 725ms, setup 0ms, import 1.66s, tests 2.17s, environment 7.08s)
+
+npm notice
+npm notice New major version of npm available! 10.9.8 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice
+=== phase: TypeScript typecheck (remaining=93.4s) ===
+
+> voice-agent-v2-web@0.0.0 typecheck
+> tsc -b --pretty false
+
+=== phase: production web build (remaining=93.1s) ===
+
+> voice-agent-v2-web@0.0.0 build:production-only
+> vite build
+
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 37 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.69 kB │ gzip:   0.42 kB
+dist/assets/index-C4nHLEif.css   14.30 kB │ gzip:   3.87 kB
+dist/assets/index-DhO_xQ-Q.js   764.92 kB │ gzip: 208.53 kB
+
+✓ built in 253ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+=== phase: review fixture probe build (remaining=92.6s) ===
+
+> voice-agent-v2-web@0.0.0 build:review-only
+> vite build --mode review
+
+vite v8.2.1 building client environment for review...
+[2Ktransforming...✓ 34 modules transformed.
+rendering chunks...
+computing gzip size...
+review/dist/index.html                   0.70 kB │ gzip:  0.42 kB
+review/dist/assets/index-D5A8619D.css   14.30 kB │ gzip:  3.84 kB
+review/dist/assets/index-BTWU9xdz.js   229.39 kB │ gzip: 71.00 kB
+
+✓ built in 96ms
+=== phase: short production Firefox/actual-LiveKit smoke (remaining=92.2s) ===
+Nvidia Decoder is supported.
+livekit_ffi::server:266:livekit_ffi::server - Attempted to drop unknown FFI handle: 19
+browser_smoke_cleanup: firefox=1.029 rtc=1.084 all=1.134
+Firefox/production/actual-LiveKit smoke: PASS wall_seconds=4.722 startup_seconds=1.817 functional_seconds=1.771 cleanup_seconds=1.134 review_swap=reject capability=reject current_pcm=present stale_generation=drop cleanup=verified
+canonical_pr_gate: PASS deadline_seconds=120 unexpected_skips=0
+RESULT: PASS
