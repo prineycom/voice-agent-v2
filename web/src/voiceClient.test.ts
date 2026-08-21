@@ -199,6 +199,45 @@ afterEach(() => {
 })
 
 describe('VoiceClient checkpoint A+B protocol', () => {
+  it('reuses one opaque tab-scoped attempt across a reload-style client replacement', async () => {
+    const first = new VoiceClient(document.createElement('div'), callbacks())
+    await first.start()
+    await first.stop(false)
+    const second = new VoiceClient(document.createElement('div'), callbacks())
+    await second.start()
+
+    const posts = vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'POST')
+    const firstIdentity = (posts[0][1]?.headers as Record<string, string>)['X-Voice-Session-Attempt']
+    const secondIdentity = (posts[1][1]?.headers as Record<string, string>)['X-Voice-Session-Attempt']
+    expect(firstIdentity).toMatch(/^[0-9a-f-]{36}$/)
+    expect(secondIdentity).toBe(firstIdentity)
+    expect(sessionStorage.getItem('voice-agent.session-attempt.v1')).toBe(firstIdentity)
+    expect([...Array(sessionStorage.length)].map((_, index) => sessionStorage.key(index)))
+      .toEqual(['voice-agent.session-attempt.v1'])
+    await second.stop(false)
+  })
+
+  it('rotates one stale attempt once and explicitly ends only the replacement identity', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 410 } as Response)
+      .mockResolvedValueOnce(capabilityResponse())
+      .mockResolvedValue({ ok: true, status: 204 } as Response))
+    const client = new VoiceClient(document.createElement('div'), callbacks())
+    await client.start()
+
+    const posts = vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'POST')
+    const firstIdentity = (posts[0][1]?.headers as Record<string, string>)['X-Voice-Session-Attempt']
+    const replacementIdentity = (posts[1][1]?.headers as Record<string, string>)['X-Voice-Session-Attempt']
+    expect(replacementIdentity).not.toBe(firstIdentity)
+    expect(sessionStorage.getItem('voice-agent.session-attempt.v1')).toBe(replacementIdentity)
+
+    await client.stop()
+    const end = vi.mocked(fetch).mock.calls.find(([, options]) => options?.method === 'DELETE')
+    expect((end?.[1]?.headers as Record<string, string>)['X-Voice-Session-Attempt'])
+      .toBe(replacementIdentity)
+    expect(sessionStorage.getItem('voice-agent.session-attempt.v1')).toBeNull()
+  })
+
   it('attaches only the current announced publication generation and sends no media ACK', async () => {
     const observed = callbacks()
     const client = new VoiceClient(document.createElement('div'), observed)
@@ -328,9 +367,23 @@ describe('VoiceClient checkpoint A+B protocol', () => {
     emitControl(room, 'llm.visible', 6, { response: 'Приватный ответ.' })
     emitControl(room, 'turn.completed', 7, { outcome: 'completed' }, true)
 
-    expect(storageWrite).not.toHaveBeenCalled()
+    expect(storageWrite).toHaveBeenCalledTimes(1)
+    expect(storageWrite).toHaveBeenCalledWith(
+      'voice-agent.session-attempt.v1', expect.stringMatching(/^[0-9a-f-]{36}$/),
+    )
     expect(localStorage.length).toBe(0)
-    expect(sessionStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(1)
+    const persistedOutput = JSON.stringify(Object.fromEntries(
+      [...Array(sessionStorage.length)].map((_, index) => {
+        const key = sessionStorage.key(index)!
+        return [key, sessionStorage.getItem(key)]
+      }),
+    ))
+    expect(persistedOutput).toMatch(/^\{"voice-agent\.session-attempt\.v1":"[0-9a-f-]{36}"\}$/)
+    expect(persistedOutput).not.toContain('room-token-long-enough')
+    expect(persistedOutput).not.toContain('session-test-0001')
+    expect(persistedOutput).not.toContain('Секретный вопрос.')
+    expect(persistedOutput).not.toContain('Приватный ответ.')
     const diagnosticOutput = JSON.stringify(
       vi.mocked(observed.onDiagnostic!).mock.calls.map(([record]) => record),
     )
@@ -380,9 +433,22 @@ describe('VoiceClient checkpoint A+B protocol', () => {
       payload: expect.objectContaining({ stage: 'stt' }),
     }))
     expect(observed.onConnection).not.toHaveBeenCalledWith('failed', expect.anything())
-    expect(storageWrite).not.toHaveBeenCalled()
+    expect(storageWrite).toHaveBeenCalledTimes(1)
+    expect(storageWrite).toHaveBeenCalledWith(
+      'voice-agent.session-attempt.v1', expect.stringMatching(/^[0-9a-f-]{36}$/),
+    )
     expect(localStorage.length).toBe(0)
-    expect(sessionStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(1)
+    const persistedOutput = JSON.stringify(Object.fromEntries(
+      [...Array(sessionStorage.length)].map((_, index) => {
+        const key = sessionStorage.key(index)!
+        return [key, sessionStorage.getItem(key)]
+      }),
+    ))
+    expect(persistedOutput).toMatch(/^\{"voice-agent\.session-attempt\.v1":"[0-9a-f-]{36}"\}$/)
+    expect(persistedOutput).not.toContain('room-token-long-enough')
+    expect(persistedOutput).not.toContain('session-test-0001')
+    expect(persistedOutput).not.toContain('selected_stt_unavailable')
   })
 
   it('keeps a visible prefix and session alive when TTS fails', async () => {

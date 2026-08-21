@@ -123,17 +123,20 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         registry.settings = settings
         registry.runner = runner
         registry._controllers = {}
+        registry._attempts = {}
+        registry._attempt_by_session = {}
+        registry._retired_attempts = {}
         registry._lock = asyncio.Lock()
         registry._accepting = True
         registry.operational_health = lambda: {"overall_readiness": "ready"}
         controller = types.SimpleNamespace(
             start=lambda: asyncio.sleep(0),
-            arm_browser_join_timeout=lambda: None,
-            browser_token=lambda: "room-token",
+            arm_browser_join_timeout=lambda **_kwargs: None,
+            browser_token=lambda _ttl=None: "room-token",
         )
 
         with patch.object(runtime, "LiveKitRoomController", return_value=controller):
-            capability = await registry.create()
+            capability = await registry.create("attempt-profile")
 
         self.assertEqual(capability["llm_profile"], llm_profile)
 
@@ -155,6 +158,9 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         registry.settings = settings
         registry.runner = runner
         registry._controllers = {}
+        registry._attempts = {}
+        registry._attempt_by_session = {}
+        registry._retired_attempts = {}
         registry._lock = asyncio.Lock()
         registry._accepting = True
         health = iter((
@@ -176,13 +182,13 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
             patch.object(runtime, "LiveKitRoomController", return_value=controller),
             self.assertRaisesRegex(RuntimeError, "became unavailable"),
         ):
-            await registry.create()
+            await registry.create("attempt-room-readiness")
 
         self.assertEqual(token_requests, [])
         self.assertEqual(closed, [False])
         self.assertEqual(registry._controllers, {})
 
-    async def test_refuses_constructed_capability_if_readiness_drops_before_issue(self) -> None:
+    async def test_refuses_capability_if_readiness_drops_before_issue(self) -> None:
         runtime = load_runtime()
         token_requests: list[str] = []
         closed: list[bool] = []
@@ -200,6 +206,9 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         registry.settings = settings
         registry.runner = runner
         registry._controllers = {}
+        registry._attempts = {}
+        registry._attempt_by_session = {}
+        registry._retired_attempts = {}
         registry._lock = asyncio.Lock()
         registry._accepting = True
         health = iter((
@@ -222,12 +231,12 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
             patch.object(runtime, "LiveKitRoomController", return_value=controller),
             self.assertRaisesRegex(RuntimeError, "before capability issue"),
         ):
-            await registry.create()
-        self.assertEqual(token_requests, ["requested"])
+            await registry.create("attempt-issue-readiness")
+        self.assertEqual(token_requests, [])
         self.assertEqual(closed, [False])
         self.assertEqual(registry._controllers, {})
 
-    async def test_cleanup_failure_cannot_leak_the_single_admission_slot(self) -> None:
+    async def test_startup_cleanup_failure_retains_the_single_admission_slot(self) -> None:
         runtime = load_runtime()
         runner = types.SimpleNamespace(
             public_llm_profile=lambda: {"provider_mode": "local"},
@@ -243,6 +252,9 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         registry.settings = settings
         registry.runner = runner
         registry._controllers = {}
+        registry._attempts = {}
+        registry._attempt_by_session = {}
+        registry._retired_attempts = {}
         registry._lock = asyncio.Lock()
         registry._accepting = True
         health = iter((
@@ -261,22 +273,215 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
             start=lambda: asyncio.sleep(0),
             close=cleanup_failure,
         )
-        replacement_controller = types.SimpleNamespace(
-            start=lambda: asyncio.sleep(0),
-            arm_browser_join_timeout=lambda: None,
-            browser_token=lambda: "replacement-token",
-        )
         with patch.object(
-            runtime, "LiveKitRoomController",
-            side_effect=(failed_controller, replacement_controller),
+            runtime, "LiveKitRoomController", return_value=failed_controller,
         ):
             with self.assertRaisesRegex(RuntimeError, "room cleanup failed"):
-                await registry.create()
-            self.assertEqual(registry._controllers, {})
-            capability = await registry.create()
+                await registry.create("attempt-cleanup-failure")
+            self.assertEqual(len(registry._controllers), 1)
+            with self.assertRaises(runtime.SessionCapacityError):
+                await registry.create("attempt-replacement")
 
-        self.assertEqual(capability["token"], "replacement-token")
         self.assertEqual(len(registry._controllers), 1)
+
+
+class IdempotentAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    def make_registry(self, runtime):
+        runner = types.SimpleNamespace(
+            public_llm_profile=lambda: {"provider_mode": "local"},
+            tts_profile=types.SimpleNamespace(public_metadata=lambda: {"profile": "test"}),
+        )
+        settings = types.SimpleNamespace(
+            max_sessions=1,
+            livekit_public_url="ws://127.0.0.1:7880",
+            room_token_ttl_seconds=300,
+            browser_join_timeout_seconds=30,
+        )
+        registry = runtime.SessionRegistry.__new__(runtime.SessionRegistry)
+        registry.settings = settings
+        registry.runner = runner
+        registry._controllers = {}
+        registry._attempts = {}
+        registry._attempt_by_session = {}
+        registry._retired_attempts = {}
+        registry._lock = asyncio.Lock()
+        registry._accepting = True
+        registry.operational_health = lambda: {"overall_readiness": "ready"}
+        return registry
+
+    async def test_same_attempt_shares_startup_and_reissues_one_controller_capability(self) -> None:
+        runtime = load_runtime()
+        registry = self.make_registry(runtime)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        controllers = []
+
+        class Controller:
+            def __init__(self, **arguments) -> None:
+                self.session_id = arguments["session_id"]
+                self.on_closed = arguments["on_closed"]
+                self.closed = False
+                self.tokens = 0
+                self.timer_arms = 0
+                controllers.append(self)
+
+            async def start(self) -> None:
+                entered.set()
+                await release.wait()
+
+            def browser_token(self, _ttl: int | None = None) -> str:
+                self.tokens += 1
+                return f"room-token-{self.tokens}"
+
+            def arm_browser_join_timeout(self, **_arguments) -> None:
+                self.timer_arms += 1
+
+            async def close(self, *, notify: bool = True) -> None:
+                self.closed = True
+                if notify:
+                    await self.on_closed(self.session_id)
+
+        with patch.object(runtime, "LiveKitRoomController", Controller):
+            first = asyncio.create_task(registry.create("same-tab-attempt"))
+            await entered.wait()
+            second = asyncio.create_task(registry.create("same-tab-attempt"))
+            with self.assertRaises(runtime.SessionCapacityError):
+                await registry.create("distinct-tab-attempt")
+            release.set()
+            first_capability, second_capability = await asyncio.gather(first, second)
+            resumed_capability = await registry.create("same-tab-attempt")
+
+        self.assertEqual(len(controllers), 1)
+        self.assertEqual(
+            {first_capability["session_id"], second_capability["session_id"], resumed_capability["session_id"]},
+            {controllers[0].session_id},
+        )
+        self.assertEqual(
+            {first_capability["token"], second_capability["token"], resumed_capability["token"]},
+            {"room-token-1", "room-token-2", "room-token-3"},
+        )
+        self.assertEqual(controllers[0].timer_arms, 4)
+        self.assertEqual(registry.active_count, 1)
+
+    async def test_expired_or_explicitly_ended_identity_cannot_overlap_replacement(self) -> None:
+        runtime = load_runtime()
+        registry = self.make_registry(runtime)
+        close_release = asyncio.Event()
+        controllers = []
+
+        class Controller:
+            def __init__(self, **arguments) -> None:
+                self.session_id = arguments["session_id"]
+                self.on_closed = arguments["on_closed"]
+                self.closed = False
+                controllers.append(self)
+
+            async def start(self) -> None:
+                return None
+
+            def browser_token(self, _ttl: int | None = None) -> str:
+                return "room-token"
+
+            def arm_browser_join_timeout(self, **_arguments) -> None:
+                return None
+
+            async def close(self, *, notify: bool = True) -> None:
+                self.closed = True
+                if len(controllers) == 1 and not close_release.is_set():
+                    await close_release.wait()
+                if notify:
+                    await self.on_closed(self.session_id)
+
+        with patch.object(runtime, "LiveKitRoomController", Controller):
+            await registry.create("expiring-attempt")
+            registry._attempts["expiring-attempt"].expires_at = 0
+            with self.assertRaises(runtime.SessionAttemptExpiredError):
+                await registry.create("expiring-attempt")
+            with self.assertRaises(runtime.SessionCapacityError):
+                await registry.create("distinct-while-expired-controller-closes")
+            close_release.set()
+            for _ in range(20):
+                if registry.active_count == 0:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual(registry.active_count, 0)
+            await registry.create("replacement-attempt")
+            await registry.end("replacement-attempt")
+            with self.assertRaises(runtime.SessionAttemptExpiredError):
+                await registry.create("replacement-attempt")
+
+        self.assertEqual(len(controllers), 2)
+        self.assertTrue(all(controller.closed for controller in controllers))
+        self.assertEqual(registry.active_count, 0)
+
+    async def test_pre_media_reload_disconnect_cannot_close_replacement_participant(self) -> None:
+        runtime = load_runtime()
+        handlers = {}
+
+        class Room:
+            def on(self, event):
+                def register(callback):
+                    handlers[event] = callback
+                    return callback
+                return register
+
+        controller = runtime.LiveKitRoomController.__new__(runtime.LiveKitRoomController)
+        controller.room = Room()
+        controller.browser_identity = "browser-session-test"
+        controller._browser_participant_sid = None
+        controller._browser_ready = False
+        controller._control_task = object()
+        closed = asyncio.Event()
+
+        async def close(*, notify: bool = True) -> None:
+            closed.set()
+
+        controller.close = close
+        controller._register_handlers()
+        old = types.SimpleNamespace(identity=controller.browser_identity, sid="old-sid")
+        replacement = types.SimpleNamespace(identity=controller.browser_identity, sid="new-sid")
+        handlers["participant_connected"](old)
+        handlers["participant_disconnected"](old)
+        self.assertFalse(closed.is_set())
+        handlers["participant_connected"](replacement)
+        controller._browser_ready = True
+        handlers["participant_disconnected"](old)
+        await asyncio.sleep(0)
+        self.assertFalse(closed.is_set())
+        handlers["participant_disconnected"](replacement)
+        await asyncio.wait_for(closed.wait(), 0.1)
+
+    async def test_startup_failure_cleans_slot_and_fresh_registry_recovers_stored_identity(self) -> None:
+        runtime = load_runtime()
+        registry = self.make_registry(runtime)
+
+        class FailingController:
+            def __init__(self, **arguments) -> None:
+                self.session_id = arguments["session_id"]
+
+            async def start(self) -> None:
+                raise RuntimeError("injected startup failure")
+
+            async def close(self, *, notify: bool = True) -> None:
+                return None
+
+        with patch.object(runtime, "LiveKitRoomController", FailingController):
+            with self.assertRaisesRegex(RuntimeError, "injected startup failure"):
+                await registry.create("stored-tab-attempt")
+        self.assertEqual(registry.active_count, 0)
+        with self.assertRaises(runtime.SessionAttemptExpiredError):
+            await registry.create("stored-tab-attempt")
+
+        restarted = self.make_registry(runtime)
+        controller = types.SimpleNamespace(
+            start=lambda: asyncio.sleep(0),
+            browser_token=lambda _ttl=None: "restarted-token",
+            arm_browser_join_timeout=lambda **_kwargs: None,
+        )
+        with patch.object(runtime, "LiveKitRoomController", return_value=controller):
+            capability = await restarted.create("stored-tab-attempt")
+        self.assertEqual(capability["token"], "restarted-token")
+        self.assertEqual(restarted.active_count, 1)
 
 
 class LiveTurnObservationTests(unittest.TestCase):

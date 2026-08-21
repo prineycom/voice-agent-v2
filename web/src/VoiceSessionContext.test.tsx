@@ -81,9 +81,16 @@ function SessionProbe() {
 
 beforeEach(() => {
   livekit.createLocalAudioTrack.mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
-  vi.stubGlobal('fetch', vi.fn()
-    .mockResolvedValueOnce(capabilityResponse())
-    .mockResolvedValueOnce({ ok: false, status: 503 }))
+  let postCount = 0
+  vi.stubGlobal('fetch', vi.fn((_url: string, options?: RequestInit) => {
+    if (options?.method === 'DELETE') {
+      return Promise.resolve({ ok: true, status: 204 } as Response)
+    }
+    postCount += 1
+    return Promise.resolve(
+      postCount === 1 ? capabilityResponse() : ({ ok: false, status: 503 } as Response),
+    )
+  }))
 })
 
 afterEach(() => {
@@ -113,7 +120,9 @@ describe('VoiceSessionProvider connection attempts', () => {
       expect(screen.getByLabelText('microphone state').textContent).toBe('disconnected')
     })
 
-    expect(fetch).toHaveBeenCalledTimes(2)
+    const calls = vi.mocked(fetch).mock.calls
+    expect(calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(2)
+    expect(calls.filter(([, options]) => options?.method === 'DELETE')).toHaveLength(1)
     expect(livekit.createLocalAudioTrack).toHaveBeenCalledTimes(1)
   })
 })

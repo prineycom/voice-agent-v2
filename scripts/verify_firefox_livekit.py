@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -15,6 +16,7 @@ import socket
 import subprocess
 import threading
 import time
+from uuid import UUID
 
 from livekit import api, rtc
 from selenium import webdriver
@@ -26,6 +28,7 @@ from voice_agent_v2.contracts import EventEnvelope
 from voice_agent_v2.livekit_runtime import LiveKitAudioSink, LiveKitEventSink
 from voice_agent_v2.realtime import RealtimeSession
 from voice_agent_v2.silero_tts import SileroVoiceProfile
+from voice_agent_v2.slice6_config import livekit_server_config
 from voice_agent_v2.tracer import TraceResult
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,8 +48,9 @@ GECKODRIVER = Path(
 FIREFOX = shutil.which("firefox")
 
 
-def free_port() -> int:
-    with socket.socket() as listener:
+def free_port(*, udp: bool = False) -> int:
+    kind = socket.SOCK_DGRAM if udp else socket.SOCK_STREAM
+    with socket.socket(socket.AF_INET, kind) as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
 
@@ -159,6 +163,7 @@ def handler_for(
     root: Path,
     capability: dict[str, object],
     session_requests: list[str],
+    attempt_digests: list[str],
 ):
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *arguments, **keywords):
@@ -169,12 +174,26 @@ def handler_for(
             if self.path != "/api/session":
                 self.send_error(404)
                 return
+            identity = self.headers.get("X-Voice-Session-Attempt", "")
+            try:
+                parsed_identity = UUID(identity)
+            except ValueError:
+                self.send_error(400)
+                return
+            if parsed_identity.version != 4 or str(parsed_identity) != identity:
+                self.send_error(400)
+                return
+            attempt_digests.append(hashlib.sha256(identity.encode("ascii")).hexdigest())
             payload = json.dumps(capability, separators=(",", ":")).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def do_DELETE(self) -> None:
+            self.send_response(204)
+            self.end_headers()
 
         def do_GET(self) -> None:
             requested = root / self.path.lstrip("/")
@@ -393,9 +412,15 @@ def stop_owned_browser(driver) -> None:
             raise RuntimeError(f"owned Firefox profile survived cleanup: {profile}")
 
 
-def create_server(port: int, root: Path, capability: dict[str, object], requests: list[str]):
+def create_server(
+    port: int,
+    root: Path,
+    capability: dict[str, object],
+    requests: list[str],
+    attempt_digests: list[str],
+):
     server = ThreadingHTTPServer(
-        ("127.0.0.1", port), handler_for(root, capability, requests)
+        ("127.0.0.1", port), handler_for(root, capability, requests, attempt_digests)
     )
     server.daemon_threads = True
     thread = threading.Thread(
@@ -431,18 +456,15 @@ async def main() -> int:
 
     api_key, api_secret = "firefox-test-key", "s" * 32
     livekit_port, web_port, swapped_port = free_port(), free_port(), free_port()
+    rtc_udp_port = free_port(udp=True)
     session_id = "session-firefox-pr"
     room_name = "firefox-pr-room"
     browser_identity = f"browser-{session_id}"
     agent_identity = f"agent-{session_id}"
-    config = json.dumps(
-        {
-            "port": livekit_port,
-            "bind_addresses": ["127.0.0.1"],
-            "rtc": {"tcp_port": 0, "udp_port": 0, "use_external_ip": False},
-            "logging": {"level": "error"},
-        }
-    )
+    config = livekit_server_config({
+        "VOICE_AGENT_LIVEKIT_PORT": str(livekit_port),
+        "VOICE_AGENT_RTC_UDP_PORT": str(rtc_udp_port),
+    })
     livekit = subprocess.Popen(
         [str(LIVEKIT)],
         env={**os.environ, "LIVEKIT_CONFIG": config, "LIVEKIT_KEYS": f"{api_key}: {api_secret}"},
@@ -535,9 +557,15 @@ async def main() -> int:
             },
         }
         production_requests: list[str] = []
+        production_attempt_digests: list[str] = []
         swapped_requests: list[str] = []
-        servers.append(create_server(web_port, dist, capability, production_requests))
-        servers.append(create_server(swapped_port, review_dist, capability, swapped_requests))
+        swapped_attempt_digests: list[str] = []
+        servers.append(create_server(
+            web_port, dist, capability, production_requests, production_attempt_digests,
+        ))
+        servers.append(create_server(
+            swapped_port, review_dist, capability, swapped_requests, swapped_attempt_digests,
+        ))
 
         options = Options()
         options.add_argument("-headless")
@@ -636,6 +664,8 @@ async def main() -> int:
         driver.get(f"http://127.0.0.1:{web_port}/")
         driver.find_element("xpath", "//button[normalize-space()='CONNECT']").click()
         await wait_for(lambda: production_requests == ["/api/session", "/api/session"], "invalid capability was not fetched")
+        if len(production_attempt_digests) != 2 or len(set(production_attempt_digests)) != 1:
+            raise AssertionError("same-tab reload did not reuse one tab-scoped admission attempt")
         await wait_for(
             lambda: "UNAVAILABLE" in driver.find_element("tag name", "body").text,
             "invalid capability did not fail visibly",

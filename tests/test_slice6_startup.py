@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -221,13 +222,41 @@ class SystemdReadinessTests(unittest.TestCase):
         self.assertTrue(notifier.closed)
 
 
-class LoopbackRuntimeConfigurationTests(unittest.TestCase):
-    def test_livekit_server_is_restricted_to_loopback(self) -> None:
-        document = json.loads(run_slice6.livekit_server_config())
+class LocalRuntimeConfigurationTests(unittest.TestCase):
+    def test_livekit_signaling_is_loopback_and_media_has_one_exact_host_path(self) -> None:
+        with patch(
+            "voice_agent_v2.slice6_config._local_rtc_media_path",
+            return_value=("eth-test", "192.0.2.10"),
+        ):
+            document = json.loads(run_slice6.livekit_server_config())
         self.assertEqual(document["bind_addresses"], ["127.0.0.1"])
-        self.assertEqual(document["rtc"]["node_ip"], "127.0.0.1")
-        self.assertEqual(document["rtc"]["interfaces"], {"includes": ["lo"]})
-        self.assertEqual(document["rtc"]["ips"], {"includes": ["127.0.0.1/32"]})
+        self.assertEqual(document["rtc"]["node_ip"], "192.0.2.10")
+        self.assertEqual(document["rtc"]["interfaces"], {"includes": ["eth-test"]})
+        self.assertEqual(document["rtc"]["ips"], {"includes": ["192.0.2.10/32"]})
+
+
+class TabScopedAdmissionHeaderTests(unittest.TestCase):
+    def test_requires_exact_same_origin_uuid4_without_echoing_identity(self) -> None:
+        from fastapi import HTTPException
+        from voice_agent_v2.slice6_gateway import _admission_identity
+
+        identity = "9f31f340-40b5-4fb7-92b2-d2544ca29fa1"
+        settings = SimpleNamespace(app_public_url="http://127.0.0.1:8000")
+        request = SimpleNamespace(headers={
+            "origin": "http://127.0.0.1:8000",
+            "x-voice-session-attempt": identity,
+        })
+        self.assertEqual(_admission_identity(request, settings), identity)
+
+        for headers, status in (
+            ({"origin": "http://127.0.0.1:8000"}, 400),
+            ({"origin": "http://127.0.0.1:8000", "x-voice-session-attempt": "guessable"}, 400),
+            ({"origin": "https://remote.invalid", "x-voice-session-attempt": identity}, 403),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                _admission_identity(SimpleNamespace(headers=headers), settings)
+            self.assertEqual(raised.exception.status_code, status)
+            self.assertNotIn(identity, str(raised.exception.detail))
 
 
 class ParentProcessIdentityTests(unittest.TestCase):

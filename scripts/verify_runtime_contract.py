@@ -207,21 +207,46 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
         settings, "session-startup", runner=startup_runner
     )
 
-    def refuse_join_timer() -> None:
-        raise AssertionError("cancelled request must not arm a join timer")
+    join_timer_arms = 0
 
-    startup_controller.arm_browser_join_timeout = refuse_join_timer
+    def record_join_timer(*, restart: bool = False) -> None:
+        nonlocal join_timer_arms
+        join_timer_arms += 1
+
+    async def start_stub() -> None:
+        startup_controller._runner_start_task = asyncio.create_task(
+            asyncio.to_thread(startup_runner.start)
+        )
+        await asyncio.shield(startup_controller._runner_start_task)
+
+    startup_controller.start = start_stub
+    startup_controller.arm_browser_join_timeout = record_join_timer
+    startup_controller.browser_token = lambda _ttl=None: "resumed-token"
 
     cancelled_registry = SessionRegistry(
         settings, agent_runtime=DISPOSABLE_AGENT_RUNTIME
     )
+    cancelled_registry.runner = type("AdmissionRunner", (), {
+        "public_llm_profile": lambda self: {"provider_mode": "local"},
+        "tts_profile": type("TTSProfile", (), {
+            "public_metadata": lambda self: {"profile": "test"},
+        })(),
+    })()
     cancelled_registry._accepting = True
     cancelled_registry.operational_health = lambda: {"overall_readiness": "ready"}
+    def startup_controller_factory(**arguments):
+        startup_controller.session_id = arguments["session_id"]
+        startup_controller.browser_identity = arguments["browser_identity"]
+        startup_controller.on_closed = arguments["on_closed"]
+        return startup_controller
+
     with patch(
         "voice_agent_v2.livekit_runtime.LiveKitRoomController",
-        return_value=startup_controller,
+        side_effect=startup_controller_factory,
     ):
-        request = asyncio.create_task(cancelled_registry.create())
+        request = asyncio.create_task(
+            cancelled_registry.create("attempt-cancelled-startup")
+        )
         if not await asyncio.to_thread(startup_runner.entered.wait, 1):
             raise AssertionError("runner startup worker did not begin")
         request.cancel()
@@ -235,12 +260,19 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
             pass
         else:
             raise AssertionError("cancelled registry request unexpectedly completed")
+    resumed = await cancelled_registry.create("attempt-cancelled-startup")
     if (
-        cancelled_registry.active_count != 0
+        cancelled_registry.active_count != 1
         or not startup_runner.started
-        or startup_runner.closed_sessions != [startup_controller.session_id]
+        or startup_runner.closed_sessions
+        or resumed["session_id"] != startup_controller.session_id
+        or resumed["token"] != "resumed-token"
+        or join_timer_arms != 2
     ):
-        raise AssertionError("cancelled registry request leaked startup resources")
+        raise AssertionError("same-tab retry did not reclaim the shared startup")
+    await cancelled_registry.end("attempt-cancelled-startup")
+    if cancelled_registry.active_count != 0:
+        raise AssertionError("explicit end did not release the resumed admission")
 
     failed_controller = controller_stub(
         settings,
@@ -263,7 +295,7 @@ async def verify_room_lifecycle_bounds(settings: Slice6Settings) -> None:
     if failed_registry.active_count != 1:
         raise AssertionError("cleanup failure released session capacity")
     try:
-        await failed_registry.create()
+        await failed_registry.create("attempt-distinct-after-cleanup-failure")
     except SessionCapacityError:
         pass
     else:

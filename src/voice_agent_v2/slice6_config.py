@@ -8,7 +8,11 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import struct
 from urllib.parse import urlsplit
+
+import fcntl
 
 from .instance_runtime import listener_port
 from .runtime_directory import require_lifetime_runtime_root
@@ -24,9 +28,55 @@ class Slice6ConfigurationError(ValueError):
     pass
 
 
+def _local_rtc_media_path() -> tuple[str, str]:
+    """Select one host IPv4 media path without widening HTTP/signaling binds."""
+
+    preferred: list[tuple[int, str]] = []
+    try:
+        for line in Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 8 and fields[1] == "00000000" and int(fields[3], 16) & 1:
+                preferred.append((int(fields[6]), fields[0]))
+    except (OSError, ValueError):
+        pass
+    names = [name for _metric, name in sorted(preferred)]
+    names.extend(sorted(name for _index, name in socket.if_nameindex() if name not in names))
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for name in names:
+            if name == "lo" or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", name):
+                continue
+            try:
+                state = (Path("/sys/class/net") / name / "operstate").read_text(
+                    encoding="ascii"
+                ).strip()
+                if state not in {"up", "unknown"}:
+                    continue
+            except OSError:
+                continue
+            try:
+                packed = fcntl.ioctl(
+                    probe.fileno(), 0x8915, struct.pack("256s", name.encode("ascii"))
+                )
+                address = socket.inet_ntoa(packed[20:24])
+                parsed = ipaddress.ip_address(address)
+            except (OSError, UnicodeEncodeError, ValueError):
+                continue
+            if parsed.version == 4 and not (
+                parsed.is_loopback or parsed.is_link_local or parsed.is_multicast
+            ):
+                return name, address
+    finally:
+        probe.close()
+    raise Slice6ConfigurationError(
+        "one active non-loopback IPv4 interface is required for same-host RTC media"
+    )
+
+
 def livekit_server_config(environment: dict[str, str] | None = None) -> str:
     signal_port = listener_port("VOICE_AGENT_LIVEKIT_PORT", 7880, environment)
     rtc_udp_port = listener_port("VOICE_AGENT_RTC_UDP_PORT", 7882, environment)
+    media_interface, media_ip = _local_rtc_media_path()
     config = {
         "port": signal_port,
         "bind_addresses": ["127.0.0.1"],
@@ -34,9 +84,9 @@ def livekit_server_config(environment: dict[str, str] | None = None) -> str:
             "tcp_port": 0,
             "udp_port": rtc_udp_port,
             "use_external_ip": False,
-            "node_ip": "127.0.0.1",
-            "interfaces": {"includes": ["lo"]},
-            "ips": {"includes": ["127.0.0.1/32"]},
+            "node_ip": media_ip,
+            "interfaces": {"includes": [media_interface]},
+            "ips": {"includes": [f"{media_ip}/32"]},
         },
         "room": {
             "auto_create": True,

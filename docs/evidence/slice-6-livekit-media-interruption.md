@@ -5,7 +5,7 @@
 - **Status:** Historical 2026-08-12 checkpoint; the failed manual attempt remains evidence, while the active Silero/Kseniya branch is documented separately
 - **Legacy source:** None inspected or used
 
-This report preserves the pre-ADR-0009 Slice 6/Issue #15 checkpoint and distinguishes its executable evidence from physical observations. Pasha's first Firefox attempt failed: background/silence triggered turns and no useful visible/audible response was accepted. The diagnosis is preserved outside the repository; nothing below relabels that failed test or claims final Slice 6 acceptance. The active TTS v2/native-48 composition, current verification limits, and remaining acceptance procedure are owned by [`silero-kseniya-48k-private-evaluation.md`](silero-kseniya-48k-private-evaluation.md).
+This report preserves the pre-ADR-0009 Slice 6/Issue #15 checkpoint and distinguishes its executable evidence from physical observations. Pasha's first Firefox attempt failed: background/silence triggered turns and no useful visible/audible response was accepted. Nothing below relabels that failed test or claims final Slice 6 acceptance. A later 2026-08-21 diagnosis proved that the then-current loopback-only UDP candidate could not connect the official same-host Python RTC participant; the correction and its nonclaims are recorded in [`local-session-connect-same-pc.md`](local-session-connect-same-pc.md). The active TTS v2/native-48 composition, current verification limits, and remaining acceptance procedure are owned by [`silero-kseniya-48k-private-evaluation.md`](silero-kseniya-48k-private-evaluation.md).
 
 ## Implemented stack and boundaries
 
@@ -70,13 +70,13 @@ A current host smoke generated the server config through `livekit_server_config`
 | Path | Configured address | Smoke result |
 | --- | --- | --- |
 | LiveKit signaling/API | `127.0.0.1:7880/tcp` | **Observed listening only on loopback.** |
-| WebRTC UDP media | loopback `127.0.0.1:7882/udp` in the active configuration | Current application boundary; the original external-address observation is historical. |
+| WebRTC UDP media | loopback `127.0.0.1:7882/udp` in the checkpoint configuration | Historical bind observation later proved incompatible with the official same-host Python participant; it is not the current guarantee. |
 | ICE/TCP media | disabled (`tcp_port: 0`; conventional `7881` absent) | **No `7881` or `7882` TCP listener observed.** |
 | Gateway | production config `127.0.0.1:8000/tcp` | Gateway behavior/security smoke passed on temporary loopback port `18006`; full runner port remains part of the physical gate. |
 | External application/signaling exposure | none owned by the application | Optional and entirely operator-owned; not an acceptance requirement. |
 | TURN/public fallback | none | No implementation or listener added. |
 
-The historical LiveKit JSON startup observation reported version `1.13.5` and UDP start `7882`. The active configuration restricts signaling/media to loopback. Neither observation proves audible media, and external traversal/certificates are outside application acceptance.
+The historical LiveKit JSON startup observation reported version `1.13.5` and UDP start `7882`. That checkpoint configuration restricted signaling/media to loopback; it is preserved as contradictory evidence rather than a connectivity claim. The current configuration keeps signaling loopback-only and selects one exact host IPv4 UDP media path. Neither observation nor an official participant join proves microphone capture or audible media, and external traversal/certificates are outside application acceptance.
 
 ## Local LFM / Issue #15 evidence
 

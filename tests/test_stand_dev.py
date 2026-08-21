@@ -759,9 +759,15 @@ class StandDevTests(unittest.TestCase):
                     self.assertTrue(Path(environment[name]).is_relative_to(instance_root), name)
                 settings = Slice6Settings.from_environment(environment, project_root=main_selected[1] / "source")
                 self.assertEqual(settings.livekit_internal_url, environment["LIVEKIT_INTERNAL_URL"])
-                server = json.loads(livekit_server_config(environment))
+                with patch(
+                    "voice_agent_v2.slice6_config._local_rtc_media_path",
+                    return_value=("eth-test", "192.0.2.10"),
+                ):
+                    server = json.loads(livekit_server_config(environment))
                 self.assertEqual(server["bind_addresses"], ["127.0.0.1"])
-                self.assertEqual(server["rtc"]["node_ip"], "127.0.0.1")
+                self.assertEqual(server["rtc"]["node_ip"], "192.0.2.10")
+                self.assertEqual(server["rtc"]["interfaces"], {"includes": ["eth-test"]})
+                self.assertEqual(server["rtc"]["ips"], {"includes": ["192.0.2.10/32"]})
                 self.assertEqual(server["port"], int(environment["VOICE_AGENT_LIVEKIT_PORT"]))
                 self.assertEqual(server["rtc"]["udp_port"], int(environment["VOICE_AGENT_RTC_UDP_PORT"]))
                 with patch.dict(os.environ, environment, clear=True):
