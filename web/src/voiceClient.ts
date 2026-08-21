@@ -466,7 +466,13 @@ export class VoiceClient {
   private async ensureRoomStarting(room: Room, microphone?: LocalAudioTrack): Promise<void> {
     if (!this.stopping) return
     if (this.room === null) this.room = room
-    if (microphone !== undefined && this.microphone === null) this.microphone = microphone
+    // A pending getUserMedia() can resolve after the first cancellation cleanup
+    // has taken its resource snapshot. Release that newly attached track here;
+    // never attach it again after cleanup has already cleared the client field.
+    if (microphone !== undefined && this.microphone === microphone) {
+      this.microphone = null
+      microphone.stop()
+    }
     await this.stop()
     throw new Error('voice session start was cancelled')
   }
