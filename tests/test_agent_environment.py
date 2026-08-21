@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -15,7 +17,7 @@ from unittest.mock import patch
 
 from voice_agent_v2.agent_config import AgentUserContext
 from voice_agent_v2.agent_environment import (
-    AgentEnvironment, AgentEnvironmentError, DockerResult,
+    AgentEnvironment, AgentEnvironmentError, DOCKER_DAEMON_INFO_FORMAT, DockerCLI, DockerResult,
     GENERATION_LABEL, MANAGED_LABEL, OWNER_LABEL, SCHEMA_LABEL, SPEC_LABEL,
 )
 from voice_agent_v2.agent_environment_config import (
@@ -38,6 +40,252 @@ TEST_PREPARED_IMAGE = PreparedImageSelection(
 )
 
 
+class DockerCLICustodyTests(unittest.TestCase):
+    UID = 1000
+    ENDPOINT = Path("/run/user/1000/docker.sock")
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="private-docker-client-")
+        self.private_home = Path(self.temporary.name) / "private/client"
+        self.commands: list[tuple[str, ...]] = []
+        self.environments: list[dict[str, str]] = []
+        self.engine_id = "rootless-engine-a"
+        self.rootless = True
+        self.image_present = True
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    @staticmethod
+    def _metadata(mode: int, *, uid: int, inode: int) -> os.stat_result:
+        return os.stat_result((mode, inode, 7, 1, uid, uid, 0, 0, 0, 0))
+
+    def _lstat(self, path: Path) -> os.stat_result:
+        facts = {
+            Path("/run"): self._metadata(stat.S_IFDIR | 0o755, uid=0, inode=1),
+            Path("/run/user"): self._metadata(stat.S_IFDIR | 0o755, uid=0, inode=2),
+            Path("/run/user/1000"): self._metadata(stat.S_IFDIR | 0o700, uid=self.UID, inode=3),
+            self.ENDPOINT: self._metadata(stat.S_IFSOCK | 0o660, uid=self.UID, inode=4),
+        }
+        if path not in facts:
+            raise FileNotFoundError(path)
+        return facts[path]
+
+    @staticmethod
+    def _image_document() -> dict[str, object]:
+        return {
+            "Id": TEST_PREPARED_IMAGE.image_id,
+            "Os": "linux", "Architecture": "amd64",
+            "Config": {
+                "User": "1000:1000",
+                "Entrypoint": ["/sbin/tini", "--"],
+                "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
+                "Labels": {
+                    IMAGE_MANAGED_LABEL: "1", IMAGE_SCHEMA_LABEL: "1",
+                    IMAGE_CONTEXT_LABEL: TEST_PREPARED_IMAGE.context_revision,
+                },
+            },
+            "RootFS": {"Layers": ["sha256:" + "6" * 64]},
+        }
+
+    def _subprocess(self, arguments, **options) -> subprocess.CompletedProcess[bytes]:
+        command = tuple(arguments[1:])
+        self.commands.append(command)
+        self.environments.append(dict(options["env"]))
+        if command == ("info", "--format", DOCKER_DAEMON_INFO_FORMAT):
+            options = ["name=seccomp", "name=rootless"] if self.rootless else ["name=seccomp"]
+            output = json.dumps({
+                "ID": self.engine_id, "OSType": "linux", "Architecture": "amd64",
+                "SecurityOptions": options,
+            }).encode()
+            return subprocess.CompletedProcess(arguments, 0, output, b"")
+        if command == ("image", "inspect", TEST_PREPARED_IMAGE.image_id):
+            if not self.image_present:
+                return subprocess.CompletedProcess(arguments, 1, b"[]\n", b"private path must stay private")
+            return subprocess.CompletedProcess(
+                arguments, 0, json.dumps([self._image_document()]).encode(), b"",
+            )
+        raise AssertionError(f"unexpected private Docker command: {command!r}")
+
+    def _client(self) -> DockerCLI:
+        with patch("voice_agent_v2.agent_environment.os.geteuid", return_value=self.UID):
+            client = DockerCLI(self.private_home)
+        client.binary = "/usr/bin/docker"
+        return client
+
+    def test_explicit_current_user_rootless_endpoint_ignores_ambient_context_and_credentials(self) -> None:
+        client = self._client()
+        ambient = {
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
+            "DOCKER_CONTEXT": "ssh://remote.invalid/host-selected-context",
+            "DOCKER_CONFIG": "/host/docker-config",
+            "DOCKER_AUTH_CONFIG": "host-registry-credential",
+            "XDG_RUNTIME_DIR": "/foreign/runtime",
+        }
+        with (
+            patch.dict(os.environ, ambient, clear=False),
+            patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=self._lstat),
+            patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+        ):
+            result = client.run(("image", "inspect", TEST_PREPARED_IMAGE.image_id))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.commands, [
+            ("info", "--format", DOCKER_DAEMON_INFO_FORMAT),
+            ("image", "inspect", TEST_PREPARED_IMAGE.image_id),
+        ])
+        expected = {
+            "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "HOME": str(self.private_home), "DOCKER_CONFIG": str(self.private_home),
+            "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+        }
+        self.assertTrue(self.environments)
+        self.assertTrue(all(environment == expected for environment in self.environments))
+        self.assertEqual(list(self.private_home.iterdir()), [])
+        self.assertEqual(stat.S_IMODE(self.private_home.stat().st_mode), 0o700)
+
+    def test_prepared_image_inspect_reaches_pinned_daemon_and_status_progresses_to_absent(self) -> None:
+        root = Path(self.temporary.name) / "environment"
+        manager = AgentEnvironment(
+            parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
+            state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
+            prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        manager.runner = self._client()
+        with (
+            patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=self._lstat),
+            patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+        ):
+            document = manager.status()
+        self.assertEqual(document["state"], "absent")
+        self.assertIsNone(document["reason_code"])
+        self.assertIn(("image", "inspect", TEST_PREPARED_IMAGE.image_id), self.commands)
+        self.assertFalse(any(command[:2] == ("container", "create") for command in self.commands))
+        self.assertFalse(manager.registry_path.exists())
+
+    def test_status_distinguishes_actual_image_absence_from_endpoint_failure(self) -> None:
+        root = Path(self.temporary.name) / "missing-image"
+        manager = AgentEnvironment(
+            parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
+            state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
+            prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        manager.runner = self._client()
+        self.image_present = False
+        with (
+            patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=self._lstat),
+            patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+        ):
+            document = manager.status()
+        self.assertEqual(document["state"], "unavailable")
+        self.assertEqual(document["reason_code"], "prepared_image_missing")
+        self.assertNotIn("docker.sock", json.dumps(document))
+        self.assertIn(("image", "inspect", TEST_PREPARED_IMAGE.image_id), self.commands)
+
+    def test_missing_foreign_changed_or_rootful_endpoint_fails_before_requested_operation(self) -> None:
+        cases: list[tuple[str, object, str]] = []
+
+        def missing(path: Path) -> os.stat_result:
+            if path == self.ENDPOINT:
+                raise FileNotFoundError(path)
+            return self._lstat(path)
+
+        def foreign(path: Path) -> os.stat_result:
+            fact = self._lstat(path)
+            if path == self.ENDPOINT:
+                return self._metadata(fact.st_mode, uid=0, inode=fact.st_ino)
+            return fact
+
+        cases.extend((
+            ("missing", missing, "docker_endpoint_unavailable"),
+            ("foreign", foreign, "docker_endpoint_incompatible"),
+        ))
+        for name, lstat_side_effect, reason in cases:
+            with self.subTest(name=name):
+                self.commands.clear(); self.environments.clear()
+                client = self._client()
+                with (
+                    patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=lstat_side_effect),
+                    patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+                ):
+                    with self.assertRaises(AgentEnvironmentError) as caught:
+                        client.run(("image", "inspect", TEST_PREPARED_IMAGE.image_id))
+                self.assertEqual(caught.exception.code, reason)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertEqual(self.commands, [])
+
+        self.commands.clear(); self.environments.clear()
+        root = Path(self.temporary.name) / "missing-status"
+        manager = AgentEnvironment(
+            parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
+            state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
+            prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        manager.runner = self._client()
+        with (
+            patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=missing),
+            patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+        ):
+            document = manager.status()
+        self.assertEqual(document["state"], "unavailable")
+        self.assertEqual(document["reason_code"], "docker_endpoint_unavailable")
+        self.assertNotIn("/run/", json.dumps(document))
+        self.assertEqual(self.commands, [])
+
+        self.commands.clear(); self.environments.clear(); self.rootless = False
+        client = self._client()
+        with (
+            patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=self._lstat),
+            patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+        ):
+            with self.assertRaises(AgentEnvironmentError) as caught:
+                client.run(("image", "inspect", TEST_PREPARED_IMAGE.image_id))
+        self.assertEqual(caught.exception.code, "docker_endpoint_incompatible")
+        self.assertNotIn(("image", "inspect", TEST_PREPARED_IMAGE.image_id), self.commands)
+
+        self.commands.clear(); self.environments.clear(); self.rootless = True
+        socket_observations = 0
+
+        def changed(path: Path) -> os.stat_result:
+            nonlocal socket_observations
+            fact = self._lstat(path)
+            if path == self.ENDPOINT:
+                socket_observations += 1
+                return self._metadata(fact.st_mode, uid=self.UID, inode=3 + socket_observations)
+            return fact
+
+        client = self._client()
+        with (
+            patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=changed),
+            patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+        ):
+            with self.assertRaises(AgentEnvironmentError) as caught:
+                client.run(("image", "inspect", TEST_PREPARED_IMAGE.image_id))
+        self.assertEqual(caught.exception.code, "docker_endpoint_changed")
+        self.assertIn(("image", "inspect", TEST_PREPARED_IMAGE.image_id), self.commands)
+
+    def test_daemon_identity_change_is_rejected_without_retry_or_fallback(self) -> None:
+        client = self._client()
+        with (
+            patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=self._lstat),
+            patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+        ):
+            client.run(("image", "inspect", TEST_PREPARED_IMAGE.image_id))
+            self.engine_id = "rootless-engine-b"
+            with self.assertRaises(AgentEnvironmentError) as caught:
+                client.run(("image", "inspect", TEST_PREPARED_IMAGE.image_id))
+        self.assertEqual(caught.exception.code, "docker_endpoint_changed")
+        self.assertEqual(
+            self.commands.count(("image", "inspect", TEST_PREPARED_IMAGE.image_id)), 1,
+        )
+        self.assertTrue(all(
+            environment["DOCKER_HOST"] == "unix:///run/user/1000/docker.sock"
+            for environment in self.environments
+        ))
+
+
 class FakeDocker:
     def __init__(self, prepared_image: PreparedImageSelection = TEST_PREPARED_IMAGE) -> None:
         self.lock = threading.Lock()
@@ -46,7 +294,7 @@ class FakeDocker:
         self.commands: list[tuple[str, ...]] = []
         self.containers: dict[str, dict[str, object]] = {}
         self.next_id = 1
-        self.endpoint = b'{"ID":"engine-a","Os":"linux","Arch":"amd64"}'
+        self.endpoint = b'{"ID":"engine-a","OSType":"linux","Architecture":"amd64","SecurityOptions":["name=rootless"]}'
         self.partial_inspect = False
         self.ambiguous_exec = False
         self.reject_stopped_once = False
@@ -109,7 +357,7 @@ class FakeDocker:
             self.commands.append(arguments)
             if arguments == ("context", "show"):
                 return DockerResult(0, b"default\n")
-            if arguments[:2] == ("version", "--format"):
+            if arguments == ("info", "--format", DOCKER_DAEMON_INFO_FORMAT):
                 return DockerResult(0, self.endpoint + b"\n")
             if arguments[:3] == ("container", "ls", "-a"):
                 owner_filter = next(value for value in arguments if value.startswith("label=" + OWNER_LABEL))
@@ -603,11 +851,11 @@ class AgentEnvironmentTests(unittest.TestCase):
     def test_endpoint_partial_duplicate_and_stale_truth_fail_closed(self) -> None:
         facts = self.fixture.manager.ensure_running()
         create_count = sum(command[:2] == ("container", "create") for command in self.fixture.docker.commands)
-        self.fixture.docker.endpoint = b'{"ID":"engine-b"}'
+        self.fixture.docker.endpoint = b'{"ID":"engine-b","OSType":"linux","Architecture":"amd64","SecurityOptions":["name=rootless"]}'
         with self.assertRaises(AgentEnvironmentError) as changed:
             self.fixture.manager.ensure_running()
         self.assertEqual(changed.exception.code, "docker_endpoint_changed")
-        self.fixture.docker.endpoint = b'{"ID":"engine-a","Os":"linux","Arch":"amd64"}'
+        self.fixture.docker.endpoint = b'{"ID":"engine-a","OSType":"linux","Architecture":"amd64","SecurityOptions":["name=rootless"]}'
         self.fixture.docker.partial_inspect = True
         with self.assertRaises(AgentEnvironmentError) as partial:
             self.fixture.manager.ensure_running()

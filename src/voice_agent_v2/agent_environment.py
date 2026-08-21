@@ -68,6 +68,10 @@ CALL_ID = re.compile(r"^[a-f0-9]{32}$")
 CONTAINER_ID = re.compile(r"^[a-f0-9]{12,64}$")
 MAX_DOCKER_OUTPUT = 1024 * 1024
 DOCKER_TIMEOUT = 15.0
+DOCKER_DAEMON_INFO_FORMAT = (
+    '{"ID":{{json .ID}},"OSType":{{json .OSType}},'
+    '"Architecture":{{json .Architecture}},"SecurityOptions":{{json .SecurityOptions}}}'
+)
 CREDENTIAL_AUTHORITY_WARNING = (
     "Exposed credentials have their full configured authority: container content may read, "
     "persist, transmit, spend quota, alter remote data, and push Git without domain or payload binding."
@@ -121,14 +125,34 @@ class DockerRunner(Protocol):
     def run(self, arguments: tuple[str, ...], *, stdin: bytes = b"", timeout: float = DOCKER_TIMEOUT) -> DockerResult: ...
 
 
+def _rootless_daemon_id(output: bytes) -> str:
+    try:
+        daemon = json.loads(output)
+        engine_id = daemon["ID"]
+        architecture = daemon["Architecture"]
+        options = daemon["SecurityOptions"]
+    except (KeyError, TypeError, ValueError) as error:
+        raise AgentEnvironmentError("docker_endpoint_incompatible") from error
+    if (
+        not isinstance(engine_id, str) or not engine_id
+        or len(engine_id.encode("utf-8")) > 256
+        or daemon.get("OSType") != "linux"
+        or not isinstance(architecture, str) or not architecture
+        or not isinstance(options, list) or "name=rootless" not in options
+    ):
+        raise AgentEnvironmentError("docker_endpoint_incompatible")
+    return engine_id
+
+
 class DockerCLI:
-    """Fixed Docker CLI transport.  It never invokes a shell or host credential home."""
+    """Fixed current-user rootless Docker transport with an empty private client home."""
 
     _RELEASE_PATHS = (
         "/usr/bin/docker",
         "/usr/local/bin/docker",
         "/opt/homebrew/bin/docker",
     )
+    _RUNTIME_ROOT = Path("/run/user")
 
     def __init__(self, private_home: Path) -> None:
         self.binary = next(
@@ -136,23 +160,52 @@ class DockerCLI:
             self._RELEASE_PATHS[0],
         )
         self.private_home = private_home
+        self.uid = os.geteuid()
+        self.endpoint = self._RUNTIME_ROOT / str(self.uid) / "docker.sock"
+        self._daemon_fingerprint: str | None = None
 
-    def run(
-        self, arguments: tuple[str, ...], *, stdin: bytes = b"", timeout: float = DOCKER_TIMEOUT
-    ) -> DockerResult:
-        if not arguments or any(not isinstance(value, str) or "\0" in value for value in arguments):
-            raise AgentEnvironmentError("docker_request_invalid")
-        self.private_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.private_home, 0o700)
-        environment = {
+    @staticmethod
+    def _path_fact(path: Path) -> os.stat_result:
+        try:
+            return path.lstat()
+        except OSError as error:
+            raise AgentEnvironmentError("docker_endpoint_unavailable") from error
+
+    def _endpoint_identity(self) -> tuple[int, int, int]:
+        """Validate the one constructible same-user rootless Unix-socket path."""
+
+        run = self._path_fact(Path("/run"))
+        users = self._path_fact(self._RUNTIME_ROOT)
+        runtime = self._path_fact(self.endpoint.parent)
+        endpoint = self._path_fact(self.endpoint)
+        if (
+            not stat.S_ISDIR(run.st_mode) or run.st_uid != 0 or run.st_mode & 0o022
+            or not stat.S_ISDIR(users.st_mode) or users.st_uid != 0 or users.st_mode & 0o022
+            or not stat.S_ISDIR(runtime.st_mode) or runtime.st_uid != self.uid
+            or stat.S_IMODE(runtime.st_mode) != 0o700
+            or not stat.S_ISSOCK(endpoint.st_mode) or endpoint.st_uid != self.uid
+            or endpoint.st_mode & 0o002 or endpoint.st_nlink != 1
+        ):
+            raise AgentEnvironmentError("docker_endpoint_incompatible")
+        return endpoint.st_dev, endpoint.st_ino, endpoint.st_uid
+
+    def _environment(self) -> dict[str, str]:
+        return {
             "PATH": "/usr/bin:/bin",
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "HOME": str(self.private_home),
             "DOCKER_CONFIG": str(self.private_home),
+            "DOCKER_HOST": f"unix://{self.endpoint}",
         }
+
+    def _invoke(
+        self, arguments: tuple[str, ...], *, environment: Mapping[str, str],
+        stdin: bytes = b"", timeout: float = DOCKER_TIMEOUT,
+        failure_code: str = "docker_runtime_unavailable",
+    ) -> subprocess.CompletedProcess[bytes]:
         try:
-            completed = subprocess.run(
+            return subprocess.run(
                 [self.binary, *arguments],
                 input=stdin,
                 stdout=subprocess.PIPE,
@@ -161,10 +214,43 @@ class DockerCLI:
                 check=False,
                 env=environment,
             )
-        except subprocess.TimeoutExpired as error:
-            raise AgentEnvironmentError("docker_runtime_unavailable") from error
-        except OSError as error:
-            raise AgentEnvironmentError("docker_runtime_unavailable") from error
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AgentEnvironmentError(failure_code) from error
+
+    def _validate_daemon(self, environment: Mapping[str, str], timeout: float) -> None:
+        info = self._invoke(
+            ("info", "--format", DOCKER_DAEMON_INFO_FORMAT),
+            environment=environment, timeout=timeout,
+            failure_code="docker_endpoint_unavailable",
+        )
+        if info.returncode != 0:
+            raise AgentEnvironmentError("docker_endpoint_unavailable")
+        if len(info.stdout) > MAX_DOCKER_OUTPUT or len(info.stderr) > MAX_DOCKER_OUTPUT:
+            raise AgentEnvironmentError("docker_response_out_of_bounds")
+        engine_id = _rootless_daemon_id(info.stdout)
+        fingerprint = hashlib.sha256(
+            b"voice-agent.current-user-rootless.v1\0" + engine_id.encode("utf-8")
+        ).hexdigest()
+        if self._daemon_fingerprint is None:
+            self._daemon_fingerprint = fingerprint
+        elif self._daemon_fingerprint != fingerprint:
+            raise AgentEnvironmentError("docker_endpoint_changed")
+
+    def run(
+        self, arguments: tuple[str, ...], *, stdin: bytes = b"", timeout: float = DOCKER_TIMEOUT
+    ) -> DockerResult:
+        if not arguments or any(not isinstance(value, str) or "\0" in value for value in arguments):
+            raise AgentEnvironmentError("docker_request_invalid")
+        self.private_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.private_home, 0o700)
+        before = self._endpoint_identity()
+        environment = self._environment()
+        self._validate_daemon(environment, timeout)
+        completed = self._invoke(
+            arguments, environment=environment, stdin=stdin, timeout=timeout,
+        )
+        if self._endpoint_identity() != before:
+            raise AgentEnvironmentError("docker_endpoint_changed")
         if len(completed.stdout) > MAX_DOCKER_OUTPUT or len(completed.stderr) > MAX_DOCKER_OUTPUT:
             raise AgentEnvironmentError("docker_response_out_of_bounds")
         return DockerResult(completed.returncode, completed.stdout, completed.stderr)
@@ -734,19 +820,11 @@ class AgentEnvironment:
 
     def _endpoint(self, registry: dict[str, object], *, pin: bool) -> str:
         context = self._docker("context", "show")
-        server = self._docker("version", "--format", "{{json .Server}}")
-        if context.returncode != 0 or server.returncode != 0 or not context.stdout.strip() or not server.stdout.strip():
-            raise AgentEnvironmentError("docker_runtime_unavailable")
-        try:
-            server_identity = json.loads(server.stdout)
-            engine_id = server_identity["ID"]
-        except (KeyError, TypeError, json.JSONDecodeError) as error:
-            raise AgentEnvironmentError("docker_runtime_unavailable") from error
-        if not isinstance(engine_id, str) or not engine_id or len(engine_id.encode("utf-8")) > 256:
-            raise AgentEnvironmentError("docker_runtime_unavailable")
-        fingerprint = hashlib.sha256(
-            context.stdout.strip() + b"\0" + engine_id.encode("utf-8")
-        ).hexdigest()
+        daemon = self._docker("info", "--format", DOCKER_DAEMON_INFO_FORMAT)
+        if context.returncode != 0 or daemon.returncode != 0 or context.stdout.strip() != b"default":
+            raise AgentEnvironmentError("docker_endpoint_unavailable")
+        engine_id = _rootless_daemon_id(daemon.stdout)
+        fingerprint = hashlib.sha256(b"default\0" + engine_id.encode("utf-8")).hexdigest()
         pinned = registry.get("endpoint_fingerprint")
         if pinned is None and pin:
             registry["endpoint_fingerprint"] = fingerprint
