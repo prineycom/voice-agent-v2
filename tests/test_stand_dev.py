@@ -14,6 +14,7 @@ from unittest.mock import patch
 from scripts import stand as stand_cli
 from voice_agent_v2.agent_environment import (
     AgentEnvironment,
+    DOCKER_DAEMON_INFO_FORMAT,
     DockerResult,
     GENERATION_LABEL,
     MANAGED_LABEL,
@@ -165,8 +166,8 @@ class StopDocker:
         self.calls.append(command)
         if command == ("context", "show"):
             return DockerResult(0, b"default\n")
-        if command == ("version", "--format", "{{json .Server}}"):
-            return DockerResult(0, b'{"ID":"stand-engine"}\n')
+        if command == ("info", "--format", DOCKER_DAEMON_INFO_FORMAT):
+            return DockerResult(0, b'{"ID":"stand-engine","OSType":"linux","Architecture":"amd64","SecurityOptions":["name=rootless"]}\n')
         if command[:3] == ("container", "ls", "-a"):
             return DockerResult(0, f"{self.container_id}\n".encode("ascii"))
         if command == ("container", "inspect", self.container_id):
