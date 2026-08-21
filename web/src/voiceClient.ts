@@ -27,6 +27,29 @@ import {
 const RECONNECT_ACK_TIMEOUT_MS = 5_000
 const RECONNECT_RETRY_INTERVAL_MS = 500
 const SAFE_DIAGNOSTIC_CODE = /^[a-z0-9_]{1,64}$/
+const ATTEMPT_STORAGE_KEY = 'voice-agent.session-attempt.v1'
+const ATTEMPT_HEADER = 'X-Voice-Session-Attempt'
+const ATTEMPT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+function storedAttemptIdentity(): string {
+  const stored = sessionStorage.getItem(ATTEMPT_STORAGE_KEY)
+  if (stored !== null && ATTEMPT_PATTERN.test(stored)) return stored
+  const identity = crypto.randomUUID()
+  sessionStorage.setItem(ATTEMPT_STORAGE_KEY, identity)
+  return identity
+}
+
+function clearAttemptIdentity(identity: string): void {
+  if (sessionStorage.getItem(ATTEMPT_STORAGE_KEY) === identity) {
+    sessionStorage.removeItem(ATTEMPT_STORAGE_KEY)
+  }
+}
+
+function admissionError(status: number): Error {
+  if (status === 409) return new Error('Голосовая сессия уже используется в другой вкладке')
+  if (status === 410) return new Error('Попытка подключения истекла; повторите CONNECT')
+  return new Error(`Локальный голосовой путь недоступен (${status})`)
+}
 
 function privacySafeCode(value: unknown, fallback: string): string {
   return typeof value === 'string' && SAFE_DIAGNOSTIC_CODE.test(value) ? value : fallback
@@ -89,6 +112,8 @@ export class VoiceClient {
   private stopping = false
   private startAbort: AbortController | null = null
   private stopPromise: Promise<void> | null = null
+  private attemptIdentity: string | null = null
+  private attemptEndPromise: Promise<void> | null = null
   private reconnectAckTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectRetryTimer: ReturnType<typeof setTimeout> | null = null
   private initialReadyTimer: ReturnType<typeof setTimeout> | null = null
@@ -143,14 +168,22 @@ export class VoiceClient {
     let startupStage = 'session_request'
     this.callbacks.onConnection('connecting')
     try {
-      const response = await fetch('/api/session', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { Accept: 'application/json' },
-        signal: abort.signal,
-      })
+      let attemptIdentity = storedAttemptIdentity()
+      this.attemptIdentity = attemptIdentity
+      let response = await this.requestCapability(attemptIdentity, abort.signal)
       this.ensureStarting()
-      if (!response.ok) throw new Error(`local voice path unavailable (${response.status})`)
+      if (response.status === 410) {
+        clearAttemptIdentity(attemptIdentity)
+        attemptIdentity = storedAttemptIdentity()
+        this.attemptIdentity = attemptIdentity
+        response = await this.requestCapability(attemptIdentity, abort.signal)
+        this.ensureStarting()
+      }
+      if (!response.ok) {
+        clearAttemptIdentity(attemptIdentity)
+        if (this.attemptIdentity === attemptIdentity) this.attemptIdentity = null
+        throw admissionError(response.status)
+      }
       startupStage = 'capability'
       const capability = parseCapability(await response.json())
       this.ensureStarting()
@@ -251,10 +284,41 @@ export class VoiceClient {
     this.playback.reset()
   }
 
-  async stop(): Promise<void> {
+  async stop(endAttempt = true): Promise<void> {
     this.stopping = true
     this.startAbort?.abort()
-    return this.beginResourceRelease(true, this.microphoneFailureActive)
+    try {
+      await this.beginResourceRelease(true, this.microphoneFailureActive)
+    } finally {
+      if (endAttempt) await this.endAdmissionAttempt()
+    }
+  }
+
+  private requestCapability(identity: string, signal: AbortSignal): Promise<Response> {
+    return fetch('/api/session', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json', [ATTEMPT_HEADER]: identity },
+      signal,
+    })
+  }
+
+  private endAdmissionAttempt(): Promise<void> {
+    if (this.attemptEndPromise !== null) return this.attemptEndPromise
+    const identity = this.attemptIdentity
+    if (identity === null) return Promise.resolve()
+    const request = fetch('/api/session', {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json', [ATTEMPT_HEADER]: identity },
+      keepalive: true,
+    }).then(() => undefined, () => undefined).finally(() => {
+      clearAttemptIdentity(identity)
+      if (this.attemptIdentity === identity) this.attemptIdentity = null
+      if (this.attemptEndPromise === request) this.attemptEndPromise = null
+    })
+    this.attemptEndPromise = request
+    return request
   }
 
   private beginResourceRelease(
@@ -783,6 +847,7 @@ export class VoiceClient {
     } catch {
       failure = `${message} (не удалось полностью освободить транспорт)`
     } finally {
+      await this.endAdmissionAttempt()
       if (notifyConnectionFailure) this.callbacks.onConnection('failed', failure)
     }
   }

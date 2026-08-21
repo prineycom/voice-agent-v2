@@ -117,7 +117,9 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => () => {
-    void clientRef.current?.stop()
+    // A document unload keeps the tab-scoped attempt resumable. Explicit
+    // DISCONNECT and terminal startup failures call stop() with its default end.
+    void clientRef.current?.stop(false)
     clientRef.current = null
     envelopeListenersRef.current.clear()
   }, [])

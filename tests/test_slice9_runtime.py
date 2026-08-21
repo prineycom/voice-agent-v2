@@ -25,10 +25,13 @@ class Slice9RuntimeTests(unittest.TestCase):
             registry = object.__new__(runtime.SessionRegistry)
             registry.settings = SimpleNamespace(max_sessions=1)
             registry._controllers = {}
+            registry._attempts = {}
+            registry._attempt_by_session = {}
+            registry._retired_attempts = {}
             registry._lock = asyncio.Lock()
             registry._accepting = False
             with self.assertRaisesRegex(RuntimeError, "draining"):
-                await registry.create()
+                await registry.create("attempt-draining")
 
         asyncio.run(scenario())
 
@@ -74,13 +77,16 @@ class Slice9RuntimeTests(unittest.TestCase):
         registry.settings.supervised_livekit_process = "123:456"
         registry.settings.supervised_lfm_process = "789:1011"
         registry._controllers = {}
+        registry._attempts = {}
+        registry._attempt_by_session = {}
+        registry._retired_attempts = {}
         registry._lock = asyncio.Lock()
         with (
             patch.object(livekit_runtime, "supervised_process_alive", return_value=False),
             patch.object(livekit_runtime, "LiveKitRoomController") as controller,
             self.assertRaisesRegex(RuntimeError, "unavailable"),
         ):
-            asyncio.run(registry.create())
+            asyncio.run(registry.create("attempt-unready"))
         controller.assert_not_called()
 
     def test_fresh_livekit_and_lfm_probes_override_cached_ready_state(self) -> None:

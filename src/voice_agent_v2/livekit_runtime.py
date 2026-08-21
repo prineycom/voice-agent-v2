@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
 import http.client
 import json
@@ -118,6 +119,20 @@ def local_lfm_endpoint_health(
 
 class SessionCapacityError(RuntimeError):
     pass
+
+
+class SessionAttemptExpiredError(RuntimeError):
+    pass
+
+
+@dataclass
+class _AdmissionAttempt:
+    identity: str
+    session_id: str
+    controller: "LiveKitRoomController"
+    created_at: float
+    expires_at: float
+    startup: asyncio.Task[tuple[dict[str, object], dict[str, object]]] | None = None
 
 
 class LiveTurnRunner:
@@ -926,6 +941,7 @@ class LiveKitRoomController:
         self._transport_failed = False
         self._room_disconnected = False
         self._browser_ready = False
+        self._browser_participant_sid: str | None = None
 
     async def start(self) -> None:
         try:
@@ -951,9 +967,13 @@ class LiveKitRoomController:
             self._transport_failed = True
         asyncio.create_task(self.close(), name=f"failed-session-{self.session_id}")
 
-    def arm_browser_join_timeout(self) -> None:
-        if self._closed or self._browser_ready or self._browser_join_task is not None:
+    def arm_browser_join_timeout(self, *, restart: bool = False) -> None:
+        if self._closed or self._browser_ready:
             return
+        if self._browser_join_task is not None:
+            if not restart:
+                return
+            self._browser_join_task.cancel()
         self._browser_join_task = asyncio.create_task(
             self._expire_unclaimed_room(), name=f"browser-join-{self.session_id}"
         )
@@ -971,7 +991,7 @@ class LiveKitRoomController:
         except asyncio.CancelledError:
             raise
 
-    def browser_token(self) -> str:
+    def browser_token(self, ttl_seconds: int | None = None) -> str:
         grants = api.VideoGrants(
             room_join=True,
             room=self.room_name,
@@ -989,7 +1009,7 @@ class LiveKitRoomController:
             .with_identity(self.browser_identity)
             .with_name("Voice browser")
             .with_grants(grants)
-            .with_ttl(timedelta(seconds=self.settings.room_token_ttl_seconds))
+            .with_ttl(timedelta(seconds=ttl_seconds or self.settings.room_token_ttl_seconds))
             .to_jwt()
         )
 
@@ -1023,11 +1043,13 @@ class LiveKitRoomController:
         def participant_connected(participant) -> None:
             if participant.identity != self.browser_identity:
                 return
+            self._browser_participant_sid = participant.sid
 
         @self.room.on("track_subscribed")
         def track_subscribed(track, publication, participant) -> None:
             if (
                 participant.identity != self.browser_identity
+                or participant.sid != getattr(self, "_browser_participant_sid", participant.sid)
                 or track.kind != rtc.TrackKind.KIND_AUDIO
                 or publication.source != rtc.TrackSource.SOURCE_MICROPHONE
             ):
@@ -1085,7 +1107,13 @@ class LiveKitRoomController:
 
         @self.room.on("participant_disconnected")
         def participant_disconnected(participant) -> None:
-            if participant.identity == self.browser_identity:
+            if (
+                participant.identity != self.browser_identity
+                or participant.sid != getattr(self, "_browser_participant_sid", participant.sid)
+            ):
+                return
+            self._browser_participant_sid = None
+            if self._browser_ready:
                 asyncio.create_task(self.close())
 
     async def _consume_controls(self) -> None:
@@ -1484,6 +1512,9 @@ class SessionRegistry:
             TRACE_ROOT / f"{runtime_id}.jsonl", TraceIdentity(runtime_id)
         )
         self._controllers: dict[str, LiveKitRoomController] = {}
+        self._attempts: dict[str, _AdmissionAttempt] = {}
+        self._attempt_by_session: dict[str, str] = {}
+        self._retired_attempts: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._accepting = False
 
@@ -1573,61 +1604,156 @@ class SessionRegistry:
         )
         return HealthReport(tuple(components)).as_dict()
 
-    async def create(self) -> dict[str, object]:
-        async with self._lock:
-            if not self._accepting:
-                raise RuntimeError("the voice stack is draining")
-            if len(self._controllers) >= self.settings.max_sessions:
-                raise SessionCapacityError("the single measured Slice 6 session is in use")
-            if self.operational_health()["overall_readiness"] != "ready":
-                raise RuntimeError("the voice stack is unavailable")
-            session_id = f"session-{secrets.token_hex(12)}"
-            room_name = f"voice-{session_id}"
-            browser_identity = f"browser-{session_id}"
-            controller = LiveKitRoomController(
-                settings=self.settings,
-                session_id=session_id,
-                room_name=room_name,
-                browser_identity=browser_identity,
-                on_closed=self.remove,
-                runner=self.runner,
-            )
-            self._controllers[session_id] = controller
+    def _prune_retired_attempts(self, now: float) -> None:
+        for identity, expires_at in tuple(self._retired_attempts.items()):
+            if expires_at <= now:
+                self._retired_attempts.pop(identity, None)
+
+    def _retire_locked(self, attempt: _AdmissionAttempt, now: float) -> None:
+        if self._attempts.get(attempt.identity) is attempt:
+            self._attempts.pop(attempt.identity, None)
+        self._attempt_by_session.pop(attempt.session_id, None)
+        self._controllers.pop(attempt.session_id, None)
+        self._retired_attempts[attempt.identity] = (
+            now + min(float(self.settings.room_token_ttl_seconds), 60.0)
+        )
+
+    @staticmethod
+    def _consume_startup_result(task: asyncio.Task[object]) -> None:
         try:
-            await controller.start()
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+
+    async def _start_attempt(
+        self, attempt: _AdmissionAttempt
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        try:
+            await attempt.controller.start()
             llm_profile = self.runner.public_llm_profile()
             tts_profile = self.runner.tts_profile.public_metadata()
             if self.operational_health()["overall_readiness"] != "ready":
                 raise RuntimeError("the voice stack became unavailable during admission")
-            capability = {
-                "session_id": session_id,
-                "stream_epoch": 1,
-                "livekit_url": self.settings.livekit_public_url,
-                "token": controller.browser_token(),
-                "expires_in_seconds": self.settings.room_token_ttl_seconds,
-                "admission_timeout_ms": min(
-                    self.settings.browser_join_timeout_seconds,
-                    self.settings.room_token_ttl_seconds,
-                ) * 1_000,
-                "control_version": "voice-agent.realtime-control.v2",
-                "llm_profile": llm_profile,
-                "tts_profile": tts_profile,
-            }
-            controller.arm_browser_join_timeout()
-            if self.operational_health()["overall_readiness"] != "ready":
-                raise RuntimeError("the voice stack became unavailable before capability issue")
+            attempt.controller.arm_browser_join_timeout()
+            return llm_profile, tts_profile
         except BaseException:
+            cleanup_complete = False
             try:
-                await controller.close(notify=False)
+                await attempt.controller.close(notify=False)
+                cleanup_complete = True
             finally:
-                async with self._lock:
-                    self._controllers.pop(session_id, None)
+                if cleanup_complete:
+                    async with self._lock:
+                        self._retire_locked(attempt, time.monotonic())
             raise
+
+    async def create(self, attempt_identity: str) -> dict[str, object]:
+        expired_controller: LiveKitRoomController | None = None
+        async with self._lock:
+            now = time.monotonic()
+            self._prune_retired_attempts(now)
+            if not self._accepting:
+                raise RuntimeError("the voice stack is draining")
+            if attempt_identity in self._retired_attempts:
+                raise SessionAttemptExpiredError("the session attempt is no longer active")
+            attempt = self._attempts.get(attempt_identity)
+            if attempt is not None and attempt.expires_at <= now:
+                expired_controller = attempt.controller
+                self._attempts.pop(attempt.identity, None)
+                self._retired_attempts[attempt.identity] = (
+                    now + min(float(self.settings.room_token_ttl_seconds), 60.0)
+                )
+                attempt = None
+            if expired_controller is None and attempt is None:
+                if len(self._controllers) >= self.settings.max_sessions:
+                    raise SessionCapacityError("the single measured Slice 6 session is in use")
+                if self.operational_health()["overall_readiness"] != "ready":
+                    raise RuntimeError("the voice stack is unavailable")
+                session_id = f"session-{secrets.token_hex(12)}"
+                room_name = f"voice-{session_id}"
+                browser_identity = f"browser-{session_id}"
+                controller = LiveKitRoomController(
+                    settings=self.settings,
+                    session_id=session_id,
+                    room_name=room_name,
+                    browser_identity=browser_identity,
+                    on_closed=self.remove,
+                    runner=self.runner,
+                )
+                attempt = _AdmissionAttempt(
+                    identity=attempt_identity,
+                    session_id=session_id,
+                    controller=controller,
+                    created_at=now,
+                    expires_at=now + float(self.settings.room_token_ttl_seconds),
+                )
+                self._controllers[session_id] = controller
+                self._attempts[attempt_identity] = attempt
+                self._attempt_by_session[session_id] = attempt_identity
+                attempt.startup = asyncio.create_task(
+                    self._start_attempt(attempt), name=f"admission-{session_id}"
+                )
+                attempt.startup.add_done_callback(self._consume_startup_result)
+        if expired_controller is not None:
+            asyncio.create_task(expired_controller.close(), name="expired-session-attempt")
+            raise SessionAttemptExpiredError("the session attempt expired")
+        assert attempt is not None and attempt.startup is not None
+        llm_profile, tts_profile = await asyncio.shield(attempt.startup)
+        issue_error: RuntimeError | None = None
+        async with self._lock:
+            now = time.monotonic()
+            if self._attempts.get(attempt_identity) is not attempt or attempt.expires_at <= now:
+                issue_error = SessionAttemptExpiredError("the session attempt expired")
+            elif self.operational_health()["overall_readiness"] != "ready":
+                issue_error = RuntimeError(
+                    "the voice stack became unavailable before capability issue"
+                )
+            else:
+                remaining_seconds = max(1, int(attempt.expires_at - now))
+                capability = {
+                    "session_id": attempt.session_id,
+                    "stream_epoch": 1,
+                    "livekit_url": self.settings.livekit_public_url,
+                    "token": attempt.controller.browser_token(remaining_seconds),
+                    "expires_in_seconds": remaining_seconds,
+                    "admission_timeout_ms": min(
+                        self.settings.browser_join_timeout_seconds,
+                        remaining_seconds,
+                    ) * 1_000,
+                    "control_version": "voice-agent.realtime-control.v2",
+                    "llm_profile": llm_profile,
+                    "tts_profile": tts_profile,
+                }
+                attempt.controller.arm_browser_join_timeout(restart=True)
+        if issue_error is not None:
+            await attempt.controller.close(notify=False)
+            async with self._lock:
+                self._retire_locked(attempt, time.monotonic())
+            raise issue_error
         return capability
+
+    async def end(self, attempt_identity: str) -> bool:
+        async with self._lock:
+            now = time.monotonic()
+            self._prune_retired_attempts(now)
+            attempt = self._attempts.get(attempt_identity)
+            if attempt is None:
+                self._retired_attempts[attempt_identity] = (
+                    now + min(float(self.settings.room_token_ttl_seconds), 60.0)
+                )
+                return False
+        await attempt.controller.close()
+        return True
 
     async def remove(self, session_id: str) -> None:
         async with self._lock:
-            self._controllers.pop(session_id, None)
+            identity = self._attempt_by_session.get(session_id)
+            attempt = self._attempts.get(identity) if identity is not None else None
+            if attempt is None:
+                self._controllers.pop(session_id, None)
+                self._attempt_by_session.pop(session_id, None)
+            else:
+                self._retire_locked(attempt, time.monotonic())
 
     async def close(self) -> None:
         async with self._lock:
