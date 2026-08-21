@@ -31,7 +31,7 @@ from .agent_environment_config import AgentConfigV2Snapshot
 from .agent_environment_image import (
     IMAGE_CONTEXT_LABEL, IMAGE_MANAGED_LABEL, IMAGE_SCHEMA_LABEL,
     NativeImageContract, PreparedImageError, PreparedImageSelection,
-    load_native_image_contract, load_prepared_image,
+    load_prepared_image, load_runtime_image_contract,
 )
 from .agent_environment_credentials import (
     CredentialStore, CredentialStoreError, EmptyCredentialStore, InstallationCredentialStore,
@@ -573,7 +573,7 @@ class AgentEnvironment:
             if self._prepared_image_override is not None:
                 selected = self._prepared_image_override
             else:
-                contract = self._image_contract or load_native_image_contract(IMAGE_SOURCE_ROOT)
+                contract = self._image_contract or load_runtime_image_contract(IMAGE_SOURCE_ROOT)
                 selected = load_prepared_image(self.image_state_root, contract).selected
         except PreparedImageError as error:
             raise AgentEnvironmentError(error.code) from None
