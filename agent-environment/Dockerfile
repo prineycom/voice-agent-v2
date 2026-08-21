@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # The explicit stand preparation command builds this pinned context natively.
 # Runtime consumes only its privately recorded immutable local image ID.
-ARG BASE_IMAGE=python:3.13-alpine@sha256:2b5c902e7a9e3348f78e17816561e8785f6c3ca7bfedc55d6e47f2c922c5b176
+ARG BASE_IMAGE=python:3.13-alpine@sha256:540c7d91f98ff6880174c40e99067bf5941eb54d818a7a5e094d188b196a934d
 FROM ${BASE_IMAGE}
 ARG VOICE_AGENT_IMAGE_CONTEXT_REVISION
 LABEL io.priney.voice-agent-v2.image-managed="1" \
