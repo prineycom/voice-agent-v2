@@ -32,6 +32,7 @@ class AgentRunProvider:
         credential_root: Path | None = None,
         workspace_root: Path | None = None,
         cache_root: Path | None = None,
+        image_state_root: Path | None = None,
         provider: LocalLFMProvider | None = None,
     ) -> None:
         selected = provider or LocalLFMProvider(request_timeout_seconds=120)
@@ -45,6 +46,7 @@ class AgentRunProvider:
                 InstallationCredentialStore(credential_root)
                 if credential_root is not None else None
             ),
+            image_state_root=image_state_root,
         )
         self.agent_run = AgentRun(
             self.environment,

@@ -29,6 +29,7 @@ HERMETIC_OWNERS = (
     "tests.test_agent_config",
     "tests.test_agent_profile_runtime",
     "tests.test_agent_environment",
+    "tests.test_agent_environment_image",
     "tests.test_agent_environment_processes",
     "tests.test_agent_environment_files",
     "tests.test_agent_environment_network",

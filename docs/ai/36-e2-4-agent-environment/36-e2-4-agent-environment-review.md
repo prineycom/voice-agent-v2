@@ -1,5 +1,7 @@
 # Review: 36-e2-4-agent-environment
 
+> Historical review note: the accepted local-image correction later retired the separately published OCI-index assumption recorded here. It did not weaken the exact-image or AgentEnvironment custody findings; active architecture now requires explicit native locked-context preparation and a private exact local Docker image ID.
+
 **Source:** issue #36 and diff from `4af4b9271ad4e52951bf5c70ce9fb7a49b98935d`  
 **Status:** ✅ pass
 

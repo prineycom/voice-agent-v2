@@ -20,7 +20,7 @@ from voice_agent_v2.agent_config import AgentConfigError
 from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
 from voice_agent_v2.schema import validate as validate_schema
-from tests.test_agent_environment import Disk, FakeDocker
+from tests.test_agent_environment import Disk, FakeDocker, TEST_PREPARED_IMAGE
 
 
 SYNTHETIC_OLD = b"synthetic-token-old-38"
@@ -228,6 +228,7 @@ class Fixture:
         self.manager = AgentEnvironment(
             configured(network=network), state_root=root / "private", workspace=root / "workspace",
             cache=root / "cache", runner=self.docker, credential_store=self.store,
+            prepared_image=TEST_PREPARED_IMAGE,
             disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
 
@@ -258,6 +259,7 @@ class NetworkCredentialStreamTests(unittest.TestCase):
         restarted = AgentEnvironment(
             manager.config, state_root=manager.state_root, workspace=manager.workspace, cache=manager.cache,
             runner=self.fixture.docker, credential_store=self.fixture.store,
+            prepared_image=TEST_PREPARED_IMAGE,
             disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
         self.assertEqual(
@@ -329,6 +331,7 @@ class NetworkCredentialStreamTests(unittest.TestCase):
         replacement_controller = AgentEnvironment(
             manager.config, state_root=manager.state_root, workspace=manager.workspace, cache=manager.cache,
             runner=self.fixture.docker, credential_store=self.fixture.store,
+            prepared_image=TEST_PREPARED_IMAGE,
             disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
         self.assertNotEqual(replacement_controller.spec, old_spec)
@@ -453,6 +456,7 @@ class NetworkDisabledAndSchemaTests(unittest.TestCase):
             manager = AgentEnvironment(
                 configured(), state_root=root / "private", workspace=root / "workspace",
                 cache=root / "cache", runner=NetworkDocker(),
+                prepared_image=TEST_PREPARED_IMAGE,
                 disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
             )
             self.assertEqual(manager.status()["state"], "unavailable")

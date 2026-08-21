@@ -16,7 +16,7 @@ from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
 from voice_agent_v2.research_evaluation import FrozenResearchTask, score_frozen_research
 from voice_agent_v2.schema import validate as validate_schema
-from tests.test_agent_environment import FakeDocker
+from tests.test_agent_environment import FakeDocker, TEST_PREPARED_IMAGE
 
 Disk = namedtuple("Disk", "total used free")
 FIXED_TIME = 1_800_000_000
@@ -158,7 +158,8 @@ class Fixture:
         self.manager = AgentEnvironment(
             parse_agent_config_v2(json.dumps(document).encode()), state_root=root / "private",
             workspace=root / "workspace", cache=root / "cache", runner=self.docker,
-            credential_store=Store(), disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            credential_store=Store(), prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
 
     def close(self) -> None:
@@ -328,7 +329,8 @@ class ResearchSliceTests(unittest.TestCase):
             manager = AgentEnvironment(
                 parse_agent_config_v2(json.dumps(document).encode()), state_root=root / "private",
                 workspace=root / "workspace", cache=root / "cache", runner=docker,
-                credential_store=store, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+                credential_store=store, prepared_image=TEST_PREPARED_IMAGE,
+                disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
             )
 
             class Model:

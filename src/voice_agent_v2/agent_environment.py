@@ -27,7 +27,12 @@ import time
 from typing import Callable, Iterator, Mapping, Protocol
 import uuid
 
-from .agent_environment_config import AgentConfigV2Snapshot, PINNED_IMAGE
+from .agent_environment_config import AgentConfigV2Snapshot
+from .agent_environment_image import (
+    IMAGE_CONTEXT_LABEL, IMAGE_MANAGED_LABEL, IMAGE_SCHEMA_LABEL,
+    NativeImageContract, PreparedImageError, PreparedImageSelection,
+    load_native_image_contract, load_prepared_image,
+)
 from .agent_environment_credentials import (
     CredentialStore, CredentialStoreError, EmptyCredentialStore, InstallationCredentialStore,
 )
@@ -68,10 +73,7 @@ CREDENTIAL_AUTHORITY_WARNING = (
     "persist, transmit, spend quota, alter remote data, and push Git without domain or payload binding."
 )
 STREAM_ROOTS = {"workspace": "/workspace", "cache": "/cache"}
-PINNED_CHILD_IMAGES = frozenset({
-    "sha256:560f855490a6e6a0bd96515510ab6051611a4ec99b0a762c7a07701b3d152b95",
-    "sha256:6c810b5b9c0135db734c5fbcc1f35821465146f2695338321963ea20dd8d39ef",
-})
+IMAGE_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_TMPFS = {
     "/scratch": "size=1024m,exec,nosuid,nodev",
     "/tmp": "size=512m,exec,nosuid,nodev",
@@ -328,10 +330,14 @@ class AgentEnvironment:
         cache: Path,
         runner: DockerRunner | None = None,
         credential_store: CredentialStore | None = None,
+        image_state_root: Path | None = None,
+        prepared_image: PreparedImageSelection | None = None,
+        image_contract: NativeImageContract | None = None,
         disk_usage: Callable[[Path], shutil._ntuple_diskusage] = shutil.disk_usage,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        for path in (state_root, workspace, cache):
+        required_paths = (state_root, workspace, cache) + ((image_state_root,) if image_state_root is not None else ())
+        for path in required_paths:
             if not path.is_absolute():
                 raise ValueError("AgentEnvironment paths must be absolute")
         self.config = config
@@ -339,6 +345,10 @@ class AgentEnvironment:
         self.workspace = workspace
         self.cache = cache
         self.runner = runner or DockerCLI(state_root / "docker-client")
+        self.image_state_root = image_state_root or (state_root / "prepared-image")
+        self._prepared_image_override = prepared_image
+        self._image_contract = image_contract
+        self._pinned_image: PreparedImageSelection | None = None
         declarations = config.model.agent_environment.credentials
         has_credentials = any((
             declarations.creation_environment_names,
@@ -365,7 +375,11 @@ class AgentEnvironment:
                 name: self._credential_value("file", name)
                 for name in credentials.creation_file_names
             }
-            self.spec = self._spec_revision()
+            if prepared_image is not None:
+                self._pinned_image = prepared_image
+                self.spec = self._spec_revision(prepared_image)
+            else:
+                self.spec = self._spec_revision(None)
         except AgentEnvironmentError as error:
             self._pinned_creation_environment = {}
             self._pinned_creation_files = {}
@@ -522,7 +536,58 @@ class AgentEnvironment:
         except CredentialStoreError as error:
             raise AgentEnvironmentError(str(error)) from None
 
-    def _spec_revision(self) -> str:
+    def _verify_prepared_image(self, image: PreparedImageSelection) -> None:
+        """Freshly prove exact immutable image custody before container resolution."""
+
+        result = self._docker("image", "inspect", image.image_id)
+        if result.returncode != 0:
+            raise AgentEnvironmentError("prepared_image_missing")
+        try:
+            documents = json.loads(result.stdout)
+            raw = documents[0]
+            config = raw["Config"]
+            labels = config["Labels"]
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
+            raise AgentEnvironmentError("prepared_image_inspection_failed") from error
+        expected_labels = {
+            IMAGE_MANAGED_LABEL: "1",
+            IMAGE_SCHEMA_LABEL: "1",
+            IMAGE_CONTEXT_LABEL: image.context_revision,
+        }
+        if (
+            raw.get("Id") != image.image_id
+            or raw.get("Os") != "linux"
+            or raw.get("Architecture") != image.architecture
+            or image.platform != f"linux/{image.architecture}"
+            or config.get("User") != "1000:1000"
+            or config.get("Entrypoint") != ["/sbin/tini", "--"]
+            or config.get("Cmd") != ["/usr/local/lib/voice-agent/agent-helper", "init-container"]
+            or labels != expected_labels
+            or not isinstance(raw.get("RootFS"), dict)
+            or not raw["RootFS"].get("Layers")
+        ):
+            raise AgentEnvironmentError("prepared_image_mismatch")
+
+    def _pin_prepared_image(self) -> PreparedImageSelection:
+        try:
+            if self._prepared_image_override is not None:
+                selected = self._prepared_image_override
+            else:
+                contract = self._image_contract or load_native_image_contract(IMAGE_SOURCE_ROOT)
+                selected = load_prepared_image(self.image_state_root, contract).selected
+        except PreparedImageError as error:
+            raise AgentEnvironmentError(error.code) from None
+        if self._pinned_image is not None:
+            if self._pinned_image != selected:
+                raise AgentEnvironmentError("image_preparation_changed")
+            self._verify_prepared_image(selected)
+            return selected
+        self._verify_prepared_image(selected)
+        self._pinned_image = selected
+        self.spec = self._spec_revision(selected)
+        return selected
+
+    def _spec_revision(self, image: PreparedImageSelection | None) -> str:
         model = self.config.model
         credentials = model.agent_environment.credentials
         creation_fingerprints = {
@@ -537,8 +602,12 @@ class AgentEnvironment:
         }
         document = {
             "schema": 1,
-            "image": model.agent_environment.image.reference,
-            "platforms": ["linux/amd64", "linux/arm64"],
+            "image": {
+                "configuration": model.agent_environment.image.model_dump(mode="json"),
+                "context_revision": image.context_revision if image else "unavailable",
+                "image_id": image.image_id if image else "unavailable",
+                "platform": image.platform if image else "unavailable",
+            },
             "workspace": str(self.workspace),
             "cache": str(self.cache),
             "mounts": {
@@ -763,8 +832,9 @@ class AgentEnvironment:
             (str(item.get("Source")), str(item.get("Destination")), bool(item.get("RW")))
             for item in mounts if isinstance(item, dict) and item.get("Type") == "bind"
         }
+        expected_image = self._pinned_image.image_id if self._pinned_image is not None else None
         checks = {
-            "image": config.get("Image") == PINNED_IMAGE and raw.get("Image") in PINNED_CHILD_IMAGES,
+            "image": expected_image is not None and config.get("Image") == expected_image and raw.get("Image") == expected_image,
             "platform": raw.get("Platform") == "linux",
             "user": config.get("User") == "1000:1000",
             "restart_policy": isinstance(host.get("RestartPolicy"), dict) and host["RestartPolicy"].get("Name") == "no",
@@ -919,7 +989,7 @@ class AgentEnvironment:
             "--tmpfs", "/tmp:size=512m,exec,nosuid,nodev",
             "--tmpfs", "/var/tmp:size=256m,noexec,nosuid,nodev",
             "--tmpfs", "/run:size=64m,noexec,nosuid,nodev",
-            PINNED_IMAGE,
+            self._pinned_image.image_id if self._pinned_image is not None else "image-preparation-unavailable",
         ))
         return tuple(arguments)
 
@@ -1073,6 +1143,7 @@ class AgentEnvironment:
     def ensure_running(self) -> ContainerFacts:
         if self._credential_initialization_error is not None:
             raise AgentEnvironmentError(self._credential_initialization_error)
+        self._pin_prepared_image()
         with self._locked(create=True):
             registry = self._registry(create=True)
             self._endpoint(registry, pin=True)
@@ -1620,6 +1691,10 @@ class AgentEnvironment:
             return self._status_document(
                 None, state="unavailable", reason=self._credential_initialization_error
             )
+        try:
+            self._pin_prepared_image()
+        except AgentEnvironmentError as error:
+            return self._status_document(None, state="unavailable", reason=error.code)
         if not self.registry_path.exists():
             return self._status_document(None, state="absent", reason=None)
         try:
@@ -1833,6 +1908,7 @@ class AgentEnvironment:
                 )
             facts = self._exact_current(registry, allow_stale=True)
             if action == "rebuild":
+                self._pin_prepared_image()
                 if facts.state == "running":
                     stopped = self._docker("container", "stop", "--time", "10", facts.container_id)
                     if stopped.returncode != 0:

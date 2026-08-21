@@ -1,5 +1,7 @@
 # Do Report: 36-e2-4-agent-environment
 
+> Historical assumption note: active personal-install architecture later replaced the unavailable published OCI-index prerequisite with explicit host-native locked-context preparation and a private exact local image ID. This does not alter the issue-era deterministic AgentEnvironment results or turn them into real Docker evidence.
+
 **Source:** https://github.com/prineycom/voice-agent-v2/issues/36  
 **Parent:** —  
 **Status:** ✅ pass

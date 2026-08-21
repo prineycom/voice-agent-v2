@@ -23,10 +23,12 @@
       "properties": {
         "image": {
           "type": "object", "additionalProperties": false,
-          "required": ["reference", "pull_at_runtime"],
+          "required": ["source", "lock_schema", "runtime_pull", "registry_required"],
           "properties": {
-            "reference": {"const": "ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421"},
-            "pull_at_runtime": {"const": false}
+            "source": {"const": "prepared-local-native"},
+            "lock_schema": {"const": "voice-agent.agent-environment-image-lock.v2"},
+            "runtime_pull": {"const": false},
+            "registry_required": {"const": false}
           }
         },
         "lifecycle": {
