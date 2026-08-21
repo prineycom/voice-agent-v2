@@ -114,6 +114,7 @@ export class VoiceClient {
   private stopPromise: Promise<void> | null = null
   private attemptIdentity: string | null = null
   private attemptEndPromise: Promise<void> | null = null
+  private endAttemptOnStop: boolean | null = null
   private reconnectAckTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectRetryTimer: ReturnType<typeof setTimeout> | null = null
   private initialReadyTimer: ReturnType<typeof setTimeout> | null = null
@@ -285,12 +286,16 @@ export class VoiceClient {
   }
 
   async stop(endAttempt = true): Promise<void> {
+    // The first shutdown caller defines whether this admission ends. A document
+    // unmount can race an unfinished start(), whose later cancellation cleanup
+    // must not turn resumable teardown into an explicit DELETE.
+    this.endAttemptOnStop ??= endAttempt
     this.stopping = true
     this.startAbort?.abort()
     try {
       await this.beginResourceRelease(true, this.microphoneFailureActive)
     } finally {
-      if (endAttempt) await this.endAdmissionAttempt()
+      if (this.endAttemptOnStop) await this.endAdmissionAttempt()
     }
   }
 
@@ -461,7 +466,13 @@ export class VoiceClient {
   private async ensureRoomStarting(room: Room, microphone?: LocalAudioTrack): Promise<void> {
     if (!this.stopping) return
     if (this.room === null) this.room = room
-    if (microphone !== undefined && this.microphone === null) this.microphone = microphone
+    // A pending getUserMedia() can resolve after the first cancellation cleanup
+    // has taken its resource snapshot. Release that newly attached track here;
+    // never attach it again after cleanup has already cleared the client field.
+    if (microphone !== undefined && this.microphone === microphone) {
+      this.microphone = null
+      microphone.stop()
+    }
     await this.stop()
     throw new Error('voice session start was cancelled')
   }

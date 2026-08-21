@@ -74,6 +74,10 @@ export function VoiceSessionProvider({ children }: { children: ReactNode }) {
     try {
       await client.start()
     } catch (error) {
+      // Unmount has already stopped this client without ending its admission.
+      // Do not let its delayed startup rejection convert reload teardown into
+      // an explicit session DELETE.
+      if (clientRef.current !== client) return
       const microphoneFailed = (microphoneLifecycleRef.current as MicrophoneLifecycle) === 'error'
       try {
         await client.stop()

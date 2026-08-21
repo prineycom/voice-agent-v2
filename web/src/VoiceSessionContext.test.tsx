@@ -68,10 +68,11 @@ function capabilityResponse(): Response {
 }
 
 function SessionProbe() {
-  const { state, connect, audioContainerRef } = useVoiceSession()
+  const { state, connect, disconnect, audioContainerRef } = useVoiceSession()
   return (
     <>
       <button type="button" onClick={() => void connect()}>CONNECT</button>
+      <button type="button" onClick={() => void disconnect()}>DISCONNECT</button>
       <output aria-label="connection state">{state.connection}</output>
       <output aria-label="microphone state">{state.microphoneStatus}</output>
       <div ref={audioContainerRef} />
@@ -80,6 +81,7 @@ function SessionProbe() {
 }
 
 beforeEach(() => {
+  sessionStorage.clear()
   livekit.createLocalAudioTrack.mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
   let postCount = 0
   vi.stubGlobal('fetch', vi.fn((_url: string, options?: RequestInit) => {
@@ -100,6 +102,76 @@ afterEach(() => {
 })
 
 describe('VoiceSessionProvider connection attempts', () => {
+  it('retains a reload admission through provider unmount cleanup, then explicitly releases it', async () => {
+    const user = userEvent.setup()
+    const firstMicrophone = {
+      isMuted: false,
+      mute: vi.fn().mockResolvedValue(undefined),
+      unmute: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    }
+    const reloadedMicrophone = {
+      isMuted: false,
+      mute: vi.fn().mockResolvedValue(undefined),
+      unmute: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+    }
+    let releaseMicrophone: (track: typeof firstMicrophone) => void = () => undefined
+    const pendingMicrophone = new Promise<typeof firstMicrophone>((resolve) => {
+      releaseMicrophone = resolve
+    })
+    livekit.createLocalAudioTrack
+      .mockImplementationOnce(() => pendingMicrophone)
+      .mockResolvedValueOnce(reloadedMicrophone)
+    vi.stubGlobal('fetch', vi.fn((_url: string, options?: RequestInit) => Promise.resolve(
+      options?.method === 'DELETE'
+        ? ({ ok: true, status: 204 } as Response)
+        : capabilityResponse(),
+    )))
+
+    const initialDocument = render(
+      <VoiceSessionProvider>
+        <SessionProbe />
+      </VoiceSessionProvider>,
+    )
+    await user.click(screen.getByRole('button', { name: 'CONNECT' }))
+    await waitFor(() => expect(livekit.createLocalAudioTrack).toHaveBeenCalledTimes(1))
+    const initialPost = vi.mocked(fetch).mock.calls.find(([, options]) => options?.method === 'POST')
+    const attemptIdentity = (initialPost?.[1]?.headers as Record<string, string>)
+      ['X-Voice-Session-Attempt']
+
+    // This follows the old document's unmount path while start() is still
+    // pending, then mounts the replacement document with the same tab storage.
+    initialDocument.unmount()
+    releaseMicrophone(firstMicrophone)
+    await waitFor(() => expect(firstMicrophone.stop).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'DELETE'))
+      .toHaveLength(0)
+    expect(sessionStorage.getItem('voice-agent.session-attempt.v1')).toBe(attemptIdentity)
+
+    const reloadedDocument = render(
+      <VoiceSessionProvider>
+        <SessionProbe />
+      </VoiceSessionProvider>,
+    )
+    await user.click(screen.getByRole('button', { name: 'CONNECT' }))
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(
+      ([, options]) => options?.method === 'POST',
+    )).toHaveLength(2))
+    const reloadPost = vi.mocked(fetch).mock.calls.filter(
+      ([, options]) => options?.method === 'POST',
+    )[1]
+    expect((reloadPost[1]?.headers as Record<string, string>)['X-Voice-Session-Attempt'])
+      .toBe(attemptIdentity)
+
+    await user.click(screen.getByRole('button', { name: 'DISCONNECT' }))
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(
+      ([, options]) => options?.method === 'DELETE',
+    )).toHaveLength(1))
+    expect(sessionStorage.getItem('voice-agent.session-attempt.v1')).toBeNull()
+    reloadedDocument.unmount()
+  })
+
   it('does not carry a microphone failure into an earlier-stage retry failure', async () => {
     const user = userEvent.setup()
     render(
