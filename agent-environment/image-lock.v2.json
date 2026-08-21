@@ -1,0 +1,26 @@
+{
+  "schema_version": "voice-agent.agent-environment-image-lock.v2",
+  "base_image": "python:3.13-alpine@sha256:2b5c902e7a9e3348f78e17816561e8785f6c3ca7bfedc55d6e47f2c922c5b176",
+  "native_platforms": ["linux/amd64", "linux/arm64"],
+  "context_files": [
+    {
+      "path": "Dockerfile",
+      "sha256": "c2f15ea3a292fd4040103055e3aaa93398788a1cf53e9ffa1e0cc4158c35b4a4",
+      "mode": "0644"
+    },
+    {
+      "path": "helpers/agent-helper",
+      "sha256": "d3ec33fd0d6bfa83ab82aaa1cde89bc81080c9dad2ea025995f60a6044a49c5a",
+      "mode": "0755"
+    }
+  ],
+  "runtime_pull": false,
+  "registry_required": false,
+  "entrypoint": ["/sbin/tini", "--"],
+  "command": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
+  "user": "1000:1000",
+  "labels": {
+    "io.priney.voice-agent-v2.image-managed": "1",
+    "io.priney.voice-agent-v2.image-schema": "1"
+  }
+}

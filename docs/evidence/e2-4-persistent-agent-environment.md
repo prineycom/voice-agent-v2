@@ -1,5 +1,7 @@
 # E2.4 deterministic evidence — persistent AgentEnvironment
 
+> Historical assumption note: this issue-era evidence required a separately published locked OCI index. The later personal-install correction replaced only that unavailable distribution assumption with explicit host-native locked-context preparation and a private exact local image ID. The AgentEnvironment identity, security, execution, persistence and lifecycle findings below remain unchanged; this historical run is not retroactively relabelled as real Docker evidence.
+
 **Issue:** [#36](https://github.com/prineycom/voice-agent-v2/issues/36)  
 **Tier:** deterministic PR evidence only  
 **Command:** `./verify`

@@ -19,7 +19,7 @@ from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
 from voice_agent_v2.schema import validate as validate_schema
 from voice_agent_v2.tracer import CancellationToken
-from tests.test_agent_environment import Disk
+from tests.test_agent_environment import Disk, TEST_PREPARED_IMAGE
 from tests.test_agent_research import ResearchDocker
 
 TARGET = TelegramTarget(424242, 424242)
@@ -161,6 +161,7 @@ class Fixture:
         self.environment = AgentEnvironment(
             config, state_root=self.state, workspace=root / "workspace", cache=root / "cache",
             runner=self.docker, credential_store=DeliveryCredentialStore(),
+            prepared_image=TEST_PREPARED_IMAGE,
             disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
         self.transport = transport or FakeTelegram()

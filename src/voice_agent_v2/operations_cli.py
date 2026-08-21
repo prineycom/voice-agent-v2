@@ -773,12 +773,18 @@ def _agent_environment_manager():
     else:
         root = instance / "agent-environment"
         credentials = InstallationCredentialStore(instance / "credentials")
+    image_state_root = (
+        Path(os.environ["VOICE_AGENT_AGENT_IMAGE_ROOT"])
+        if instance is not None and "VOICE_AGENT_AGENT_IMAGE_ROOT" in os.environ
+        else root / "prepared-image"
+    )
     return AgentEnvironment(
         config,
         state_root=root / "private",
         workspace=(instance / "workspace") if instance is not None else root / "workspace",
         cache=(instance / "cache" / "agent-environment") if instance is not None else root / "cache",
         credential_store=credentials,
+        image_state_root=image_state_root,
     )
 
 

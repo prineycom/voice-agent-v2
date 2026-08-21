@@ -31,7 +31,7 @@ from .agent_config import (
 
 CONFIG_SCHEMA = "voice-agent.config.v2"
 CONFIG_STATUS_SCHEMA = "voice-agent.agent-config-status.v2"
-PINNED_IMAGE = "ghcr.io/prineycom/voice-agent-environment@sha256:8a5a972b25f7c203c71b8e28af17f756d9daf39bc74ebbc5d86eaf6c9f3da421"
+IMAGE_LOCK_SCHEMA = "voice-agent.agent-environment-image-lock.v2"
 TOOL_IDS = (
     "shell.exec",
     "file.read",
@@ -67,8 +67,10 @@ class AgentSettingsV2(BaseModel):
 
 class ImageV2(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    reference: Literal[PINNED_IMAGE]
-    pull_at_runtime: Literal[False]
+    source: Literal["prepared-local-native"]
+    lock_schema: Literal[IMAGE_LOCK_SCHEMA]
+    runtime_pull: Literal[False]
+    registry_required: Literal[False]
 
 
 class LifecycleV2(BaseModel):
@@ -210,7 +212,12 @@ DEFAULT_DOCUMENT: dict[str, object] = {
         "tools": list(TOOL_IDS),
     },
     "agent_environment": {
-        "image": {"reference": PINNED_IMAGE, "pull_at_runtime": False},
+        "image": {
+            "source": "prepared-local-native",
+            "lock_schema": IMAGE_LOCK_SCHEMA,
+            "runtime_pull": False,
+            "registry_required": False,
+        },
         "lifecycle": {
             "lazy_create": True,
             "persistent": True,

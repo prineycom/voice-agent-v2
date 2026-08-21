@@ -159,6 +159,10 @@ class LiveTurnRunner:
                 credential_root=credential_root,
                 workspace_root=(selected_root / "workspace") if selected_root is not None else None,
                 cache_root=(selected_root / "cache" / "agent-environment") if selected_root is not None else None,
+                image_state_root=(
+                    Path(os.environ["VOICE_AGENT_AGENT_IMAGE_ROOT"])
+                    if selected_root is not None else None
+                ),
             )
         else:
             # Configuration failure disables tools only; ordinary voice stays on

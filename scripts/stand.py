@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sys
@@ -18,6 +19,8 @@ from voice_agent_v2.stand_dev import (  # noqa: E402
     deploy_local,
     deploy_remote,
     exec_launcher,
+    agent_image_status,
+    prepare_agent_image,
     initialize,
     list_instances,
     logs,
@@ -30,7 +33,7 @@ from voice_agent_v2.stand_doctor import main as doctor_main  # noqa: E402
 
 
 def usage() -> int:
-    print("usage: stand doctor | init | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | start <main|dev> | stop <main|dev> | status <main|dev> | logs <main|dev> | list")
+    print("usage: stand doctor | init | agent-image <prepare|status> | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | start <main|dev> | stop <main|dev> | status <main|dev> | logs <main|dev> | list")
     return 2
 
 
@@ -49,6 +52,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 controller_repository=ROOT, command=command,
             )
             print("stand init: complete")
+            return 0
+        if arguments == ("agent-image", "prepare"):
+            print(json.dumps(prepare_agent_image(
+                state_root=root, source_root=ROOT, command=command,
+            ), sort_keys=True))
+            return 0
+        if arguments == ("agent-image", "status"):
+            print(json.dumps(agent_image_status(
+                state_root=root, source_root=ROOT, command=command,
+            ), sort_keys=True))
             return 0
         if len(arguments) == 5 and arguments[0:3] == ("deploy", "dev", "--local"):
             instance = "dev"

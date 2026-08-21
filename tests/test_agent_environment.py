@@ -14,7 +14,11 @@ from voice_agent_v2.agent_environment import (
     GENERATION_LABEL, MANAGED_LABEL, OWNER_LABEL, SCHEMA_LABEL, SPEC_LABEL,
 )
 from voice_agent_v2.agent_environment_config import (
-    DEFAULT_CONFIG_BYTES, PINNED_IMAGE, parse_agent_config_v2, upgrade_v1_to_v2,
+    DEFAULT_CONFIG_BYTES, parse_agent_config_v2, upgrade_v1_to_v2,
+)
+from voice_agent_v2.agent_environment_image import (
+    IMAGE_CONTEXT_LABEL, IMAGE_MANAGED_LABEL, IMAGE_SCHEMA_LABEL,
+    PreparedImageSelection,
 )
 from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
@@ -22,6 +26,9 @@ from voice_agent_v2.schema import validate as validate_schema
 from voice_agent_v2.tracer import CancellationToken
 
 Disk = namedtuple("Disk", "total used free")
+TEST_PREPARED_IMAGE = PreparedImageSelection(
+    "sha256:" + "5" * 64, "c" * 64, "linux/amd64", "amd64",
+)
 
 
 class FakeDocker:
@@ -49,10 +56,10 @@ class FakeDocker:
         container = self.containers[identifier]
         return {
             "Id": identifier,
-            "Image": "sha256:560f855490a6e6a0bd96515510ab6051611a4ec99b0a762c7a07701b3d152b95",
+            "Image": TEST_PREPARED_IMAGE.image_id,
             "Platform": "linux",
             "Config": {
-                "Image": PINNED_IMAGE,
+                "Image": TEST_PREPARED_IMAGE.image_id,
                 "User": "1000:1000",
                 "Labels": dict(container["labels"]),
                 "ExposedPorts": None,
@@ -100,6 +107,23 @@ class FakeDocker:
                 owner = owner_filter.rsplit("=", 1)[1]
                 ids = [identifier for identifier, item in self.containers.items() if item["labels"].get(OWNER_LABEL) == owner and item["labels"].get(MANAGED_LABEL) == "1"]
                 return DockerResult(0, ("\n".join(ids) + ("\n" if ids else "")).encode())
+            if arguments[:2] == ("image", "inspect"):
+                if arguments[2] != TEST_PREPARED_IMAGE.image_id:
+                    return DockerResult(1, stderr=b"No such image")
+                return DockerResult(0, json.dumps([{
+                    "Id": TEST_PREPARED_IMAGE.image_id,
+                    "Os": "linux", "Architecture": "amd64",
+                    "Config": {
+                        "User": "1000:1000",
+                        "Entrypoint": ["/sbin/tini", "--"],
+                        "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
+                        "Labels": {
+                            IMAGE_MANAGED_LABEL: "1", IMAGE_SCHEMA_LABEL: "1",
+                            IMAGE_CONTEXT_LABEL: TEST_PREPARED_IMAGE.context_revision,
+                        },
+                    },
+                    "RootFS": {"Layers": ["sha256:" + "6" * 64]},
+                }]).encode())
             if arguments[:2] == ("container", "inspect"):
                 if self.partial_inspect:
                     return DockerResult(0, b"[{}]")
@@ -248,7 +272,8 @@ class Fixture:
         self.manager = AgentEnvironment(
             parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
             state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
-            runner=self.docker, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            runner=self.docker, prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
 
     def close(self) -> None:
@@ -270,6 +295,10 @@ class ConfigV2Tests(unittest.TestCase):
         self.assertNotIn(b"private-name", upgraded)
         self.assertNotIn(b"profile_id", upgraded)
         self.assertEqual(parse_agent_config_v2(upgraded).semantic_revision, parsed.semantic_revision)
+        image = json.loads(json.dumps(parsed.model.model_dump(mode="json")))
+        image["agent_environment"]["image"]["reference"] = "mutable:latest"
+        with self.assertRaises(AgentConfigError):
+            parse_agent_config_v2(json.dumps(image).encode())
         root = Path(__file__).resolve().parents[1]
         validate_schema(
             parsed.model.model_dump(mode="json"),
@@ -294,6 +323,35 @@ class AgentEnvironmentTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.close()
 
+    def test_missing_preparation_is_unavailable_and_runtime_never_builds_pulls_or_publishes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="missing-prepared-image-") as temporary:
+            root = Path(temporary)
+            docker = FakeDocker()
+            manager = AgentEnvironment(
+                parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
+                state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
+                image_state_root=root / "shared-image/private", runner=docker,
+                disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            )
+            self.assertEqual(manager.status()["reason_code"], "image_preparation_missing")
+            with self.assertRaisesRegex(AgentEnvironmentError, "image_preparation_missing"):
+                manager.ensure_running()
+            flattened = " ".join(" ".join(command) for command in docker.commands)
+            self.assertNotIn("build", flattened)
+            self.assertNotIn("pull", flattened)
+            self.assertNotIn("push", flattened)
+            self.assertEqual(docker.containers, {})
+
+    def test_prepared_image_is_freshly_inspected_before_every_reuse(self) -> None:
+        self.fixture.manager.ensure_running()
+        self.fixture.manager.ensure_running()
+        inspections = [
+            command for command in self.fixture.docker.commands
+            if command[:2] == ("image", "inspect")
+        ]
+        self.assertEqual(len(inspections), 2)
+        self.assertTrue(all(command[2] == TEST_PREPARED_IMAGE.image_id for command in inspections))
+
     def test_concurrent_first_use_creates_once_and_later_calls_reuse_state(self) -> None:
         ids: list[str] = []
         threads = [threading.Thread(target=lambda: ids.append(self.fixture.manager.ensure_running().container_id)) for _ in range(8)]
@@ -311,7 +369,7 @@ class AgentEnvironmentTests(unittest.TestCase):
             state_root=self.fixture.manager.state_root,
             workspace=self.fixture.manager.workspace,
             cache=self.fixture.manager.cache,
-            runner=self.fixture.docker,
+            runner=self.fixture.docker, prepared_image=TEST_PREPARED_IMAGE,
             disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
         later = restarted_controller.execute("shell.exec", {"command": "get rootfs"})
@@ -324,7 +382,8 @@ class AgentEnvironmentTests(unittest.TestCase):
         restarted = AgentEnvironment(
             self.fixture.manager.config, state_root=self.fixture.manager.state_root,
             workspace=self.fixture.manager.workspace, cache=self.fixture.manager.cache,
-            runner=self.fixture.docker, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            runner=self.fixture.docker, prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
         restarted.execute("shell.exec", {"command": "cwd /deleted"})
         dispatches = [item for item in self.fixture.docker.commands if "claim-execute" in item]
@@ -427,7 +486,8 @@ class AgentEnvironmentTests(unittest.TestCase):
         restarted = AgentEnvironment(
             self.fixture.manager.config, state_root=self.fixture.manager.state_root,
             workspace=self.fixture.manager.workspace, cache=self.fixture.manager.cache,
-            runner=self.fixture.docker, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            runner=self.fixture.docker, prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
         poll = restarted.execute("process", {"action": "poll", "receipt": receipt})
         self.assertEqual(poll.metadata["details"]["state"], "running")
@@ -573,7 +633,8 @@ class AdditionalMountTests(unittest.TestCase):
         return AgentEnvironment(
             self._config(mounts), state_root=self.root / "private",
             workspace=self.root / "workspace", cache=self.root / "cache",
-            runner=self.docker, disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            runner=self.docker, prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
 
     def test_typed_ro_rw_mounts_are_explicit_pinned_and_disclosed(self) -> None:
@@ -592,6 +653,7 @@ class AdditionalMountTests(unittest.TestCase):
         manager = AgentEnvironment(
             config, state_root=self.root / "private", workspace=self.root / "workspace",
             cache=self.root / "cache", runner=self.docker,
+            prepared_image=TEST_PREPARED_IMAGE,
             disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
         )
         facts = manager.ensure_running()

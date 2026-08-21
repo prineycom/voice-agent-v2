@@ -26,6 +26,7 @@ from voice_agent_v2.agent_environment import (
 from voice_agent_v2.stand_dev import (
     CommandResult,
     PRODUCTION_LOCK,
+    agent_image_state_root,
     RELEASE_SCHEMA,
     StandError,
     config_path,
@@ -248,6 +249,8 @@ class StandDevTests(unittest.TestCase):
             self.assertTrue((source / ".git").is_dir())
             self.assertEqual(git(source, "config", "--get", "remote.origin.url"), str(root / "private-origin.git"))
             self.assertTrue((state / "releases").is_dir())
+            self.assertTrue(agent_image_state_root(state).is_dir())
+            self.assertEqual(stat.S_IMODE(agent_image_state_root(state).stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(config_path(state, "dev").stat().st_mode), 0o600)
             self.assertEqual(parse_private_config(config_path(state, "dev"))["STAND_NAME"], "dev")
             template = (units / "voice-agent-v2@.service").read_text(encoding="utf-8")
@@ -267,6 +270,25 @@ class StandDevTests(unittest.TestCase):
             self.assertIn("StandardOutput=journal", template)
             self.assertIn("StandardError=journal", template)
             self.assertIn(("git", "clone", "--no-checkout", str(root / "private-origin.git"), str(source)), command.calls)
+
+    def test_agent_image_commands_use_shared_stand_owner_without_instance_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            prepared = {
+                "schema_version": "voice-agent.prepared-agent-environment-image-status.v1",
+                "state": "prepared", "changed": True,
+            }
+            with patch.dict(os.environ, {"VOICE_AGENT_STAND_STATE_ROOT": str(state)}), patch.object(
+                stand_cli, "prepare_agent_image", return_value=prepared,
+            ) as prepare, patch("builtins.print") as output:
+                self.assertEqual(stand_cli.main(("agent-image", "prepare")), 0)
+            prepare.assert_called_once()
+            self.assertEqual(json.loads(output.call_args.args[0]), prepared)
+            with patch.dict(os.environ, {"VOICE_AGENT_STAND_STATE_ROOT": str(state)}), patch.object(
+                stand_cli, "agent_image_status", return_value={**prepared, "changed": False},
+            ) as image_status:
+                self.assertEqual(stand_cli.main(("agent-image", "status")), 0)
+            image_status.assert_called_once()
 
     def test_explicit_lifecycle_toggles_persistence_preserves_state_and_lists_both_stands(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -750,6 +772,10 @@ class StandDevTests(unittest.TestCase):
                 self.assertEqual(environment["VOICE_AGENT_SHARED_CACHE_ROOT"], str(root / "shared/voice-agent-v2"))
                 instance_root = (state / "instances" / instance).resolve()
                 self.assertEqual(environment["VOICE_AGENT_INSTANCE_ROOT"], str(instance_root))
+                self.assertEqual(
+                    environment["VOICE_AGENT_AGENT_IMAGE_ROOT"],
+                    str(agent_image_state_root(state)),
+                )
                 for name in (
                     "VOICE_AGENT_DATA_ROOT", "VOICE_AGENT_MUTABLE_CACHE_ROOT",
                     "VOICE_AGENT_TASK_RUNTIME_ROOT", "VOICE_AGENT_WORKSPACE_ROOT",
@@ -781,6 +807,7 @@ class StandDevTests(unittest.TestCase):
                     credential_root=Path(environment["VOICE_AGENT_CREDENTIALS_ROOT"]),
                     workspace_root=Path(environment["VOICE_AGENT_WORKSPACE_ROOT"]),
                     cache_root=Path(environment["VOICE_AGENT_MUTABLE_CACHE_ROOT"]) / "agent-environment",
+                    image_state_root=Path(environment["VOICE_AGENT_AGENT_IMAGE_ROOT"]),
                 )
                 self.assertEqual(
                     agent_provider.environment.state_root,
@@ -792,7 +819,15 @@ class StandDevTests(unittest.TestCase):
                     agent_provider.environment.credential_store.path,
                     instance_root / "credentials/credentials.json",
                 )
+                self.assertEqual(
+                    agent_provider.environment.image_state_root,
+                    agent_image_state_root(state),
+                )
 
+            self.assertEqual(
+                environments["main"]["VOICE_AGENT_AGENT_IMAGE_ROOT"],
+                environments["dev"]["VOICE_AGENT_AGENT_IMAGE_ROOT"],
+            )
             main_values = parse_private_config(config_path(state, "main"))
             dev_values = parse_private_config(config_path(state, "dev"))
             self.assertFalse(

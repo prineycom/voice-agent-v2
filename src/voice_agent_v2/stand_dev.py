@@ -23,6 +23,9 @@ from typing import Mapping, Protocol, Sequence
 import uuid
 
 from .agent_environment import AgentEnvironment, AgentEnvironmentError, DockerRunner
+from .agent_environment_image import (
+    PreparedImageError, inspect_prepared_image, prepare_native_image,
+)
 
 
 DEFAULT_STATE_ROOT = Path.home() / ".local/share/voice-agent-v2"
@@ -100,6 +103,10 @@ def _mkdir_private(path: Path) -> None:
     if path.is_symlink() or not path.is_dir():
         raise StandError("stand state path is not a directory")
     os.chmod(path, 0o700)
+
+
+def agent_image_state_root(state_root: Path) -> Path:
+    return state_root / "agent-image" / "private"
 
 
 def instance_root(state_root: Path, instance: str) -> Path:
@@ -244,6 +251,8 @@ def initialize(
     _mkdir_private(state_root)
     _mkdir_private(state_root / "releases")
     _mkdir_private(state_root / "instances")
+    _mkdir_private(state_root / "agent-image")
+    _mkdir_private(agent_image_state_root(state_root))
     for instance in INSTANCE_NAMES:
         root = instance_root(state_root, instance)
         for relative in (
@@ -731,6 +740,32 @@ def logs(*, state_root: Path, instance: str, command: CommandRunner) -> str:
     return f"{header}\n{records}" if records else header
 
 
+def prepare_agent_image(
+    *, state_root: Path, source_root: Path, command: CommandRunner,
+) -> dict[str, object]:
+    try:
+        return prepare_native_image(
+            state_root=agent_image_state_root(state_root),
+            source_root=source_root,
+            runner=command,
+        )
+    except PreparedImageError as error:
+        raise StandError(f"agent image preparation failed: {error.code}") from error
+
+
+def agent_image_status(
+    *, state_root: Path, source_root: Path, command: CommandRunner,
+) -> dict[str, object]:
+    try:
+        return inspect_prepared_image(
+            state_root=agent_image_state_root(state_root),
+            source_root=source_root,
+            runner=command,
+        )
+    except PreparedImageError as error:
+        raise StandError(f"agent image status failed: {error.code}") from error
+
+
 def validate_release_external_configuration(
     *, state_root: Path, instance: str, release: Path,
 ) -> None:
@@ -851,6 +886,7 @@ def _launcher_environment_for_release(
     result.update({name: str(path) for name, path in private_paths.items()})
     result.update({
         "VOICE_AGENT_INSTANCE_ROOT": str(root),
+        "VOICE_AGENT_AGENT_IMAGE_ROOT": str(agent_image_state_root(state_root)),
         "VOICE_AGENT_SHARED_CACHE_ROOT": str(shared_cache),
         "VOICE_AGENT_BUILD_ID": commit,
         "VOICE_AGENT_RELEASE_ID": commit[:24],
