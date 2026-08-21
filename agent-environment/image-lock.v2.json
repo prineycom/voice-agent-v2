@@ -1,11 +1,11 @@
 {
   "schema_version": "voice-agent.agent-environment-image-lock.v2",
-  "base_image": "python:3.13-alpine@sha256:2b5c902e7a9e3348f78e17816561e8785f6c3ca7bfedc55d6e47f2c922c5b176",
+  "base_image": "python:3.13-alpine@sha256:540c7d91f98ff6880174c40e99067bf5941eb54d818a7a5e094d188b196a934d",
   "native_platforms": ["linux/amd64", "linux/arm64"],
   "context_files": [
     {
       "path": "Dockerfile",
-      "sha256": "c2f15ea3a292fd4040103055e3aaa93398788a1cf53e9ffa1e0cc4158c35b4a4",
+      "sha256": "692b71c3030e0990c926bbaf35a2d59e91e4014274a5c6456da2997a4d8c744e",
       "mode": "0644"
     },
     {
