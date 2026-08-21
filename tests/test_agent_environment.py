@@ -29,7 +29,9 @@ from voice_agent_v2.agent_environment_image import (
     load_prepared_image, prepare_native_image,
 )
 from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
+from voice_agent_v2.contracts import AudioFormat, LLM_VERSION, STT_VERSION, TTS_VERSION
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
+from voice_agent_v2.real_turn import RealTurnController
 from voice_agent_v2.schema import validate as validate_schema
 from voice_agent_v2.stand_dev import _make_immutable
 from voice_agent_v2.tracer import CancellationToken
@@ -1182,6 +1184,94 @@ class BlockingModel(FakeModel):
 
 
 class AgentRunTests(unittest.TestCase):
+    def test_invalid_decision_fails_one_turn_before_environment_or_tts_mutation(self) -> None:
+        marker = "PRIVATE_INVALID_DECISION_7391"
+        fixture = Fixture()
+
+        class InvalidModel(FakeModel):
+            def decide(self, request: str, cancellation: CancellationToken):
+                json.loads(request)
+                return {"kind": "unknown", "private": marker}
+
+        run = AgentRun(fixture.manager, model=InvalidModel())
+
+        class AgentVoiceProvider:
+            version = LLM_VERSION
+            provider_mode = "local"
+            provider_identity = PROVIDER_IDENTITY
+            supports_visible_handoff = True
+            visible_handoff_is_cumulative = True
+
+            def respond_with_handoff(
+                self, *, session_id, stream_epoch, turn_id, request_id,
+                turn_generation, transcript, on_sentence,
+                on_visible_sentence, cancellation,
+            ):
+                result = run.run(
+                    transcript=transcript,
+                    identity=AgentRealtimeIdentity(
+                        session_id, stream_epoch, turn_id, request_id,
+                        turn_generation,
+                    ),
+                    cancellation=cancellation,
+                )
+                on_visible_sentence(result.answer)
+                on_sentence(result.answer)
+                return result.answer
+
+            def cancel_request(self) -> None:
+                run.cancel()
+
+        class StaticSTT:
+            version = STT_VERSION
+
+            def transcribe(self, **_arguments) -> str:
+                return "harmless request"
+
+        class CountingTTS:
+            version = TTS_VERSION
+            output_format = AudioFormat()
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream_synthesize(self, **_arguments):
+                self.calls += 1
+                yield b"\0\0"
+
+        tts = CountingTTS()
+        controller = RealTurnController(StaticSTT(), AgentVoiceProvider(), tts)
+        try:
+            with (
+                patch.object(
+                    fixture.manager, "ensure_running",
+                    wraps=fixture.manager.ensure_running,
+                ) as ensure_running,
+                patch.object(
+                    fixture.manager, "execute", wraps=fixture.manager.execute,
+                ) as execute,
+            ):
+                result = controller.run_turn(
+                    session_id="session-invalid-decision",
+                    turn_id="turn-invalid-decision",
+                    request_id="request-invalid-decision",
+                    input_pcm=b"\0\0" * 160,
+                )
+            terminal = result.terminal_event
+            self.assertEqual(terminal["type"], "turn.failed")
+            self.assertEqual(terminal["payload"], {
+                "outcome": "failed",
+                "stage": "llm_provider",
+                "code": "agent_decision_invalid",
+            })
+            self.assertNotIn(marker, json.dumps(result.events))
+            ensure_running.assert_not_called()
+            execute.assert_not_called()
+            self.assertEqual(tts.calls, 0)
+            self.assertEqual(fixture.docker.containers, {})
+        finally:
+            fixture.close()
+
     def test_cancellation_drops_noncooperative_late_model_output(self) -> None:
         fixture = Fixture()
         try:
