@@ -78,6 +78,7 @@ class NativeImagePreparationTests(unittest.TestCase):
             "ARG BASE_IMAGE=python:3.13-alpine@sha256:" + "b" * 64 + "\nFROM ${BASE_IMAGE}\n",
             encoding="utf-8",
         )
+        os.chmod(self.dockerfile, 0o644)
         self.helper.write_text("#!/bin/sh\n", encoding="utf-8")
         os.chmod(self.helper, 0o755)
         self._write_lock()
