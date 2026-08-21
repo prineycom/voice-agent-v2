@@ -102,9 +102,15 @@ def _safe_relative(value: object) -> str:
     return value
 
 
-def load_native_image_contract(source_root: Path) -> NativeImageContract:
-    """Validate the exact repository lock and canonical build-context bytes."""
+def _immutable_release_mode(mode: str) -> str:
+    """Return the one read-only mode transform owned by ``stand_dev``."""
 
+    return "0555" if int(mode, 8) & 0o111 else "0444"
+
+
+def _load_native_image_contract(
+    source_root: Path, *, allow_immutable_release_modes: bool,
+) -> NativeImageContract:
     lock_path = source_root / "agent-environment/image-lock.v2.json"
     try:
         raw = lock_path.read_bytes()
@@ -136,6 +142,7 @@ def load_native_image_contract(source_root: Path) -> NativeImageContract:
     if not isinstance(files, list) or not files:
         raise PreparedImageError("image_lock_invalid")
     observed: list[dict[str, object]] = []
+    observed_modes: list[tuple[str, str]] = []
     contents: dict[str, bytes] = {}
     names: set[str] = set()
     context_root = source_root / "agent-environment"
@@ -154,14 +161,22 @@ def load_native_image_contract(source_root: Path) -> NativeImageContract:
             content = path.read_bytes()
         except OSError as error:
             raise PreparedImageError("image_context_invalid") from error
+        observed_mode = f"{stat.S_IMODE(metadata.st_mode):04o}"
         if (
             not stat.S_ISREG(metadata.st_mode) or path.is_symlink()
-            or f"{stat.S_IMODE(metadata.st_mode):04o}" != item["mode"]
             or hashlib.sha256(content).hexdigest() != item["sha256"]
         ):
             raise PreparedImageError("image_context_invalid")
         contents[relative] = content
+        observed_modes.append((observed_mode, item["mode"]))
         observed.append({"path": relative, "sha256": item["sha256"], "mode": item["mode"]})
+    canonical_modes = all(actual == locked for actual, locked in observed_modes)
+    immutable_modes = allow_immutable_release_modes and all(
+        actual == _immutable_release_mode(locked)
+        for actual, locked in observed_modes
+    )
+    if not canonical_modes and not immutable_modes:
+        raise PreparedImageError("image_context_invalid")
     if names != {"Dockerfile", "helpers/agent-helper"}:
         raise PreparedImageError("image_lock_invalid")
     expected_base = f"ARG BASE_IMAGE={document['base_image']}".encode("utf-8")
@@ -182,6 +197,27 @@ def load_native_image_contract(source_root: Path) -> NativeImageContract:
         base_image=document["base_image"], native_platforms=tuple(document["native_platforms"]),
         entrypoint=tuple(document["entrypoint"]), command=tuple(document["command"]),
         user=str(document["user"]), required_labels=dict(document["labels"]),
+    )
+
+
+def load_native_image_contract(source_root: Path) -> NativeImageContract:
+    """Strictly validate canonical source bytes and original locked modes."""
+
+    return _load_native_image_contract(
+        source_root, allow_immutable_release_modes=False,
+    )
+
+
+def load_runtime_image_contract(source_root: Path) -> NativeImageContract:
+    """Validate runtime content with only the deterministic release-mode transform.
+
+    Runtime may execute from a canonical checkout or from a stand release made
+    read-only by ``stand_dev._make_immutable``.  Both retain the same locked
+    source modes in the context revision; no other observed mode is admitted.
+    """
+
+    return _load_native_image_contract(
+        source_root, allow_immutable_release_modes=True,
     )
 
 

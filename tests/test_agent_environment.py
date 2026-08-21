@@ -2,27 +2,34 @@ from __future__ import annotations
 
 import base64
 from collections import namedtuple
+import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
+from voice_agent_v2.agent_config import AgentUserContext
 from voice_agent_v2.agent_environment import (
     AgentEnvironment, AgentEnvironmentError, DockerResult,
     GENERATION_LABEL, MANAGED_LABEL, OWNER_LABEL, SCHEMA_LABEL, SPEC_LABEL,
 )
 from voice_agent_v2.agent_environment_config import (
-    DEFAULT_CONFIG_BYTES, parse_agent_config_v2, upgrade_v1_to_v2,
+    DEFAULT_CONFIG_BYTES, load_agent_config_v2, parse_agent_config_v2, upgrade_v1_to_v2,
 )
 from voice_agent_v2.agent_environment_image import (
     IMAGE_CONTEXT_LABEL, IMAGE_MANAGED_LABEL, IMAGE_SCHEMA_LABEL,
-    PreparedImageSelection,
+    ImageCommandResult, PreparedImageError, PreparedImageSelection, load_native_image_contract,
+    load_prepared_image, prepare_native_image,
 )
 from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
 from voice_agent_v2.schema import validate as validate_schema
+from voice_agent_v2.stand_dev import _make_immutable
 from voice_agent_v2.tracer import CancellationToken
 
 Disk = namedtuple("Disk", "total used free")
@@ -32,8 +39,10 @@ TEST_PREPARED_IMAGE = PreparedImageSelection(
 
 
 class FakeDocker:
-    def __init__(self) -> None:
+    def __init__(self, prepared_image: PreparedImageSelection = TEST_PREPARED_IMAGE) -> None:
         self.lock = threading.Lock()
+        self.prepared_image = prepared_image
+        self.image_mismatch = False
         self.commands: list[tuple[str, ...]] = []
         self.containers: dict[str, dict[str, object]] = {}
         self.next_id = 1
@@ -56,10 +65,10 @@ class FakeDocker:
         container = self.containers[identifier]
         return {
             "Id": identifier,
-            "Image": TEST_PREPARED_IMAGE.image_id,
+            "Image": self.prepared_image.image_id,
             "Platform": "linux",
             "Config": {
-                "Image": TEST_PREPARED_IMAGE.image_id,
+                "Image": self.prepared_image.image_id,
                 "User": "1000:1000",
                 "Labels": dict(container["labels"]),
                 "ExposedPorts": None,
@@ -108,22 +117,23 @@ class FakeDocker:
                 ids = [identifier for identifier, item in self.containers.items() if item["labels"].get(OWNER_LABEL) == owner and item["labels"].get(MANAGED_LABEL) == "1"]
                 return DockerResult(0, ("\n".join(ids) + ("\n" if ids else "")).encode())
             if arguments[:2] == ("image", "inspect"):
-                if arguments[2] != TEST_PREPARED_IMAGE.image_id:
+                if arguments[2] != self.prepared_image.image_id:
                     return DockerResult(1, stderr=b"No such image")
-                return DockerResult(0, json.dumps([{
-                    "Id": TEST_PREPARED_IMAGE.image_id,
-                    "Os": "linux", "Architecture": "amd64",
+                document = {
+                    "Id": self.prepared_image.image_id,
+                    "Os": "linux", "Architecture": self.prepared_image.architecture,
                     "Config": {
-                        "User": "1000:1000",
+                        "User": "0:0" if self.image_mismatch else "1000:1000",
                         "Entrypoint": ["/sbin/tini", "--"],
                         "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
                         "Labels": {
                             IMAGE_MANAGED_LABEL: "1", IMAGE_SCHEMA_LABEL: "1",
-                            IMAGE_CONTEXT_LABEL: TEST_PREPARED_IMAGE.context_revision,
+                            IMAGE_CONTEXT_LABEL: self.prepared_image.context_revision,
                         },
                     },
                     "RootFS": {"Layers": ["sha256:" + "6" * 64]},
-                }]).encode())
+                }
+                return DockerResult(0, json.dumps([document]).encode())
             if arguments[:2] == ("container", "inspect"):
                 if self.partial_inspect:
                     return DockerResult(0, b"[{}]")
@@ -264,6 +274,51 @@ class FakeDocker:
             raise AssertionError(f"unexpected fake Docker command: {arguments!r}")
 
 
+class FakeNativePreparationDocker:
+    """Build-only fake that selects one exact image for the runtime fake."""
+
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, ...]] = []
+        self.images: dict[str, dict[str, object]] = {}
+        self.builds = 0
+
+    def run(self, arguments, *, cwd: Path | None = None) -> ImageCommandResult:
+        del cwd
+        command = tuple(arguments)
+        self.commands.append(command)
+        if command == ("docker", "version", "--format", "{{json .Server}}"):
+            return ImageCommandResult(0, '{"ID":"engine-a","Os":"linux","Arch":"amd64"}\n')
+        if command == ("docker", "info", "--format", "{{json .SecurityOptions}}"):
+            return ImageCommandResult(0, '["name=rootless","name=cgroupns"]\n')
+        if command[:4] == ("docker", "buildx", "build", "--load"):
+            self.builds += 1
+            revision = command[command.index("--build-arg") + 1].split("=", 1)[1]
+            tag = command[command.index("--tag") + 1]
+            image_id = "sha256:" + f"{self.builds:064x}"
+            document = {
+                "Id": image_id, "Os": "linux", "Architecture": "amd64",
+                "Config": {
+                    "User": "1000:1000",
+                    "Entrypoint": ["/sbin/tini", "--"],
+                    "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
+                    "Labels": {
+                        IMAGE_MANAGED_LABEL: "1", IMAGE_SCHEMA_LABEL: "1",
+                        IMAGE_CONTEXT_LABEL: revision,
+                    },
+                },
+                "RootFS": {"Layers": ["sha256:" + "6" * 64]},
+            }
+            self.images[tag] = document
+            self.images[image_id] = document
+            return ImageCommandResult(0)
+        if command[:3] == ("docker", "image", "inspect"):
+            document = self.images.get(command[3])
+            if document is None:
+                return ImageCommandResult(1, stderr="missing")
+            return ImageCommandResult(0, json.dumps([document]))
+        return ImageCommandResult(1, stderr="unexpected")
+
+
 class Fixture:
     def __init__(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="agent-environment-")
@@ -278,6 +333,148 @@ class Fixture:
 
     def close(self) -> None:
         self.temp.cleanup()
+
+
+class ImmutableReleasePreparedImageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="immutable-runtime-image-")
+        self.root = Path(self.temporary.name)
+        self.canonical = self.root / "canonical-source"
+        self.canonical.mkdir()
+        shutil.copytree(
+            Path(__file__).resolve().parents[1] / "agent-environment",
+            self.canonical / "agent-environment",
+        )
+        self.image_state = self.root / "agent-image/private"
+        self.preparation = FakeNativePreparationDocker()
+        prepare_native_image(
+            state_root=self.image_state,
+            source_root=self.canonical,
+            runner=self.preparation,
+        )
+        contract = load_native_image_contract(self.canonical)
+        self.selection = load_prepared_image(self.image_state, contract).selected
+        self.instance = self.root / "instances/dev"
+        profile = self.instance / "config/agent-profile"
+        profile.mkdir(mode=0o700, parents=True)
+        for name in ("memory", "sessions", "skills"):
+            (profile / name).mkdir(mode=0o700)
+        (profile / "config.yaml").write_bytes(DEFAULT_CONFIG_BYTES)
+        (profile / "config.yaml").chmod(0o600)
+        (profile / "SOUL.md").write_bytes(b"")
+        (profile / "SOUL.md").chmod(0o600)
+        with patch.dict(os.environ, {"VOICE_AGENT_INSTANCE_ROOT": str(self.instance)}):
+            context = AgentUserContext.effective()
+            self.config = load_agent_config_v2(
+                context.profile_root / "config.yaml", context=context,
+            )
+
+    def tearDown(self) -> None:
+        for directory, _, files in os.walk(self.root, topdown=False):
+            for name in files:
+                Path(directory, name).chmod(0o600)
+            Path(directory).chmod(0o700)
+        self.temporary.cleanup()
+
+    def _release_source(self, name: str) -> Path:
+        source = self.root / name / "source"
+        source.mkdir(parents=True)
+        shutil.copytree(
+            self.canonical / "agent-environment", source / "agent-environment",
+        )
+        return source
+
+    def _manager(self, name: str, runner: FakeDocker) -> AgentEnvironment:
+        return AgentEnvironment(
+            self.config,
+            state_root=self.root / f"runtime-{name}/private",
+            workspace=self.root / f"runtime-{name}/workspace",
+            cache=self.root / f"runtime-{name}/cache",
+            runner=runner,
+            image_state_root=self.image_state,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+
+    def _assert_unavailable(
+        self, name: str, source: Path, reason: str, *, image_mismatch: bool = False,
+    ) -> None:
+        runner = FakeDocker(self.selection)
+        runner.image_mismatch = image_mismatch
+        manager = self._manager(name, runner)
+        with patch("voice_agent_v2.agent_environment.IMAGE_SOURCE_ROOT", source):
+            document = manager.status()
+        self.assertEqual(document["state"], "unavailable")
+        self.assertEqual(document["reason_code"], reason)
+        self.assertFalse(manager.state_root.exists())
+        self.assertEqual(runner.containers, {})
+        self.assertFalse(any(
+            command[:2] in {
+                ("container", "create"), ("container", "start"),
+                ("container", "stop"), ("container", "exec"), ("container", "rm"),
+            }
+            for command in runner.commands
+        ))
+
+    def test_prepared_image_runtime_accepts_only_exact_immutable_release_transform(self) -> None:
+        self.assertEqual(self.preparation.builds, 1)
+
+        exact = self._release_source("exact")
+        _make_immutable(exact)
+        self.assertEqual((exact / "agent-environment/Dockerfile").stat().st_mode & 0o777, 0o444)
+        self.assertEqual((exact / "agent-environment/helpers/agent-helper").stat().st_mode & 0o777, 0o555)
+        with self.assertRaisesRegex(PreparedImageError, "image_context_invalid"):
+            load_native_image_contract(exact)
+
+        unexpected_mode = self._release_source("unexpected-mode")
+        _make_immutable(unexpected_mode)
+        (unexpected_mode / "agent-environment/helpers/agent-helper").chmod(0o500)
+        self._assert_unavailable(
+            "unexpected-mode", unexpected_mode, "image_context_invalid",
+        )
+
+        mixed_modes = self._release_source("mixed-modes")
+        (mixed_modes / "agent-environment/Dockerfile").chmod(0o444)
+        self._assert_unavailable("mixed-modes", mixed_modes, "image_context_invalid")
+
+        changed_bytes = self._release_source("changed-bytes")
+        _make_immutable(changed_bytes)
+        dockerfile = changed_bytes / "agent-environment/Dockerfile"
+        dockerfile.chmod(0o644)
+        dockerfile.write_bytes(dockerfile.read_bytes() + b"# changed after release\n")
+        dockerfile.chmod(0o444)
+        self._assert_unavailable("changed-bytes", changed_bytes, "image_context_invalid")
+
+        changed_context = self._release_source("changed-context")
+        helper = changed_context / "agent-environment/helpers/agent-helper"
+        helper.write_bytes(helper.read_bytes() + b"# different locked context\n")
+        helper.chmod(0o755)
+        lock_path = changed_context / "agent-environment/image-lock.v2.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        for item in lock["context_files"]:
+            if item["path"] == "helpers/agent-helper":
+                item["sha256"] = hashlib.sha256(helper.read_bytes()).hexdigest()
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        _make_immutable(changed_context)
+        self._assert_unavailable(
+            "changed-context", changed_context, "image_preparation_stale",
+        )
+
+        self._assert_unavailable(
+            "inspect-mismatch", exact, "prepared_image_mismatch", image_mismatch=True,
+        )
+
+        runner = FakeDocker(self.selection)
+        manager = self._manager("exact", runner)
+        with patch("voice_agent_v2.agent_environment.IMAGE_SOURCE_ROOT", exact):
+            facts = manager.ensure_running()
+            document = manager.status()
+        self.assertEqual(facts.raw["Image"], self.selection.image_id)
+        self.assertEqual(document["state"], "running")
+        self.assertEqual(len(runner.containers), 1)
+        self.assertEqual(
+            sum(command[:2] == ("container", "create") for command in runner.commands),
+            1,
+        )
 
 
 class ConfigV2Tests(unittest.TestCase):
