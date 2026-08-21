@@ -15,7 +15,22 @@
           "const": "operation"
         },
         "tool": {
-          "type": "string"
+          "enum": [
+            "shell.exec",
+            "file.read",
+            "file.search",
+            "file.write",
+            "file.edit",
+            "file.patch",
+            "execute_code",
+            "process",
+            "receipt",
+            "web.search",
+            "web.fetch",
+            "web.extract",
+            "report.artifact",
+            "report.deliver"
+          ]
         },
         "arguments": {
           "type": "object"

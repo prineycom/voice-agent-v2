@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+from pathlib import Path
 import threading
 import time
 import unittest
 
+from voice_agent_v2.agent_run import AGENT_TOOLS, AgentDecision
 from voice_agent_v2.contracts import StageFailure
 from voice_agent_v2.local_lfm import (
+    AGENT_DECISION_ALLOWED_PAYLOAD_FIELDS,
     ALLOWED_PAYLOAD_FIELDS,
     LLAMA_ENDPOINT,
     MAX_TOKENS,
@@ -254,6 +257,173 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertEqual(payload["reasoning_format"], "deepseek")
         self.assertFalse(payload["cache_prompt"])
         self.assertNotIn("endpoint", json.dumps(payload))
+
+    def test_agent_decision_request_uses_exact_closed_schema_and_valid_documents_parse_unchanged(self) -> None:
+        operation = {
+            "kind": "operation",
+            "tool": "shell.exec",
+            "arguments": {"command": "printf safe"},
+        }
+        final = {"kind": "final", "answer": "Готово."}
+        responses = [
+            StubResponse([
+                stream_event(content=json.dumps(operation)),
+                stream_event(finish="stop"),
+            ]),
+            StubResponse([
+                stream_event(content=json.dumps(final, ensure_ascii=False)),
+                stream_event(finish="stop"),
+            ]),
+        ]
+        factory, created = self.factory(responses)
+        provider = LocalLFMProvider(connection_factory=factory)
+
+        self.assertEqual(provider.agent_decision(request="first"), operation)
+        self.assertEqual(provider.agent_decision(request="second"), final)
+        parsed_operation = AgentDecision.parse(operation)
+        parsed_final = AgentDecision.parse(final)
+        self.assertEqual(parsed_operation.tool, operation["tool"])
+        self.assertEqual(parsed_operation.arguments, operation["arguments"])
+        self.assertEqual(parsed_final.answer, final["answer"])
+
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "contracts/agent-decision.v4.schema.json").read_bytes()
+        )
+        for connection in created:
+            payload = json.loads(connection.requests[0][2])
+            self.assertEqual(set(payload), AGENT_DECISION_ALLOWED_PAYLOAD_FIELDS)
+            self.assertEqual(payload["response_format"], {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "voice_agent_agent_decision_v4",
+                    "strict": True,
+                    "schema": schema,
+                },
+            })
+        variants = schema["oneOf"]
+        self.assertEqual({variant["properties"]["kind"]["const"] for variant in variants}, {"operation", "final"})
+        self.assertTrue(all(variant["additionalProperties"] is False for variant in variants))
+        self.assertEqual(tuple(variants[0]["properties"]["tool"]["enum"]), AGENT_TOOLS)
+
+    def test_malformed_agent_decision_is_turn_local_and_next_request_stays_ready(self) -> None:
+        marker = "PRIVATE_MALFORMED_DECISION_7391"
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        malformed = StubResponse([
+            stream_event(content=marker),
+            stream_event(finish="stop"),
+        ])
+        final = {"kind": "final", "answer": "Следующий ход готов."}
+        recovered = StubResponse([
+            stream_event(content=json.dumps(final, ensure_ascii=False)),
+            stream_event(finish="stop"),
+        ])
+        factory, created = self.factory([health, malformed, recovered])
+        provider = LocalLFMProvider(connection_factory=factory)
+        provider.readiness()
+        ready_health = provider.runtime_health
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.agent_decision(request="malformed-request")
+
+        self.assertEqual(raised.exception.code, "agent_decision_invalid")
+        self.assertEqual(str(raised.exception), "agent_decision_invalid")
+        self.assertNotIn(marker, str(raised.exception))
+        self.assertEqual(provider.runtime_health, ready_health)
+        self.assertEqual(
+            provider.agent_decision(request="fresh-independent-request"), final
+        )
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": True,
+            "compatible": True,
+            "reason_code": None,
+        })
+        self.assertEqual(len(created), 3)
+
+    def test_agent_decision_identity_and_protocol_failures_remain_global(self) -> None:
+        cases = (
+            (
+                StubResponse([
+                    stream_event(content='{"kind":"final","answer":"x"}', model="wrong-model"),
+                    stream_event(finish="stop", model="wrong-model"),
+                ]),
+                "selected_provider_identity_mismatch",
+            ),
+            (
+                StubResponse([
+                    {"model": MODEL_ALIAS, "choices": "invalid"},
+                ]),
+                "selected_provider_protocol_error",
+            ),
+        )
+        for response, code in cases:
+            with self.subTest(code=code):
+                factory, _created = self.factory([response])
+                provider = LocalLFMProvider(connection_factory=factory)
+                provider._set_runtime_health(
+                    live=True, ready=True, compatible=True, reason_code=None,
+                )
+
+                with self.assertRaises(StageFailure) as raised:
+                    provider.agent_decision(request="global-failure")
+
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(provider.runtime_health, {
+                    "live": True,
+                    "ready": False,
+                    "compatible": False,
+                    "reason_code": code,
+                })
+
+    def test_agent_decision_transport_failure_remains_global(self) -> None:
+        class TransportFailureConnection(StubConnection):
+            def request(self, method: str, path: str, body=None, headers=None) -> None:
+                raise OSError("private transport detail")
+
+        def factory(host: str, port: int, *, timeout: float):
+            return TransportFailureConnection(
+                host, port, timeout=timeout, responses=[],
+            )
+
+        provider = LocalLFMProvider(connection_factory=factory)
+        provider._set_runtime_health(
+            live=True, ready=True, compatible=True, reason_code=None,
+        )
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.agent_decision(request="transport-failure")
+
+        self.assertEqual(raised.exception.code, "local_lfm_transport_error")
+        self.assertEqual(str(raised.exception), "local_lfm_transport_error")
+        self.assertEqual(provider.runtime_health, {
+            "live": False,
+            "ready": False,
+            "compatible": True,
+            "reason_code": "local_lfm_transport_error",
+        })
+
+    def test_structured_output_rejection_is_stable_global_compatibility_failure(self) -> None:
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        factory, _created = self.factory([health, StubResponse([], status=400)])
+        provider = LocalLFMProvider(connection_factory=factory)
+        provider.readiness()
+
+        with self.assertRaises(StageFailure) as raised:
+            provider.agent_decision(request="requires-structured-output")
+
+        self.assertEqual(
+            raised.exception.code, "agent_decision_structured_output_unsupported"
+        )
+        self.assertEqual(provider.runtime_health, {
+            "live": True,
+            "ready": False,
+            "compatible": False,
+            "reason_code": "agent_decision_structured_output_unsupported",
+        })
 
     def test_hidden_reasoning_never_reaches_handoff_or_response(self) -> None:
         response = StubResponse([

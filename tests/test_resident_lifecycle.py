@@ -8,6 +8,7 @@ import threading
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 from voice_agent_v2.contracts import AudioFormat, StageFailure
 from voice_agent_v2.local_lfm import MODEL_ALIAS, LocalLFMProvider
@@ -157,6 +158,54 @@ class MemoryEvents:
 
 
 class ResidentLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_agent_decision_keeps_resident_stack_ready_while_global_loss_blocks_it(self) -> None:
+        runtime = load_runtime()
+        runner = object.__new__(runtime.LiveTurnRunner)
+        runner.stt = ResidentSTT(3101)
+        runner.llm = LocalLFMProvider(connection_factory=lambda *_args, **_kwargs: None)
+        runner.tts = ResidentTTS(3103)
+        runner.warmup_metadata = {
+            "stt": {"discarded": True},
+            "lfm_ready": {
+                "ready": True,
+                "provider_mode": runner.llm.provider_mode,
+                "provider_identity": runner.llm.provider_identity,
+                "selected_alias": MODEL_ALIAS,
+                "external_transfer": False,
+                "automatic_fallback": False,
+            },
+            "tts": {"discarded": True},
+        }
+        runner._started = True
+        runner.llm._set_runtime_health(
+            live=True, ready=True, compatible=True, reason_code=None,
+        )
+
+        with (
+            patch.object(
+                runner.llm, "_execute", return_value={"text": "not-json-private"},
+            ),
+            self.assertRaises(StageFailure) as invalid,
+        ):
+            runner.llm.agent_decision(request="bounded-request")
+
+        self.assertEqual(invalid.exception.code, "agent_decision_invalid")
+        self.assertTrue(runner.ready_for_admission())
+        self.assertTrue(all(
+            component.readiness == "ready"
+            for component in runner.readiness_components()
+        ))
+
+        runner.llm._record_runtime_failure("selected_provider_protocol_error")
+        self.assertFalse(runner.ready_for_admission())
+        llm_health = next(
+            component for component in runner.readiness_components()
+            if component.component == "selected_llm"
+        )
+        self.assertEqual(llm_health.liveness, "alive")
+        self.assertEqual(llm_health.readiness, "unready")
+        self.assertFalse(llm_health.compatible)
+
     async def test_local_lfm_compatibility_failure_is_alive_unready_and_blocks_admission(self) -> None:
         runtime = load_runtime()
         runner = object.__new__(runtime.LiveTurnRunner)

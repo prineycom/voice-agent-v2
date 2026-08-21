@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import http.client
 import json
+from pathlib import Path
 import queue
 import threading
 import time
@@ -56,12 +57,40 @@ _CONTRACT_FAILURE_CODES = frozenset({
     "local_lfm_incomplete_response",
     "empty_selected_provider_response",
     "forbidden_request_field",
+    "agent_decision_structured_output_unsupported",
+})
+_STRUCTURED_OUTPUT_REJECTION_CODES = frozenset({
+    "local_lfm_http_400",
+    "local_lfm_http_404",
+    "local_lfm_http_405",
+    "local_lfm_http_415",
+    "local_lfm_http_422",
+    "local_lfm_http_501",
 })
 ALLOWED_PAYLOAD_FIELDS = frozenset({
     "model", "messages", "stream", "stream_options", "temperature", "top_p",
     "top_k", "repeat_penalty", "max_tokens", "reasoning_format", "reasoning_budget",
     "cache_prompt", "timings",
 })
+AGENT_DECISION_ALLOWED_PAYLOAD_FIELDS = ALLOWED_PAYLOAD_FIELDS | {"response_format"}
+_AGENT_DECISION_SCHEMA_BYTES = (
+    Path(__file__).resolve().parents[2] / "contracts/agent-decision.v4.schema.json"
+).read_bytes()
+
+
+def _agent_decision_response_format() -> dict[str, object]:
+    """Return a fresh exact llama.cpp/OpenAI structured-output contract."""
+    schema = json.loads(_AGENT_DECISION_SCHEMA_BYTES)
+    if not isinstance(schema, dict):
+        raise RuntimeError("AgentDecision schema is not an object")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "voice_agent_agent_decision_v4",
+            "strict": True,
+            "schema": schema,
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -949,8 +978,11 @@ class LocalLFMProvider:
             "reasoning_budget": REASONING_BUDGET,
             "cache_prompt": False,
             "timings": True,
+            "response_format": _agent_decision_response_format(),
         }
         try:
+            if set(payload) != AGENT_DECISION_ALLOWED_PAYLOAD_FIELDS:
+                raise StageFailure("llm_provider", "forbidden_request_field")
             result = self._execute(
                 payload, generation, started, deadline, None, None, None
             )
@@ -964,8 +996,21 @@ class LocalLFMProvider:
                 live=True, ready=True, compatible=True, reason_code=None
             )
             return document
+        except StageFailure as error:
+            if error.code == "agent_decision_invalid":
+                raise
+            code = (
+                "agent_decision_structured_output_unsupported"
+                if error.code in _STRUCTURED_OUTPUT_REJECTION_CODES
+                else error.code
+            )
+            self._record_runtime_failure(code)
+            if code != error.code:
+                raise StageFailure("llm_provider", code) from error
+            raise
         except (json.JSONDecodeError, UnicodeError, ValueError) as error:
-            self._record_runtime_failure("agent_decision_invalid")
+            # The endpoint remains reachable, exact, and structured-output capable.
+            # One malformed decision is request-local and never poisons readiness.
             raise StageFailure("llm_provider", "agent_decision_invalid") from error
         finally:
             unregister()
