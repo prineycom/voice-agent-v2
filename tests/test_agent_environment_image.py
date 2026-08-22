@@ -44,7 +44,7 @@ class FakeImageDocker:
                 return ImageCommandResult(1, stderr="missing")
             value = json.loads(json.dumps(document))
             if self.mismatch:
-                value["Config"]["User"] = "0:0"
+                value["Config"]["User"] = "1000:1000"
             return ImageCommandResult(0, json.dumps([value]))
         return ImageCommandResult(1, stderr="unexpected")
 
@@ -53,7 +53,7 @@ class FakeImageDocker:
         return {
             "Id": image_id, "Os": "linux", "Architecture": "amd64",
             "Config": {
-                "User": "1000:1000",
+                "User": "0:0",
                 "Entrypoint": ["/sbin/tini", "--"],
                 "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
                 "Labels": {
@@ -101,7 +101,7 @@ class NativeImagePreparationTests(unittest.TestCase):
             "registry_required": False,
             "entrypoint": ["/sbin/tini", "--"],
             "command": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
-            "user": "1000:1000",
+            "user": "0:0",
             "labels": {IMAGE_MANAGED_LABEL: "1", IMAGE_SCHEMA_LABEL: "1"},
         }
         (self.context / "image-lock.v2.json").write_text(json.dumps(document), encoding="utf-8")

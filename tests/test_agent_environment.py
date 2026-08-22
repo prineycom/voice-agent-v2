@@ -33,6 +33,7 @@ from voice_agent_v2.agent_run import (
     MAX_CONVERSATION_BYTES, AgentRealtimeIdentity, AgentRun,
 )
 from voice_agent_v2.agent_run_provider import AgentRunProvider
+from voice_agent_v2.agent_runtime import AgentRuntime
 from voice_agent_v2.contracts import (
     AudioFormat, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure,
 )
@@ -86,7 +87,7 @@ class DockerCLICustodyTests(unittest.TestCase):
             "Id": TEST_PREPARED_IMAGE.image_id,
             "Os": "linux", "Architecture": "amd64",
             "Config": {
-                "User": "1000:1000",
+                "User": "0:0",
                 "Entrypoint": ["/sbin/tini", "--"],
                 "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
                 "Labels": {
@@ -346,6 +347,7 @@ class FakeDocker:
         self.ambiguous_exec = False
         self.reject_stopped_once = False
         self.fail_next_start = False
+        self.create_result_mode = "success"
         self.claims: dict[str, dict[str, object]] = {}
         self.dispatch_count: dict[str, int] = {}
         self.markers: dict[str, str] = {}
@@ -364,7 +366,7 @@ class FakeDocker:
             "Platform": "linux",
             "Config": {
                 "Image": self.prepared_image.image_id,
-                "User": "1000:1000",
+                "User": str(container.get("user", "0:0")),
                 "Labels": dict(container["labels"]),
                 "ExposedPorts": None,
             },
@@ -418,7 +420,7 @@ class FakeDocker:
                     "Id": self.prepared_image.image_id,
                     "Os": "linux", "Architecture": self.prepared_image.architecture,
                     "Config": {
-                        "User": "0:0" if self.image_mismatch else "1000:1000",
+                        "User": "1000:1000" if self.image_mismatch else "0:0",
                         "Entrypoint": ["/sbin/tini", "--"],
                         "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
                         "Labels": {
@@ -437,6 +439,14 @@ class FakeDocker:
                     return DockerResult(1, stderr=b"No such container")
                 return DockerResult(0, json.dumps([self._inspect(identifier)]).encode())
             if arguments[:2] == ("container", "create"):
+                if self.create_result_mode == "rejected":
+                    return DockerResult(
+                        125, b"", b"private path credential endpoint identifier", accepted=False,
+                    )
+                if self.create_result_mode == "malformed_success":
+                    return DockerResult(
+                        0, b"malformed private identifier\n", b"private response", accepted=None,
+                    )
                 identifier = self._id()
                 labels: dict[str, str] = {}
                 for index, value in enumerate(arguments):
@@ -451,10 +461,11 @@ class FakeDocker:
                     )
                     inspected_mounts.append({
                         "Type": "bind", "Source": fields["src"], "Destination": fields["dst"],
-                        "RW": declaration.endswith(",rw"),
+                        "RW": not declaration.endswith(",readonly"),
                     })
                 self.containers[identifier] = {
                     "labels": labels,
+                    "user": self._value(arguments, "--user"),
                     "state": "created",
                     "workspace": mounts[0].split(",")[1].removeprefix("src="),
                     "cache": mounts[1].split(",")[1].removeprefix("src="),
@@ -593,7 +604,7 @@ class FakeNativePreparationDocker:
             document = {
                 "Id": image_id, "Os": "linux", "Architecture": "amd64",
                 "Config": {
-                    "User": "1000:1000",
+                    "User": "0:0",
                     "Entrypoint": ["/sbin/tini", "--"],
                     "Cmd": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
                     "Labels": {
@@ -952,6 +963,133 @@ class AgentEnvironmentTests(unittest.TestCase):
         self.assertEqual(len(inspections), 2)
         self.assertTrue(all(command[2] == TEST_PREPARED_IMAGE.image_id for command in inspections))
 
+    def test_create_failure_is_closed_private_preserved_and_never_retried(self) -> None:
+        allowed = {
+            "cause", "exit_status_class", "accepted_before_exec", "generation",
+            "managed_candidate", "endpoint_precheck_passed", "image_precheck_passed",
+        }
+        cases = (
+            ("rejected", "docker_create_rejected", "nonzero", "rejected"),
+            ("malformed_success", "docker_create_response_invalid", "zero", "unknown"),
+        )
+        for mode, cause, exit_class, accepted in cases:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                docker = FakeDocker()
+                docker.create_result_mode = mode
+                manager = AgentEnvironment(
+                    self.fixture.manager.config,
+                    state_root=root / "private", workspace=root / "workspace",
+                    cache=root / "cache", runner=docker,
+                    prepared_image=TEST_PREPARED_IMAGE,
+                    disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+                )
+                with self.assertRaises(AgentEnvironmentError) as caught:
+                    manager.ensure_running()
+                self.assertEqual(caught.exception.code, "environment_creation_failed")
+                first = manager.status()
+                second = manager.status()
+                self.assertEqual(first["state"], "unavailable")
+                self.assertEqual(second["state"], "unavailable")
+                self.assertEqual(second["reason_code"], "container_create_failed")
+                failure = second["last_create_failure"]
+                self.assertEqual(set(failure), allowed)
+                self.assertEqual(failure["cause"], cause)
+                self.assertEqual(failure["exit_status_class"], exit_class)
+                self.assertEqual(failure["accepted_before_exec"], accepted)
+                self.assertEqual(failure["managed_candidate"], "absent")
+                self.assertTrue(failure["endpoint_precheck_passed"])
+                self.assertTrue(failure["image_precheck_passed"])
+                self.assertFalse(second["container_provisioned"])
+                self.assertEqual(docker.containers, {})
+                self.assertEqual(
+                    sum(command[:2] == ("container", "create") for command in docker.commands), 1,
+                )
+                self.assertFalse(any(
+                    command[:2] in {("container", "start"), ("container", "rm")}
+                    for command in docker.commands
+                ))
+                rendered_failure = json.dumps(failure)
+                for forbidden in (
+                    "private path", "credential", "endpoint identifier",
+                    "malformed private identifier", "private response",
+                ):
+                    self.assertNotIn(forbidden, rendered_failure)
+
+    def test_provider_readiness_preprovisions_once_and_gates_failure_without_fallback(self) -> None:
+        class Selected:
+            def readiness(self, _cancellation=None):
+                return {
+                    "ready": True, "provider_mode": "local",
+                    "provider_identity": PROVIDER_IDENTITY,
+                    "selected_alias": "lfm2.5-q4-k-m", "external_transfer": False,
+                    "automatic_fallback": False,
+                }
+
+        provider = AgentRunProvider.__new__(AgentRunProvider)
+        provider.selected = Selected()
+        provider.environment = self.fixture.manager
+        first = provider.readiness()
+        selected_id = self.fixture.manager.status()["container_id_prefix"]
+        second = provider.readiness()
+        self.assertTrue(first["agent_environment_ready"])
+        self.assertTrue(second["agent_environment_ready"])
+        self.assertEqual(self.fixture.manager.status()["container_id_prefix"], selected_id)
+        self.assertEqual(
+            sum(command[:2] == ("container", "create") for command in self.fixture.docker.commands), 1,
+        )
+        active_runtime = AgentRuntime(
+            provider.environment.config, "active", "agent_config_active",
+        ).status_document(provider.environment.status())
+        self.assertTrue(active_runtime["agent_tools_admitted"])
+        self.assertEqual(active_runtime["environment_state"], "running")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            docker = FakeDocker(); docker.create_result_mode = "rejected"
+            provider.environment = AgentEnvironment(
+                self.fixture.manager.config,
+                state_root=root / "private", workspace=root / "workspace",
+                cache=root / "cache", runner=docker,
+                prepared_image=TEST_PREPARED_IMAGE,
+                disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+            )
+            unavailable = provider.readiness()
+            self.assertFalse(unavailable["agent_environment_ready"])
+            self.assertEqual(
+                unavailable["agent_environment_reason_code"], "environment_creation_failed",
+            )
+            self.assertEqual(
+                sum(command[:2] == ("container", "create") for command in docker.commands), 1,
+            )
+            self.assertFalse(any("fallback" in part for command in docker.commands for part in command))
+            runtime = AgentRuntime(
+                provider.environment.config, "active", "agent_config_active",
+            ).status_document(provider.environment.status())
+            self.assertEqual(runtime["status"], "degraded")
+            self.assertFalse(runtime["agent_tools_admitted"])
+            self.assertEqual(runtime["environment_state"], "unavailable")
+            self.assertEqual(runtime["environment_reason_code"], "environment_creation_failed")
+            self.assertNotIn("environment_failure_cause", runtime)
+
+    def test_canonical_mount_grammar_uses_default_writable_and_explicit_readonly_only(self) -> None:
+        manager = self.fixture.manager
+        manager.ensure_running()
+        create = next(
+            command for command in self.fixture.docker.commands
+            if command[:2] == ("container", "create")
+        )
+        declarations = [
+            create[index + 1] for index, value in enumerate(create) if value == "--mount"
+        ]
+        self.assertEqual(len(declarations), 2)
+        self.assertTrue(all(not declaration.endswith(",rw") for declaration in declarations))
+        self.assertTrue(all(not declaration.endswith(",readonly") for declaration in declarations))
+        self.assertEqual(create[create.index("--user") + 1], "0:0")
+        self.assertEqual(create[create.index("--cap-drop") + 1], "ALL")
+        self.assertEqual(create[create.index("--security-opt") + 1], "no-new-privileges")
+        self.assertFalse(any("docker.sock" in value for value in create))
+
     def test_concurrent_first_use_creates_once_and_later_calls_reuse_state(self) -> None:
         ids: list[str] = []
         threads = [threading.Thread(target=lambda: ids.append(self.fixture.manager.ensure_running().container_id)) for _ in range(8)]
@@ -1028,6 +1166,18 @@ class AgentEnvironmentTests(unittest.TestCase):
         self.assertEqual(stale.exception.code, "stale_spec")
         self.assertIn(facts.container_id, self.fixture.docker.containers)
         self.assertEqual(create_count, sum(command[:2] == ("container", "create") for command in self.fixture.docker.commands))
+
+    def test_unexpected_container_process_identity_is_guarded_without_replacement_or_delete(self) -> None:
+        facts = self.fixture.manager.ensure_running()
+        self.fixture.docker.containers[facts.container_id]["user"] = "1000:1000"
+        status = self.fixture.manager.status()
+        self.assertEqual(status["state"], "stale_spec")
+        self.assertIn("user", status["mismatch_fields"])
+        self.assertIn(facts.container_id, self.fixture.docker.containers)
+        self.assertEqual(
+            sum(command[:2] == ("container", "create") for command in self.fixture.docker.commands), 1,
+        )
+        self.assertFalse(any(command[:2] == ("container", "rm") for command in self.fixture.docker.commands))
 
     def test_at_most_once_and_only_same_id_preacceptance_retry(self) -> None:
         self.fixture.manager.ensure_running()
@@ -1261,6 +1411,15 @@ class AdditionalMountTests(unittest.TestCase):
         observed = {(item["Destination"], item["RW"]) for item in mounts}
         self.assertIn(("/data/reference", False), observed)
         self.assertIn(("/data/output", True), observed)
+        create = next(
+            command for command in self.docker.commands
+            if command[:2] == ("container", "create")
+        )
+        declarations_used = [
+            create[index + 1] for index, value in enumerate(create) if value == "--mount"
+        ]
+        self.assertTrue(any(value.endswith(",readonly") for value in declarations_used))
+        self.assertFalse(any(value.endswith(",rw") for value in declarations_used))
         status = manager.status()
         self.assertEqual(status["additional_mounts"], declarations)
         self.assertIn("exfiltratable", status["additional_mount_authority_warning"])

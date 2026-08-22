@@ -11,11 +11,13 @@ RUN apk add --no-cache ca-certificates curl git openssh-client patch ripgrep sud
     && addgroup -g 1000 agent && adduser -D -u 1000 -G agent agent \
     && printf 'agent ALL=(ALL) NOPASSWD: ALL\\nDefaults:agent !setenv\\n' > /etc/sudoers.d/agent \
     && chmod 0440 /etc/sudoers.d/agent \
-    && install -d -m 0700 -o agent -g agent /workspace /cache \
+    && install -d -m 0700 -o root -g root /workspace /cache \
        /var/lib/voice-agent/exec-ledger /var/lib/voice-agent/stream-ledger \
        /var/lib/voice-agent/process-ledger /var/lib/voice-agent/credentials
 COPY --chmod=0555 helpers/agent-helper /usr/local/lib/voice-agent/agent-helper
-USER 1000:1000
+# Namespace root maps to the ordinary current host user under the sole admitted
+# rootless daemon. Capabilities and host authority remain removed at create time.
+USER 0:0
 WORKDIR /workspace
 ENTRYPOINT ["/sbin/tini","--"]
 CMD ["/usr/local/lib/voice-agent/agent-helper","init-container"]

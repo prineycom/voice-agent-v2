@@ -11,7 +11,7 @@ export type MicrophoneVisualState = 'idle' | 'listening' | 'muted' | 'error'
 export type ComponentHealth = 'READY' | 'CONNECTING' | 'DEGRADED' | 'UNAVAILABLE' | 'FAILED' | 'UNKNOWN'
 
 export interface UiSystemComponent {
-  id: 'livekit' | 'controller' | 'stt' | 'selected_llm' | 'tts' | 'avatar_host' | 'active_module'
+  id: 'livekit' | 'controller' | 'stt' | 'selected_llm' | 'agent_environment' | 'tts' | 'avatar_host' | 'active_module'
   label: string
   health: ComponentHealth
   liveness: 'ALIVE' | 'DEAD' | 'UNKNOWN'
@@ -85,6 +85,33 @@ function observedServerComponent(
     readiness: observation.readiness.toUpperCase() as UiSystemComponent['readiness'],
     compatible: observation.compatible,
     reason: affected ? state.failureCode : observation.reason_code,
+  }
+}
+
+function agentEnvironmentComponent(state: VoiceState): UiSystemComponent {
+  const selected = state.health?.components.find((candidate) => candidate.component === 'selected_llm')
+  if (selected === undefined) {
+    const health = voicePathHealth(state.connection)
+    return {
+      id: 'agent_environment', label: 'AGENT ENV', health,
+      liveness: 'UNKNOWN', readiness: 'UNKNOWN', compatible: null, reason: null,
+    }
+  }
+  const reason = selected.reason_code
+  const environmentUnavailable = reason !== null && (
+    reason.startsWith('environment_')
+    || reason.startsWith('container_')
+    || reason === 'stale_spec'
+    || reason === 'host_free_reserve_breached'
+  )
+  return {
+    id: 'agent_environment',
+    label: 'AGENT ENV',
+    health: environmentUnavailable ? 'UNAVAILABLE' : 'READY',
+    liveness: environmentUnavailable ? 'UNKNOWN' : 'ALIVE',
+    readiness: environmentUnavailable ? 'UNREADY' : 'READY',
+    compatible: !environmentUnavailable,
+    reason: environmentUnavailable ? reason : null,
   }
 }
 
@@ -163,6 +190,7 @@ export function mapVoiceStateToUi(
       observedServerComponent(state, 'controller', 'CONTROLLER'),
       observedServerComponent(state, 'stt', 'STT'),
       observedServerComponent(state, 'selected_llm', 'SELECTED LLM'),
+      agentEnvironmentComponent(state),
       observedServerComponent(state, 'tts', 'TTS'),
       {
         id: 'avatar_host', label: 'AVATAR HOST', health: avatarHostHealth,

@@ -678,7 +678,10 @@ def _persistence_state(*, instance: str, command: CommandRunner) -> str:
     return "unknown"
 
 
-def status(*, state_root: Path, instance: str, command: CommandRunner) -> str:
+def status(
+    *, state_root: Path, instance: str, command: CommandRunner,
+    docker_runner: DockerRunner | None = None,
+) -> str:
     selected = selected_release(state_root, instance)
     commit = selected[0] if selected is not None else "none"
     active = _service_state(instance=instance, command=command)
@@ -711,9 +714,17 @@ def status(*, state_root: Path, instance: str, command: CommandRunner) -> str:
         lifecycle, readiness = "stopped", "not-ready"
     if selected is None:
         readiness += " (no selected release)"
+    try:
+        environment_state = AgentEnvironment.registered_state(
+            state_root=instance_root(state_root, instance) / "agent-environment" / "private",
+            runner=docker_runner,
+        )
+    except AgentEnvironmentError:
+        environment_state = "unavailable"
     lines = [
         f"stand status {instance}", f"version: {commit}", f"state: {lifecycle}",
         f"persistence: {persistence}", f"readiness: {readiness}",
+        f"agent container: {environment_state}",
     ]
     if failure is not None:
         lines.append(f"failure: {failure}")

@@ -102,6 +102,9 @@ FORBIDDEN_MOUNT_SOURCES = (
     "/var/run/docker.sock", "/run/docker.sock",
 )
 FORBIDDEN_SOURCE_MARKERS = ("docker.sock", "podman.sock", "containerd.sock", "/systemd/", "/dbus/", "/bus/")
+CREATE_FAILURE_CAUSES = frozenset({"docker_create_rejected", "docker_create_response_invalid"})
+CREATE_ACCEPTANCE_STATES = frozenset({"accepted", "rejected", "unknown"})
+CREATE_CANDIDATE_STATES = frozenset({"present", "absent", "unknown"})
 
 
 class AgentEnvironmentError(RuntimeError):
@@ -598,6 +601,37 @@ class AgentEnvironment:
         self._thread_lock = threading.RLock()
 
     @classmethod
+    def registered_state(
+        cls, *, state_root: Path, runner: DockerRunner | None = None,
+    ) -> str:
+        """Freshly inspect the installation-owned identity without provisioning."""
+
+        registry_path = state_root / "registry.json"
+        if not registry_path.exists():
+            return "absent"
+        environment = cls.__new__(cls)
+        environment.state_root = state_root
+        environment.registry_path = registry_path
+        environment.lock_path = state_root / "installation.lock"
+        environment.runner = runner or DockerCLI(state_root / "docker-client")
+        environment._thread_lock = threading.RLock()
+        with environment._locked(create=False):
+            registry = environment._registry(create=False)
+            environment._endpoint(registry, pin=False)
+            selected = registry.get("selected_container_id")
+            if selected is None:
+                if environment._candidate_ids(registry):
+                    raise AgentEnvironmentError("environment_identity_conflict")
+                return (
+                    "unavailable" if registry.get("state") == "unavailable"
+                    else "absent"
+                )
+            facts = environment._exact_current(registry, allow_stale=True)
+            if facts.spec != registry.get("spec"):
+                raise AgentEnvironmentError("environment_identity_conflict")
+            return environment._state(facts.state)
+
+    @classmethod
     def stop_registered(
         cls, *, state_root: Path, runner: DockerRunner | None = None,
     ) -> str:
@@ -764,7 +798,7 @@ class AgentEnvironment:
             or raw.get("Os") != "linux"
             or raw.get("Architecture") != image.architecture
             or image.platform != f"linux/{image.architecture}"
-            or config.get("User") != "1000:1000"
+            or config.get("User") != "0:0"
             or config.get("Entrypoint") != ["/sbin/tini", "--"]
             or config.get("Cmd") != ["/usr/local/lib/voice-agent/agent-helper", "init-container"]
             or labels != expected_labels
@@ -824,7 +858,7 @@ class AgentEnvironment:
                 "declaration": model.agent_environment.credentials.model_dump(mode="json"),
                 "creation_fingerprints": creation_fingerprints,
             },
-            "user": "1000:1000",
+            "user": "0:0",
             "restart": "no",
             "cap_drop": ["ALL"],
             "cap_add": [],
@@ -874,6 +908,7 @@ class AgentEnvironment:
             "logical_cwd": "/workspace",
             "state": "absent",
             "reason_code": None,
+            "last_create_failure": None,
         }
 
     def _registry(self, *, create: bool) -> dict[str, object]:
@@ -891,16 +926,37 @@ class AgentEnvironment:
         required = {
             "schema_version", "installation_uuid", "owner_key", "endpoint_fingerprint",
             "selected_container_id", "generation", "spec", "retained", "calls", "processes",
-            "logical_cwd", "state", "reason_code",
+            "logical_cwd", "state", "reason_code", "last_create_failure",
         }
-        historical = required - {"processes"}
-        if isinstance(document, dict) and set(document) == historical:
-            # Safe in-place registry evolution: old state gains no process authority.
-            document["processes"] = {}
+        if isinstance(document, dict) and set(document) in {
+            frozenset(required - {"last_create_failure"}),
+            frozenset(required - {"processes", "last_create_failure"}),
+        }:
+            # Safe in-place registry evolution adds no execution authority and
+            # invents no historical diagnostic fact.
+            document.setdefault("processes", {})
+            document["last_create_failure"] = None
             _atomic_private(self.registry_path, document)
+        failure = document.get("last_create_failure") if isinstance(document, dict) else None
+        failure_valid = failure is None or (
+            isinstance(failure, dict)
+            and set(failure) == {
+                "cause", "exit_status_class", "accepted_before_exec", "generation",
+                "managed_candidate", "endpoint_precheck_passed", "image_precheck_passed",
+            }
+            and failure.get("cause") in CREATE_FAILURE_CAUSES
+            and failure.get("exit_status_class") in {"zero", "nonzero"}
+            and failure.get("accepted_before_exec") in CREATE_ACCEPTANCE_STATES
+            and isinstance(failure.get("generation"), int)
+            and 1 <= failure["generation"] <= 1_000_000_000
+            and failure.get("managed_candidate") in CREATE_CANDIDATE_STATES
+            and failure.get("endpoint_precheck_passed") is True
+            and failure.get("image_precheck_passed") is True
+        )
         if (
             not isinstance(document, dict)
             or set(document) != required
+            or not failure_valid
             or document.get("schema_version") != REGISTRY_SCHEMA
             or not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != os.geteuid()
@@ -1016,7 +1072,7 @@ class AgentEnvironment:
         checks = {
             "image": expected_image is not None and config.get("Image") == expected_image and raw.get("Image") == expected_image,
             "platform": raw.get("Platform") == "linux",
-            "user": config.get("User") == "1000:1000",
+            "user": config.get("User") == "0:0",
             "restart_policy": isinstance(host.get("RestartPolicy"), dict) and host["RestartPolicy"].get("Name") == "no",
             "resources": host.get("NanoCpus") == resource.cpus * 1_000_000_000
                 and host.get("Memory") == resource.memory_mib * 1024 * 1024
@@ -1069,14 +1125,34 @@ class AgentEnvironment:
         retained = {str(item["container_id"]) for item in registry["retained"] if isinstance(item, dict)}
         current = tuple(item for item in facts if item.container_id not in retained)
         selected = registry.get("selected_container_id")
+        if selected is None and registry.get("last_create_failure") is not None and current:
+            # A malformed/nonzero create response cannot be converted into
+            # implicit adoption during a later inspect. Operator/startup sees
+            # the preserved unavailable truth and no replacement is created.
+            failure = dict(registry["last_create_failure"])
+            failure["managed_candidate"] = "present"
+            registry["last_create_failure"] = failure
+            registry["state"] = "unavailable"
+            registry["reason_code"] = "container_create_failed"
+            _atomic_private(self.registry_path, registry)
+            raise AgentEnvironmentError("environment_creation_failed")
         if selected is not None:
             matches = tuple(item for item in current if item.container_id == selected)
             if len(matches) != 1:
                 raise AgentEnvironmentError("environment_selected_missing")
             facts_one = matches[0]
         elif not current:
-            registry["state"] = "absent"
-            registry["reason_code"] = None
+            if registry.get("last_create_failure") is not None:
+                # Inspect-only absence confirms that no managed candidate is
+                # present but must not erase the last failed provisioning truth.
+                failure = dict(registry["last_create_failure"])
+                failure["managed_candidate"] = "absent"
+                registry["last_create_failure"] = failure
+                registry["state"] = "unavailable"
+                registry["reason_code"] = "container_create_failed"
+            else:
+                registry["state"] = "absent"
+                registry["reason_code"] = None
             _atomic_private(self.registry_path, registry)
             return None
         else:
@@ -1154,16 +1230,18 @@ class AgentEnvironment:
         arguments.extend((
             "--restart", "no", "--cpus", str(resource.cpus), "--memory", f"{resource.memory_mib}m",
             "--pids-limit", str(resource.pids), "--shm-size", f"{resource.shm_mib}m",
-            "--user", "1000:1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--user", "0:0", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--network", "bridge" if network.enabled else "none",
-            "--mount", f"type=bind,src={self.workspace},dst=/workspace,rw",
-            "--mount", f"type=bind,src={self.cache},dst=/cache,rw",
+            # Docker's --mount grammar makes bind mounts writable by default;
+            # unlike -v, it admits readonly/ro but no explicit rw token.
+            "--mount", f"type=bind,src={self.workspace},dst=/workspace",
+            "--mount", f"type=bind,src={self.cache},dst=/cache",
         ))
         for mount in self._mounts:
-            mode = "readonly" if mount.mode == "read_only" else "rw"
-            arguments.extend((
-                "--mount", f"type=bind,src={mount.source},dst={mount.destination},{mode}",
-            ))
+            declaration = f"type=bind,src={mount.source},dst={mount.destination}"
+            if mount.mode == "read_only":
+                declaration += ",readonly"
+            arguments.extend(("--mount", declaration))
         arguments.extend((
             "--tmpfs", "/scratch:size=1024m,exec,nosuid,nodev",
             "--tmpfs", "/tmp:size=512m,exec,nosuid,nodev",
@@ -1200,6 +1278,33 @@ class AgentEnvironment:
         _atomic_private(self.registry_path, registry)
         return fresh
 
+    def _record_create_failure(
+        self, registry: dict[str, object], result: DockerResult, generation: int,
+    ) -> None:
+        try:
+            managed_candidate = "present" if self._candidate_ids(registry) else "absent"
+        except AgentEnvironmentError:
+            managed_candidate = "unknown"
+        registry["state"] = "unavailable"
+        registry["reason_code"] = "container_create_failed"
+        registry["last_create_failure"] = {
+            "cause": (
+                "docker_create_rejected" if result.returncode != 0
+                else "docker_create_response_invalid"
+            ),
+            "exit_status_class": "nonzero" if result.returncode != 0 else "zero",
+            "accepted_before_exec": (
+                "accepted" if result.accepted is True
+                else "rejected" if result.accepted is False
+                else "unknown"
+            ),
+            "generation": generation,
+            "managed_candidate": managed_candidate,
+            "endpoint_precheck_passed": True,
+            "image_precheck_passed": True,
+        }
+        _atomic_private(self.registry_path, registry)
+
     def _create(self, registry: dict[str, object]) -> ContainerFacts:
         self._prepare_bind_roots()
         generation = int(registry["generation"]) + 1
@@ -1228,9 +1333,7 @@ class AgentEnvironment:
                 environment_file.unlink(missing_ok=True)
         candidate = result.stdout.decode("ascii", "ignore").strip()
         if result.returncode != 0 or not CONTAINER_ID.fullmatch(candidate):
-            registry["state"] = "unavailable"
-            registry["reason_code"] = "container_create_failed"
-            _atomic_private(self.registry_path, registry)
+            self._record_create_failure(registry, result, generation)
             code = "additional_mount_creation_rejected" if self._mounts else "environment_creation_failed"
             raise AgentEnvironmentError(code)
         facts = self._inspect(candidate)
@@ -1244,6 +1347,7 @@ class AgentEnvironment:
         registry["selected_container_id"] = candidate
         registry["spec"] = self.spec
         registry["state"] = "running"
+        registry["last_create_failure"] = None
         _atomic_private(self.registry_path, registry)
         return started
 
@@ -1269,6 +1373,7 @@ class AgentEnvironment:
             result = self._docker(*self._create_arguments(registry, generation, environment_file=environment_file))
             candidate = result.stdout.decode("ascii", "ignore").strip()
             if result.returncode != 0 or not CONTAINER_ID.fullmatch(candidate):
+                self._record_create_failure(registry, result, generation)
                 code = "additional_mount_creation_rejected" if self._mounts else "environment_creation_failed"
                 raise AgentEnvironmentError(code)
             facts = self._inspect(candidate)
@@ -1888,7 +1993,9 @@ class AgentEnvironment:
                 self._endpoint(registry, pin=False)
                 facts = self._resolve(registry)
                 state = (
-                    "absent" if facts is None
+                    str(registry.get("state"))
+                    if facts is None and registry.get("state") == "unavailable"
+                    else "absent" if facts is None
                     else "resource_stopped" if registry.get("state") == "resource_stopped"
                     else self._state(facts.state)
                 )
@@ -1953,6 +2060,9 @@ class AgentEnvironment:
             "spec_prefix": self.spec[:12],
             "generation": registry.get("generation") if registry else 0,
             "reason_code": reason if isinstance(reason, str) else None,
+            "image_state": "prepared" if self._pinned_image is not None else "unavailable",
+            "container_provisioned": bool(selected),
+            "last_create_failure": registry.get("last_create_failure") if registry else None,
             "mismatch_fields": list(mismatch),
             "bounds": self.config.model.agent_environment.resources.model_dump(mode="json"),
             "network_egress_enabled": self.config.model.agent_environment.network.enabled,
@@ -2118,6 +2228,7 @@ class AgentEnvironment:
                 registry["spec"] = self.spec
                 registry["state"] = "running"
                 registry["reason_code"] = None
+                registry["last_create_failure"] = None
                 _atomic_private(self.registry_path, registry)
                 return self._status_document(registry, state="running", reason=None)
             original_spec = facts.spec
@@ -2144,5 +2255,6 @@ class AgentEnvironment:
             registry["selected_container_id"] = None
             registry["state"] = "absent"
             registry["reason_code"] = None
+            registry["last_create_failure"] = None
             _atomic_private(self.registry_path, registry)
             return self._status_document(registry, state="absent", reason=None)

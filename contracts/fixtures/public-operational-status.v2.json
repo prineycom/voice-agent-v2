@@ -87,6 +87,10 @@
     "agent_enabled": true,
     "agent_tools_admitted": true,
     "environment_count": 1,
+    "environment_state": "running",
+    "environment_image_state": "prepared",
+    "environment_container_provisioned": true,
+    "environment_reason_code": null,
     "provider_mode": "local",
     "automatic_fallback": false
   }

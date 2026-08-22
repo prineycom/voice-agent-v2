@@ -264,6 +264,10 @@ class AgentProfileDegradedVoiceRegressionTests(unittest.TestCase):
                         "agent_enabled": False,
                         "agent_tools_admitted": False,
                         "environment_count": 1,
+                        "environment_state": "disabled",
+                        "environment_image_state": "unavailable",
+                        "environment_container_provisioned": False,
+                        "environment_reason_code": None,
                         "provider_mode": "local",
                         "automatic_fallback": False,
                     }

@@ -5,7 +5,7 @@
   "context_files": [
     {
       "path": "Dockerfile",
-      "sha256": "692b71c3030e0990c926bbaf35a2d59e91e4014274a5c6456da2997a4d8c744e",
+      "sha256": "ee6e84db189f516d47112cf21020a3746c68c07d054f4b1778fea72a0534eb8e",
       "mode": "0644"
     },
     {
@@ -18,7 +18,7 @@
   "registry_required": false,
   "entrypoint": ["/sbin/tini", "--"],
   "command": ["/usr/local/lib/voice-agent/agent-helper", "init-container"],
-  "user": "1000:1000",
+  "user": "0:0",
   "labels": {
     "io.priney.voice-agent-v2.image-managed": "1",
     "io.priney.voice-agent-v2.image-schema": "1"
