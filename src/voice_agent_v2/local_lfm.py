@@ -67,6 +67,11 @@ _STRUCTURED_OUTPUT_REJECTION_CODES = frozenset({
     "local_lfm_http_422",
     "local_lfm_http_501",
 })
+_AGENT_DECISION_CONTENT_FAILURE_CODES = frozenset({
+    "selected_provider_output_out_of_bounds",
+    "local_lfm_incomplete_response",
+    "empty_selected_provider_response",
+})
 ALLOWED_PAYLOAD_FIELDS = frozenset({
     "model", "messages", "stream", "stream_options", "temperature", "top_p",
     "top_k", "repeat_penalty", "max_tokens", "reasoning_format", "reasoning_budget",
@@ -78,17 +83,40 @@ _AGENT_DECISION_SCHEMA_BYTES = (
 ).read_bytes()
 
 
-def _agent_decision_response_format() -> dict[str, object]:
-    """Return a fresh exact llama.cpp/OpenAI structured-output contract."""
+def _agent_decision_generation_schema() -> dict[str, object]:
+    """Clone V4 and remove only b10357's exact GBNF repetition tripwire."""
     schema = json.loads(_AGENT_DECISION_SCHEMA_BYTES)
     if not isinstance(schema, dict):
         raise RuntimeError("AgentDecision schema is not an object")
+    variants = schema.get("oneOf")
+    if not isinstance(variants, list):
+        raise RuntimeError("AgentDecision schema variants are unavailable")
+    final_variants = [
+        variant for variant in variants
+        if isinstance(variant, dict)
+        and isinstance(variant.get("properties"), dict)
+        and isinstance(variant["properties"].get("kind"), dict)
+        and variant["properties"]["kind"].get("const") == "final"
+    ]
+    if len(final_variants) != 1:
+        raise RuntimeError("AgentDecision final schema is unavailable")
+    answer = final_variants[0]["properties"].get("answer")
+    if not isinstance(answer, dict) or answer.get("maxLength") != 2_000:
+        raise RuntimeError("AgentDecision final answer bound changed")
+    # b10357 rejects the generated GBNF repetition exactly at its 2,000 threshold.
+    # AgentDecision.parse remains the unchanged nonempty/2,000-byte admission owner.
+    del answer["maxLength"]
+    return schema
+
+
+def _agent_decision_response_format() -> dict[str, object]:
+    """Return the strict llama.cpp structured-output generation contract."""
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "voice_agent_agent_decision_v4",
             "strict": True,
-            "schema": schema,
+            "schema": _agent_decision_generation_schema(),
         },
     }
 
@@ -999,6 +1027,8 @@ class LocalLFMProvider:
         except StageFailure as error:
             if error.code == "agent_decision_invalid":
                 raise
+            if error.code in _AGENT_DECISION_CONTENT_FAILURE_CODES:
+                raise StageFailure("llm_provider", "agent_decision_invalid") from error
             code = (
                 "agent_decision_structured_output_unsupported"
                 if error.code in _STRUCTURED_OUTPUT_REJECTION_CODES
