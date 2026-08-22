@@ -43,8 +43,8 @@ TEST_PREPARED_IMAGE = PreparedImageSelection(
 
 
 class DockerCLICustodyTests(unittest.TestCase):
-    UID = 1000
-    ENDPOINT = Path("/run/user/1000/docker.sock")
+    UID = os.geteuid()
+    ENDPOINT = Path(f"/run/user/{UID}/docker.sock")
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="private-docker-client-")
@@ -67,7 +67,7 @@ class DockerCLICustodyTests(unittest.TestCase):
         facts = {
             Path("/run"): self._metadata(stat.S_IFDIR | 0o755, uid=0, inode=1),
             Path("/run/user"): self._metadata(stat.S_IFDIR | 0o755, uid=0, inode=2),
-            Path("/run/user/1000"): self._metadata(stat.S_IFDIR | 0o700, uid=self.UID, inode=3),
+            self.ENDPOINT.parent: self._metadata(stat.S_IFDIR | 0o700, uid=self.UID, inode=3),
             self.ENDPOINT: self._metadata(stat.S_IFSOCK | 0o660, uid=self.UID, inode=4),
         }
         if path not in facts:
@@ -174,7 +174,7 @@ class DockerCLICustodyTests(unittest.TestCase):
         expected = {
             "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
             "HOME": str(self.private_home), "DOCKER_CONFIG": str(self.private_home),
-            "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+            "DOCKER_HOST": f"unix://{self.ENDPOINT}",
         }
         self.assertTrue(self.environments)
         self.assertTrue(all(environment == expected for environment in self.environments))
@@ -322,7 +322,7 @@ class DockerCLICustodyTests(unittest.TestCase):
             self.commands.count(("image", "inspect", TEST_PREPARED_IMAGE.image_id)), 1,
         )
         self.assertTrue(all(
-            environment["DOCKER_HOST"] == "unix:///run/user/1000/docker.sock"
+            environment["DOCKER_HOST"] == f"unix://{self.ENDPOINT}"
             for environment in self.environments
         ))
 
