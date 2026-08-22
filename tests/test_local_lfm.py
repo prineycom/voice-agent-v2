@@ -105,6 +105,24 @@ class CallbackGatedResponse:
         return b""
 
 
+def semantic_difference_paths(
+    left: object, right: object, path: tuple[object, ...] = (),
+) -> set[tuple[object, ...]]:
+    if isinstance(left, dict) and isinstance(right, dict):
+        result = {path + (key,) for key in set(left) ^ set(right)}
+        for key in set(left) & set(right):
+            result.update(semantic_difference_paths(left[key], right[key], path + (key,)))
+        return result
+    if isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            return {path + ("length",)}
+        result: set[tuple[object, ...]] = set()
+        for index, (left_item, right_item) in enumerate(zip(left, right, strict=True)):
+            result.update(semantic_difference_paths(left_item, right_item, path + (index,)))
+        return result
+    return set() if left == right else {path}
+
+
 def stream_event(*, reasoning: str = "", content: str = "", finish=None, model=MODEL_ALIAS):
     delta = {}
     if reasoning:
@@ -258,7 +276,7 @@ class LocalLFMProviderTests(unittest.TestCase):
         self.assertFalse(payload["cache_prompt"])
         self.assertNotIn("endpoint", json.dumps(payload))
 
-    def test_agent_decision_request_uses_exact_closed_schema_and_valid_documents_parse_unchanged(self) -> None:
+    def test_agent_decision_request_uses_one_field_generation_clone_and_valid_documents_parse_unchanged(self) -> None:
         operation = {
             "kind": "operation",
             "tool": "shell.exec",
@@ -289,6 +307,8 @@ class LocalLFMProviderTests(unittest.TestCase):
         schema = json.loads(
             (Path(__file__).resolve().parents[1] / "contracts/agent-decision.v4.schema.json").read_bytes()
         )
+        generation_schema = json.loads(json.dumps(schema))
+        del generation_schema["oneOf"][1]["properties"]["answer"]["maxLength"]
         for connection in created:
             payload = json.loads(connection.requests[0][2])
             self.assertEqual(set(payload), AGENT_DECISION_ALLOWED_PAYLOAD_FIELDS)
@@ -297,10 +317,25 @@ class LocalLFMProviderTests(unittest.TestCase):
                 "json_schema": {
                     "name": "voice_agent_agent_decision_v4",
                     "strict": True,
-                    "schema": schema,
+                    "schema": generation_schema,
                 },
             })
-        variants = schema["oneOf"]
+        generated = json.loads(
+            created[0].requests[0][2]
+        )["response_format"]["json_schema"]["schema"]
+        self.assertEqual(
+            semantic_difference_paths(schema, generated),
+            {("oneOf", 1, "properties", "answer", "maxLength")},
+        )
+        self.assertEqual(schema["oneOf"][1]["properties"]["answer"]["maxLength"], 2_000)
+        self.assertEqual(generated.get("$schema"), schema["$schema"])
+        self.assertEqual(generated.get("$id"), schema["$id"])
+        self.assertEqual(generated["oneOf"][0], schema["oneOf"][0])
+        self.assertEqual(
+            generated["oneOf"][1]["properties"]["citations"],
+            schema["oneOf"][1]["properties"]["citations"],
+        )
+        variants = generated["oneOf"]
         self.assertEqual({variant["properties"]["kind"]["const"] for variant in variants}, {"operation", "final"})
         self.assertTrue(all(variant["additionalProperties"] is False for variant in variants))
         self.assertEqual(tuple(variants[0]["properties"]["tool"]["enum"]), AGENT_TOOLS)
@@ -341,6 +376,65 @@ class LocalLFMProviderTests(unittest.TestCase):
             "reason_code": None,
         })
         self.assertEqual(len(created), 3)
+
+    def test_empty_and_incomplete_decision_streams_are_turn_local_and_ready(self) -> None:
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        responses = (
+            StubResponse([stream_event(finish="stop")]),
+            StubResponse([
+                stream_event(content='{"kind":"final","answer":"partial"}'),
+                stream_event(finish="length"),
+            ]),
+        )
+        factory, _created = self.factory([health, *responses])
+        provider = LocalLFMProvider(connection_factory=factory)
+        provider.readiness()
+        ready_health = provider.runtime_health
+
+        for request in ("empty-decision", "incomplete-decision"):
+            with self.subTest(request=request), self.assertRaises(StageFailure) as raised:
+                provider.agent_decision(request=request)
+            self.assertEqual(raised.exception.code, "agent_decision_invalid")
+            self.assertEqual(provider.runtime_health, ready_health)
+
+    def test_semantically_invalid_agent_decisions_remain_turn_local_and_ready(self) -> None:
+        cases = (
+            ("empty-answer", {"kind": "final", "answer": ""}, "agent_decision_invalid"),
+            ("oversized-answer", {"kind": "final", "answer": "я" * 1_001}, "agent_decision_invalid"),
+            ("unknown-field", {"kind": "final", "answer": "ok", "extra": True}, "agent_decision_invalid"),
+            ("unknown-tool", {"kind": "operation", "tool": "unknown", "arguments": {}}, "agent_decision_invalid"),
+            (
+                "invalid-citation",
+                {
+                    "kind": "final",
+                    "answer": "ok",
+                    "citations": [{"receipt_id": "bad", "claims": ["ok"], "spans": ["ok"]}],
+                },
+                "research_citation_invalid",
+            ),
+        )
+        health = StubResponse([])
+        health._body = b'{"status":"ok"}'
+        health.read = lambda limit=None: health._body
+        responses = [health, *(
+            StubResponse([
+                stream_event(content=json.dumps(document, ensure_ascii=False)),
+                stream_event(finish="stop"),
+            ])
+            for _name, document, _code in cases
+        )]
+        factory, _created = self.factory(responses)
+        provider = LocalLFMProvider(connection_factory=factory)
+        provider.readiness()
+        ready_health = provider.runtime_health
+
+        for name, _document, code in cases:
+            with self.subTest(name=name), self.assertRaises(StageFailure) as raised:
+                AgentDecision.parse(provider.agent_decision(request=f"case-{name}"))
+            self.assertEqual(raised.exception.code, code)
+            self.assertEqual(provider.runtime_health, ready_health)
 
     def test_agent_decision_identity_and_protocol_failures_remain_global(self) -> None:
         cases = (

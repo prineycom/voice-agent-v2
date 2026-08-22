@@ -1272,6 +1272,116 @@ class AgentRunTests(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_invalid_decision_matrix_is_turn_local_before_environment_tool_or_tts(self) -> None:
+        cases = (
+            ("malformed", "not-a-document", "agent_decision_invalid"),
+            ("empty-answer", {"kind": "final", "answer": ""}, "agent_decision_invalid"),
+            ("oversized-answer", {"kind": "final", "answer": "я" * 1_001}, "agent_decision_invalid"),
+            ("unknown-field", {"kind": "final", "answer": "ok", "private": "PRIVATE_MATRIX_7391"}, "agent_decision_invalid"),
+            ("unknown-tool", {"kind": "operation", "tool": "unknown", "arguments": {}}, "agent_decision_invalid"),
+            (
+                "invalid-citation",
+                {
+                    "kind": "final",
+                    "answer": "ok",
+                    "citations": [{"receipt_id": "bad", "claims": ["ok"], "spans": ["ok"]}],
+                },
+                "research_citation_invalid",
+            ),
+        )
+
+        class InvalidModel(FakeModel):
+            def __init__(self, decision: object) -> None:
+                self.decision = decision
+
+            def decide(self, request: str, cancellation: CancellationToken):
+                json.loads(request)
+                return self.decision
+
+        class AgentVoiceProvider:
+            version = LLM_VERSION
+            provider_mode = "local"
+            provider_identity = PROVIDER_IDENTITY
+            supports_visible_handoff = True
+            visible_handoff_is_cumulative = True
+
+            def __init__(self, run: AgentRun) -> None:
+                self.run = run
+
+            def respond_with_handoff(
+                self, *, session_id, stream_epoch, turn_id, request_id,
+                turn_generation, transcript, on_sentence,
+                on_visible_sentence, cancellation,
+            ):
+                result = self.run.run(
+                    transcript=transcript,
+                    identity=AgentRealtimeIdentity(
+                        session_id, stream_epoch, turn_id, request_id,
+                        turn_generation,
+                    ),
+                    cancellation=cancellation,
+                )
+                on_visible_sentence(result.answer)
+                on_sentence(result.answer)
+                return result.answer
+
+            def cancel_request(self) -> None:
+                self.run.cancel()
+
+        class StaticSTT:
+            version = STT_VERSION
+
+            def transcribe(self, **_arguments) -> str:
+                return "harmless request"
+
+        class CountingTTS:
+            version = TTS_VERSION
+            output_format = AudioFormat()
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream_synthesize(self, **_arguments):
+                self.calls += 1
+                yield b"\0\0"
+
+        for name, decision, code in cases:
+            with self.subTest(name=name):
+                fixture = Fixture()
+                tts = CountingTTS()
+                run = AgentRun(fixture.manager, model=InvalidModel(decision))
+                controller = RealTurnController(StaticSTT(), AgentVoiceProvider(run), tts)
+                try:
+                    with (
+                        patch.object(
+                            fixture.manager, "ensure_running",
+                            wraps=fixture.manager.ensure_running,
+                        ) as ensure_running,
+                        patch.object(
+                            fixture.manager, "execute",
+                            wraps=fixture.manager.execute,
+                        ) as execute,
+                    ):
+                        result = controller.run_turn(
+                            session_id=f"session-{name}",
+                            turn_id=f"turn-{name}",
+                            request_id=f"request-{name}",
+                            input_pcm=b"\0\0" * 160,
+                        )
+                    self.assertEqual(result.terminal_event["type"], "turn.failed")
+                    self.assertEqual(result.terminal_event["payload"], {
+                        "outcome": "failed",
+                        "stage": "llm_provider",
+                        "code": code,
+                    })
+                    self.assertNotIn("PRIVATE_MATRIX_7391", json.dumps(result.events))
+                    ensure_running.assert_not_called()
+                    execute.assert_not_called()
+                    self.assertEqual(tts.calls, 0)
+                    self.assertEqual(fixture.docker.containers, {})
+                finally:
+                    fixture.close()
+
     def test_cancellation_drops_noncooperative_late_model_output(self) -> None:
         fixture = Fixture()
         try:
