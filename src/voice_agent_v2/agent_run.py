@@ -299,7 +299,10 @@ class AgentRun:
                     )
                 assert decision.tool is not None and decision.arguments is not None
                 call_id = uuid.uuid4().hex
-                facts = self.environment.ensure_running()
+                try:
+                    facts = self.environment.ensure_running()
+                except AgentEnvironmentError as error:
+                    raise StageFailure("agent_environment", error.code) from None
                 with self._lock:
                     if (
                         self._active_identity != identity
