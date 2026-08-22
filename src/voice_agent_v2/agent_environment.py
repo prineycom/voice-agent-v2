@@ -144,6 +144,127 @@ def _rootless_daemon_id(output: bytes) -> str:
     return engine_id
 
 
+def _ensure_product_private_directory(path: Path, *, create: bool) -> None:
+    """Own one exact private child without following or chmodding another object."""
+
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise AgentEnvironmentError("environment_state_unsafe")
+    parent = path.parent
+    try:
+        parent_path = os.lstat(parent)
+    except OSError as error:
+        raise AgentEnvironmentError("environment_state_unsafe") from error
+    if (
+        not stat.S_ISDIR(parent_path.st_mode)
+        or parent_path.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_path.st_mode) != 0o700
+    ):
+        raise AgentEnvironmentError("environment_state_unsafe")
+    parent_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        parent_descriptor = os.open(parent, parent_flags)
+    except OSError as error:
+        raise AgentEnvironmentError("environment_state_unsafe") from error
+    changed = False
+    try:
+        parent_open = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent_open.st_mode)
+            or (parent_open.st_dev, parent_open.st_ino, parent_open.st_uid)
+            != (parent_path.st_dev, parent_path.st_ino, parent_path.st_uid)
+            or stat.S_IMODE(parent_open.st_mode) != 0o700
+        ):
+            raise AgentEnvironmentError("environment_state_unsafe")
+        try:
+            child_path = os.lstat(path)
+            created = False
+        except FileNotFoundError:
+            if not create:
+                raise AgentEnvironmentError("environment_absent") from None
+            try:
+                os.mkdir(path.name, mode=0o700, dir_fd=parent_descriptor)
+                created = True
+                changed = True
+            except FileExistsError:
+                created = False
+            except OSError as error:
+                raise AgentEnvironmentError("environment_state_unsafe") from error
+            try:
+                child_path = os.stat(
+                    path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+                )
+            except OSError as error:
+                raise AgentEnvironmentError("environment_state_unsafe") from error
+        except OSError as error:
+            raise AgentEnvironmentError("environment_state_unsafe") from error
+        child_mode = stat.S_IMODE(child_path.st_mode)
+        if (
+            not stat.S_ISDIR(child_path.st_mode)
+            or child_path.st_uid != os.geteuid()
+            or child_path.st_dev != parent_open.st_dev
+            or (
+                not created
+                and child_mode != 0o700
+                and (
+                    child_mode & 0o700 != 0o700
+                    or child_mode & 0o022
+                    or child_mode & ~0o777
+                )
+            )
+        ):
+            raise AgentEnvironmentError("environment_state_unsafe")
+        child_flags = (
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            child_descriptor = os.open(
+                path.name, child_flags, dir_fd=parent_descriptor,
+            )
+        except OSError as error:
+            raise AgentEnvironmentError("environment_state_unsafe") from error
+        try:
+            child_open = os.fstat(child_descriptor)
+            if (
+                not stat.S_ISDIR(child_open.st_mode)
+                or (
+                    child_open.st_dev, child_open.st_ino, child_open.st_uid,
+                    child_open.st_nlink,
+                ) != (
+                    child_path.st_dev, child_path.st_ino, child_path.st_uid,
+                    child_path.st_nlink,
+                )
+            ):
+                raise AgentEnvironmentError("environment_state_unsafe")
+            if created or child_mode != 0o700:
+                os.fchmod(child_descriptor, 0o700)
+                changed = True
+            child_final = os.fstat(child_descriptor)
+            if (
+                (child_final.st_dev, child_final.st_ino, child_final.st_uid)
+                != (child_open.st_dev, child_open.st_ino, child_open.st_uid)
+                or not stat.S_ISDIR(child_final.st_mode)
+                or stat.S_IMODE(child_final.st_mode) != 0o700
+            ):
+                raise AgentEnvironmentError("environment_state_unsafe")
+            if changed:
+                os.fsync(child_descriptor)
+        except OSError as error:
+            raise AgentEnvironmentError("environment_state_unsafe") from error
+        finally:
+            os.close(child_descriptor)
+        if changed:
+            try:
+                os.fsync(parent_descriptor)
+            except OSError as error:
+                raise AgentEnvironmentError("environment_state_unsafe") from error
+    finally:
+        os.close(parent_descriptor)
+
+
 class DockerCLI:
     """Fixed current-user rootless Docker transport with an empty private client home."""
 
@@ -241,8 +362,7 @@ class DockerCLI:
     ) -> DockerResult:
         if not arguments or any(not isinstance(value, str) or "\0" in value for value in arguments):
             raise AgentEnvironmentError("docker_request_invalid")
-        self.private_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.private_home, 0o700)
+        _ensure_product_private_directory(self.private_home, create=True)
         before = self._endpoint_identity()
         environment = self._environment()
         self._validate_daemon(environment, timeout)
@@ -383,8 +503,7 @@ def _canonical(value: object) -> bytes:
 
 
 def _atomic_private(path: Path, value: Mapping[str, object]) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    _ensure_product_private_directory(path.parent, create=False)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
@@ -715,27 +834,10 @@ class AgentEnvironment:
         }
         return base64.b32encode(hashlib.sha256(_canonical(document)).digest()).decode("ascii").lower().rstrip("=")
 
-    @staticmethod
-    def _verify_private_directory(path: Path) -> None:
-        try:
-            metadata = path.lstat()
-        except OSError as error:
-            raise AgentEnvironmentError("environment_state_unsafe") from error
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-        ):
-            raise AgentEnvironmentError("environment_state_unsafe")
-
     @contextmanager
     def _locked(self, *, create: bool) -> Iterator[None]:
         with self._thread_lock:
-            if create and not self.state_root.exists():
-                self.state_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-            if not self.state_root.exists():
-                raise AgentEnvironmentError("environment_absent")
-            self._verify_private_directory(self.state_root)
+            _ensure_product_private_directory(self.state_root, create=create)
             flags = os.O_RDWR | (os.O_CREAT if create else 0) | getattr(os, "O_CLOEXEC", 0)
             try:
                 descriptor = os.open(self.lock_path, flags, 0o600)
@@ -1219,6 +1321,7 @@ class AgentEnvironment:
                 environment_file.unlink(missing_ok=True)
 
     def ensure_running(self) -> ContainerFacts:
+        _ensure_product_private_directory(self.state_root, create=True)
         if self._credential_initialization_error is not None:
             raise AgentEnvironmentError(self._credential_initialization_error)
         self._pin_prepared_image()
@@ -1765,6 +1868,10 @@ class AgentEnvironment:
             return result.returncode == 0 and result.stdout == b'{"outcome":"signalled"}'
 
     def status(self) -> dict[str, object]:
+        try:
+            _ensure_product_private_directory(self.state_root, create=True)
+        except AgentEnvironmentError as error:
+            return self._status_document(None, state="unavailable", reason=error.code)
         if self._credential_initialization_error is not None:
             return self._status_document(
                 None, state="unavailable", reason=self._credential_initialization_error

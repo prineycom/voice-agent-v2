@@ -441,9 +441,10 @@ class StandDevTests(unittest.TestCase):
     def test_stop_registered_container_rechecks_identity_and_never_removes_rootfs_or_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            private = root / "agent-environment/private"
-            private.mkdir(parents=True, mode=0o700)
-            os.chmod(private, 0o700)
+            installation_root = root / "agent-environment"
+            installation_root.mkdir(mode=0o700)
+            private = installation_root / "private"
+            private.mkdir(mode=0o700)
             installation = "12345678-1234-5678-1234-567812345678"
             owner = owner_key(installation)
             container_id = "a" * 64

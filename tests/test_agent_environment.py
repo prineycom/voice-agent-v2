@@ -49,6 +49,7 @@ class DockerCLICustodyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="private-docker-client-")
         self.private_home = Path(self.temporary.name) / "private/client"
+        self.private_home.parent.mkdir(mode=0o700)
         self.commands: list[tuple[str, ...]] = []
         self.environments: list[dict[str, str]] = []
         self.engine_id = "rootless-engine-a"
@@ -115,6 +116,41 @@ class DockerCLICustodyTests(unittest.TestCase):
         client.binary = "/usr/bin/docker"
         return client
 
+    def test_absent_product_root_and_nested_client_are_private_under_permissive_umask(self) -> None:
+        root = Path(self.temporary.name) / "environment"
+        root.mkdir(mode=0o700)
+        manager = AgentEnvironment(
+            parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
+            state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
+            prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+        previous_umask = os.umask(0)
+        try:
+            with (
+                patch("voice_agent_v2.agent_environment.Path.lstat", autospec=True, side_effect=self._lstat),
+                patch("voice_agent_v2.agent_environment.subprocess.run", side_effect=self._subprocess),
+            ):
+                document = manager.status()
+        finally:
+            os.umask(previous_umask)
+        self.assertEqual(document["state"], "absent")
+        self.assertIsNone(document["reason_code"])
+        self.assertEqual(stat.S_IMODE(manager.state_root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((manager.state_root / "docker-client").stat().st_mode), 0o700)
+        self.assertEqual(list((manager.state_root / "docker-client").iterdir()), [])
+        self.assertFalse(manager.registry_path.exists())
+        self.assertFalse(any(command[:2] == ("container", "create") for command in self.commands))
+
+        docker = FakeDocker()
+        manager.runner = docker
+        facts = manager.ensure_running()
+        self.assertEqual(facts.state, "running")
+        self.assertTrue(manager.registry_path.is_file())
+        self.assertEqual(len(docker.containers), 1)
+        self.assertEqual(stat.S_IMODE(manager.state_root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((manager.state_root / "docker-client").stat().st_mode), 0o700)
+
     def test_explicit_current_user_rootless_endpoint_ignores_ambient_context_and_credentials(self) -> None:
         client = self._client()
         ambient = {
@@ -147,6 +183,7 @@ class DockerCLICustodyTests(unittest.TestCase):
 
     def test_prepared_image_inspect_reaches_pinned_daemon_and_status_progresses_to_absent(self) -> None:
         root = Path(self.temporary.name) / "environment"
+        root.mkdir(mode=0o700)
         manager = AgentEnvironment(
             parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
             state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
@@ -167,6 +204,7 @@ class DockerCLICustodyTests(unittest.TestCase):
 
     def test_status_distinguishes_actual_image_absence_from_endpoint_failure(self) -> None:
         root = Path(self.temporary.name) / "missing-image"
+        root.mkdir(mode=0o700)
         manager = AgentEnvironment(
             parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
             state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
@@ -219,6 +257,7 @@ class DockerCLICustodyTests(unittest.TestCase):
 
         self.commands.clear(); self.environments.clear()
         root = Path(self.temporary.name) / "missing-status"
+        root.mkdir(mode=0o700)
         manager = AgentEnvironment(
             parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
             state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
@@ -585,6 +624,110 @@ class Fixture:
         self.temp.cleanup()
 
 
+class AgentEnvironmentPrivateRootCustodyTests(unittest.TestCase):
+    def _manager(self, root: Path, docker: FakeDocker) -> AgentEnvironment:
+        return AgentEnvironment(
+            parse_agent_config_v2(DEFAULT_CONFIG_BYTES),
+            state_root=root / "private", workspace=root / "workspace", cache=root / "cache",
+            runner=docker, prepared_image=TEST_PREPARED_IMAGE,
+            disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
+        )
+
+    def test_existing_safe_broad_root_is_hardened_before_status_and_first_use(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-environment-private-root-") as temporary:
+            root = Path(temporary)
+            state_root = root / "private"
+            state_root.mkdir(mode=0o755)
+            state_root.chmod(0o755)
+            docker = FakeDocker()
+            manager = self._manager(root, docker)
+
+            document = manager.status()
+
+            self.assertEqual(document["state"], "absent")
+            self.assertIsNone(document["reason_code"])
+            self.assertEqual(stat.S_IMODE(state_root.stat().st_mode), 0o700)
+            self.assertFalse(manager.registry_path.exists())
+            self.assertEqual(docker.containers, {})
+            self.assertFalse(any(
+                command[:2] == ("container", "create") for command in docker.commands
+            ))
+
+            facts = manager.ensure_running()
+
+            self.assertEqual(facts.state, "running")
+            self.assertTrue(manager.registry_path.is_file())
+            self.assertEqual(len(docker.containers), 1)
+            self.assertEqual(
+                sum(command[:2] == ("container", "create") for command in docker.commands),
+                1,
+            )
+
+    def test_unsafe_root_types_and_custody_fail_before_docker_or_registry_mutation(self) -> None:
+        cases = ("symlink", "non-directory", "foreign-owner", "cross-device", "identity-drift", "writable")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                prefix=f"agent-environment-private-root-{case}-"
+            ) as temporary:
+                root = Path(temporary)
+                state_root = root / "private"
+                target: Path | None = None
+                if case == "symlink":
+                    target = root / "target"
+                    target.mkdir(mode=0o755)
+                    target.chmod(0o755)
+                    state_root.symlink_to(target, target_is_directory=True)
+                elif case == "non-directory":
+                    state_root.write_bytes(b"not a directory")
+                    state_root.chmod(0o600)
+                else:
+                    state_root.mkdir(mode=0o700)
+                    if case == "writable":
+                        state_root.chmod(0o777)
+                docker = FakeDocker()
+                manager = self._manager(root, docker)
+                real_lstat = os.lstat
+                real_fstat = os.fstat
+                fstat_calls = 0
+
+                def lstat(candidate, *arguments, **options):
+                    fact = real_lstat(candidate, *arguments, **options)
+                    if os.fspath(candidate) != os.fspath(state_root):
+                        return fact
+                    values = list(fact)
+                    if case == "foreign-owner":
+                        values[4] = fact.st_uid + 1
+                    elif case == "cross-device":
+                        values[2] = fact.st_dev + 1
+                    return os.stat_result(values)
+
+                def fstat(descriptor):
+                    nonlocal fstat_calls
+                    fact = real_fstat(descriptor)
+                    fstat_calls += 1
+                    if case == "identity-drift" and fstat_calls == 2:
+                        values = list(fact)
+                        values[1] = fact.st_ino + 1
+                        return os.stat_result(values)
+                    return fact
+
+                with (
+                    patch("voice_agent_v2.agent_environment.os.lstat", side_effect=lstat),
+                    patch("voice_agent_v2.agent_environment.os.fstat", side_effect=fstat),
+                    patch("voice_agent_v2.agent_environment.os.fchmod", wraps=os.fchmod) as fchmod,
+                ):
+                    document = manager.status()
+
+                self.assertEqual(document["state"], "unavailable")
+                self.assertEqual(document["reason_code"], "environment_state_unsafe")
+                self.assertFalse(manager.registry_path.exists())
+                self.assertEqual(docker.commands, [])
+                self.assertEqual(docker.containers, {})
+                fchmod.assert_not_called()
+                if target is not None:
+                    self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
+
 class ImmutableReleasePreparedImageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="immutable-runtime-image-")
@@ -635,11 +778,13 @@ class ImmutableReleasePreparedImageTests(unittest.TestCase):
         return source
 
     def _manager(self, name: str, runner: FakeDocker) -> AgentEnvironment:
+        runtime_root = self.root / f"runtime-{name}"
+        runtime_root.mkdir(mode=0o700, exist_ok=True)
         return AgentEnvironment(
             self.config,
-            state_root=self.root / f"runtime-{name}/private",
-            workspace=self.root / f"runtime-{name}/workspace",
-            cache=self.root / f"runtime-{name}/cache",
+            state_root=runtime_root / "private",
+            workspace=runtime_root / "workspace",
+            cache=runtime_root / "cache",
             runner=runner,
             image_state_root=self.image_state,
             disk_usage=lambda _path: Disk(100 << 30, 1, 99 << 30),
@@ -655,7 +800,9 @@ class ImmutableReleasePreparedImageTests(unittest.TestCase):
             document = manager.status()
         self.assertEqual(document["state"], "unavailable")
         self.assertEqual(document["reason_code"], reason)
-        self.assertFalse(manager.state_root.exists())
+        self.assertTrue(manager.state_root.is_dir())
+        self.assertEqual(stat.S_IMODE(manager.state_root.stat().st_mode), 0o700)
+        self.assertFalse(manager.registry_path.exists())
         self.assertEqual(runner.containers, {})
         self.assertFalse(any(
             command[:2] in {
@@ -1269,6 +1416,90 @@ class AgentRunTests(unittest.TestCase):
             execute.assert_not_called()
             self.assertEqual(tts.calls, 0)
             self.assertEqual(fixture.docker.containers, {})
+        finally:
+            fixture.close()
+
+    def test_first_use_custody_failure_is_typed_without_helper_tts_or_readiness_mutation(self) -> None:
+        fixture = Fixture()
+        model = FakeModel()
+        model.runtime_health = {"status": "ready", "failure_count": 0}
+        readiness_before = dict(model.runtime_health)
+        run = AgentRun(fixture.manager, model=model)
+
+        class AgentVoiceProvider:
+            version = LLM_VERSION
+            provider_mode = "local"
+            provider_identity = PROVIDER_IDENTITY
+            supports_visible_handoff = True
+            visible_handoff_is_cumulative = True
+
+            def respond_with_handoff(
+                self, *, session_id, stream_epoch, turn_id, request_id,
+                turn_generation, transcript, on_sentence,
+                on_visible_sentence, cancellation,
+            ):
+                result = run.run(
+                    transcript=transcript,
+                    identity=AgentRealtimeIdentity(
+                        session_id, stream_epoch, turn_id, request_id,
+                        turn_generation,
+                    ),
+                    cancellation=cancellation,
+                )
+                on_visible_sentence(result.answer)
+                on_sentence(result.answer)
+                return result.answer
+
+            def cancel_request(self) -> None:
+                run.cancel()
+
+        class StaticSTT:
+            version = STT_VERSION
+
+            def transcribe(self, **_arguments) -> str:
+                return "harmless operation"
+
+        class CountingTTS:
+            version = TTS_VERSION
+            output_format = AudioFormat()
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream_synthesize(self, **_arguments):
+                self.calls += 1
+                yield b"\0\0"
+
+        tts = CountingTTS()
+        controller = RealTurnController(StaticSTT(), AgentVoiceProvider(), tts)
+        try:
+            with (
+                patch.object(
+                    fixture.manager, "ensure_running",
+                    side_effect=AgentEnvironmentError("environment_state_unsafe"),
+                ) as ensure_running,
+                patch.object(
+                    fixture.manager, "execute", wraps=fixture.manager.execute,
+                ) as execute,
+            ):
+                result = controller.run_turn(
+                    session_id="session-private-root",
+                    turn_id="turn-private-root",
+                    request_id="request-private-root",
+                    input_pcm=b"\0\0" * 160,
+                )
+            self.assertEqual(result.terminal_event["type"], "turn.failed")
+            self.assertEqual(result.terminal_event["payload"], {
+                "outcome": "failed",
+                "stage": "agent_environment",
+                "code": "environment_state_unsafe",
+            })
+            ensure_running.assert_called_once()
+            execute.assert_not_called()
+            self.assertEqual(tts.calls, 0)
+            self.assertEqual(fixture.docker.commands, [])
+            self.assertEqual(fixture.docker.containers, {})
+            self.assertEqual(model.runtime_health, readiness_before)
         finally:
             fixture.close()
 
