@@ -91,7 +91,6 @@
     "environment_image_state": "prepared",
     "environment_container_provisioned": true,
     "environment_reason_code": null,
-    "environment_failure_cause": null,
     "provider_mode": "local",
     "automatic_fallback": false
   }

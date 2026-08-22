@@ -40,7 +40,6 @@ class AgentRuntime:
         image_state = "unavailable"
         provisioned = False
         environment_reason: str | None = None
-        failure_cause: str | None = None
         if enabled and agent_environment is not None:
             raw_state = agent_environment.get("state")
             environment_state = raw_state if isinstance(raw_state, str) else "unavailable"
@@ -56,7 +55,8 @@ class AgentRuntime:
             if isinstance(failure, dict) and failure.get("cause") in {
                 "docker_create_rejected", "docker_create_response_invalid",
             }:
-                failure_cause = str(failure["cause"])
+                # The closed subclass remains private AgentEnvironment status;
+                # the gateway publishes only the stable public reason.
                 environment_reason = "environment_creation_failed"
         admitted = enabled and (
             agent_environment is None or environment_state == "running"
@@ -74,7 +74,6 @@ class AgentRuntime:
             "environment_image_state": image_state,
             "environment_container_provisioned": provisioned,
             "environment_reason_code": environment_reason,
-            "environment_failure_cause": failure_cause,
             "provider_mode": "local",
             "automatic_fallback": False,
         }

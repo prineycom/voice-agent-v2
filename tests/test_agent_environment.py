@@ -1009,12 +1009,12 @@ class AgentEnvironmentTests(unittest.TestCase):
                     command[:2] in {("container", "start"), ("container", "rm")}
                     for command in docker.commands
                 ))
-                rendered = json.dumps(second)
+                rendered_failure = json.dumps(failure)
                 for forbidden in (
                     "private path", "credential", "endpoint identifier",
                     "malformed private identifier", "private response",
                 ):
-                    self.assertNotIn(forbidden, rendered)
+                    self.assertNotIn(forbidden, rendered_failure)
 
     def test_provider_readiness_preprovisions_once_and_gates_failure_without_fallback(self) -> None:
         class Selected:
@@ -1070,7 +1070,7 @@ class AgentEnvironmentTests(unittest.TestCase):
             self.assertFalse(runtime["agent_tools_admitted"])
             self.assertEqual(runtime["environment_state"], "unavailable")
             self.assertEqual(runtime["environment_reason_code"], "environment_creation_failed")
-            self.assertEqual(runtime["environment_failure_cause"], "docker_create_rejected")
+            self.assertNotIn("environment_failure_cause", runtime)
 
     def test_canonical_mount_grammar_uses_default_writable_and_explicit_readonly_only(self) -> None:
         manager = self.fixture.manager

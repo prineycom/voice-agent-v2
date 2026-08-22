@@ -279,7 +279,6 @@
         "environment_image_state",
         "environment_container_provisioned",
         "environment_reason_code",
-        "environment_failure_cause",
         "provider_mode",
         "automatic_fallback"
       ],
@@ -328,9 +327,6 @@
         },
         "environment_reason_code": {
           "oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}]
-        },
-        "environment_failure_cause": {
-          "oneOf": [{"type": "null"}, {"enum": ["docker_create_rejected", "docker_create_response_invalid"]}]
         },
         "provider_mode": {
           "const": "local"
