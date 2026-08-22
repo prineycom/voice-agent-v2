@@ -51,6 +51,11 @@ _SAFE_FIELD_KEYS_WITH_RESERVED_WORDS = frozenset({
 })
 _SAFE_STRING_FIELD_KEYS = frozenset({
     "backend",
+    "action_outcome",
+    "speech_outcome",
+    "worker_error_class",
+    "logical_slot_class",
+    "admission_version",
     "capture_kind",
     "component",
     "contract_version",

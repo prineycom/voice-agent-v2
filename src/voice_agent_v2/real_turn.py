@@ -129,6 +129,27 @@ class RealTurnController:
         tts_chunks = 0
         token = cancellation or CancellationToken()
 
+        def action_provenance() -> dict[str, object]:
+            owner = getattr(self.llm, "turn_provenance", None)
+            if owner is None:
+                return {}
+            value = owner(
+                session_id, stream_epoch, turn_id, turn_generation, request_id
+            )
+            operation_count = value.get("operation_count") if isinstance(value, dict) else None
+            action_outcome = value.get("action_outcome") if isinstance(value, dict) else None
+            if (
+                type(operation_count) is not int
+                or not 0 <= operation_count <= 24
+                or action_outcome not in {"no_operation", "completed", "failed"}
+                or (operation_count == 0) != (action_outcome == "no_operation")
+            ):
+                raise StageFailure("llm_provider", "agent_provenance_invalid")
+            return {
+                "operation_count": operation_count,
+                "action_outcome": action_outcome,
+            }
+
         def trace(stage: str, event: str, **fields: object) -> None:
             if trace_observer is not None:
                 trace_observer(stage, event, fields)
@@ -168,8 +189,14 @@ class RealTurnController:
                 trace("controller", "event", event_type=event_type, terminal=terminal)
 
         def fail(error: StageFailure) -> TraceResult:
+            provenance = action_provenance()
+            if provenance:
+                provenance["speech_outcome"] = (
+                    "failed" if error.stage == "tts" else "not_started"
+                )
             payload: dict[str, object] = {
                 "outcome": "failed", "stage": error.stage, "code": error.code,
+                **provenance,
             }
             input_retained = getattr(error, "input_retained", None)
             if input_retained is not None:
@@ -196,8 +223,12 @@ class RealTurnController:
                         pass
 
         def interrupted() -> TraceResult:
+            provenance = action_provenance()
+            if provenance:
+                provenance["speech_outcome"] = "interrupted"
             emit("turn.interrupted", {
                 "outcome": "interrupted", "audio_chunks_emitted": tts_chunks,
+                **provenance,
             }, True)
             return TraceResult(tuple(events), input_pcm, b"")
 
@@ -272,6 +303,7 @@ class RealTurnController:
                 "response": visible_text,
                 "provider_mode": self.llm.provider_mode,
                 "provider_identity": self.llm.provider_identity,
+                **action_provenance(),
             })
             trace("llm_provider", "visible_text", visible_chars=visible_chars)
 
@@ -477,10 +509,12 @@ class RealTurnController:
                 "response": response,
                 "provider_mode": self.llm.provider_mode,
                 "provider_identity": self.llm.provider_identity,
+                **action_provenance(),
             })
         emit("llm.final", {
             "response": response, "provider_mode": self.llm.provider_mode,
             "provider_identity": self.llm.provider_identity,
+            **action_provenance(),
         })
         trace("llm_provider", "completed", visible_chars=len(response))
         if tts_error is not None:
@@ -493,9 +527,13 @@ class RealTurnController:
             cancel_adapters(self.llm, self.tts)
             return interrupted()
         output_pcm = b"".join(output_chunks)
+        provenance = action_provenance()
+        if provenance:
+            provenance["speech_outcome"] = "delivered"
         emit("turn.completed", {
             "outcome": "completed", "audio_chunks_emitted": tts_chunks,
             "output_bytes": tts_bytes,
             "audio_format": self.tts.output_format.as_dict(),
+            **provenance,
         }, True)
         return TraceResult(tuple(events), input_pcm, output_pcm)

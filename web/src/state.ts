@@ -15,6 +15,8 @@ export type UserVisibleState = 'available' | 'unavailable' | 'degraded' | 'retry
 export type MicrophoneLifecycle = 'disconnected' | 'requesting-permission' | 'publishing' | 'live' | 'muted' | 'error'
 export type TurnPhase = 'idle' | 'listening' | 'thinking' | 'speaking'
 export type TurnOutcome = 'completed' | 'interrupted' | 'failed'
+export type ActionOutcome = 'no_operation' | 'completed' | 'failed'
+export type SpeechOutcome = 'not_started' | 'delivered' | 'failed' | 'interrupted'
 export type HealthComponentName = 'livekit' | 'controller' | 'stt' | 'selected_llm' | 'tts'
 export type LivenessState = 'alive' | 'dead' | 'unknown'
 export type ReadinessState = 'ready' | 'unready' | 'degraded' | 'unknown'
@@ -122,6 +124,9 @@ export interface TurnHistoryItem {
   assistant: string
   outcome: TurnOutcome | null
   audioUnavailable: boolean
+  operationCount?: number
+  actionOutcome?: ActionOutcome
+  speechOutcome?: SpeechOutcome
   endpointToFirstVisibleMs: number | null
   endpointToFirstAcceptedPcmMs: number | null
   endpointToSttFinalMs?: number | null
@@ -336,6 +341,20 @@ export function parseControlEvent(payload: Uint8Array | string): ControlEvent | 
     || typeof eventType !== 'string' || !EVENT_TYPES.has(eventType as ControlEventType)
     || typeof value.terminal !== 'boolean' || value.terminal !== TERMINAL_TYPES.has(eventType as ControlEventType)
     || !ownObject(value.payload) || !boundedValue(value.payload)
+  ) return null
+  const operationCount = value.payload.operation_count
+  const actionOutcome = value.payload.action_outcome
+  const speechOutcome = value.payload.speech_outcome
+  if (
+    (operationCount !== undefined || actionOutcome !== undefined)
+    && (
+      !Number.isSafeInteger(operationCount) || (operationCount as number) < 0
+      || (operationCount as number) > 24
+      || !['no_operation', 'completed', 'failed'].includes(String(actionOutcome))
+      || ((operationCount as number) === 0) !== (actionOutcome === 'no_operation')
+    )
+    || speechOutcome !== undefined
+      && !['not_started', 'delivered', 'failed', 'interrupted'].includes(String(speechOutcome))
   ) return null
   if (eventType === 'session.ready' || eventType === 'session.degraded') {
     const health = parseHealthReadinessReport(value.payload.health)
@@ -766,6 +785,7 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       assistant: '',
       outcome: null,
       audioUnavailable: false,
+      speechOutcome: 'not_started',
       endpointToFirstVisibleMs: null,
       endpointToFirstAcceptedPcmMs: null,
     }
@@ -827,6 +847,11 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     audioUnavailable: item.audioUnavailable || (
       event.type === 'turn.failed' && event.payload.stage === 'tts'
     ),
+    operationCount: count(event.payload, 'operation_count') ?? item.operationCount,
+    actionOutcome: ['no_operation', 'completed', 'failed'].includes(String(event.payload.action_outcome))
+      ? event.payload.action_outcome as ActionOutcome : item.actionOutcome,
+    speechOutcome: ['not_started', 'delivered', 'failed', 'interrupted'].includes(String(event.payload.speech_outcome))
+      ? event.payload.speech_outcome as SpeechOutcome : item.speechOutcome ?? 'not_started',
     endpointToFirstVisibleMs: visibleMetric ?? item.endpointToFirstVisibleMs,
     endpointToFirstAcceptedPcmMs: pcmMetric ?? item.endpointToFirstAcceptedPcmMs,
     endpointToSttFinalMs: metric(event.payload, 'endpoint_to_stt_final_ms') ?? item.endpointToSttFinalMs ?? null,

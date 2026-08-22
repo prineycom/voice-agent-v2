@@ -172,7 +172,7 @@ class LiveTurnRunner:
         self.tts = SileroKseniyaTTS()
         self.controller = RealTurnController(self.stt, self.llm, self.tts)
         self.complete_segment_capacity = asyncio.BoundedSemaphore(2)
-        self._snapshots: dict[tuple[str, str], tuple[dict[str, str], ...]] = {}
+        self._snapshots: dict[tuple[str, str], tuple[dict[str, object], ...]] = {}
         self._turn_correlations: dict[tuple[str, str], tuple[int, int]] = {}
         self._turn_correlations_lock = threading.Lock()
         self._startup_cancellation = CancellationToken()
@@ -398,8 +398,34 @@ class LiveTurnRunner:
         self._release_tts_turn(session_id, turn_id)
 
     def turn_delivered(self, session_id: str, turn_id: str) -> None:
+        finish_turn = getattr(self.llm, "finish_turn", None)
+        if finish_turn is not None:
+            finish_turn(session_id, turn_id)
         self._snapshots.pop((session_id, turn_id), None)
         self._release_tts_turn(session_id, turn_id)
+
+    def finish_turn(self, session_id: str, turn_id: str) -> None:
+        finish_turn = getattr(self.llm, "finish_turn", None)
+        if finish_turn is not None:
+            finish_turn(session_id, turn_id)
+
+    def turn_provenance(
+        self, session_id: str, stream_epoch: int, turn_id: str,
+        turn_generation: int, request_id: str,
+    ) -> dict[str, object]:
+        owner = getattr(self.llm, "turn_provenance", None)
+        if owner is None:
+            return {"operation_count": 0, "action_outcome": "no_operation"}
+        return owner(
+            session_id, stream_epoch, turn_id, turn_generation, request_id
+        )
+
+    def retain_visible_failed_turn(self, session_id: str, turn_id: str) -> None:
+        """Commit option-B context only after the pre-turn snapshot was restored."""
+        retain = getattr(self.llm, "retain_visible_failed_turn", None)
+        if retain is None:
+            raise RuntimeError("visible failed context is unsupported")
+        retain(session_id, turn_id)
 
     def readiness_components(self) -> tuple[ComponentHealth, ...]:
         warmup_metadata = getattr(self, "warmup_metadata", None)

@@ -33,7 +33,7 @@
             {"type": "null"}
           ]
         },
-        "^(?:backend|capability_id|capture_kind|component|contract_version|decision|effective_policy_revision|event_type|failed_event_type|failure_class|failure_code|failure_matrix_id|failure_stage|model_identity|outcome|provider_identity|provider_mode|reason_code|request_id|resource_phase|slowest_stage|speaker|stage|transition|user_state|worker_id)$": {
+        "^(?:action_outcome|admission_version|backend|capability_id|capture_kind|component|contract_version|decision|effective_policy_revision|event_type|failed_event_type|failure_class|failure_code|failure_matrix_id|failure_stage|logical_slot_class|model_identity|outcome|provider_identity|provider_mode|reason_code|request_id|resource_phase|slowest_stage|speaker|speech_outcome|stage|transition|user_state|worker_error_class|worker_id)$": {
           "oneOf": [
             {"type": "string", "maxLength": 512, "pattern": "^[^\\r\\n]*$"},
             {"type": "boolean"},

@@ -18,6 +18,12 @@ TARGET_MIN_CHARS = 40
 TARGET_MAX_CHARS = 100
 HARD_MAX_CHARS = 240
 MAX_SEGMENTS = 16
+SPEECH_ADMISSION_VERSION = "voice-agent.silero-ru-admission.v1"
+
+# These are the only Latin technical tokens with an already established Russian
+# pronunciation in the shaping contract. This is intentionally not a general
+# transliterator or translator.
+SUPPORTED_TECHNICAL_TOKENS = frozenset({"PDF", "SSD", "HTTP", "REDACTED"})
 
 _SENTENCE_MARKS = frozenset(".!?…。！？")
 _CLAUSE_MARKS = frozenset(",;:")
@@ -240,6 +246,92 @@ class ShapedTTS:
     version: str = SHAPING_VERSION
 
 
+@dataclass(frozen=True)
+class RussianSpeechAdmission:
+    shaped_char_count: int
+    utf8_byte_count: int
+    cyrillic_count: int
+    latin_count: int
+    digit_count: int
+    space_count: int
+    punctuation_count: int
+    symbol_count: int
+    other_count: int
+    version: str = SPEECH_ADMISSION_VERSION
+
+    @property
+    def admitted(self) -> bool:
+        return self.latin_count == 0
+
+    def safe_counts(self) -> dict[str, int | str]:
+        return {
+            "admission_version": self.version,
+            "shaped_char_count": self.shaped_char_count,
+            "utf8_byte_count": self.utf8_byte_count,
+            "cyrillic_count": self.cyrillic_count,
+            "latin_count": self.latin_count,
+            "digit_count": self.digit_count,
+            "space_count": self.space_count,
+            "punctuation_count": self.punctuation_count,
+            "symbol_count": self.symbol_count,
+            "other_count": self.other_count,
+        }
+
+
+def inspect_russian_spoken_form(synthesis_text: str) -> RussianSpeechAdmission:
+    """Classify only aggregate characters; never retain or report the text."""
+    import unicodedata
+
+    counts = {
+        "cyrillic": 0, "latin": 0, "digit": 0, "space": 0,
+        "punctuation": 0, "symbol": 0, "other": 0,
+    }
+    for character in synthesis_text:
+        name = unicodedata.name(character, "")
+        category = unicodedata.category(character)
+        if "CYRILLIC" in name and category.startswith("L"):
+            counts["cyrillic"] += 1
+        elif "LATIN" in name and category.startswith("L"):
+            counts["latin"] += 1
+        elif category.startswith("N"):
+            counts["digit"] += 1
+        elif character.isspace():
+            counts["space"] += 1
+        elif category.startswith("P"):
+            counts["punctuation"] += 1
+        elif category.startswith("S"):
+            counts["symbol"] += 1
+        else:
+            counts["other"] += 1
+    return RussianSpeechAdmission(
+        len(synthesis_text), len(synthesis_text.encode("utf-8")),
+        counts["cyrillic"], counts["latin"], counts["digit"], counts["space"],
+        counts["punctuation"], counts["symbol"], counts["other"],
+    )
+
+
+def require_russian_spoken_form(synthesis_text: str) -> RussianSpeechAdmission:
+    admission = inspect_russian_spoken_form(synthesis_text)
+    if not admission.admitted:
+        error = StageFailure("tts", "tts_language_unsupported")
+        error.safe_counts = admission.safe_counts()
+        raise error
+    return admission
+
+
+def admit_russian_visible_answer(visible_text: str) -> tuple[RussianSpeechAdmission, ...]:
+    """Validate every exact shaped segment before any answer publication or TTS."""
+    segmenter = RussianTTSSegmenter()
+    segments = segmenter.feed(visible_text, final=True)
+    admissions: list[RussianSpeechAdmission] = []
+    for segment in segments:
+        shaped = shape_russian_tts(segment)
+        admissions.append(require_russian_spoken_form(shaped.synthesis_text))
+    if not admissions:
+        raise StageFailure("tts", "empty_tts_output")
+    return tuple(admissions)
+
+
 _ONES = (
     "ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять",
     "десять", "одиннадцать", "двенадцать", "тринадцать", "четырнадцать", "пятнадцать",
@@ -370,6 +462,7 @@ def shape_russian_tts(visible_text: str) -> ShapedTTS:
         r"\bPDF\b": "Пи-Ди-Эф",
         r"\bSSD\b": "эс-эс-ди",
         r"\bHTTP\b": "эйч-ти-ти-пи",
+        r"\bREDACTED\b": "скрыто",
         r"\bИИ\b": "искусственный интеллект",
         r"\bт\.\s*е\.": "то есть",
         r"\bи\s+т\.\s*д\.": "и так далее",

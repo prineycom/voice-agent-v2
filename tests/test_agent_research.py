@@ -192,10 +192,10 @@ class NaturalResearchModel:
         ]
         if self.step <= len(operations):
             return operations[self.step - 1]
-        answer = "The launch is 2026, and the limit is 42."
+        answer = "Запуск назначен на 2026 год, лимит равен 42."
         return {"kind":"final", "answer":answer, "citations":[
-            {"receipt_id":self.fetch_ids[0], "claims":["launch 2026"], "spans":["launch is 2026"]},
-            {"receipt_id":self.fetch_ids[1], "claims":["limit 42"], "spans":["limit is 42"]},
+            {"receipt_id":self.fetch_ids[0], "claims":["запуск 2026"], "spans":["Запуск назначен на 2026"]},
+            {"receipt_id":self.fetch_ids[1], "claims":["лимит 42"], "spans":["лимит равен 42"]},
         ]}
 
     def cancel(self) -> None:
@@ -210,7 +210,7 @@ class ResearchSliceTests(unittest.TestCase):
                 transcript="Compare current launch facts and limits.",
                 identity=AgentRealtimeIdentity("session-e41", 1, "turn-e41", "request-e41", 1),
             )
-            task = FrozenResearchTask("en-current", "en", (("launch", "2026"), ("limit", "42")))
+            task = FrozenResearchTask("ru-current", "ru", (("запуск", "2026"), ("лимит", "42")))
             score = score_frozen_research(task, result)
             self.assertTrue(score.passed, score.document())
             self.assertEqual(result.operations, 6)
@@ -228,7 +228,7 @@ class ResearchSliceTests(unittest.TestCase):
             root = Path(__file__).resolve().parents[1]
             for citation in result.citations:
                 validate_schema(citation.document(), json.loads((root / "contracts/research-citation.v1.schema.json").read_text()))
-            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v4.schema.json").read_text()))
+            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v5.schema.json").read_text()))
         finally:
             fixture.close()
 
@@ -251,7 +251,7 @@ class ResearchSliceTests(unittest.TestCase):
                     raw = base64.b64decode(item["result"]["receipt"]["stdout"]["data_base64"])
                     self.test.assertIn(b'"kind":"operation"', raw)
                     return {"kind":"operation", "tool":"shell.exec", "arguments":{"command":"hostile-authority-write-and-token"}}
-                return {"kind":"final", "answer":"Hostile content was observed.", "citations":[{"receipt_id":self.receipt, "claims":["hostile content"], "spans":["Hostile content"]}]}
+                return {"kind":"final", "answer":"Враждебное содержимое было замечено.", "citations":[{"receipt_id":self.receipt, "claims":["враждебное содержимое"], "spans":["Враждебное содержимое"]}]}
             def cancel(self): pass
 
         model = Model(); model.test = self
@@ -297,7 +297,7 @@ class ResearchSliceTests(unittest.TestCase):
                 self.step += 1
                 if self.step == 1:
                     return {"kind":"operation", "tool":"web.fetch", "arguments":{"url":"https://unavailable.synthetic.test/page", "save_path":"/workspace/research/failure.html"}}
-                return {"kind":"final", "answer":"The controlled source was unavailable."}
+                return {"kind":"final", "answer":"Контролируемый источник был недоступен."}
             def cancel(self): pass
         try:
             result = AgentRun(fixture.manager, model=Model()).run(
@@ -342,7 +342,7 @@ class ResearchSliceTests(unittest.TestCase):
                         return {"kind":"operation", "tool":"web.fetch", "arguments":{"url":"https://source.synthetic.test/page?api_token=" + secret.decode(), "save_path":"/workspace/research/raw.bin"}}
                     item = parsed["history"][-1]; raw = base64.b64decode(item["result"]["receipt"]["stdout"]["data_base64"])
                     self.test.assertEqual(raw, secret); self.receipt = item["operation"]["call_id"]
-                    return {"kind":"final", "answer":"observed " + secret.decode(), "citations":[{"receipt_id":self.receipt, "claims":[secret.decode()], "spans":[secret.decode()]}]}
+                    return {"kind":"final", "answer":"Замечено: " + secret.decode(), "citations":[{"receipt_id":self.receipt, "claims":[secret.decode()], "spans":[secret.decode()]}]}
                 def cancel(self): pass
 
             model = Model(); model.test = self
@@ -351,7 +351,7 @@ class ResearchSliceTests(unittest.TestCase):
                 identity=AgentRealtimeIdentity("session-redact", 1, "turn-redact", "request-redact", 1),
             )
             self.assertEqual(docker.persisted["/workspace/research/raw.bin"], secret)
-            self.assertEqual(result.answer, "observed [REDACTED]")
+            self.assertEqual(result.answer, "Замечено: [REDACTED]")
             self.assertNotIn(secret.decode(), result.citations[0].title or "")
             self.assertEqual(result.citations[0].spans, ("[REDACTED]",))
             self.assertIn("api_token=%5BREDACTED%5D", result.citations[0].displayed_url)

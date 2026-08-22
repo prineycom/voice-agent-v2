@@ -24,8 +24,9 @@ from .agent_research import CitationRecord, CitationRequest, WEB_TOOLS, bind_cit
 from .contracts import StageFailure, valid_correlation_id
 from .local_lfm import LocalLFMProvider, MODEL_ALIAS, PROVIDER_IDENTITY
 from .tracer import CancellationToken
+from .tts_text import admit_russian_visible_answer
 
-AGENT_RUN_VERSION = "voice-agent.agent-run.v4"
+AGENT_RUN_VERSION = "voice-agent.agent-run.v5"
 DECISION_VERSION = "voice-agent.agent-decision.v4"
 OPERATION_VERSION = "voice-agent.agent-operation.v1"
 RESULT_VERSION = "voice-agent.agent-operation-result.v1"
@@ -33,9 +34,57 @@ BUDGET_VERSION = "voice-agent.agent-budget.v1"
 IDENTITY_VERSION = "voice-agent.agent-realtime-identity.v1"
 CANCELLATION_VERSION = "voice-agent.agent-cancellation.v1"
 MAX_DECISION_INPUT_BYTES = 16_384
+MAX_CONVERSATION_MESSAGES = 4
+MAX_CONVERSATION_BYTES = 8_192
 REPORT_ARTIFACT_TOOL = "report.artifact"
 REPORT_DELIVERY_TOOL = "report.deliver"
 AGENT_TOOLS = (*HELPERS, REPORT_ARTIFACT_TOOL, REPORT_DELIVERY_TOOL)
+
+
+def validate_conversation(
+    conversation: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    if len(conversation) > MAX_CONVERSATION_MESSAGES:
+        raise StageFailure("llm_provider", "agent_context_out_of_bounds")
+    if len(conversation) % 2:
+        raise StageFailure("llm_provider", "agent_context_invalid")
+    copied: list[dict[str, object]] = []
+    for index, message in enumerate(conversation):
+        if not isinstance(message, dict):
+            raise StageFailure("llm_provider", "agent_context_invalid")
+        role = "user" if index % 2 == 0 else "assistant"
+        if role == "user":
+            valid = (
+                set(message) == {"role", "content"}
+                and message.get("role") == role
+                and isinstance(message.get("content"), str)
+                and 1 <= len(message["content"].encode("utf-8")) <= 2_048
+            )
+        else:
+            valid = (
+                set(message) == {
+                    "role", "content", "terminal_status", "action_outcome",
+                    "operation_count",
+                }
+                and message.get("role") == role
+                and isinstance(message.get("content"), str)
+                and 1 <= len(message["content"].encode("utf-8")) <= 2_000
+                and message.get("terminal_status") in {
+                    "completed", "visible_tts_failed",
+                }
+                and message.get("action_outcome") in {
+                    "no_operation", "completed", "failed",
+                }
+                and type(message.get("operation_count")) is int
+                and 0 <= message["operation_count"] <= 24
+            )
+        if not valid:
+            raise StageFailure("llm_provider", "agent_context_invalid")
+        copied.append(dict(message))
+    encoded = json.dumps(copied, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MAX_CONVERSATION_BYTES:
+        raise StageFailure("llm_provider", "agent_context_out_of_bounds")
+    return tuple(copied)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +200,7 @@ class AgentRunResult:
     answer: str
     decisions: int
     operations: int
+    action_outcome: str
     terminal: str
     citations: tuple[CitationRecord, ...] = ()
     research_receipts: tuple[Mapping[str, object], ...] = ()
@@ -165,6 +215,8 @@ class AgentRunResult:
             "answer": self.answer,
             "decisions": self.decisions,
             "operations": self.operations,
+            "operation_count": self.operations,
+            "action_outcome": self.action_outcome,
             "terminal": self.terminal,
             "provider_mode": "local",
             "provider_identity": PROVIDER_IDENTITY,
@@ -203,6 +255,32 @@ class AgentRun:
         self._active_identity: AgentRealtimeIdentity | None = None
         self._active_call: tuple[str, str] | None = None
         self._closed: set[AgentRealtimeIdentity] = set()
+        self._provenance: dict[AgentRealtimeIdentity, dict[str, object]] = {}
+
+    def provenance(self, identity: AgentRealtimeIdentity) -> dict[str, object]:
+        with self._lock:
+            value = self._provenance.get(identity, {
+                "operation_count": 0, "action_outcome": "no_operation",
+            })
+            return dict(value)
+
+    def _set_provenance(
+        self, identity: AgentRealtimeIdentity, operation_count: int, action_outcome: str
+    ) -> None:
+        if (
+            type(operation_count) is not int
+            or not 0 <= operation_count <= 24
+            or action_outcome not in {"no_operation", "completed", "failed"}
+            or (operation_count == 0) != (action_outcome == "no_operation")
+        ):
+            raise ValueError("invalid action provenance")
+        with self._lock:
+            self._provenance[identity] = {
+                "operation_count": operation_count,
+                "action_outcome": action_outcome,
+            }
+            for stale in tuple(self._provenance)[:-64]:
+                self._provenance.pop(stale, None)
 
     def _live(self, identity: AgentRealtimeIdentity, cancellation: CancellationToken) -> bool:
         with self._lock:
@@ -224,6 +302,7 @@ class AgentRun:
         self,
         transcript: str,
         history: list[dict[str, object]],
+        conversation: tuple[dict[str, object], ...],
         identity: AgentRealtimeIdentity,
         run_id: str,
     ) -> str:
@@ -234,6 +313,7 @@ class AgentRun:
             "budget": self.budget.document(),
             "user_request": transcript,
             "allowed_tools": list(AGENT_TOOLS),
+            "conversation": [dict(message) for message in conversation],
             "history": history,
         }
         encoded = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -247,20 +327,29 @@ class AgentRun:
         transcript: str,
         identity: AgentRealtimeIdentity,
         cancellation: CancellationToken | None = None,
+        conversation: tuple[dict[str, object], ...] = (),
     ) -> AgentRunResult:
         if not transcript.strip() or len(transcript.encode("utf-8")) > 4_096:
             raise StageFailure("llm_provider", "transcript_out_of_bounds")
+        conversation = validate_conversation(conversation)
         token = cancellation or CancellationToken()
         with self._lock:
             if self._active_identity is not None:
                 raise StageFailure("llm_provider", "agent_run_capacity_unavailable")
             self._active_identity = identity
             self._closed.discard(identity)
+            self._provenance[identity] = {
+                "operation_count": 0, "action_outcome": "no_operation",
+            }
+            for stale in tuple(self._provenance)[:-64]:
+                self._provenance.pop(stale, None)
         unregister = token.register(self.cancel)
         deadline = self.clock() + self.budget.active_deadline_seconds
         history: list[dict[str, object]] = []
         run_id = uuid.uuid4().hex
         operations = 0
+        action_outcome = "no_operation"
+        any_operation_failed = False
         successful_research: dict[str, Mapping[str, object]] = {}
         research_receipts: list[Mapping[str, object]] = []
         artifact_operations: list[Mapping[str, object]] = []
@@ -271,18 +360,36 @@ class AgentRun:
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 if self.clock() >= deadline:
                     raise StageFailure("llm_provider", "agent_run_timeout")
-                request = self._request(transcript.strip(), history, identity, run_id)
+                request = self._request(
+                    transcript.strip(), history, conversation, identity, run_id
+                )
                 decision = AgentDecision.parse(self.model.decide(request, token))
                 if not self._live(identity, token):
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
                 if decision.kind == "final":
                     assert decision.answer is not None
                     citations = bind_citations(decision.answer, decision.citations, successful_research)
-                    if self.observation is not None:
-                        self.observation({"transition": "agent_run_completed", "decision_count": decision_number, "operation_count": operations, "citation_count": len(citations), "research_receipt_count": len(research_receipts)})
                     display_answer = self.environment.redact_display(
                         decision.answer.encode("utf-8")
                     ).decode("utf-8", "replace")
+                    try:
+                        admit_russian_visible_answer(display_answer)
+                    except StageFailure as error:
+                        if self.observation is not None:
+                            self.observation({
+                                "transition": "speech_admission_failed",
+                                "reason_code": error.code,
+                                **dict(getattr(error, "safe_counts", {})),
+                            })
+                        raise
+                    action_outcome = (
+                        "failed" if any_operation_failed
+                        else "completed" if operations
+                        else "no_operation"
+                    )
+                    self._set_provenance(identity, operations, action_outcome)
+                    if self.observation is not None:
+                        self.observation({"transition": "agent_run_completed", "decision_count": decision_number, "operation_count": operations, "action_outcome": action_outcome, "citation_count": len(citations), "research_receipt_count": len(research_receipts)})
                     display_citations = tuple(CitationRecord(
                         item.receipt_id, item.displayed_url,
                         self.environment.redact_display(item.title.encode()).decode("utf-8", "replace") if item.title else None,
@@ -293,12 +400,15 @@ class AgentRun:
                         tuple(self.environment.redact_display(value.encode()).decode("utf-8", "replace") for value in item.spans),
                     ) for item in citations)
                     return AgentRunResult(
-                        run_id, identity, display_answer, decision_number, operations, "completed",
-                        display_citations, tuple(research_receipts),
+                        run_id, identity, display_answer, decision_number, operations,
+                        action_outcome, "completed", display_citations, tuple(research_receipts),
                         tuple(artifact_operations), tuple(deliveries),
                     )
                 assert decision.tool is not None and decision.arguments is not None
                 call_id = uuid.uuid4().hex
+                operations += 1
+                action_outcome = "failed"
+                self._set_provenance(identity, operations, action_outcome)
                 try:
                     facts = self.environment.ensure_running()
                 except AgentEnvironmentError as error:
@@ -382,7 +492,10 @@ class AgentRun:
                             self._active_call = None
                 if not self._live(identity, token):
                     raise StageFailure("llm_provider", "selected_provider_cancelled")
-                operations += 1
+                if receipt.status != "completed" or receipt.exit_code != 0:
+                    any_operation_failed = True
+                action_outcome = "failed" if any_operation_failed else "completed"
+                self._set_provenance(identity, operations, action_outcome)
                 if decision.tool in WEB_TOOLS:
                     details = receipt.metadata.get("details", {})
                     if isinstance(details, dict):

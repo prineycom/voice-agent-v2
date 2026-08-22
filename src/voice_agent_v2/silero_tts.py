@@ -28,7 +28,10 @@ from .v2_contracts import (
 )
 from .process_adapter import AdapterProcess, AdapterProcessError, AdapterRequestError
 from .tracer import CancellationToken
-from .tts_text import SHAPING_VERSION, shape_russian_tts
+from .tts_text import (
+    SHAPING_VERSION, inspect_russian_spoken_form, require_russian_spoken_form,
+    shape_russian_tts,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "config" / "silero-kseniya-tts-v1.json"
@@ -86,6 +89,13 @@ WORKER_FINAL_EVENT_FIELDS = frozenset({
 })
 WORKER_ERROR_EVENT_FIELDS = frozenset({
     "protocol_version", "event", "key", "request_id", "error_class",
+})
+FAILED_SEGMENT_OBSERVATION_FIELDS = frozenset({
+    "worker_error_class", "logical_slot_class", "segment_index",
+    "shaped_char_count", "utf8_byte_count", "cyrillic_count", "latin_count",
+    "digit_count", "space_count", "punctuation_count", "symbol_count",
+    "other_count", "dispatch_to_error_ms", "ready_workers", "request_count",
+    "failure_count", "quarantine_count", "retry_count",
 })
 WORKER_CORRELATION_FIELDS = frozenset({
     "session_id",
@@ -229,6 +239,50 @@ def _environment(worker_id: str, runtime_root: Path) -> dict[str, str]:
         "OMP_NUM_THREADS": "2",
         "MKL_NUM_THREADS": "2",
     }
+
+
+class SileroRequestFailure(StageFailure):
+    """Generic publicly, with one validated enum and safe scalars privately."""
+
+    def __init__(self, worker_error_class: str, observation: dict[str, object]) -> None:
+        super().__init__("tts", "silero_synthesis_failed")
+        count_fields = (
+            "cyrillic_count", "latin_count", "digit_count", "space_count",
+            "punctuation_count", "symbol_count", "other_count",
+        )
+        integer_bounds = {
+            "segment_index": (0, 4_095),
+            "shaped_char_count": (1, 320),
+            "utf8_byte_count": (1, 1_280),
+            **{name: (0, 320) for name in count_fields},
+            "ready_workers": (0, POOL_SIZE),
+            "request_count": (1, 1_000_000_000),
+            "failure_count": (1, 1_000_000_000),
+            "quarantine_count": (0, 1_000_000_000),
+            "retry_count": (0, 0),
+        }
+        if (
+            worker_error_class not in WORKER_REQUEST_ERROR_CLASSES
+            or set(observation) != FAILED_SEGMENT_OBSERVATION_FIELDS
+            or observation.get("worker_error_class") != worker_error_class
+            or observation.get("logical_slot_class") not in {"slot_1", "slot_2"}
+            or any(
+                type(observation.get(name)) is not int
+                or not lower <= observation[name] <= upper
+                for name, (lower, upper) in integer_bounds.items()
+            )
+            or type(observation.get("dispatch_to_error_ms")) not in {int, float}
+            or not math.isfinite(observation["dispatch_to_error_ms"])
+            or not 0 <= observation["dispatch_to_error_ms"] <= 120_000
+            or sum(observation[name] for name in count_fields)
+            != observation["shaped_char_count"]
+            or not observation["shaped_char_count"]
+            <= observation["utf8_byte_count"]
+            <= observation["shaped_char_count"] * 4
+        ):
+            raise ValueError("invalid private Silero request failure")
+        self.worker_error_class = worker_error_class
+        self.safe_observation = dict(observation)
 
 
 @dataclass
@@ -584,11 +638,33 @@ class SileroWorkerPool:
                     self.counters["stale_before_dispatch"] += 1
                     raise StageFailure("tts", "selected_tts_cancelled")
                 slot = self._acquire_slot(key, cancellation)
+                dispatched = time.monotonic()
                 try:
                     chunks, metadata = self._request_on_slot(slot, key, text)
                 except AdapterRequestError as error:
                     self.counters["failures"] += 1
-                    raise StageFailure("tts", "silero_synthesis_failed") from error
+                    worker_error_class = str(error)
+                    if worker_error_class not in WORKER_REQUEST_ERROR_CLASSES:
+                        raise StageFailure("tts", "silero_synthesis_failed") from error
+                    counts = inspect_russian_spoken_form(text)
+                    observation: dict[str, object] = {
+                        "worker_error_class": worker_error_class,
+                        "logical_slot_class": f"slot_{self._slots.index(slot) + 1}",
+                        "segment_index": key.segment_index,
+                        **counts.safe_counts(),
+                        "dispatch_to_error_ms": round(
+                            max(0.0, (time.monotonic() - dispatched) * 1_000), 3
+                        ),
+                        "ready_workers": self.ready_count,
+                        "request_count": self.counters["requests"],
+                        "failure_count": self.counters["failures"],
+                        "quarantine_count": self.counters["worker_quarantines"],
+                        "retry_count": 0,
+                    }
+                    observation.pop("admission_version")
+                    raise SileroRequestFailure(
+                        worker_error_class, observation
+                    ) from error
                 except (AdapterProcessError, OSError, ValueError, KeyError, TypeError) as error:
                     self._quarantine(slot)
                     self.counters["failures"] += 1
@@ -1009,11 +1085,23 @@ class SileroKseniyaTTS:
         ):
             raise StageFailure("tts", "invalid_correlation_id")
         shaped = shape_russian_tts(text)
+        require_russian_spoken_form(shaped.synthesis_text)
         key = TTSRequestKey(
             session_id, stream_epoch, turn_id, turn_generation, request_id, segment_index
         )
         started = time.monotonic()
-        chunks, metadata = self.pool.synthesize(key, shaped.synthesis_text, cancellation)
+        try:
+            chunks, metadata = self.pool.synthesize(
+                key, shaped.synthesis_text, cancellation
+            )
+        except SileroRequestFailure as error:
+            observation = dict(error.safe_observation)
+            with self._observation_lock:
+                self.observations.append(observation)
+                self._turn_observations.setdefault(
+                    self._observation_key(key), []
+                ).append(observation)
+            raise
         total_bytes = sum(len(chunk) for chunk in chunks)
         budget = turn_budget or self.create_turn_budget()
         budget.consume(total_bytes)

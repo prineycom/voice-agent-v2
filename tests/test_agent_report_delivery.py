@@ -211,10 +211,10 @@ class NaturalResearchDeliveryModel:
                 },
             }
         return {
-            "kind": "final", "answer": "Saved and sent the 2026 report with limit 42.",
+            "kind": "final", "answer": "Отчёт за 2026 год с лимитом 42 сохранён и отправлен.",
             "citations": [{
-                "receipt_id": self.fetch_id, "claims": ["launch 2026", "limit 42"],
-                "spans": ["2026 report", "limit 42"],
+                "receipt_id": self.fetch_id, "claims": ["запуск 2026", "лимит 42"],
+                "spans": ["Отчёт за 2026 год", "лимитом 42"],
             }],
         }
 
@@ -250,7 +250,7 @@ class ReportDeliverySliceTests(unittest.TestCase):
             self.assertIn(REPORT, document.request_body)
             self.assertEqual(fixture.environment.redact_display(REPORT), REPORT.replace(TOKEN, b"[REDACTED]"))
             root = Path(__file__).resolve().parents[1]
-            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v4.schema.json").read_text()))
+            validate_schema(result.document(), json.loads((root / "contracts/agent-run.v5.schema.json").read_text()))
             validate_schema(delivery, json.loads((root / "contracts/telegram-delivery.v2.schema.json").read_text()))
             ledger = json.loads(fixture.controller.ledger_path.read_text())
             validate_schema(
@@ -327,7 +327,7 @@ class ReportDeliverySliceTests(unittest.TestCase):
                     self.step += 1
                     if self.step == 1:
                         return {"kind": "operation", "tool": "report.deliver", "arguments": {"action": "resend", "artifact_id": artifact_id}}
-                    return {"kind": "final", "answer": "Explicit same-byte resend acknowledged."}
+                    return {"kind": "final", "answer": "Повторная отправка тех же байтов подтверждена."}
                 def cancel(self): return None
 
             run = AgentRun(fixture.environment, model=ResendModel(), delivery=restarted).run(
@@ -411,7 +411,7 @@ class ReportDeliverySliceTests(unittest.TestCase):
                     history = json.loads(raw)["history"][-1]
                     self.test.assertIn(b"Synthetic report", base64.b64decode(history["result"]["receipt"]["stdout"]["data_base64"]))
                     details = history["result"]["receipt"]["details"]
-                    return {"kind":"final", "answer":f"Найден отчёт revision {details['revision']} hash {details['sha256']}."}
+                    return {"kind":"final", "answer":f"Найден отчёт, редакция {details['revision']}."}
                 def cancel(self): return None
 
             model = Model(); model.test = self
@@ -452,7 +452,7 @@ class ReportDeliverySliceTests(unittest.TestCase):
                         return {"kind":"operation", "tool":"report.deliver", "arguments":{
                             "action":"resend", "artifact_id":saved["artifact_id"],
                         }}
-                    return {"kind":"final", "answer":"Updated revision 2 and resent current bytes."}
+                    return {"kind":"final", "answer":"Вторая редакция обновлена, текущие байты отправлены повторно."}
                 def cancel(self): return None
 
             result = AgentRun(fixture.environment, model=Model(), delivery=fixture.controller).run(
@@ -523,8 +523,8 @@ class ReportDeliverySliceTests(unittest.TestCase):
                             "report_base64":base64.b64encode(refreshed).decode(), "mode":"document",
                             "summary":"Selected launch claim refreshed.", "citation_receipt_ids":[self.fetch],
                         }}
-                    return {"kind":"final", "answer":"The refreshed source supports the selected launch claim.", "citations":[{
-                        "receipt_id":self.fetch, "claims":["selected launch claim"], "spans":["selected launch claim"],
+                    return {"kind":"final", "answer":"Обновлённый источник подтверждает выбранное утверждение о запуске.", "citations":[{
+                        "receipt_id":self.fetch, "claims":["утверждение о запуске"], "spans":["утверждение о запуске"],
                     }]}
                 def cancel(self): return None
 

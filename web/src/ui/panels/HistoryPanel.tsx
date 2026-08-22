@@ -7,6 +7,20 @@ const OUTCOME_LABELS: Record<TurnOutcome, string> = {
   failed: 'FAILED',
 }
 
+export function actionOutcomeText(item: TurnHistoryItem): string {
+  if (item.actionOutcome === 'completed') return `ACTION COMPLETED · ${item.operationCount ?? 0}`
+  if (item.actionOutcome === 'failed') return `ACTION FAILED · ${item.operationCount ?? 0}`
+  if (item.actionOutcome === 'no_operation') return 'NO ACTION EXECUTED'
+  return 'ACTION NOT YET RESOLVED'
+}
+
+export function speechOutcomeText(item: TurnHistoryItem): string {
+  if (item.speechOutcome === 'delivered') return 'SPEECH DELIVERED'
+  if (item.speechOutcome === 'failed' || item.audioUnavailable) return 'SPEECH DELIVERY FAILED'
+  if (item.speechOutcome === 'interrupted') return 'SPEECH INTERRUPTED'
+  return 'SPEECH NOT DELIVERED'
+}
+
 export function historyUserText(item: TurnHistoryItem): string {
   if (item.user) return item.user
   return item.outcome === 'failed' ? 'Speech was not recognized.' : 'Listening…'
@@ -60,6 +74,12 @@ export function HistoryPanel({
               <span className={`outcome outcome--${item.outcome ?? 'active'}`}>
                 {item.outcome === null ? 'ACTIVE' : OUTCOME_LABELS[item.outcome]}
                 {item.audioUnavailable ? ' · AUDIO UNAVAILABLE' : ''}
+              </span>
+              <span className={`outcome outcome--${item.actionOutcome === 'failed' ? 'failed' : item.actionOutcome === 'completed' ? 'completed' : 'active'}`}>
+                {actionOutcomeText(item)}
+              </span>
+              <span className={`outcome outcome--${item.speechOutcome === 'failed' || item.audioUnavailable ? 'failed' : item.speechOutcome === 'delivered' ? 'completed' : 'active'}`}>
+                {speechOutcomeText(item)}
               </span>
             </button>
           </article>

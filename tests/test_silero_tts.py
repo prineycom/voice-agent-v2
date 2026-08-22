@@ -19,6 +19,7 @@ from voice_agent_v2.v2_contracts import TTSRequestKey, TTS_V2_VERSION
 from voice_agent_v2.local_tts import TurnTTSBudget
 from voice_agent_v2.process_adapter import AdapterRequestError
 from voice_agent_v2.silero_tts import (
+    FAILED_SEGMENT_OBSERVATION_FIELDS,
     MODEL_IDENTITY,
     MODEL_SHA256,
     MODEL_SIZE,
@@ -31,6 +32,7 @@ from voice_agent_v2.tracer import CancellationToken
 from voice_agent_v2.tts_text import (
     HARD_MAX_CHARS,
     RussianTTSSegmenter,
+    admit_russian_visible_answer,
     shape_russian_tts,
 )
 
@@ -215,6 +217,31 @@ class RussianSegmentationTests(unittest.TestCase):
             with self.subTest(tagged=tagged), self.assertRaises(StageFailure) as failure:
                 shape_russian_tts(tagged)
             self.assertEqual(failure.exception.code, "tts_plain_text_required")
+
+    def test_russian_admission_rejects_unsupported_latin_after_exact_shaping(self) -> None:
+        admitted = (
+            "Готово.",
+            "Сегодня 14.08.2026 в 09:30; PDF, SSD и HTTP готовы.",
+            "Секрет: [REDACTED].",
+        )
+        for value in admitted:
+            with self.subTest(value=value):
+                results = admit_russian_visible_answer(value)
+                self.assertTrue(results)
+                self.assertTrue(all(item.latin_count == 0 for item in results))
+
+        rejected = (
+            "This is an English answer.",
+            "Русский ответ with English clarification.",
+            "связи English clarification follows after one Cyrillic token.",
+        )
+        for value in rejected:
+            with self.subTest(value=value), self.assertRaises(StageFailure) as failure:
+                admit_russian_visible_answer(value)
+            self.assertEqual(failure.exception.code, "tts_language_unsupported")
+            counts = failure.exception.safe_counts
+            self.assertGreater(counts["latin_count"], 0)
+            self.assertNotIn("text", counts)
 
     def test_split_tag_is_rejected_before_its_buffer_can_be_segmented(self) -> None:
         segmenter = RussianTTSSegmenter()
@@ -1075,24 +1102,59 @@ class SileroPoolTests(unittest.TestCase):
                     self.assertEqual(pool.ready_count, 1)
                     self.assertEqual(pool.counters["worker_quarantines"], 1)
                     self.assertEqual(len(pool.process_ids), 1)
+                    self.assertFalse(hasattr(failure.exception, "worker_error_class"))
+                    self.assertEqual(pool.observations, [])
                 finally:
                     pool.close()
 
-    def test_validated_worker_error_is_request_failure_without_quarantine(self) -> None:
-        coordinator = ProcessCoordinator()
-        pool = self.pool(coordinator)
-        try:
-            coordinator.error_overrides["request-00000001"] = {}
+    def test_validated_worker_errors_retain_private_class_without_quarantine(self) -> None:
+        from voice_agent_v2.silero_tts import WORKER_REQUEST_ERROR_CLASSES
 
-            with self.assertRaises(StageFailure) as failure:
-                pool.synthesize(self.key(1), "Ошибка синтеза.", None)
-
-            self.assertEqual(failure.exception.code, "silero_synthesis_failed")
-            self.assertEqual(pool.ready_count, 2)
-            self.assertEqual(pool.counters["worker_quarantines"], 0)
-            self.assertEqual(len(coordinator.created), 2)
-        finally:
-            pool.close()
+        for worker_error_class in sorted(WORKER_REQUEST_ERROR_CLASSES):
+            with self.subTest(worker_error_class=worker_error_class):
+                coordinator = ProcessCoordinator()
+                pool = self.pool(coordinator)
+                tts = SileroKseniyaTTS(pool)
+                try:
+                    coordinator.error_overrides["request-00000001"] = {
+                        "error_class": worker_error_class,
+                    }
+                    with self.assertRaises(StageFailure) as failure:
+                        tuple(tts.stream_synthesize(
+                            session_id="session-test", stream_epoch=1,
+                            turn_id="turn-00000001", turn_generation=1,
+                            request_id="request-00000001", segment_index=0,
+                            text="Ошибка синтеза.",
+                        ))
+                    self.assertEqual(failure.exception.code, "silero_synthesis_failed")
+                    self.assertEqual(
+                        failure.exception.worker_error_class, worker_error_class
+                    )
+                    observations = tts.take_turn_observations(
+                        "session-test", 1, "turn-00000001", 1,
+                        "request-00000001",
+                    )
+                    self.assertEqual(len(observations), 1)
+                    observation = observations[0]
+                    self.assertEqual(set(observation), FAILED_SEGMENT_OBSERVATION_FIELDS)
+                    self.assertEqual(observation["worker_error_class"], worker_error_class)
+                    self.assertEqual(observation["ready_workers"], 2)
+                    self.assertEqual(observation["quarantine_count"], 0)
+                    self.assertEqual(observation["request_count"], 1)
+                    self.assertEqual(observation["failure_count"], 1)
+                    self.assertEqual(observation["retry_count"], 0)
+                    self.assertIn(observation["logical_slot_class"], {"slot_1", "slot_2"})
+                    self.assertGreaterEqual(observation["dispatch_to_error_ms"], 0)
+                    self.assertEqual(pool.ready_count, 2)
+                    self.assertEqual(pool.counters["worker_quarantines"], 0)
+                    rendered = str(observation)
+                    for forbidden in (
+                        "source_text", "synthesis_text", "sha256", "traceback",
+                        "session_id", "request_id", "worker_id", "pcm",
+                    ):
+                        self.assertNotIn(forbidden, rendered.lower())
+                finally:
+                    pool.close()
 
     def test_invalid_worker_error_key_or_shape_quarantines_slot(self) -> None:
         expected_key = self.key(1).as_dict()
@@ -1123,6 +1185,8 @@ class SileroPoolTests(unittest.TestCase):
                     self.assertEqual(pool.counters["worker_quarantines"], 1)
                     self.assertEqual(len(pool.process_ids), 1)
                     self.assertEqual(len(coordinator.created), 2)
+                    self.assertFalse(hasattr(failure.exception, "worker_error_class"))
+                    self.assertEqual(pool.observations, [])
                 finally:
                     pool.close()
 
