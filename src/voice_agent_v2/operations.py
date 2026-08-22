@@ -298,6 +298,8 @@ ALLOWED_CONFIGURATION_NAMES = frozenset({
     "LIVEKIT_INTERNAL_URL",
     "LIVEKIT_PUBLIC_URL",
     "SLICE6_APP_PUBLIC_URL",
+    "VOICE_AGENT_RTC_INTERFACE",
+    "VOICE_AGENT_RTC_IP",
     "VOICE_AGENT_DIAGNOSTIC_CAPTURE",
     "VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT",
     "VOICE_AGENT_DIAGNOSTIC_CAPTURE_TTL_SECONDS",
@@ -744,15 +746,42 @@ def validate_server_configuration(values: Mapping[str, str]) -> dict[str, object
     )
     if internal.hostname != "127.0.0.1" or internal.port != 7880:
         raise OperationalError("configuration_invalid", "LiveKit internal endpoint changed")
+    remote_public_urls = False
     for parsed, secure_scheme in ((public, "wss"), (app, "https")):
         try:
             is_loopback = ipaddress.ip_address(parsed.hostname).is_loopback
         except ValueError:
             is_loopback = parsed.hostname == "localhost"
+        remote_public_urls = remote_public_urls or not is_loopback
         if not is_loopback and parsed.scheme != secure_scheme:
             raise OperationalError(
                 "configuration_invalid", "non-loopback public URL must use TLS",
             )
+    rtc_interface = values.get("VOICE_AGENT_RTC_INTERFACE")
+    rtc_ip = values.get("VOICE_AGENT_RTC_IP")
+    if remote_public_urls:
+        try:
+            parsed_rtc_ip = ipaddress.ip_address(rtc_ip or "")
+        except ValueError as error:
+            raise OperationalError(
+                "configuration_invalid", "remote voice RTC address is invalid",
+            ) from error
+        if (
+            public.scheme != "wss"
+            or app.scheme != "https"
+            or public.hostname != app.hostname
+            or public.port == app.port
+            or rtc_interface != "tailscale0"
+            or parsed_rtc_ip.version != 4
+            or parsed_rtc_ip not in ipaddress.ip_network("100.64.0.0/10")
+        ):
+            raise OperationalError(
+                "configuration_invalid", "remote voice topology is incomplete",
+            )
+    elif rtc_interface is not None or rtc_ip is not None:
+        raise OperationalError(
+            "configuration_invalid", "remote voice RTC path requires public HTTPS/WSS URLs",
+        )
     capture = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE", "0")
     capture_root = values.get("VOICE_AGENT_DIAGNOSTIC_CAPTURE_ROOT")
     if capture not in {"0", "1"} or (capture == "0" and capture_root is not None):

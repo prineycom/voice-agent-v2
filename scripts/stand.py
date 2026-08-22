@@ -16,6 +16,7 @@ from voice_agent_v2.stand_dev import (  # noqa: E402
     DEFAULT_USER_UNIT_DIRECTORY,
     StandError,
     SystemCommandRunner,
+    configure_remote_voice,
     deploy_local,
     deploy_remote,
     exec_launcher,
@@ -33,7 +34,7 @@ from voice_agent_v2.stand_doctor import main as doctor_main  # noqa: E402
 
 
 def usage() -> int:
-    print("usage: stand doctor | init | agent-image <prepare|status> | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | start <main|dev> | stop <main|dev> | status <main|dev> | logs <main|dev> | list")
+    print("usage: stand doctor | init | agent-image <prepare|status> | remote-voice apply dev | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | start <main|dev> | stop <main|dev> | status <main|dev> | logs <main|dev> | list")
     return 2
 
 
@@ -62,6 +63,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
             print(json.dumps(agent_image_status(
                 state_root=root, source_root=ROOT, command=command,
             ), sort_keys=True))
+            return 0
+        if arguments == ("remote-voice", "apply", "dev"):
+            topology, backup, restarted = configure_remote_voice(
+                state_root=root, instance="dev", command=command,
+            )
+            print(f"stand remote-voice apply dev: configured {topology.app_public_url}")
+            print(f"LiveKit signaling: {topology.livekit_public_url}")
+            print(f"configuration backup: {backup}")
+            print(f"dev service restarted: {'yes' if restarted else 'no'}")
             return 0
         if len(arguments) == 5 and arguments[0:3] == ("deploy", "dev", "--local"):
             instance = "dev"

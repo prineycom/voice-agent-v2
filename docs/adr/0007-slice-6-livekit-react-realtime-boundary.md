@@ -1,6 +1,6 @@
 # ADR-0007: Use a low-level LiveKit and React boundary for Slice 6 realtime voice
 
-- **Status:** Accepted for Slice 6; active provider/TTS/control composition superseded by ADR-0008/0009, and the historical Tailscale exposure portion is superseded by ADR-0013 plus the 2026-08-21 same-host media/admission amendment below
+- **Status:** Accepted for Slice 6; active provider/TTS/control composition superseded by ADR-0008/0009, the same-host amendment remains the local default, and remote voice is superseded by ADR-0016
 - **Date:** 2026-08-11
 - **Decision owner:** Pasha
 
@@ -32,7 +32,7 @@ Media and control remain separate:
 
 Barge-in and reconnection preserve this ADR's low-level LiveKit ownership; ADR-0009 owns the active request/turn/media-generation invalidation and persistent-publication attachment rules. Reconnection resets in-memory conversation context rather than risk replay or conditioning on an answer not known to have played.
 
-The active development application and signaling binds remain loopback-only: gateway TCP `8000` and LiveKit signaling TCP `7880`. LiveKit media UDP `7882` binds to and advertises exactly one active non-loopback host IPv4 address/interface selected from the default route (with deterministic non-loopback fallback), because a loopback-only ICE candidate makes the official same-host Python RTC join time out. It is not a wildcard bind; ICE/TCP media (`7881`) and TURN remain disabled. This bounded credential-gated UDP bind is the only network-exposure increase. The foreground runner starts no exposure/proxy process and changes no routes, proxy, firewall, application origin, or Tailscale configuration. Remote HTTPS/Tailscale voice remains outside this ADR's application contract.
+The active gateway and internal signaling binds remain loopback-only: gateway TCP `8000` and LiveKit signaling TCP `7880`. The local default selects one active non-loopback host IPv4 address/interface because a loopback-only ICE candidate makes the official same-host Python RTC join time out. It is not a wildcard bind; ICE/TCP media (`7881`) and TURN remain disabled. The foreground runner starts no exposure/proxy process and changes no routes, proxy, firewall, application origin, or Tailscale configuration. ADR-0016 separately owns the supported dev Tailscale Serve URLs, exact Origin/WSS capability, and configured `tailscale0` media candidate.
 
 No avatar component, state, contract, semantic input, design system, public endpoint, separate authorization system, wake behavior, or deployment service is introduced.
 

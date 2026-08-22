@@ -23,6 +23,7 @@ from voice_agent_v2.silero_tts import verify_silero_runtime
 from voice_agent_v2.slice6_config import (
     Slice6ConfigurationError,
     Slice6Settings,
+    _local_rtc_media_path,
     livekit_server_config,
     supervised_process_identity,
 )
@@ -580,6 +581,7 @@ def main() -> int:
     if any(name in os.environ for name in FORBIDDEN_CLOUD_NAMES):
         raise Slice6ConfigurationError("LiteLLM configuration is forbidden in the local-LFM runtime")
     settings = Slice6Settings.from_environment(project_root=ROOT)
+    media_interface, media_ip = _local_rtc_media_path(dict(os.environ))
     stopping = False
 
     def request_stop(_signum=None, _frame=None) -> None:
@@ -689,8 +691,9 @@ def main() -> int:
         print("Voice Agent v2 Slice 6 local-LFM development app started")
         print(f"application: http://127.0.0.1:{GATEWAY_PORT}")
         print(
-            f"LiveKit: loopback signaling ws://127.0.0.1:{SIGNAL_PORT}, "
-            f"WebRTC UDP/{RTC_UDP_PORT} on loopback; ICE/TCP and TURN disabled"
+            f"LiveKit: internal loopback signaling ws://127.0.0.1:{SIGNAL_PORT}, "
+            f"browser signaling {settings.livekit_public_url}, WebRTC UDP/{RTC_UDP_PORT} "
+            f"on exact {media_interface}/{media_ip}; ICE/TCP and TURN disabled"
         )
         print(
             f"local LFM: {LOCAL_LFM_ALIAS}, loopback-only HTTP/{LLAMA_PORT}, "
@@ -701,8 +704,8 @@ def main() -> int:
             f"{silero_metadata['workers']} isolated workers; private noncommercial only"
         )
         print(
-            "External network exposure is optional and entirely operator-owned; "
-            "the application manages no proxy or route."
+            "Tailscale Serve/firewall readiness is owned by `stand status`; "
+            "application readiness alone does not claim remote voice readiness."
         )
         print("Press Ctrl+C to stop this development run.")
 
