@@ -3,7 +3,7 @@
   "$id": "https://voice-agent-v2.local/contracts/agent-runtime-status.v2.schema.json",
   "title": "Restart-pinned active agent runtime status v2",
   "type": "object", "additionalProperties": false,
-  "required": ["schema_version", "status", "reason_code", "config_revision", "agent_enabled", "agent_tools_admitted", "environment_count", "provider_mode", "automatic_fallback"],
+  "required": ["schema_version", "status", "reason_code", "config_revision", "agent_enabled", "agent_tools_admitted", "environment_count", "environment_state", "environment_image_state", "environment_container_provisioned", "environment_reason_code", "environment_failure_cause", "provider_mode", "automatic_fallback"],
   "properties": {
     "schema_version": {"const": "voice-agent.agent-runtime-status.v2"},
     "status": {"enum": ["active", "degraded"]},
@@ -12,6 +12,11 @@
     "agent_enabled": {"type": "boolean"},
     "agent_tools_admitted": {"type": "boolean"},
     "environment_count": {"const": 1},
+    "environment_state": {"enum": ["disabled", "absent", "creating", "running", "stopped", "exited", "starting", "restarting", "stale_spec", "unhealthy", "resource_stopped", "retiring", "retired", "unavailable", "environment_identity_conflict"]},
+    "environment_image_state": {"enum": ["prepared", "unavailable"]},
+    "environment_container_provisioned": {"type": "boolean"},
+    "environment_reason_code": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-z0-9_]{1,64}$"}]},
+    "environment_failure_cause": {"oneOf": [{"type": "null"}, {"enum": ["docker_create_rejected", "docker_create_response_invalid"]}]},
     "provider_mode": {"const": "local"},
     "automatic_fallback": {"const": false}
   }

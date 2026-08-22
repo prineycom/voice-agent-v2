@@ -433,6 +433,32 @@ class LiveTurnRunner:
         stt_alive = getattr(self.stt, "process_id", None) is not None
         stt_warmed = isinstance(warmup.get("stt"), dict) and warmup["stt"].get("discarded") is True
         lfm_ready = warmup.get("lfm_ready")
+        environment_status: dict[str, object] | None = None
+        if isinstance(self.llm, AgentRunProvider):
+            environment_status = self.llm.environment_status()
+            self._environment_status_snapshot = environment_status
+        environment_ready = (
+            not isinstance(self.llm, AgentRunProvider)
+            or (
+                isinstance(lfm_ready, dict)
+                and lfm_ready.get("agent_environment_ready") is True
+                and environment_status is not None
+                and environment_status.get("state") == "running"
+            )
+        )
+        environment_reason = None
+        if isinstance(self.llm, AgentRunProvider) and environment_status is not None:
+            failure = environment_status.get("last_create_failure")
+            if isinstance(failure, dict) and failure.get("cause") in {
+                "docker_create_rejected", "docker_create_response_invalid",
+            }:
+                environment_reason = "environment_creation_failed"
+            elif isinstance(environment_status.get("reason_code"), str):
+                environment_reason = str(environment_status["reason_code"])
+        if environment_reason is None and isinstance(lfm_ready, dict) and isinstance(
+            lfm_ready.get("agent_environment_reason_code"), str,
+        ):
+            environment_reason = str(lfm_ready["agent_environment_reason_code"])
         runtime_health = getattr(self.llm, "runtime_health", None)
         runtime_health = runtime_health if isinstance(runtime_health, dict) else {
             "live": getattr(self.llm, "runtime_live", True),
@@ -504,13 +530,14 @@ class LiveTurnRunner:
             ComponentHealth(
                 "selected_llm",
                 "alive" if lfm_alive else "dead",
-                "ready" if lfm_alive and lfm_runtime_ready and lfm_compatible else "unready",
+                "ready" if lfm_alive and lfm_runtime_ready and lfm_compatible and environment_ready else "unready",
                 bool(lfm_compatible),
                 self.llm.provider_identity,
                 self.llm.version,
-                None if lfm_alive and lfm_runtime_ready and lfm_compatible
+                None if lfm_alive and lfm_runtime_ready and lfm_compatible and environment_ready
                 else str(
-                    runtime_health.get("reason_code")
+                    environment_reason
+                    or runtime_health.get("reason_code")
                     or (
                         "local_lfm_unavailable" if not lfm_alive
                         else "local_lfm_incompatible" if not lfm_compatible
@@ -528,6 +555,13 @@ class LiveTurnRunner:
                 None if tts_ready and tts_compatible else "silero_pool_not_ready",
             ),
         )
+
+    def agent_environment_status(self) -> dict[str, object] | None:
+        snapshot = getattr(self, "_environment_status_snapshot", None)
+        if isinstance(snapshot, dict):
+            return dict(snapshot)
+        status = getattr(self.llm, "environment_status", None)
+        return status() if callable(status) else None
 
     def ready_for_admission(self) -> bool:
         if not all(hasattr(self, name) for name in ("stt", "llm", "tts")):

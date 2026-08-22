@@ -67,13 +67,17 @@ def public_status_document(
     """Compose voice readiness independently from the soft agent plane."""
 
     health = registry.operational_health()
+    environment_status_owner = getattr(getattr(registry, "runner", None), "agent_environment_status", None)
+    environment_status = (
+        environment_status_owner() if callable(environment_status_owner) else None
+    )
+    admission_ready = (
+        registry.accepting and health["overall_readiness"] == "ready"
+    )
     return {
         "schema_version": "voice-agent.public-operational-status.v2",
-        "available": (
-            registry.accepting and registry.active_count == 0
-            and health["overall_readiness"] == "ready"
-        ),
-        "accepting": registry.accepting,
+        "available": admission_ready and registry.active_count == 0,
+        "accepting": admission_ready,
         "session_limit": 1,
         "build_id": settings.build_id,
         "release_id": settings.release_id,
@@ -82,7 +86,11 @@ def public_status_document(
         "automatic_fallback": False,
         "avatar_host_contract": "voice-agent.avatar-host.v1",
         "selected_avatar_module": "mvp-eye-svg-v1",
-        "agent_runtime": registry.agent_runtime.status_document(),
+        "agent_runtime": (
+            registry.agent_runtime.status_document(environment_status)
+            if environment_status is not None
+            else registry.agent_runtime.status_document()
+        ),
         "health": health,
     }
 

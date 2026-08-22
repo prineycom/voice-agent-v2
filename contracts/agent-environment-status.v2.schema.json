@@ -3,11 +3,31 @@
   "$id": "https://voice-agent-v2.local/contracts/agent-environment-status.v2.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "state", "config_revision_prefix", "spec_prefix", "generation", "reason_code", "network_egress_enabled", "published_ports", "internal_listeners_may_conflict", "additional_mounts", "additional_mount_authority_warning", "unmounted_host_paths_sockets_devices_accessible", "docker_socket_mounted", "process_receipts", "background_process_limit", "process_poll_required_for_fresh_running_truth", "retained_generations", "lifecycle_selector_supported", "destructive_confirmation_required", "data_deletion_requires_separate_confirmation", "reset_recreates_lazily_under_same_spec", "rebuild_kills_old_processes", "rebuild_retains_old_generation_by_default", "remove_affects_only_current_container", "retire_affects_only_recorded_noncurrent_generation", "conflicts_are_not_automatically_resolved", "visible_conflict_kinds", "credential_configuration_count", "credential_exposure", "credential_authority_warning", "credential_values_or_fingerprints_exposed", "remote_effects_rolled_back_by_cancellation", "automatic_network_or_stream_retry", "rootfs_and_files_persist", "rootfs_persists_until_exact_container_destruction", "workspace_persists_after_reset_rebuild_remove_by_default", "cache_persists_after_reset_rebuild_remove_by_default", "tmpfs_persists_across_container_stop", "processes_survive_controller_events_only_while_container_running", "processes_survive_container_stop", "shell_local_state_persists_across_exec", "logical_cwd_persists_across_exec_and_controller_restart"],
+  "required": ["schema_version", "state", "config_revision_prefix", "spec_prefix", "generation", "reason_code", "image_state", "container_provisioned", "last_create_failure", "network_egress_enabled", "published_ports", "internal_listeners_may_conflict", "additional_mounts", "additional_mount_authority_warning", "unmounted_host_paths_sockets_devices_accessible", "docker_socket_mounted", "process_receipts", "background_process_limit", "process_poll_required_for_fresh_running_truth", "retained_generations", "lifecycle_selector_supported", "destructive_confirmation_required", "data_deletion_requires_separate_confirmation", "reset_recreates_lazily_under_same_spec", "rebuild_kills_old_processes", "rebuild_retains_old_generation_by_default", "remove_affects_only_current_container", "retire_affects_only_recorded_noncurrent_generation", "conflicts_are_not_automatically_resolved", "visible_conflict_kinds", "credential_configuration_count", "credential_exposure", "credential_authority_warning", "credential_values_or_fingerprints_exposed", "remote_effects_rolled_back_by_cancellation", "automatic_network_or_stream_retry", "rootfs_and_files_persist", "rootfs_persists_until_exact_container_destruction", "workspace_persists_after_reset_rebuild_remove_by_default", "cache_persists_after_reset_rebuild_remove_by_default", "tmpfs_persists_across_container_stop", "processes_survive_controller_events_only_while_container_running", "processes_survive_container_stop", "shell_local_state_persists_across_exec", "logical_cwd_persists_across_exec_and_controller_restart"],
   "properties": {
     "schema_version": {"const": "voice-agent.agent-environment-status.v2"},
     "state": {"enum": ["absent", "creating", "running", "stopped", "exited", "starting", "restarting", "stale_spec", "unhealthy", "resource_stopped", "retiring", "retired", "unavailable", "environment_identity_conflict"]},
     "config_revision_prefix": {"type": "string"}, "spec_prefix": {"type": "string"}, "generation": {"type": "integer"}, "reason_code": {},
+    "image_state": {"enum": ["prepared", "unavailable"]},
+    "container_provisioned": {"type": "boolean"},
+    "last_create_failure": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["cause", "exit_status_class", "accepted_before_exec", "generation", "managed_candidate", "endpoint_precheck_passed", "image_precheck_passed"],
+          "properties": {
+            "cause": {"enum": ["docker_create_rejected", "docker_create_response_invalid"]},
+            "exit_status_class": {"enum": ["zero", "nonzero"]},
+            "accepted_before_exec": {"enum": ["accepted", "rejected", "unknown"]},
+            "generation": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+            "managed_candidate": {"enum": ["present", "absent", "unknown"]},
+            "endpoint_precheck_passed": {"const": true},
+            "image_precheck_passed": {"const": true}
+          }
+        }
+      ]
+    },
     "installation_prefix": {}, "container_id_prefix": {}, "mismatch_fields": {"type": "array"}, "bounds": {"type": "object"},
     "network_egress_enabled": {"type": "boolean"}, "published_ports": {"const": []},
     "internal_listeners_may_conflict": {"const": true},

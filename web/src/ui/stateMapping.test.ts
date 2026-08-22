@@ -36,7 +36,7 @@ describe('voice reducer to UI domain mapping', () => {
     })
     expect(model.components.every((component) => component.health === 'READY')).toBe(true)
     expect(model.components.map((component) => component.id)).toEqual([
-      'livekit', 'controller', 'stt', 'selected_llm', 'tts',
+      'livekit', 'controller', 'stt', 'selected_llm', 'agent_environment', 'tts',
       'avatar_host', 'active_module',
     ])
   })
@@ -104,6 +104,38 @@ describe('voice reducer to UI domain mapping', () => {
       health: 'DEGRADED', reason: 'late_or_duplicate_event',
     })
     expect(model.droppedEvents).toBe(1)
+  })
+
+  it('renders preprovisioned and unavailable AgentEnvironment truth separately', () => {
+    const health = {
+      schema_version: 'voice-agent.health-readiness.v1' as const, overall_readiness: 'ready' as const,
+      components: [{
+        component: 'selected_llm' as const, liveness: 'alive' as const, readiness: 'ready' as const, compatible: true,
+        identity: 'local', contract_version: 'voice-agent.llm-provider.v1', reason_code: null,
+        retry_count: 0, retry_limit: 0,
+      }],
+      provider_mode: 'local' as const, external_transfer: false as const, automatic_fallback: false as const,
+      stt_location: 'local' as const, tts_location: 'local' as const, auth_boundary: 'loopback' as const,
+      wake_enabled: false as const, selected_avatar_module: 'mvp-eye-svg-v1' as const,
+    }
+    const ready = mapVoiceStateToUi({
+      ...initialVoiceState, connection: 'ready', health,
+    }, avatarReady)
+    expect(ready.components.find((component) => component.id === 'agent_environment')).toMatchObject({
+      health: 'READY', readiness: 'READY', reason: null,
+    })
+
+    const unavailable = mapVoiceStateToUi({
+      ...initialVoiceState,
+      connection: 'ready',
+      health: {
+        ...health, overall_readiness: 'unready',
+        components: [{ ...health.components[0], readiness: 'unready', reason_code: 'environment_creation_failed' }],
+      },
+    }, avatarReady)
+    expect(unavailable.components.find((component) => component.id === 'agent_environment')).toMatchObject({
+      health: 'UNAVAILABLE', readiness: 'UNREADY', reason: 'environment_creation_failed',
+    })
   })
 
   it('reports fallback health without changing the voice path state', () => {

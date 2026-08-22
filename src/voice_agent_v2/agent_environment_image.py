@@ -132,7 +132,7 @@ def _load_native_image_contract(
         or document.get("native_platforms") != ["linux/amd64", "linux/arm64"]
         or document.get("entrypoint") != ["/sbin/tini", "--"]
         or document.get("command") != ["/usr/local/lib/voice-agent/agent-helper", "init-container"]
-        or document.get("user") != "1000:1000"
+        or document.get("user") != "0:0"
         or document.get("labels") != {
             IMAGE_MANAGED_LABEL: "1", IMAGE_SCHEMA_LABEL: "1",
         }

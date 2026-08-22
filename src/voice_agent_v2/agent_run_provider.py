@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 from typing import Callable
 
-from .agent_environment import AgentEnvironment
+from .agent_environment import AgentEnvironment, AgentEnvironmentError
 from .agent_environment_config import AgentConfigV2Snapshot
 from .agent_environment_credentials import InstallationCredentialStore
 from .agent_run import (
@@ -78,8 +78,27 @@ class AgentRunProvider:
         return self.selected.runtime_live
 
     def readiness(self, cancellation: CancellationToken | None = None):
-        # Docker remains lazy: ordinary voice readiness probes only the exact LFM.
-        return self.selected.readiness(cancellation)
+        """Gate full admission on the persistent environment's exact running truth."""
+
+        readiness = dict(self.selected.readiness(cancellation))
+        try:
+            facts = self.environment.ensure_running()
+        except AgentEnvironmentError as error:
+            readiness["agent_environment_ready"] = False
+            readiness["agent_environment_state"] = "unavailable"
+            readiness["agent_environment_reason_code"] = error.code
+        else:
+            readiness["agent_environment_ready"] = True
+            readiness["agent_environment_state"] = "running"
+            readiness["agent_environment_reason_code"] = None
+            if facts.state != "running":  # defensive: ensure_running owns this invariant
+                readiness["agent_environment_ready"] = False
+                readiness["agent_environment_state"] = "unavailable"
+                readiness["agent_environment_reason_code"] = "environment_unhealthy"
+        return readiness
+
+    def environment_status(self) -> dict[str, object]:
+        return self.environment.status()
 
     def warmup(self, cancellation: CancellationToken | None = None):
         return self.selected.warmup(cancellation)
