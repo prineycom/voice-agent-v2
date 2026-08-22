@@ -2,7 +2,7 @@
 
 **Source:** captain-authorized Tailscale remote-voice launch brief and `remote-voice-scope.md`
 **Parent:** direct PR over merged PR #95
-**Status:** ⏳ host proof pending
+**Status:** ✅ pass
 
 ## Changed files
 
@@ -19,12 +19,12 @@
 | Criterion | Status | Evidence |
 | --- | --- | --- |
 | Exact tailnet HTTPS application path and same-origin admission | ✅ implemented | Separate `:8443` Serve listener and exact Origin/CSP/session tests. |
-| Browser-reachable TLS/SNI-valid WSS capability and full signaling path | ✅ implemented | Same MagicDNS hostname on separate `:7443` root listener; capability and Serve rendering tests; host upgrade proof pending. |
-| One tailnet-reachable LiveKit media candidate | ✅ implemented | Private `tailscale0`/current Tailscale IPv4 group drives `node_ip`, interface include, IP allowlist and exact UDP bind; host proof pending. |
+| Browser-reachable TLS/SNI-valid WSS capability and full signaling path | ✅ implemented and host-proven | Same MagicDNS hostname on separate `:7443` root listener; exact capability; official LiveKit client joined through public WSS and observed the agent participant. |
+| One tailnet-reachable LiveKit media candidate | ✅ implemented and host-proven | Private `tailscale0`/current Tailscale IPv4 group drives `node_ip`, interface include, IP allowlist and exact UDP bind; current LiveKit logs matched the configured and selected UDP host candidate. |
 | Loopback-only internal signaling/control/inference | ✅ implemented | Gateway/agent URLs remain `127.0.0.1`; deterministic separation and listener checks. |
 | Truthful composed readiness | ✅ implemented | `stand status dev` separately requires current identity, both Serve handlers, no Funnel, HTTPS probes, exact UDP bind and absence of the obsolete rule. |
 | Tailnet-only bounded exposure and refusal policy | ✅ implemented | No Funnel, TURN, ICE/TCP, wildcard/LAN service bind, alternate candidate, generic handler or main topology path; exact refusal tests. |
-| Retained dev state and clean mechanical deployment | ⏳ pending host proof | Deploy/restart preserves installation roots and preprovisioned AgentEnvironment by contract; live deploy/apply/status evidence remains to be recorded. |
+| Retained dev state and clean mechanical deployment | ✅ host-proven | Selected release survived both bounded recovery actions; one canonical image refresh retained the prior image, `stand init` refreshed the repository launcher contract without hand-editing, and final status reported the AgentEnvironment running. |
 | Intended second-device microphone/media/audio/cleanup | ⏳ Pasha acceptance | Explicitly outside host automation; exact manual observations remain open. |
 
 ## Validation
@@ -34,9 +34,14 @@
 | Focused remote/config/startup/stand suites | ✅ pass | Continuation checkpoint records passing deterministic selections, including 5/5 final `tests.test_remote_voice`. |
 | `git diff --check` | ✅ pass | Final pre-canonical tree. |
 | `./verify` | ✅ pass | Exactly one invocation: 461 hermetic Python tests, 9 local-socket tests, 94 Vitest tests, TypeScript, both web builds, and Firefox/actual-LiveKit smoke; full output saved in `evidence/verify.txt`. |
-| Dev deploy/apply and bounded host probes | ⏳ pending | Will be recorded after deployment of the committed task release. |
+| Initial selected-release start | ❌ closed prerequisite | Exact public readiness response identified only `image_preparation_stale`; build/release identity and gateway response matched. The unit was stopped before diagnosis and no topology workaround was applied. |
+| `./stand agent-image prepare` | ✅ pass | Exactly once after the deployed merged PR #95 context truthfully reported stale; selected the current native context and retained the prior image without deletion. |
+| Initial remote-apply restart | ❌ corrected deployment defect | The selected-release parser accepted the generated complete config, while the installed unit still invoked an older checkout parser and exited configuration-failed. No unit was hand-edited. |
+| `./stand init`; `./stand start dev`; `./stand status dev` | ✅ pass | Canonical bootstrap replaced the stale checkout launcher contract while preserving the selected release; exactly one final readiness proof reported running/enabled/internal-ready/remote-ready and AgentEnvironment running. |
+| HTTPS/Origin/WSS/ICE/cleanup host probe | ✅ pass | HTTP/2 app GET and exact CSP; exact-Origin capability with token omitted; official-client public WSS join; configured/selected Tailscale UDP host candidate; exact DELETE `204`; accepting/available cleanup. |
+| Serve/firewall/listener inspection | ✅ pass | Separate root handlers on `:8443` and `:7443`, preserved unrelated `:443`, no Funnel, no media rich rule, loopback internals, Tailscale-only Serve and UDP media. |
 
 ## Unresolved uncertainty
 
-- The second tailnet-device path, browser microphone permission/publication, remote participant/media, agent response audio and physical playback remain Pasha-observed Acceptance.
-- Host-side evidence cannot claim those physical observations and will not claim them after deployment.
+- Pasha must still test the exact URL from a second tailnet device and observe browser load/connect, microphone permission/publication, remote participant/media, agent response audio, and disconnect cleanup.
+- Chrome DevTools AXI found no supported Chrome binary on the host. The official-client host WSS/ICE proof makes no browser, microphone, remote-peer, audio, audibility, or playback claim.

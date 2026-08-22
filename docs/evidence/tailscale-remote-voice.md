@@ -1,7 +1,7 @@
 # Tailscale remote voice topology evidence
 
 **Decision:** [ADR-0016](../adr/0016-tailscale-remote-voice-topology.md)
-**Host proof date:** pending deployment
+**Host proof date:** 2026-08-23
 **Scope:** versioned `dev` stand only
 
 ## Implemented topology
@@ -36,15 +36,18 @@ The canonical command and full saved output are recorded in the matching Do repo
 
 ## Host-side proof
 
-Pending after the task commit is deployed to `dev`:
+The committed task release `2671b18ad80af8debe94ea4fca0e8a2cc9df7df1` was deployed to `dev`. The one canonical prepared-image refresh selected the already-merged current native context without deleting the retained prior image. The existing `./stand init` bootstrap then refreshed the repository launcher contract without changing the selected-release pointer; no unit was hand-edited. The single final `./stand status dev` proof reported running, enabled, internally ready, remote-voice ready, and the AgentEnvironment running.
 
-- exact selected release, running/enabled/internal-ready/remote-ready stand;
-- current structured Serve handlers and TLS listeners;
-- exact Origin `POST /api/session` and returned WSS capability;
-- real WSS upgrade/signaling through Serve;
-- exact Tailscale UDP bind and selected/configured ICE candidate;
-- healthy persistent AgentEnvironment;
-- explicit session cleanup and no public/LAN listener.
+Structured Serve status contained the preserved unrelated HTTPS `:443` handler plus exactly these task handlers on the current self MagicDNS name:
+
+- HTTPS `:8443` root → `http://127.0.0.1:8000`;
+- HTTPS/WSS `:7443` root → `http://127.0.0.1:7880`.
+
+There was no Funnel record. Listener inspection showed gateway, LiveKit signaling and llama.cpp only on IPv4 loopback; Serve only on the Tailscale addresses; and LiveKit UDP `7882` only on the current Tailscale IPv4. The public firewalld zone retained only its existing bounded SSH rules and no LAN/tailnet media-port rule. No application, signaling, inference, generic-service or media listener appeared on a LAN or wildcard address.
+
+`GET https://priney-arch.darter-smoot.ts.net:8443/` returned HTTP/2 `200` with CSP `connect-src 'self' wss://priney-arch.darter-smoot.ts.net:7443`. An exact-Origin `POST /api/session` with a fresh UUIDv4 returned a non-empty private token and the exact public WSS URL; only non-secret capability fields were displayed. The official Python LiveKit RTC client used that token privately, connected through the public WSS URL, observed the already joined agent participant, and disconnected. LiveKit's current start/ICE logs matched `node_ip` and the selected UDP host candidate on the current `tailscale0` address and port `7882`. The matching exact-Origin `DELETE` returned `204`; public status then reported accepting/available, remote configuration loaded, and AgentEnvironment running.
+
+Chrome DevTools AXI could not launch because this host has no supported Chrome binary, so this host proof makes no browser, microphone, or playback claim. The real official-client WSS/ICE proof is not relabelled as the intended second-device Acceptance.
 
 ## Remaining second-device Acceptance
 
