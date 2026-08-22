@@ -28,8 +28,63 @@ class Slice6ConfigurationError(ValueError):
     pass
 
 
-def _local_rtc_media_path() -> tuple[str, str]:
-    """Select one host IPv4 media path without widening HTTP/signaling binds."""
+def _interface_ipv4(name: str) -> str | None:
+    if name == "lo" or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", name):
+        return None
+    try:
+        state = (Path("/sys/class/net") / name / "operstate").read_text(
+            encoding="ascii"
+        ).strip()
+        if state not in {"up", "unknown"}:
+            return None
+    except OSError:
+        return None
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        packed = fcntl.ioctl(
+            probe.fileno(), 0x8915, struct.pack("256s", name.encode("ascii"))
+        )
+        address = socket.inet_ntoa(packed[20:24])
+        parsed = ipaddress.ip_address(address)
+    except (OSError, UnicodeEncodeError, ValueError):
+        return None
+    finally:
+        probe.close()
+    if parsed.version != 4 or parsed.is_loopback or parsed.is_link_local or parsed.is_multicast:
+        return None
+    return address
+
+
+def _local_rtc_media_path(
+    environment: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Select the exact configured tailnet path or one same-host IPv4 path."""
+
+    values = os.environ if environment is None else environment
+    configured_interface = values.get("VOICE_AGENT_RTC_INTERFACE")
+    configured_ip = values.get("VOICE_AGENT_RTC_IP")
+    if (configured_interface is None) != (configured_ip is None):
+        raise Slice6ConfigurationError(
+            "RTC interface and IPv4 address must be configured together"
+        )
+    if configured_interface is not None and configured_ip is not None:
+        if configured_interface != "tailscale0":
+            raise Slice6ConfigurationError(
+                "remote RTC media must use the exact tailscale0 interface"
+            )
+        try:
+            parsed = ipaddress.ip_address(configured_ip)
+        except ValueError as error:
+            raise Slice6ConfigurationError("configured RTC IPv4 address is invalid") from error
+        if parsed.version != 4 or parsed not in ipaddress.ip_network("100.64.0.0/10"):
+            raise Slice6ConfigurationError(
+                "remote RTC media requires one Tailscale IPv4 address"
+            )
+        if _interface_ipv4(configured_interface) != configured_ip:
+            raise Slice6ConfigurationError(
+                "configured RTC IPv4 address is not current on tailscale0"
+            )
+        return configured_interface, configured_ip
 
     preferred: list[tuple[int, str]] = []
     try:
@@ -41,33 +96,10 @@ def _local_rtc_media_path() -> tuple[str, str]:
         pass
     names = [name for _metric, name in sorted(preferred)]
     names.extend(sorted(name for _index, name in socket.if_nameindex() if name not in names))
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        for name in names:
-            if name == "lo" or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", name):
-                continue
-            try:
-                state = (Path("/sys/class/net") / name / "operstate").read_text(
-                    encoding="ascii"
-                ).strip()
-                if state not in {"up", "unknown"}:
-                    continue
-            except OSError:
-                continue
-            try:
-                packed = fcntl.ioctl(
-                    probe.fileno(), 0x8915, struct.pack("256s", name.encode("ascii"))
-                )
-                address = socket.inet_ntoa(packed[20:24])
-                parsed = ipaddress.ip_address(address)
-            except (OSError, UnicodeEncodeError, ValueError):
-                continue
-            if parsed.version == 4 and not (
-                parsed.is_loopback or parsed.is_link_local or parsed.is_multicast
-            ):
-                return name, address
-    finally:
-        probe.close()
+    for name in names:
+        address = _interface_ipv4(name)
+        if address is not None:
+            return name, address
     raise Slice6ConfigurationError(
         "one active non-loopback IPv4 interface is required for same-host RTC media"
     )
@@ -76,7 +108,7 @@ def _local_rtc_media_path() -> tuple[str, str]:
 def livekit_server_config(environment: dict[str, str] | None = None) -> str:
     signal_port = listener_port("VOICE_AGENT_LIVEKIT_PORT", 7880, environment)
     rtc_udp_port = listener_port("VOICE_AGENT_RTC_UDP_PORT", 7882, environment)
-    media_interface, media_ip = _local_rtc_media_path()
+    media_interface, media_ip = _local_rtc_media_path(environment)
     config = {
         "port": signal_port,
         "bind_addresses": ["127.0.0.1"],
@@ -186,6 +218,12 @@ class Slice6Settings:
     release_id: str = "development"
     supervised_livekit_process: str | None = None
     supervised_lfm_process: str | None = None
+    rtc_interface: str | None = None
+    rtc_ip: str | None = None
+
+    @property
+    def remote_voice_configured(self) -> bool:
+        return self.rtc_interface == "tailscale0" and self.rtc_ip is not None
 
     @classmethod
     def from_environment(
@@ -226,6 +264,7 @@ class Slice6Settings:
             name="SLICE6_APP_PUBLIC_URL",
             schemes={"http", "https"},
         )
+        remote_public_urls = False
         for name, value, secure_scheme in (
             ("LIVEKIT_PUBLIC_URL", public_url, "wss"),
             ("SLICE6_APP_PUBLIC_URL", app_public_url, "https"),
@@ -235,10 +274,32 @@ class Slice6Settings:
                 loopback = ipaddress.ip_address(str(parsed.hostname)).is_loopback
             except ValueError:
                 loopback = parsed.hostname == "localhost"
+            remote_public_urls = remote_public_urls or not loopback
             if not loopback and parsed.scheme != secure_scheme:
                 raise Slice6ConfigurationError(
                     f"non-loopback {name} must use {secure_scheme}"
                 )
+        rtc_interface = values.get("VOICE_AGENT_RTC_INTERFACE")
+        rtc_ip = values.get("VOICE_AGENT_RTC_IP")
+        if remote_public_urls:
+            livekit_endpoint = urlsplit(public_url)
+            app_endpoint = urlsplit(app_public_url)
+            if (
+                livekit_endpoint.scheme != "wss"
+                or app_endpoint.scheme != "https"
+                or livekit_endpoint.hostname != app_endpoint.hostname
+                or livekit_endpoint.port == app_endpoint.port
+                or rtc_interface != "tailscale0"
+                or rtc_ip is None
+            ):
+                raise Slice6ConfigurationError(
+                    "remote voice requires exact HTTPS/WSS listeners and Tailscale RTC media"
+                )
+            _local_rtc_media_path(values)
+        elif rtc_interface is not None or rtc_ip is not None:
+            raise Slice6ConfigurationError(
+                "an explicit Tailscale RTC path requires the complete remote voice topology"
+            )
         if any(name.startswith("LITELLM_") for name in values):
             raise Slice6ConfigurationError(
                 "LiteLLM configuration is forbidden in the local-LFM Slice 6 runtime"
@@ -313,4 +374,6 @@ class Slice6Settings:
             release_id=release_id,
             supervised_livekit_process=livekit_process,
             supervised_lfm_process=lfm_process,
+            rtc_interface=rtc_interface,
+            rtc_ip=rtc_ip,
         )

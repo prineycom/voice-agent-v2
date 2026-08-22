@@ -14,6 +14,8 @@
     "provider_mode",
     "external_provider_supervised",
     "automatic_fallback",
+    "remote_voice_configuration",
+    "remote_transport_readiness",
     "avatar_host_contract",
     "selected_avatar_module",
     "agent_runtime",
@@ -48,6 +50,12 @@
     },
     "automatic_fallback": {
       "const": false
+    },
+    "remote_voice_configuration": {
+      "enum": ["local-only", "configured"]
+    },
+    "remote_transport_readiness": {
+      "const": "owned-by-stand-operator-check"
     },
     "avatar_host_contract": {
       "const": "voice-agent.avatar-host.v1"

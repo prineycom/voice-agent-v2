@@ -8,6 +8,8 @@
   "provider_mode": "local",
   "external_provider_supervised": false,
   "automatic_fallback": false,
+  "remote_voice_configuration": "local-only",
+  "remote_transport_readiness": "owned-by-stand-operator-check",
   "avatar_host_contract": "voice-agent.avatar-host.v1",
   "selected_avatar_module": "mvp-eye-svg-v1",
   "health": {

@@ -115,7 +115,7 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
         )
         settings = types.SimpleNamespace(
             max_sessions=1,
-            livekit_public_url="ws://127.0.0.1:7880",
+            livekit_public_url="wss://voice-host.example-tailnet.ts.net:7443",
             room_token_ttl_seconds=300,
             browser_join_timeout_seconds=30,
         )
@@ -139,6 +139,10 @@ class SessionCapabilityLLMProfileTests(unittest.IsolatedAsyncioTestCase):
             capability = await registry.create("attempt-profile")
 
         self.assertEqual(capability["llm_profile"], llm_profile)
+        self.assertEqual(
+            capability["livekit_url"],
+            "wss://voice-host.example-tailnet.ts.net:7443",
+        )
 
     async def test_refuses_capability_when_readiness_is_lost_during_room_start(self) -> None:
         runtime = load_runtime()

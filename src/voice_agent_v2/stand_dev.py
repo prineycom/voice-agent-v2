@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ import stat
 import subprocess
 import tempfile
 from typing import Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 import uuid
 
 from .agent_environment import AgentEnvironment, AgentEnvironmentError, DockerRunner
@@ -51,6 +53,15 @@ CONFIG_KEYS = frozenset({
     "VOICE_AGENT_RTC_UDP_PORT",
     "VOICE_AGENT_GATEWAY_PORT",
 })
+REMOTE_VOICE_CONFIG_KEYS = frozenset({
+    "SLICE6_APP_PUBLIC_URL",
+    "VOICE_AGENT_RTC_INTERFACE",
+    "VOICE_AGENT_RTC_IP",
+})
+TAILSCALE_INTERFACE = "tailscale0"
+TAILSCALE_IPV4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+REMOTE_APP_HTTPS_PORT = 8443
+REMOTE_SIGNAL_HTTPS_PORT = 7443
 PORT_KEYS = frozenset({
     "VOICE_AGENT_LLM_PORT",
     "VOICE_AGENT_LIVEKIT_PORT",
@@ -177,7 +188,8 @@ def parse_private_config(path: Path) -> dict[str, str]:
         if key in values:
             raise StandError("private configuration has a duplicate key")
         values[key] = value
-    if frozenset(values) != CONFIG_KEYS:
+    configured_keys = frozenset(values)
+    if configured_keys not in {CONFIG_KEYS, CONFIG_KEYS | REMOTE_VOICE_CONFIG_KEYS}:
         raise StandError("private configuration has an unknown or missing key")
     if values["STAND_NAME"] not in INSTANCE_NAMES:
         raise StandError("private configuration has an invalid stand name")
@@ -186,8 +198,43 @@ def parse_private_config(path: Path) -> dict[str, str]:
         if not value.isdecimal() or not 1 <= int(value) <= 65535:
             raise StandError("private configuration requires explicit valid ports")
     expected_livekit_url = f"ws://127.0.0.1:{values['VOICE_AGENT_LIVEKIT_PORT']}"
-    if values["LIVEKIT_INTERNAL_URL"] != expected_livekit_url or values["LIVEKIT_PUBLIC_URL"] != expected_livekit_url:
+    if values["LIVEKIT_INTERNAL_URL"] != expected_livekit_url:
         raise StandError("private configuration must use its explicit loopback LiveKit port")
+    if configured_keys == CONFIG_KEYS:
+        if values["LIVEKIT_PUBLIC_URL"] != expected_livekit_url:
+            raise StandError("local private configuration must publish its loopback LiveKit URL")
+    else:
+        if values["VOICE_AGENT_RTC_INTERFACE"] != TAILSCALE_INTERFACE:
+            raise StandError("remote voice configuration requires tailscale0 media")
+        try:
+            rtc_ip = ipaddress.ip_address(values["VOICE_AGENT_RTC_IP"])
+        except ValueError as error:
+            raise StandError("remote voice configuration has an invalid media address") from error
+        if rtc_ip.version != 4 or rtc_ip not in TAILSCALE_IPV4_NETWORK:
+            raise StandError("remote voice configuration requires a Tailscale IPv4 address")
+        try:
+            app = urlsplit(values["SLICE6_APP_PUBLIC_URL"])
+            signal = urlsplit(values["LIVEKIT_PUBLIC_URL"])
+            app_port = app.port
+            signal_port = signal.port
+        except ValueError as error:
+            raise StandError("remote voice configuration has an invalid public URL") from error
+        if (
+            app.scheme != "https"
+            or signal.scheme != "wss"
+            or not app.hostname
+            or signal.hostname != app.hostname
+            or app_port != REMOTE_APP_HTTPS_PORT
+            or signal_port != REMOTE_SIGNAL_HTTPS_PORT
+            or any((app.username, app.password, signal.username, signal.password))
+            or app.path not in {"", "/"}
+            or signal.path not in {"", "/"}
+            or app.query
+            or signal.query
+            or app.fragment
+            or signal.fragment
+        ):
+            raise StandError("remote voice configuration requires exact HTTPS and WSS listeners")
     if len({values[key] for key in PORT_KEYS}) != len(PORT_KEYS):
         raise StandError("private configuration listener ports must be distinct")
     return values
@@ -298,6 +345,361 @@ def _checked(command: CommandRunner, arguments: Sequence[str], *, cwd: Path | No
     if result.returncode != 0:
         raise StandError(failure)
     return result
+
+
+@dataclass(frozen=True)
+class RemoteVoiceTopology:
+    hostname: str
+    ipv4: str
+    interface: str = TAILSCALE_INTERFACE
+
+    @property
+    def app_public_url(self) -> str:
+        return f"https://{self.hostname}:{REMOTE_APP_HTTPS_PORT}"
+
+    @property
+    def livekit_public_url(self) -> str:
+        return f"wss://{self.hostname}:{REMOTE_SIGNAL_HTTPS_PORT}"
+
+
+def discover_remote_voice_topology(command: CommandRunner) -> RemoteVoiceTopology:
+    """Discover only this node's current non-secret Tailscale identity."""
+    status = _checked(
+        command, ("tailscale", "status", "--json"),
+        failure="current Tailscale identity is unavailable",
+    )
+    try:
+        document = json.loads(status.stdout)
+        self_status = document["Self"]
+        dns_name = self_status["DNSName"]
+        addresses = self_status["TailscaleIPs"]
+        online = self_status["Online"]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise StandError("current Tailscale identity is invalid") from error
+    hostname = dns_name.removesuffix(".") if isinstance(dns_name, str) else ""
+    if (
+        online is not True
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", hostname)
+        or "." not in hostname
+        or not isinstance(addresses, list)
+    ):
+        raise StandError("current Tailscale identity is invalid")
+    ipv4_addresses = []
+    for value in addresses:
+        try:
+            parsed = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if parsed.version == 4 and parsed in TAILSCALE_IPV4_NETWORK:
+            ipv4_addresses.append(str(parsed))
+    if len(ipv4_addresses) != 1:
+        raise StandError("one current Tailscale IPv4 identity is required")
+    interface = _checked(
+        command, ("ip", "-json", "-4", "address", "show", "dev", TAILSCALE_INTERFACE),
+        failure="the tailscale0 interface is unavailable",
+    )
+    try:
+        interface_document = json.loads(interface.stdout)
+        local_addresses = {
+            item.get("local")
+            for record in interface_document
+            for item in record.get("addr_info", [])
+            if isinstance(record, dict) and isinstance(item, dict) and item.get("family") == "inet"
+        }
+    except (TypeError, json.JSONDecodeError) as error:
+        raise StandError("the tailscale0 interface identity is invalid") from error
+    if local_addresses != {ipv4_addresses[0]}:
+        raise StandError("the Tailscale IPv4 identity does not match tailscale0")
+    return RemoteVoiceTopology(hostname=hostname, ipv4=ipv4_addresses[0])
+
+
+def _replace_private_config(path: Path, values: Mapping[str, str]) -> None:
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as destination:
+            destination.write("".join(f"{key}={values[key]}\n" for key in sorted(values)))
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _remote_voice_backup(
+    *, state_root: Path, instance: str, topology: RemoteVoiceTopology,
+    command: CommandRunner,
+) -> Path:
+    root = instance_root(state_root, instance) / "remote-voice"
+    _mkdir_private(root)
+    backups = root / "backups"
+    _mkdir_private(backups)
+    backup = backups / uuid.uuid4().hex
+    backup.mkdir(mode=0o700)
+    snapshots = {
+        "serve-status.json": _checked(
+            command, ("tailscale", "serve", "status", "--json"),
+            failure="Tailscale Serve configuration cannot be backed up",
+        ).stdout,
+        "firewall-runtime.txt": _checked(
+            command, ("sudo", "-n", "firewall-cmd", "--zone=public", "--list-all"),
+            failure="runtime firewall configuration cannot be backed up",
+        ).stdout,
+        "firewall-permanent.txt": _checked(
+            command, ("sudo", "-n", "firewall-cmd", "--permanent", "--zone=public", "--list-all"),
+            failure="persistent firewall configuration cannot be backed up",
+        ).stdout,
+        "topology.json": json.dumps({
+            "schema": "voice-agent.tailscale-remote-voice-backup.v1",
+            "hostname": topology.hostname,
+            "ipv4": topology.ipv4,
+            "interface": topology.interface,
+        }, sort_keys=True) + "\n",
+    }
+    for name, content in snapshots.items():
+        path = backup / name
+        path.write_text(content, encoding="utf-8")
+        os.chmod(path, 0o600)
+    return backup
+
+
+def _serve_handler_matches(
+    document: Mapping[str, object], *, hostname: str, port: int, target: str,
+) -> bool:
+    tcp = document.get("TCP")
+    web = document.get("Web")
+    if not isinstance(tcp, dict) or not isinstance(web, dict):
+        return False
+    return (
+        tcp.get(str(port)) == {"HTTPS": True}
+        and web.get(f"{hostname}:{port}") == {"Handlers": {"/": {"Proxy": target}}}
+    )
+
+
+def _contains_funnel_authority(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            (key.lower().replace("_", "") == "allowfunnel" and item is True)
+            or _contains_funnel_authority(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_funnel_authority(item) for item in value)
+    return False
+
+
+def _media_firewall_rule(port: int) -> str:
+    return (
+        'rule family="ipv4" source address="100.64.0.0/10" '
+        f'port port="{port}" protocol="udp" accept'
+    )
+
+
+def _media_firewall_rule_present(
+    command: CommandRunner, *, port: int, permanent: bool,
+) -> bool:
+    arguments = ["sudo", "-n", "firewall-cmd"]
+    if permanent:
+        arguments.append("--permanent")
+    arguments.extend(("--zone=public", "--query-rich-rule", _media_firewall_rule(port)))
+    result = command.run(tuple(arguments))
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise StandError("firewall media-path status is unavailable")
+
+
+def _remove_obsolete_media_firewall_rule(
+    command: CommandRunner, *, port: int,
+) -> None:
+    for permanent in (False, True):
+        if not _media_firewall_rule_present(
+            command, port=port, permanent=permanent,
+        ):
+            continue
+        arguments = ["sudo", "-n", "firewall-cmd"]
+        if permanent:
+            arguments.append("--permanent")
+        arguments.extend(("--zone=public", "--remove-rich-rule", _media_firewall_rule(port)))
+        _checked(
+            command, tuple(arguments),
+            failure="obsolete LAN-zone media firewall rule could not be removed",
+        )
+        if _media_firewall_rule_present(command, port=port, permanent=permanent):
+            raise StandError("obsolete LAN-zone media firewall rule remains active")
+
+
+def _remote_config_values(
+    values: Mapping[str, str], topology: RemoteVoiceTopology,
+) -> dict[str, str]:
+    updated = dict(values)
+    updated.update({
+        "LIVEKIT_PUBLIC_URL": topology.livekit_public_url,
+        "SLICE6_APP_PUBLIC_URL": topology.app_public_url,
+        "VOICE_AGENT_RTC_INTERFACE": topology.interface,
+        "VOICE_AGENT_RTC_IP": topology.ipv4,
+    })
+    return updated
+
+
+def _serve_document(command: CommandRunner) -> dict[str, object]:
+    status = _checked(
+        command, ("tailscale", "serve", "status", "--json"),
+        failure="Tailscale Serve status is unavailable",
+    )
+    try:
+        document = json.loads(status.stdout)
+    except json.JSONDecodeError as error:
+        raise StandError("Tailscale Serve status is invalid") from error
+    if not isinstance(document, dict):
+        raise StandError("Tailscale Serve status is invalid")
+    return document
+
+
+def configure_remote_voice(
+    *, state_root: Path, instance: str, command: CommandRunner,
+) -> tuple[RemoteVoiceTopology, Path, bool]:
+    """Apply the one dev Tailscale topology through current supported Serve syntax."""
+    if instance != "dev":
+        raise StandError("remote voice configuration is limited to the dev stand")
+    values = parse_private_config(config_path(state_root, instance))
+    topology = discover_remote_voice_topology(command)
+    app_target = f"http://127.0.0.1:{values['VOICE_AGENT_GATEWAY_PORT']}"
+    signal_target = f"http://127.0.0.1:{values['VOICE_AGENT_LIVEKIT_PORT']}"
+    before = _serve_document(command)
+    web = before.get("Web", {})
+    if not isinstance(web, dict):
+        raise StandError("Tailscale Serve status is invalid")
+    for port, target in (
+        (REMOTE_APP_HTTPS_PORT, app_target),
+        (REMOTE_SIGNAL_HTTPS_PORT, signal_target),
+    ):
+        existing = web.get(f"{topology.hostname}:{port}")
+        if existing is not None and existing != {"Handlers": {"/": {"Proxy": target}}}:
+            raise StandError("remote voice refuses to replace an unrelated Serve handler")
+    backup = _remote_voice_backup(
+        state_root=state_root, instance=instance, topology=topology, command=command,
+    )
+    _remove_obsolete_media_firewall_rule(
+        command, port=int(values["VOICE_AGENT_RTC_UDP_PORT"]),
+    )
+    _checked(
+        command,
+        ("tailscale", "serve", "--bg", f"--https={REMOTE_APP_HTTPS_PORT}", app_target),
+        failure="Tailscale application Serve listener could not be applied",
+    )
+    _checked(
+        command,
+        ("tailscale", "serve", "--bg", f"--https={REMOTE_SIGNAL_HTTPS_PORT}", signal_target),
+        failure="Tailscale LiveKit Serve listener could not be applied",
+    )
+    after = _serve_document(command)
+    if (
+        _contains_funnel_authority(after)
+        or not _serve_handler_matches(
+            after, hostname=topology.hostname, port=REMOTE_APP_HTTPS_PORT, target=app_target,
+        )
+        or not _serve_handler_matches(
+            after, hostname=topology.hostname, port=REMOTE_SIGNAL_HTTPS_PORT, target=signal_target,
+        )
+    ):
+        raise StandError("applied Serve topology is not the exact tailnet-only remote voice topology")
+    _replace_private_config(config_path(state_root, instance), _remote_config_values(values, topology))
+    parse_private_config(config_path(state_root, instance))
+    restarted = _service_running(instance=instance, command=command)
+    if restarted:
+        _ensure_active(instance=instance, command=command, action="restart")
+    return topology, backup, restarted
+
+
+def _exact_udp_listener(ipv4: str, port: int, *, proc_root: Path = Path("/proc")) -> bool:
+    expected_address = bytes(reversed(ipaddress.ip_address(ipv4).packed)).hex().upper()
+    expected_port = f"{port:04X}"
+    addresses: set[str] = set()
+    for name in ("udp", "udp6"):
+        try:
+            lines = (proc_root / "net" / name).read_text(encoding="ascii").splitlines()[1:]
+        except OSError:
+            return False
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 2:
+                return False
+            address, separator, observed_port = fields[1].partition(":")
+            if separator and observed_port == expected_port:
+                addresses.add(address)
+    return addresses == {expected_address}
+
+
+def remote_voice_status(
+    *, state_root: Path, instance: str, command: CommandRunner,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, str]:
+    """Prove configured endpoints, Serve routes, TLS probes, and the exact ICE bind."""
+    try:
+        values = parse_private_config(config_path(state_root, instance))
+        if not REMOTE_VOICE_CONFIG_KEYS.issubset(values):
+            return {"state": "not-configured"}
+        topology = discover_remote_voice_topology(command)
+        if _remote_config_values(values, topology) != values:
+            raise StandError("private remote voice identity is stale")
+        serve = _serve_document(command)
+        app_target = f"http://127.0.0.1:{values['VOICE_AGENT_GATEWAY_PORT']}"
+        signal_target = f"http://127.0.0.1:{values['VOICE_AGENT_LIVEKIT_PORT']}"
+        if (
+            _contains_funnel_authority(serve)
+            or not _serve_handler_matches(
+                serve, hostname=topology.hostname, port=REMOTE_APP_HTTPS_PORT, target=app_target,
+            )
+            or not _serve_handler_matches(
+                serve, hostname=topology.hostname, port=REMOTE_SIGNAL_HTTPS_PORT, target=signal_target,
+            )
+        ):
+            raise StandError("Serve topology is incomplete")
+        app_probe = _checked(
+            command,
+            ("curl", "--fail", "--silent", "--show-error", "--max-time", "5", f"{topology.app_public_url}/api/status"),
+            failure="remote application HTTPS probe failed",
+        )
+        try:
+            public_status = json.loads(app_probe.stdout)
+        except json.JSONDecodeError as error:
+            raise StandError("remote application HTTPS status is invalid") from error
+        if not (
+            isinstance(public_status, dict)
+            and public_status.get("accepting") is True
+            and isinstance(public_status.get("health"), dict)
+            and public_status["health"].get("overall_readiness") == "ready"
+            and public_status.get("remote_voice_configuration") == "configured"
+        ):
+            raise StandError("remote application HTTPS status is not ready")
+        signal_probe = _checked(
+            command,
+            ("curl", "--fail", "--silent", "--show-error", "--max-time", "5", topology.livekit_public_url.replace("wss://", "https://") + "/"),
+            failure="remote LiveKit HTTPS/WSS listener probe failed",
+        )
+        if signal_probe.stdout != "OK":
+            raise StandError("remote LiveKit HTTPS/WSS listener is invalid")
+        media_port = int(values["VOICE_AGENT_RTC_UDP_PORT"])
+        if (
+            _media_firewall_rule_present(command, port=media_port, permanent=False)
+            or _media_firewall_rule_present(command, port=media_port, permanent=True)
+        ):
+            raise StandError("an obsolete LAN-zone media firewall rule is still present")
+        if not _exact_udp_listener(
+            topology.ipv4, media_port, proc_root=proc_root,
+        ):
+            raise StandError("LiveKit media is not bound to the exact Tailscale candidate")
+        return {"state": "ready", "url": topology.app_public_url}
+    except StandError:
+        return {"state": "not-ready"}
 
 
 def _release_manifest(release: Path) -> dict[str, object]:
@@ -721,9 +1123,16 @@ def status(
         )
     except AgentEnvironmentError:
         environment_state = "unavailable"
+    remote = remote_voice_status(
+        state_root=state_root, instance=instance, command=command,
+    )
+    remote_detail = remote["state"]
+    if "url" in remote:
+        remote_detail += f" ({remote['url']})"
     lines = [
         f"stand status {instance}", f"version: {commit}", f"state: {lifecycle}",
         f"persistence: {persistence}", f"readiness: {readiness}",
+        f"remote voice: {remote_detail}",
         f"agent container: {environment_state}",
     ]
     if failure is not None:
@@ -901,11 +1310,14 @@ def _launcher_environment_for_release(
         "VOICE_AGENT_SHARED_CACHE_ROOT": str(shared_cache),
         "VOICE_AGENT_BUILD_ID": commit,
         "VOICE_AGENT_RELEASE_ID": commit[:24],
-        "SLICE6_APP_PUBLIC_URL": f"http://127.0.0.1:{values['VOICE_AGENT_GATEWAY_PORT']}",
         "SLICE6_WEB_DIST": str(release / "source" / "web" / "dist"),
         "XDG_CACHE_HOME": str(root / "cache" / "xdg"),
         "PYTHONPYCACHEPREFIX": str(root / "cache" / "pycache"),
     })
+    result.setdefault(
+        "SLICE6_APP_PUBLIC_URL",
+        f"http://127.0.0.1:{values['VOICE_AGENT_GATEWAY_PORT']}",
+    )
     return python, (str(python), "-B", str(launcher)), result
 
 

@@ -44,6 +44,14 @@ app = FastAPI(
 )
 
 
+def content_security_policy(livekit_url: str) -> str:
+    return (
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        f"connect-src 'self' {livekit_url}; media-src 'self' blob:; "
+        "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response: Response = await call_next(request)
@@ -53,11 +61,7 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(self), geolocation=()"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self'; style-src 'self'; "
-        f"connect-src 'self' {livekit_url}; media-src 'self' blob:; "
-        "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
-    )
+    response.headers["Content-Security-Policy"] = content_security_policy(livekit_url)
     return response
 
 
@@ -84,6 +88,10 @@ def public_status_document(
         "provider_mode": "local",
         "external_provider_supervised": False,
         "automatic_fallback": False,
+        "remote_voice_configuration": (
+            "configured" if getattr(settings, "remote_voice_configured", False) else "local-only"
+        ),
+        "remote_transport_readiness": "owned-by-stand-operator-check",
         "avatar_host_contract": "voice-agent.avatar-host.v1",
         "selected_avatar_module": "mvp-eye-svg-v1",
         "agent_runtime": (
