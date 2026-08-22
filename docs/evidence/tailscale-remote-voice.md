@@ -1,7 +1,7 @@
 # Tailscale remote voice topology evidence
 
-**Decision:** [ADR-0016](../adr/0016-tailscale-remote-voice-topology.md)  
-**Host proof date:** pending deployment  
+**Decision:** [ADR-0016](../adr/0016-tailscale-remote-voice-topology.md)
+**Host proof date:** pending deployment
 **Scope:** versioned `dev` stand only
 
 ## Implemented topology
