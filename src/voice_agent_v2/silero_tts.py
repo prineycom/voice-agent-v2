@@ -246,9 +246,39 @@ class SileroRequestFailure(StageFailure):
 
     def __init__(self, worker_error_class: str, observation: dict[str, object]) -> None:
         super().__init__("tts", "silero_synthesis_failed")
+        count_fields = (
+            "cyrillic_count", "latin_count", "digit_count", "space_count",
+            "punctuation_count", "symbol_count", "other_count",
+        )
+        integer_bounds = {
+            "segment_index": (0, 4_095),
+            "shaped_char_count": (1, 320),
+            "utf8_byte_count": (1, 1_280),
+            **{name: (0, 320) for name in count_fields},
+            "ready_workers": (0, POOL_SIZE),
+            "request_count": (1, 1_000_000_000),
+            "failure_count": (1, 1_000_000_000),
+            "quarantine_count": (0, 1_000_000_000),
+            "retry_count": (0, 0),
+        }
         if (
             worker_error_class not in WORKER_REQUEST_ERROR_CLASSES
             or set(observation) != FAILED_SEGMENT_OBSERVATION_FIELDS
+            or observation.get("worker_error_class") != worker_error_class
+            or observation.get("logical_slot_class") not in {"slot_1", "slot_2"}
+            or any(
+                type(observation.get(name)) is not int
+                or not lower <= observation[name] <= upper
+                for name, (lower, upper) in integer_bounds.items()
+            )
+            or type(observation.get("dispatch_to_error_ms")) not in {int, float}
+            or not math.isfinite(observation["dispatch_to_error_ms"])
+            or not 0 <= observation["dispatch_to_error_ms"] <= 120_000
+            or sum(observation[name] for name in count_fields)
+            != observation["shaped_char_count"]
+            or not observation["shaped_char_count"]
+            <= observation["utf8_byte_count"]
+            <= observation["shaped_char_count"] * 4
         ):
             raise ValueError("invalid private Silero request failure")
         self.worker_error_class = worker_error_class

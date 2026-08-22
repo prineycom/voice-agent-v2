@@ -86,7 +86,7 @@ function TimelineTab({
             <li><span>CANCELLATION LATENCY</span><strong>{milliseconds(item.cancellationLatencyMs ?? null)}</strong></li>
             <li><span>SLOWEST STAGE</span><strong>{item.slowestStage?.toUpperCase() ?? 'NOT OBSERVED'}</strong></li>
             <li><span>TERMINAL</span><strong>{item.outcome?.toUpperCase() ?? 'ACTIVE'}</strong></li>
-            <li><span>ACTION</span><strong>{item.actionOutcome === 'completed' ? `COMPLETED · ${item.operationCount ?? 0}` : item.actionOutcome === 'failed' ? `FAILED · ${item.operationCount ?? 0}` : 'NO OPERATION'}</strong></li>
+            <li><span>ACTION</span><strong>{item.actionOutcome === 'completed' ? `COMPLETED · ${item.operationCount ?? 0}` : item.actionOutcome === 'failed' ? `FAILED · ${item.operationCount ?? 0}` : item.actionOutcome === 'no_operation' ? 'NO OPERATION' : 'NOT YET RESOLVED'}</strong></li>
             <li><span>SPEECH</span><strong>{(item.speechOutcome ?? (item.audioUnavailable ? 'failed' : 'not_started')).replaceAll('_', ' ').toUpperCase()}</strong></li>
           </ol>
           <dl className="configuration-list timeline-metadata">

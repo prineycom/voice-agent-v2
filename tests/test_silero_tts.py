@@ -1141,7 +1141,10 @@ class SileroPoolTests(unittest.TestCase):
                     self.assertEqual(observation["ready_workers"], 2)
                     self.assertEqual(observation["quarantine_count"], 0)
                     self.assertEqual(observation["request_count"], 1)
+                    self.assertEqual(observation["failure_count"], 1)
                     self.assertEqual(observation["retry_count"], 0)
+                    self.assertIn(observation["logical_slot_class"], {"slot_1", "slot_2"})
+                    self.assertGreaterEqual(observation["dispatch_to_error_ms"], 0)
                     self.assertEqual(pool.ready_count, 2)
                     self.assertEqual(pool.counters["worker_quarantines"], 0)
                     rendered = str(observation)
@@ -1182,6 +1185,8 @@ class SileroPoolTests(unittest.TestCase):
                     self.assertEqual(pool.counters["worker_quarantines"], 1)
                     self.assertEqual(len(pool.process_ids), 1)
                     self.assertEqual(len(coordinator.created), 2)
+                    self.assertFalse(hasattr(failure.exception, "worker_error_class"))
+                    self.assertEqual(pool.observations, [])
                 finally:
                     pool.close()
 

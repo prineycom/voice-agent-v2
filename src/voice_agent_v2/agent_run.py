@@ -267,13 +267,20 @@ class AgentRun:
     def _set_provenance(
         self, identity: AgentRealtimeIdentity, operation_count: int, action_outcome: str
     ) -> None:
-        if action_outcome not in {"no_operation", "completed", "failed"}:
-            raise ValueError("invalid action outcome")
+        if (
+            type(operation_count) is not int
+            or not 0 <= operation_count <= 24
+            or action_outcome not in {"no_operation", "completed", "failed"}
+            or (operation_count == 0) != (action_outcome == "no_operation")
+        ):
+            raise ValueError("invalid action provenance")
         with self._lock:
             self._provenance[identity] = {
                 "operation_count": operation_count,
                 "action_outcome": action_outcome,
             }
+            for stale in tuple(self._provenance)[:-64]:
+                self._provenance.pop(stale, None)
 
     def _live(self, identity: AgentRealtimeIdentity, cancellation: CancellationToken) -> bool:
         with self._lock:
@@ -334,6 +341,8 @@ class AgentRun:
             self._provenance[identity] = {
                 "operation_count": 0, "action_outcome": "no_operation",
             }
+            for stale in tuple(self._provenance)[:-64]:
+                self._provenance.pop(stale, None)
         unregister = token.register(self.cancel)
         deadline = self.clock() + self.budget.active_deadline_seconds
         history: list[dict[str, object]] = []

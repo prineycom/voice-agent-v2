@@ -531,6 +531,28 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.audio_chunk_sequence, 0)
         self.assertEqual(session.drop_counts["stale_event"], 1)
 
+    async def test_completed_terminal_carries_server_action_and_speech_outcomes(self) -> None:
+        class ReceiptBackedRunner(StreamingRunner):
+            def turn_provenance(self, *_identity) -> dict[str, object]:
+                return {"operation_count": 1, "action_outcome": "completed"}
+
+        events = MemoryEvents()
+        session = RealtimeSession(
+            session_id="session-test",
+            runner=ReceiptBackedRunner(),
+            event_sink=events,
+            audio_sink=MemoryAudio(),
+        )
+
+        await session.submit_utterance(b"\0\0" * 320)
+        await asyncio.wait_for(session.wait_for_cleanup(), 0.5)
+
+        terminal = events.events[-1]
+        self.assertEqual(terminal["type"], "turn.completed")
+        self.assertEqual(terminal["payload"]["operation_count"], 1)
+        self.assertEqual(terminal["payload"]["action_outcome"], "completed")
+        self.assertEqual(terminal["payload"]["speech_outcome"], "delivered")
+
     async def test_tts_failure_retains_visible_prefix_without_degrading_session(self) -> None:
         events = MemoryEvents()
         audio = MemoryAudio()

@@ -4,6 +4,13 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "identity", "answer", "decisions", "operations", "operation_count", "action_outcome", "terminal", "provider_mode", "provider_identity", "automatic_fallback", "citations", "research_receipts", "artifact_operations", "deliveries"],
+  "allOf": [
+    {
+      "if": {"properties": {"operation_count": {"const": 0}}},
+      "then": {"properties": {"action_outcome": {"const": "no_operation"}}},
+      "else": {"properties": {"action_outcome": {"enum": ["completed", "failed"]}}}
+    }
+  ],
   "properties": {
     "schema_version": {"const": "voice-agent.agent-run.v5"},
     "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},

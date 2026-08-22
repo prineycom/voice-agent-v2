@@ -246,6 +246,32 @@ describe('checkpoint A browser state', () => {
     expect(state.availability).toBe('degraded')
   })
 
+  it('keeps a final promise explicitly receipt-free', () => {
+    const state = apply([
+      event(1, 'session.ready'),
+      event(2, 'turn.listening'),
+      event(3, 'turn.media-ready'),
+      event(4, 'stt.final', 'turn-00000001', { transcript: 'Создай файл.' }),
+      event(5, 'turn.thinking'),
+      event(6, 'llm.visible', 'turn-00000001', {
+        response: 'Я создам файл позже.',
+        operation_count: 0, action_outcome: 'no_operation',
+      }),
+      event(7, 'turn.failed', 'turn-00000001', {
+        outcome: 'failed', stage: 'tts', code: 'selected_tts_unavailable',
+        operation_count: 0, action_outcome: 'no_operation', speech_outcome: 'failed',
+        user_state: 'degraded', retry_count: 0, retry_limit: 0,
+      }),
+    ])
+
+    expect(state.history[0]).toMatchObject({
+      assistant: 'Я создам файл позже.',
+      operationCount: 0,
+      actionOutcome: 'no_operation',
+      speechOutcome: 'failed',
+    })
+  })
+
   it('keeps speaking while later visible text arrives', () => {
     const state = apply([
       event(1, 'session.ready'),

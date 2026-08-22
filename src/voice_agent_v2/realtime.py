@@ -1032,6 +1032,34 @@ class RealtimeSession:
         self._closed = True
         await self._publish_degraded_locked(stage, code, health=health)
 
+    def _action_provenance(self, context: TurnContext) -> dict[str, object]:
+        owner = getattr(self.runner, "turn_provenance", None)
+        if owner is None:
+            return {}
+        try:
+            provenance = owner(
+                self.session_id, context.stream_epoch, context.turn_id,
+                context.turn_generation, context.request_id,
+            )
+        except Exception:
+            return {}
+        if (
+            not isinstance(provenance, dict)
+            or type(provenance.get("operation_count")) is not int
+            or not 0 <= provenance["operation_count"] <= 24
+            or provenance.get("action_outcome") not in {
+                "no_operation", "completed", "failed",
+            }
+            or (provenance["operation_count"] == 0) != (
+                provenance["action_outcome"] == "no_operation"
+            )
+        ):
+            return {}
+        return {
+            "operation_count": provenance["operation_count"],
+            "action_outcome": provenance["action_outcome"],
+        }
+
     async def _rollback_context(
         self, context: TurnContext, *, restore_context: bool = True
     ) -> str | None:
@@ -1202,6 +1230,17 @@ class RealtimeSession:
                         )
                     ),
                 )
+            finish_turn = getattr(self.runner, "finish_turn", None)
+            if finish_turn is not None:
+                try:
+                    async with self._runner_lock:
+                        await asyncio.to_thread(
+                            finish_turn, self.session_id, context.turn_id
+                        )
+                except Exception:
+                    context.rollback_error = (
+                        context.rollback_error or "context_rollback_failed"
+                    )
             if cancel_error is not None:
                 return "cancellation_cleanup_failed"
             return context.rollback_error
@@ -1249,6 +1288,8 @@ class RealtimeSession:
                 "user_state": "interrupted",
                 "retry_count": 0,
                 "retry_limit": 0,
+                "speech_outcome": "interrupted",
+                **self._action_provenance(context),
                 "drain_ms": round(drain_ms, 3),
                 "cancellation_latency_ms": round(drain_ms, 3),
                 "drain_bound_ms": BARGE_IN_DRAIN_BOUND_MS,
@@ -1890,6 +1931,8 @@ class RealtimeSession:
             payload: dict[str, object] = {
                 "outcome": "completed",
                 "output_bytes": output_bytes,
+                "speech_outcome": "delivered",
+                **self._action_provenance(context),
                 "server_pcm_queue_max_blocks": context.pcm_queue_high_water,
                 "server_segment_queue_max_segments": context.segment_queue_high_water,
                 "audio_format": TTS_OUTPUT_AUDIO_FORMAT.as_dict(),
@@ -1968,46 +2011,37 @@ class RealtimeSession:
         else:
             drain_error, publication_id = await self._clear_audio(context.turn_id)
         context.rollback_error = await self._rollback_context(context)
-        if (
+        retain_visible_failed = (
             context.rollback_error is None
             and payload.get("stage") == "tts"
             and context.first_visible_ms is not None
+        )
+        retain_owner = getattr(self.runner, "retain_visible_failed_turn", None)
+        finish_turn = getattr(self.runner, "finish_turn", None)
+        if (
+            (retain_visible_failed and retain_owner is not None)
+            or finish_turn is not None
         ):
-            retain_visible_failed = getattr(
-                self.runner, "retain_visible_failed_turn", None
-            )
-            if retain_visible_failed is not None:
-                try:
-                    async with self._runner_lock:
+            try:
+                async with self._runner_lock:
+                    if retain_visible_failed and retain_owner is not None:
                         await asyncio.to_thread(
-                            retain_visible_failed, self.session_id, context.turn_id
+                            retain_owner, self.session_id, context.turn_id
                         )
-                except Exception:
-                    context.rollback_error = "context_rollback_failed"
+                    if finish_turn is not None:
+                        await asyncio.to_thread(
+                            finish_turn, self.session_id, context.turn_id
+                        )
+            except Exception:
+                context.rollback_error = "context_rollback_failed"
         context.terminal = True
         self.turn_counts["failed"] += 1
         public_payload = dict(payload)
-        provenance_owner = getattr(self.runner, "turn_provenance", None)
-        if provenance_owner is not None and (
+        if (
             "operation_count" not in public_payload
             or "action_outcome" not in public_payload
         ):
-            try:
-                provenance = provenance_owner(
-                    self.session_id, context.stream_epoch, context.turn_id,
-                    context.turn_generation, context.request_id,
-                )
-            except Exception:
-                provenance = None
-            if (
-                isinstance(provenance, dict)
-                and type(provenance.get("operation_count")) is int
-                and 0 <= provenance["operation_count"] <= 24
-                and provenance.get("action_outcome") in {
-                    "no_operation", "completed", "failed",
-                }
-            ):
-                public_payload.update(provenance)
+            public_payload.update(self._action_provenance(context))
         stage = str(public_payload.get("stage", "controller"))
         code = str(public_payload.get("code", "unknown_failure"))
         public_payload.setdefault(

@@ -312,6 +312,11 @@ class LocalLFMProviderTests(unittest.TestCase):
         for connection in created:
             payload = json.loads(connection.requests[0][2])
             self.assertEqual(set(payload), AGENT_DECISION_ALLOWED_PAYLOAD_FIELDS)
+            instruction = payload["messages"][0]["content"]
+            self.assertIn("final answer must be Russian", instruction)
+            self.assertIn("requires an admitted allowed tool, select operation", instruction)
+            self.assertIn("must never promise future execution", instruction)
+            self.assertIn("without a supplied receipt result", instruction)
             self.assertEqual(payload["response_format"], {
                 "type": "json_schema",
                 "json_schema": {

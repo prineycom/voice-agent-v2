@@ -10,7 +10,8 @@ const OUTCOME_LABELS: Record<TurnOutcome, string> = {
 export function actionOutcomeText(item: TurnHistoryItem): string {
   if (item.actionOutcome === 'completed') return `ACTION COMPLETED · ${item.operationCount ?? 0}`
   if (item.actionOutcome === 'failed') return `ACTION FAILED · ${item.operationCount ?? 0}`
-  return 'NO ACTION EXECUTED'
+  if (item.actionOutcome === 'no_operation') return 'NO ACTION EXECUTED'
+  return 'ACTION NOT YET RESOLVED'
 }
 
 export function speechOutcomeText(item: TurnHistoryItem): string {

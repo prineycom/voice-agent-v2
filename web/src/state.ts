@@ -785,8 +785,6 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
       assistant: '',
       outcome: null,
       audioUnavailable: false,
-      operationCount: 0,
-      actionOutcome: 'no_operation',
       speechOutcome: 'not_started',
       endpointToFirstVisibleMs: null,
       endpointToFirstAcceptedPcmMs: null,
@@ -849,9 +847,9 @@ export function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState
     audioUnavailable: item.audioUnavailable || (
       event.type === 'turn.failed' && event.payload.stage === 'tts'
     ),
-    operationCount: count(event.payload, 'operation_count') ?? item.operationCount ?? 0,
+    operationCount: count(event.payload, 'operation_count') ?? item.operationCount,
     actionOutcome: ['no_operation', 'completed', 'failed'].includes(String(event.payload.action_outcome))
-      ? event.payload.action_outcome as ActionOutcome : item.actionOutcome ?? 'no_operation',
+      ? event.payload.action_outcome as ActionOutcome : item.actionOutcome,
     speechOutcome: ['not_started', 'delivered', 'failed', 'interrupted'].includes(String(event.payload.speech_outcome))
       ? event.payload.speech_outcome as SpeechOutcome : item.speechOutcome ?? 'not_started',
     endpointToFirstVisibleMs: visibleMetric ?? item.endpointToFirstVisibleMs,

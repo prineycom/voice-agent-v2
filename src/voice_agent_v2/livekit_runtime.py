@@ -398,8 +398,16 @@ class LiveTurnRunner:
         self._release_tts_turn(session_id, turn_id)
 
     def turn_delivered(self, session_id: str, turn_id: str) -> None:
+        finish_turn = getattr(self.llm, "finish_turn", None)
+        if finish_turn is not None:
+            finish_turn(session_id, turn_id)
         self._snapshots.pop((session_id, turn_id), None)
         self._release_tts_turn(session_id, turn_id)
+
+    def finish_turn(self, session_id: str, turn_id: str) -> None:
+        finish_turn = getattr(self.llm, "finish_turn", None)
+        if finish_turn is not None:
+            finish_turn(session_id, turn_id)
 
     def turn_provenance(
         self, session_id: str, stream_epoch: int, turn_id: str,

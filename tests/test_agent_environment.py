@@ -17,7 +17,8 @@ from unittest.mock import patch
 
 from voice_agent_v2.agent_config import AgentUserContext
 from voice_agent_v2.agent_environment import (
-    AgentEnvironment, AgentEnvironmentError, DOCKER_DAEMON_INFO_FORMAT, DockerCLI, DockerResult,
+    AgentEnvironment, AgentEnvironmentError, CallReceipt, DOCKER_DAEMON_INFO_FORMAT,
+    DockerCLI, DockerResult,
     GENERATION_LABEL, MANAGED_LABEL, OWNER_LABEL, SCHEMA_LABEL, SPEC_LABEL,
 )
 from voice_agent_v2.agent_environment_config import (
@@ -32,7 +33,9 @@ from voice_agent_v2.agent_run import (
     MAX_CONVERSATION_BYTES, AgentRealtimeIdentity, AgentRun,
 )
 from voice_agent_v2.agent_run_provider import AgentRunProvider
-from voice_agent_v2.contracts import AudioFormat, LLM_VERSION, STT_VERSION, TTS_VERSION
+from voice_agent_v2.contracts import (
+    AudioFormat, LLM_VERSION, STT_VERSION, TTS_VERSION, StageFailure,
+)
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
 from voice_agent_v2.real_turn import RealTurnController
 from voice_agent_v2.schema import validate as validate_schema
@@ -1326,6 +1329,7 @@ class BlockingModel(FakeModel):
         self.release = threading.Event()
         self.cancelled = False
     def decide(self, request: str, cancellation: CancellationToken):
+        self.count += 1
         self.entered.set()
         self.release.wait(1)
         return {"kind": "final", "answer": "late output"}
@@ -1389,10 +1393,12 @@ class AgentRunTests(unittest.TestCase):
         for name, answer in cases:
             with self.subTest(name=name):
                 fixture = Fixture(); tts = CountingTTS()
+                observations: list[dict[str, object]] = []
                 try:
                     controller = RealTurnController(
                         StaticSTT(), VoiceProvider(AgentRun(
-                            fixture.manager, model=FinalModel(answer)
+                            fixture.manager, model=FinalModel(answer),
+                            observation=observations.append,
                         )), tts,
                     )
                     result = controller.run_turn(
@@ -1403,6 +1409,14 @@ class AgentRunTests(unittest.TestCase):
                     self.assertNotIn("llm.visible", [item["type"] for item in result.events])
                     self.assertEqual(tts.calls, 0)
                     self.assertEqual(fixture.docker.containers, {})
+                    self.assertEqual(len(observations), 1)
+                    self.assertEqual(
+                        observations[0]["reason_code"],
+                        "tts_language_unsupported",
+                    )
+                    rendered = json.dumps(observations[0], ensure_ascii=False)
+                    self.assertNotIn("text", rendered.lower())
+                    self.assertNotIn("hash", rendered.lower())
                 finally:
                     fixture.close()
 
@@ -1437,18 +1451,87 @@ class AgentRunTests(unittest.TestCase):
                 ),
             )
             self.assertEqual((run.operations, run.action_outcome), (0, "no_operation"))
+            self.assertEqual(run.document()["operation_count"], 0)
+            self.assertEqual(run.document()["action_outcome"], "no_operation")
             self.assertEqual(fixture.docker.containers, {})
         finally:
+            fixture.close()
+
+    def test_helper_and_speech_failures_keep_separate_server_outcomes(self) -> None:
+        fixture = Fixture()
+
+        class OperationThenFinalModel:
+            provider_mode = "local"
+            provider_identity = PROVIDER_IDENTITY
+            def __init__(self) -> None: self.count = 0
+            def decide(self, _request, _cancellation):
+                self.count += 1
+                if self.count == 1:
+                    return {
+                        "kind": "operation", "tool": "shell.exec",
+                        "arguments": {"command": "проверка"},
+                    }
+                return {"kind": "final", "answer": "Операция завершилась ошибкой."}
+            def cancel(self): pass
+
+        class StaticSTT:
+            version = STT_VERSION
+            def transcribe(self, **_arguments): return "Выполни проверку."
+
+        class FailingTTS:
+            version = TTS_VERSION
+            output_format = AudioFormat()
+            def stream_synthesize(self, **_arguments):
+                raise StageFailure("tts", "silero_synthesis_failed")
+                yield b""  # pragma: no cover
+
+        model = OperationThenFinalModel()
+        provider = AgentRunProvider.__new__(AgentRunProvider)
+        provider.selected = model
+        provider.environment = fixture.manager
+        provider._context_lock = threading.Lock()
+        provider._contexts = {}
+        provider._turn_records = {}
+        provider._turn_provenance = {}
+        provider._observations = []
+        provider.agent_run = AgentRun(fixture.manager, model=model)
+
+        def failed_execute(_tool, _arguments, *, call_id, timeout_seconds):
+            del timeout_seconds
+            return CallReceipt(
+                call_id, next(iter(fixture.docker.containers)), 1,
+                "failed", 2, b"", b"synthetic failure", "/workspace",
+            )
+
+        try:
+            with patch.object(fixture.manager, "execute", side_effect=failed_execute):
+                result = RealTurnController(
+                    StaticSTT(), provider, FailingTTS()
+                ).run_turn(
+                    session_id="session-failed-outcomes",
+                    turn_id="turn-failed-outcomes",
+                    request_id="request-failed-outcomes",
+                    input_pcm=b"\0\0" * 160,
+                )
+            terminal = result.terminal_event["payload"]
+            self.assertEqual(terminal["code"], "silero_synthesis_failed")
+            self.assertEqual(terminal["operation_count"], 1)
+            self.assertEqual(terminal["action_outcome"], "failed")
+            self.assertEqual(terminal["speech_outcome"], "failed")
+        finally:
+            provider.close()
             fixture.close()
 
     def test_agent_run_provider_context_is_bounded_isolated_and_transactional(self) -> None:
         fixture = Fixture()
         class ContextModel:
             provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
-            def __init__(self) -> None: self.requests: list[dict[str, object]] = []
+            def __init__(self) -> None:
+                self.requests: list[dict[str, object]] = []
+                self.answer = "Контекст принят."
             def decide(self, request, _cancellation):
                 document = json.loads(request); self.requests.append(document)
-                return {"kind": "final", "answer": "Контекст принят."}
+                return {"kind": "final", "answer": self.answer}
             def cancel(self): pass
 
         model = ContextModel()
@@ -1499,14 +1582,92 @@ class AgentRunTests(unittest.TestCase):
             self.assertEqual(visible_failed[-1]["terminal_status"], "visible_tts_failed")
             self.assertEqual(visible_failed[-1]["action_outcome"], "no_operation")
             self.assertNotIn("receipt", json.dumps(visible_failed, ensure_ascii=False).lower())
+            provider.finish_turn("session-context", "turn-00000003")
+            self.assertEqual(provider._turn_records, {})
 
             provider.reset_session("session-context")
             self.assertEqual(provider.snapshot_session("session-context"), ())
             turn("session-context", 4, "После переподключения.")
             self.assertEqual(model.requests[-1]["conversation"], [])
+
+            provider.reset_session("session-context")
+            model.answer = "я " * 650
+            bounded_input = "у " * 1_024
+            turn("session-context", 5, bounded_input)
+            turn("session-context", 6, bounded_input)
+            byte_bounded = provider.snapshot_session("session-context")
+            self.assertEqual(len(byte_bounded), 2)
+            self.assertLessEqual(
+                len(json.dumps(
+                    byte_bounded, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()),
+                MAX_CONVERSATION_BYTES,
+            )
+
             provider.close()
             self.assertEqual(provider.snapshot_session("session-context"), ())
         finally:
+            fixture.close()
+
+    def test_operation_and_no_operation_turns_share_receipt_free_conversation(self) -> None:
+        fixture = Fixture()
+
+        class OperationContextModel:
+            provider_mode = "local"
+            provider_identity = PROVIDER_IDENTITY
+            def __init__(self) -> None: self.requests: list[dict[str, object]] = []
+            def decide(self, request, _cancellation):
+                document = json.loads(request)
+                self.requests.append(document)
+                if document["user_request"] == "Выполни операцию." and not document["history"]:
+                    return {
+                        "kind": "operation", "tool": "shell.exec",
+                        "arguments": {"command": "готово"},
+                    }
+                return {"kind": "final", "answer": "Готово."}
+            def cancel(self): pass
+
+        model = OperationContextModel()
+        provider = AgentRunProvider.__new__(AgentRunProvider)
+        provider.selected = model
+        provider.environment = fixture.manager
+        provider._context_lock = threading.Lock()
+        provider._contexts = {}
+        provider._turn_records = {}
+        provider._turn_provenance = {}
+        provider._observations = []
+        provider.agent_run = AgentRun(fixture.manager, model=model)
+
+        def turn(index: int, transcript: str) -> None:
+            provider.respond_with_handoff(
+                session_id="session-operation-context", stream_epoch=1,
+                turn_id=f"turn-{index:08d}", request_id=f"request-{index:08d}",
+                turn_generation=index, transcript=transcript,
+                on_sentence=lambda _value: None,
+                on_visible_sentence=lambda _value: None,
+            )
+
+        try:
+            turn(1, "Выполни операцию.")
+            operation_context = provider.snapshot_session(
+                "session-operation-context"
+            )
+            self.assertEqual(operation_context[-1]["operation_count"], 1)
+            self.assertEqual(operation_context[-1]["action_outcome"], "completed")
+            serialized = json.dumps(operation_context, ensure_ascii=False).lower()
+            for forbidden in ("receipt", "call_id", "stdout", "stderr", "container"):
+                self.assertNotIn(forbidden, serialized)
+
+            turn(2, "Продолжи разговор.")
+            followup = model.requests[-1]
+            self.assertEqual(followup["conversation"], list(operation_context))
+            self.assertEqual(followup["history"], [])
+            latest = provider.snapshot_session("session-operation-context")[-1]
+            self.assertEqual(latest["operation_count"], 0)
+            self.assertEqual(latest["action_outcome"], "no_operation")
+        finally:
+            provider.close()
             fixture.close()
 
     def test_invalid_decision_fails_one_turn_before_environment_or_tts_mutation(self) -> None:
@@ -1807,7 +1968,11 @@ class AgentRunTests(unittest.TestCase):
             thread.join(1)
             self.assertFalse(thread.is_alive())
             self.assertTrue(model.cancelled)
+            self.assertEqual(model.count, 1)
             self.assertEqual(getattr(errors[0], "code", None), "selected_provider_cancelled")
+            self.assertEqual(run.provenance(AgentRealtimeIdentity(
+                "session-cancel", 1, "turn-cancel", "request-cancel", 1,
+            )), {"operation_count": 0, "action_outcome": "no_operation"})
             self.assertEqual(fixture.docker.containers, {})
         finally:
             fixture.close()
@@ -1832,6 +1997,8 @@ class AgentRunTests(unittest.TestCase):
             self.assertEqual(run.operations, 2)
             self.assertEqual(run.action_outcome, "completed")
             self.assertEqual(run.answer, "Готово: выполнила два шага.")
+            self.assertEqual(run.document()["operation_count"], 2)
+            self.assertEqual(run.document()["action_outcome"], "completed")
             self.assertEqual(run.document()["provider_identity"], PROVIDER_IDENTITY)
             self.assertFalse(run.document()["automatic_fallback"])
             self.assertEqual(len(fixture.docker.containers), 1)

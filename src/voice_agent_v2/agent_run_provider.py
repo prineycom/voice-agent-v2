@@ -132,8 +132,18 @@ class AgentRunProvider:
             or safe["action_outcome"] not in {"no_operation", "completed", "failed"}
         ):
             raise StageFailure("llm_provider", "agent_provenance_invalid")
+        if (safe["operation_count"] == 0) != (
+            safe["action_outcome"] == "no_operation"
+        ):
+            raise StageFailure("llm_provider", "agent_provenance_invalid")
         with self._context_lock:
             self._turn_provenance[key] = safe
+            session_keys = [
+                existing for existing in self._turn_provenance
+                if existing[0] == identity.session_id
+            ]
+            for stale in session_keys[:-8]:
+                self._turn_provenance.pop(stale, None)
 
     def turn_provenance(
         self, session_id: str, stream_epoch: int, turn_id: str,
@@ -141,9 +151,23 @@ class AgentRunProvider:
     ) -> dict[str, object]:
         key = (session_id, stream_epoch, turn_id, turn_generation, request_id)
         with self._context_lock:
-            return dict(self._turn_provenance.get(key, {
-                "operation_count": 0, "action_outcome": "no_operation",
-            }))
+            cached = self._turn_provenance.get(key)
+        if cached is not None:
+            return dict(cached)
+        identity = AgentRealtimeIdentity(
+            session_id, stream_epoch, turn_id, request_id, turn_generation
+        )
+        provenance = self.agent_run.provenance(identity)
+        self._cache_provenance(identity, provenance)
+        return provenance
+
+    def _store_turn_record(self, record: dict[str, object]) -> None:
+        key = (str(record["session_id"]), str(record["turn_id"]))
+        with self._context_lock:
+            for stale in tuple(self._turn_records):
+                if stale[0] == key[0] and stale != key:
+                    self._turn_records.pop(stale, None)
+            self._turn_records[key] = dict(record)
 
     def respond_with_handoff(
         self,
@@ -182,8 +206,7 @@ class AgentRunProvider:
             "session_id": session_id, "turn_id": turn_id,
             "transcript": transcript, "answer": result.answer, **provenance,
         }
-        with self._context_lock:
-            self._turn_records[(session_id, turn_id)] = record
+        self._store_turn_record(record)
         self._commit_record(record, "completed")
         if cancellation is not None and cancellation.cancelled:
             raise StageFailure("llm_provider", "selected_provider_cancelled")
@@ -220,8 +243,7 @@ class AgentRunProvider:
             "session_id": session_id, "turn_id": turn_id,
             "transcript": transcript, "answer": result.answer, **provenance,
         }
-        with self._context_lock:
-            self._turn_records[(session_id, turn_id)] = record
+        self._store_turn_record(record)
         self._commit_record(record, "completed")
         return result.answer
 
@@ -250,6 +272,11 @@ class AgentRunProvider:
         if record is None:
             raise StageFailure("llm_provider", "visible_failed_context_unavailable")
         self._commit_record(record, "visible_tts_failed")
+
+    def finish_turn(self, session_id: str, turn_id: str) -> None:
+        """Release content-bearing transaction scratch after terminalization."""
+        with self._context_lock:
+            self._turn_records.pop((session_id, turn_id), None)
 
     def reset_session(self, session_id: str) -> None:
         with self._context_lock:
