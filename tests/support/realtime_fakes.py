@@ -319,6 +319,13 @@ class LateTTSFailureRunner(StreamingRunner):
 
 
 class VisibleTTSFailureRunner(StreamingRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.visible_failed: list[tuple[str, str]] = []
+
+    def retain_visible_failed_turn(self, session_id: str, turn_id: str) -> None:
+        self.visible_failed.append((session_id, turn_id))
+
     def run_turn(
         self, *, session_id, turn_id, input_pcm, cancellation, event_observer,
         audio_observer, trace_observer=None, retain_output=True,
@@ -527,9 +534,10 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_tts_failure_retains_visible_prefix_without_degrading_session(self) -> None:
         events = MemoryEvents()
         audio = MemoryAudio()
+        runner = VisibleTTSFailureRunner()
         session = RealtimeSession(
             session_id="session-test",
-            runner=VisibleTTSFailureRunner(),
+            runner=runner,
             event_sink=events,
             audio_sink=audio,
         )
@@ -544,6 +552,7 @@ class CheckpointARealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.events[-2]["payload"]["response"], "Сохранённый ответ.")
         self.assertEqual(events.events[-1]["payload"]["stage"], "tts")
         self.assertEqual(audio.cleared, [])
+        self.assertEqual(runner.visible_failed, [("session-test", "turn-00000001")])
         self.assertFalse(session._failure_reported)
 
     async def test_late_tts_failure_preserves_accepted_pcm_prefix(self) -> None:

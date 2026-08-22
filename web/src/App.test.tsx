@@ -15,7 +15,9 @@ import type { SpeechEnvelopeObservation } from './playback'
 import { ACTIVE_LLM_MODEL_IDENTITY, initialVoiceState, type VoiceState } from './state'
 import { AvatarViewport } from './ui/AvatarViewport'
 import { VoiceShell } from './ui/VoiceShell'
-import { historyUserText } from './ui/panels/HistoryPanel'
+import {
+  actionOutcomeText, historyUserText, speechOutcomeText,
+} from './ui/panels/HistoryPanel'
 import { REDUCE_MOTION_STORAGE_KEY } from './ui/useReducedMotion'
 
 function testAvatarHost(onUpdate = vi.fn(), onCancel = vi.fn()): AvatarHostV1 {
@@ -58,6 +60,18 @@ beforeEach(() => {
 })
 
 describe('Slice 7 modular shell', () => {
+  it('labels action provenance and speech delivery independently of prose', () => {
+    const item = {
+      turnId: 'turn-provenance', user: 'Создай файл.',
+      assistant: 'Я создам файл позже.', outcome: 'failed' as const,
+      audioUnavailable: true, operationCount: 0,
+      actionOutcome: 'no_operation' as const, speechOutcome: 'failed' as const,
+      endpointToFirstVisibleMs: 1, endpointToFirstAcceptedPcmMs: null,
+    }
+    expect(actionOutcomeText(item)).toBe('NO ACTION EXECUTED')
+    expect(speechOutcomeText(item)).toBe('SPEECH DELIVERY FAILED')
+  })
+
   it('labels terminal STT failure without inventing conversation content', () => {
     expect(historyUserText({
       turnId: 'turn-00000001',

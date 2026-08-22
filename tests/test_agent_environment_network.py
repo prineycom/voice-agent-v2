@@ -283,7 +283,7 @@ class NetworkCredentialStreamTests(unittest.TestCase):
                     return {"kind": "operation", "tool": "shell.exec", "arguments": {"command": "send-token-a"}}
                 raw = base64.b64decode(document["history"][-1]["result"]["receipt"]["stdout"]["data_base64"])
                 self.test_case.assertEqual(raw, SYNTHETIC_OLD)
-                return {"kind": "final", "answer": f"token={raw.decode()}"}
+                return {"kind": "final", "answer": f"Секрет: {raw.decode()}"}
 
             def cancel(self) -> None:
                 return None
@@ -294,7 +294,7 @@ class NetworkCredentialStreamTests(unittest.TestCase):
             transcript="synthetic credential display boundary",
             identity=AgentRealtimeIdentity("session-e32", 1, "turn-e32", "request-e32", 1),
         )
-        self.assertEqual(result.answer, "token=[REDACTED]")
+        self.assertEqual(result.answer, "Секрет: [REDACTED]")
 
     def test_per_exec_rotation_running_process_and_scoped_file_cleanup(self) -> None:
         manager = self.fixture.manager
@@ -467,7 +467,7 @@ class NetworkDisabledAndSchemaTests(unittest.TestCase):
                 provider_mode = "local"
                 provider_identity = PROVIDER_IDENTITY
                 def decide(self, _request, _cancellation):
-                    return {"kind": "final", "answer": "ordinary voice remains ready"}
+                    return {"kind": "final", "answer": "Обычный голосовой ответ остаётся доступен."}
                 def cancel(self):
                     return None
 
@@ -475,7 +475,7 @@ class NetworkDisabledAndSchemaTests(unittest.TestCase):
                 transcript="ordinary voice",
                 identity=AgentRealtimeIdentity("session-ready", 1, "turn-ready", "request-ready", 1),
             )
-            self.assertEqual(result.answer, "ordinary voice remains ready")
+            self.assertEqual(result.answer, "Обычный голосовой ответ остаётся доступен.")
 
     def test_network_disabled_fixture_fails_closed_without_ports_or_fallback(self) -> None:
         fixture = Fixture(network=False)

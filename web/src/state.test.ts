@@ -223,6 +223,7 @@ describe('checkpoint A browser state', () => {
       event(6, 'llm.visible', 'turn-00000001', { response: 'Видимый ответ.' }),
       event(7, 'turn.failed', 'turn-00000001', {
         outcome: 'failed', stage: 'tts', code: 'selected_tts_unavailable',
+        operation_count: 1, action_outcome: 'completed', speech_outcome: 'failed',
         user_state: 'degraded', retry_count: 0, retry_limit: 0,
       }),
     ])
@@ -234,6 +235,9 @@ describe('checkpoint A browser state', () => {
       assistant: 'Видимый ответ.',
       outcome: 'failed',
       audioUnavailable: true,
+      operationCount: 1,
+      actionOutcome: 'completed',
+      speechOutcome: 'failed',
       userState: 'degraded',
     })
     state = voiceReducer(state, {

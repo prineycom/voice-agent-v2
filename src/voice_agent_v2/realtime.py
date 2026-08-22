@@ -74,6 +74,9 @@ CONTROL_OBSERVATION_PAYLOAD_FIELDS = (
     "dependency_class",
     "failure_matrix_id",
     "outcome",
+    "operation_count",
+    "action_outcome",
+    "speech_outcome",
     "admit_turn",
     "voice_continues",
     "text_salvageable",
@@ -1965,11 +1968,52 @@ class RealtimeSession:
         else:
             drain_error, publication_id = await self._clear_audio(context.turn_id)
         context.rollback_error = await self._rollback_context(context)
+        if (
+            context.rollback_error is None
+            and payload.get("stage") == "tts"
+            and context.first_visible_ms is not None
+        ):
+            retain_visible_failed = getattr(
+                self.runner, "retain_visible_failed_turn", None
+            )
+            if retain_visible_failed is not None:
+                try:
+                    async with self._runner_lock:
+                        await asyncio.to_thread(
+                            retain_visible_failed, self.session_id, context.turn_id
+                        )
+                except Exception:
+                    context.rollback_error = "context_rollback_failed"
         context.terminal = True
         self.turn_counts["failed"] += 1
         public_payload = dict(payload)
+        provenance_owner = getattr(self.runner, "turn_provenance", None)
+        if provenance_owner is not None and (
+            "operation_count" not in public_payload
+            or "action_outcome" not in public_payload
+        ):
+            try:
+                provenance = provenance_owner(
+                    self.session_id, context.stream_epoch, context.turn_id,
+                    context.turn_generation, context.request_id,
+                )
+            except Exception:
+                provenance = None
+            if (
+                isinstance(provenance, dict)
+                and type(provenance.get("operation_count")) is int
+                and 0 <= provenance["operation_count"] <= 24
+                and provenance.get("action_outcome") in {
+                    "no_operation", "completed", "failed",
+                }
+            ):
+                public_payload.update(provenance)
         stage = str(public_payload.get("stage", "controller"))
         code = str(public_payload.get("code", "unknown_failure"))
+        public_payload.setdefault(
+            "speech_outcome", "failed" if stage in {"tts", "publication"}
+            else "not_started",
+        )
         public_payload.update(failure_payload(stage, code))
         if publication_id is not None:
             public_payload["server_media_publication_id"] = publication_id

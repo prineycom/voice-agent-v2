@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import threading
 from typing import Callable
 
 from .agent_environment import AgentEnvironment
 from .agent_environment_config import AgentConfigV2Snapshot
 from .agent_environment_credentials import InstallationCredentialStore
-from .agent_run import AgentRealtimeIdentity, AgentRun, ExactLocalLFMAgentAdapter
+from .agent_run import (
+    MAX_CONVERSATION_BYTES, MAX_CONVERSATION_MESSAGES,
+    AgentRealtimeIdentity, AgentRun, ExactLocalLFMAgentAdapter,
+    validate_conversation,
+)
 from .contracts import LLM_VERSION, StageFailure
 from .local_lfm import LocalLFMProvider, MODEL_ALIAS, PROVIDER_IDENTITY
 from .tracer import CancellationToken
@@ -48,14 +54,20 @@ class AgentRunProvider:
             ),
             image_state_root=image_state_root,
         )
+        self._context_lock = threading.Lock()
+        self._contexts: dict[str, list[dict[str, object]]] = {}
+        self._turn_records: dict[tuple[str, str], dict[str, object]] = {}
+        self._turn_provenance: dict[tuple[str, int, str, int, str], dict[str, object]] = {}
+        self._observations = selected.observations
         self.agent_run = AgentRun(
             self.environment,
             model=ExactLocalLFMAgentAdapter(selected),
+            observation=lambda item: self._observations.append(dict(item)),
         )
 
     @property
     def observations(self):
-        return self.selected.observations
+        return self._observations
 
     @property
     def runtime_health(self):
@@ -72,6 +84,67 @@ class AgentRunProvider:
     def warmup(self, cancellation: CancellationToken | None = None):
         return self.selected.warmup(cancellation)
 
+    @staticmethod
+    def _bounded_user(value: str) -> str:
+        encoded = value.strip().encode("utf-8")
+        if len(encoded) <= 2_048:
+            return encoded.decode("utf-8")
+        return encoded[:2_048].decode("utf-8", "ignore").strip()
+
+    def _snapshot(self, session_id: str) -> tuple[dict[str, object], ...]:
+        with self._context_lock:
+            return tuple(dict(item) for item in self._contexts.get(session_id, ()))
+
+    def _commit_record(self, record: dict[str, object], terminal_status: str) -> None:
+        pair = [
+            {"role": "user", "content": self._bounded_user(str(record["transcript"]))},
+            {
+                "role": "assistant", "content": str(record["answer"]),
+                "terminal_status": terminal_status,
+                "operation_count": int(record["operation_count"]),
+                "action_outcome": str(record["action_outcome"]),
+            },
+        ]
+        session_id = str(record["session_id"])
+        with self._context_lock:
+            context = list(self._contexts.get(session_id, ())) + pair
+            context = context[-MAX_CONVERSATION_MESSAGES:]
+            while context and len(json.dumps(
+                context, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")) > MAX_CONVERSATION_BYTES:
+                context = context[2:]
+            validate_conversation(tuple(context))
+            self._contexts[session_id] = context
+
+    def _cache_provenance(
+        self, identity: AgentRealtimeIdentity, provenance: dict[str, object]
+    ) -> None:
+        key = (
+            identity.session_id, identity.stream_epoch, identity.turn_id,
+            identity.turn_generation, identity.request_id,
+        )
+        safe = {
+            "operation_count": int(provenance.get("operation_count", 0)),
+            "action_outcome": str(provenance.get("action_outcome", "no_operation")),
+        }
+        if (
+            not 0 <= safe["operation_count"] <= 24
+            or safe["action_outcome"] not in {"no_operation", "completed", "failed"}
+        ):
+            raise StageFailure("llm_provider", "agent_provenance_invalid")
+        with self._context_lock:
+            self._turn_provenance[key] = safe
+
+    def turn_provenance(
+        self, session_id: str, stream_epoch: int, turn_id: str,
+        turn_generation: int, request_id: str,
+    ) -> dict[str, object]:
+        key = (session_id, stream_epoch, turn_id, turn_generation, request_id)
+        with self._context_lock:
+            return dict(self._turn_provenance.get(key, {
+                "operation_count": 0, "action_outcome": "no_operation",
+            }))
+
     def respond_with_handoff(
         self,
         *,
@@ -87,13 +160,31 @@ class AgentRunProvider:
         cancellation: CancellationToken | None = None,
     ) -> str:
         del on_handoff_abort
-        result = self.agent_run.run(
-            transcript=transcript,
-            identity=AgentRealtimeIdentity(
-                session_id, stream_epoch, turn_id, request_id, turn_generation
-            ),
-            cancellation=cancellation,
+        identity = AgentRealtimeIdentity(
+            session_id, stream_epoch, turn_id, request_id, turn_generation
         )
+        try:
+            result = self.agent_run.run(
+                transcript=transcript,
+                identity=identity,
+                cancellation=cancellation,
+                conversation=self._snapshot(session_id),
+            )
+        except StageFailure:
+            self._cache_provenance(identity, self.agent_run.provenance(identity))
+            raise
+        provenance = {
+            "operation_count": result.operations,
+            "action_outcome": result.action_outcome,
+        }
+        self._cache_provenance(identity, provenance)
+        record = {
+            "session_id": session_id, "turn_id": turn_id,
+            "transcript": transcript, "answer": result.answer, **provenance,
+        }
+        with self._context_lock:
+            self._turn_records[(session_id, turn_id)] = record
+        self._commit_record(record, "completed")
         if cancellation is not None and cancellation.cancelled:
             raise StageFailure("llm_provider", "selected_provider_cancelled")
         if on_visible_sentence is not None:
@@ -109,13 +200,30 @@ class AgentRunProvider:
         transcript: str,
         cancellation: CancellationToken | None = None,
     ) -> str:
-        return self.agent_run.run(
-            transcript=transcript,
-            identity=AgentRealtimeIdentity(
-                session_id, 1, turn_id, f"request-{turn_id}"[:64], 1
-            ),
-            cancellation=cancellation,
-        ).answer
+        identity = AgentRealtimeIdentity(
+            session_id, 1, turn_id, f"request-{turn_id}"[:64], 1
+        )
+        try:
+            result = self.agent_run.run(
+                transcript=transcript, identity=identity, cancellation=cancellation,
+                conversation=self._snapshot(session_id),
+            )
+        except StageFailure:
+            self._cache_provenance(identity, self.agent_run.provenance(identity))
+            raise
+        provenance = {
+            "operation_count": result.operations,
+            "action_outcome": result.action_outcome,
+        }
+        self._cache_provenance(identity, provenance)
+        record = {
+            "session_id": session_id, "turn_id": turn_id,
+            "transcript": transcript, "answer": result.answer, **provenance,
+        }
+        with self._context_lock:
+            self._turn_records[(session_id, turn_id)] = record
+        self._commit_record(record, "completed")
+        return result.answer
 
     def cancel_request(self) -> None:
         self.agent_run.cancel()
@@ -123,16 +231,40 @@ class AgentRunProvider:
     def cancel(self) -> None:
         self.cancel_request()
 
-    def snapshot_session(self, _session_id: str) -> tuple[dict[str, str], ...]:
-        return ()
+    def snapshot_session(self, session_id: str) -> tuple[dict[str, object], ...]:
+        return self._snapshot(session_id)
 
-    def restore_session(self, _session_id: str, _snapshot: tuple[dict[str, str], ...]) -> None:
-        return None
+    def restore_session(
+        self, session_id: str, snapshot: tuple[dict[str, object], ...]
+    ) -> None:
+        validated = validate_conversation(snapshot)
+        with self._context_lock:
+            if validated:
+                self._contexts[session_id] = [dict(message) for message in validated]
+            else:
+                self._contexts.pop(session_id, None)
 
-    def reset_session(self, _session_id: str) -> None:
-        return None
+    def retain_visible_failed_turn(self, session_id: str, turn_id: str) -> None:
+        with self._context_lock:
+            record = self._turn_records.get((session_id, turn_id))
+        if record is None:
+            raise StageFailure("llm_provider", "visible_failed_context_unavailable")
+        self._commit_record(record, "visible_tts_failed")
+
+    def reset_session(self, session_id: str) -> None:
+        with self._context_lock:
+            self._contexts.pop(session_id, None)
+            for key in tuple(self._turn_records):
+                if key[0] == session_id:
+                    self._turn_records.pop(key, None)
+            for key in tuple(self._turn_provenance):
+                if key[0] == session_id:
+                    self._turn_provenance.pop(key, None)
 
     def close(self) -> None:
-        # Deliberately no environment stop/remove. The selected HTTP adapter owns
-        # no persistent local process and has no close requirement.
-        return None
+        # Deliberately no environment stop/remove. Clear every memory-only
+        # conversation while leaving installation-owned AgentEnvironment intact.
+        with self._context_lock:
+            self._contexts.clear()
+            self._turn_records.clear()
+            self._turn_provenance.clear()

@@ -28,7 +28,10 @@ from voice_agent_v2.agent_environment_image import (
     ImageCommandResult, PreparedImageError, PreparedImageSelection, load_native_image_contract,
     load_prepared_image, prepare_native_image,
 )
-from voice_agent_v2.agent_run import AgentRealtimeIdentity, AgentRun
+from voice_agent_v2.agent_run import (
+    MAX_CONVERSATION_BYTES, AgentRealtimeIdentity, AgentRun,
+)
+from voice_agent_v2.agent_run_provider import AgentRunProvider
 from voice_agent_v2.contracts import AudioFormat, LLM_VERSION, STT_VERSION, TTS_VERSION
 from voice_agent_v2.local_lfm import PROVIDER_IDENTITY
 from voice_agent_v2.real_turn import RealTurnController
@@ -1331,6 +1334,181 @@ class BlockingModel(FakeModel):
 
 
 class AgentRunTests(unittest.TestCase):
+    def test_agent_run_language_admission_precedes_visibility_and_any_tts_media(self) -> None:
+        class FinalModel:
+            provider_mode = "local"
+            provider_identity = PROVIDER_IDENTITY
+            def __init__(self, answer: str) -> None:
+                self.answer = answer
+            def decide(self, _request: str, _cancellation: CancellationToken):
+                return {"kind": "final", "answer": self.answer}
+            def cancel(self) -> None: pass
+
+        class StaticSTT:
+            version = STT_VERSION
+            def transcribe(self, **_arguments) -> str: return "Проверка."
+
+        class CountingTTS:
+            version = TTS_VERSION
+            output_format = AudioFormat()
+            def __init__(self) -> None: self.calls = 0
+            def stream_synthesize(self, **_arguments):
+                self.calls += 1
+                yield b"\0\0"
+
+        class VoiceProvider:
+            version = LLM_VERSION
+            provider_mode = "local"
+            provider_identity = PROVIDER_IDENTITY
+            supports_visible_handoff = True
+            visible_handoff_is_cumulative = True
+            def __init__(self, run: AgentRun) -> None: self.run = run
+            def respond_with_handoff(
+                self, *, session_id, stream_epoch, turn_id, request_id,
+                turn_generation, transcript, on_sentence, on_visible_sentence,
+                cancellation,
+            ):
+                result = self.run.run(
+                    transcript=transcript,
+                    identity=AgentRealtimeIdentity(
+                        session_id, stream_epoch, turn_id, request_id,
+                        turn_generation,
+                    ),
+                    cancellation=cancellation,
+                )
+                on_visible_sentence(result.answer)
+                on_sentence(result.answer)
+                return result.answer
+            def cancel_request(self) -> None: self.run.cancel()
+
+        cases = (
+            ("all-english", "This answer is entirely unsupported."),
+            ("mixed", "Русский ответ with an English clarification."),
+            ("structural", "связи English clarification follows."),
+        )
+        for name, answer in cases:
+            with self.subTest(name=name):
+                fixture = Fixture(); tts = CountingTTS()
+                try:
+                    controller = RealTurnController(
+                        StaticSTT(), VoiceProvider(AgentRun(
+                            fixture.manager, model=FinalModel(answer)
+                        )), tts,
+                    )
+                    result = controller.run_turn(
+                        session_id=f"session-{name}", turn_id=f"turn-{name}",
+                        request_id=f"request-{name}", input_pcm=b"\0\0" * 160,
+                    )
+                    self.assertEqual(result.terminal_event["payload"]["code"], "tts_language_unsupported")
+                    self.assertNotIn("llm.visible", [item["type"] for item in result.events])
+                    self.assertEqual(tts.calls, 0)
+                    self.assertEqual(fixture.docker.containers, {})
+                finally:
+                    fixture.close()
+
+        fixture = Fixture(); tts = CountingTTS()
+        try:
+            answer = "Сегодня 14.08.2026 в 09:30; PDF, SSD и HTTP готовы."
+            result = RealTurnController(
+                StaticSTT(), VoiceProvider(AgentRun(
+                    fixture.manager, model=FinalModel(answer)
+                )), tts,
+            ).run_turn(
+                session_id="session-russian", turn_id="turn-russian",
+                request_id="request-russian", input_pcm=b"\0\0" * 160,
+            )
+            self.assertEqual(result.terminal_event["type"], "turn.completed")
+            self.assertEqual(tts.calls, 1)
+        finally:
+            fixture.close()
+
+    def test_final_promise_is_explicitly_receipt_free_no_operation(self) -> None:
+        fixture = Fixture()
+        class PromiseModel:
+            provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
+            def decide(self, _request, _cancellation):
+                return {"kind": "final", "answer": "Я создам файл позже."}
+            def cancel(self): pass
+        try:
+            run = AgentRun(fixture.manager, model=PromiseModel()).run(
+                transcript="Создай файл.",
+                identity=AgentRealtimeIdentity(
+                    "session-promise", 1, "turn-promise", "request-promise", 1,
+                ),
+            )
+            self.assertEqual((run.operations, run.action_outcome), (0, "no_operation"))
+            self.assertEqual(fixture.docker.containers, {})
+        finally:
+            fixture.close()
+
+    def test_agent_run_provider_context_is_bounded_isolated_and_transactional(self) -> None:
+        fixture = Fixture()
+        class ContextModel:
+            provider_mode = "local"; provider_identity = PROVIDER_IDENTITY
+            def __init__(self) -> None: self.requests: list[dict[str, object]] = []
+            def decide(self, request, _cancellation):
+                document = json.loads(request); self.requests.append(document)
+                return {"kind": "final", "answer": "Контекст принят."}
+            def cancel(self): pass
+
+        model = ContextModel()
+        provider = AgentRunProvider.__new__(AgentRunProvider)
+        provider.selected = model
+        provider.environment = fixture.manager
+        provider._context_lock = threading.Lock()
+        provider._contexts = {}
+        provider._turn_records = {}
+        provider._turn_provenance = {}
+        provider._observations = []
+        provider.agent_run = AgentRun(fixture.manager, model=model)
+
+        def turn(session: str, index: int, transcript: str = "Вопрос.") -> str:
+            return provider.respond_with_handoff(
+                session_id=session, stream_epoch=1,
+                turn_id=f"turn-{index:08d}", request_id=f"request-{index:08d}",
+                turn_generation=index, transcript=transcript,
+                on_sentence=lambda _value: None,
+                on_visible_sentence=lambda _value: None,
+            )
+
+        try:
+            turn("session-context", 1, "Первый вопрос.")
+            first_snapshot = provider.snapshot_session("session-context")
+            self.assertEqual(len(first_snapshot), 2)
+            turn("session-context", 2, "Второй вопрос.")
+            self.assertEqual(model.requests[1]["conversation"], list(first_snapshot))
+            self.assertEqual(model.requests[1]["history"], [])
+            self.assertEqual(model.requests[-1]["conversation"][-1]["terminal_status"], "completed")
+            self.assertEqual(provider.snapshot_session("session-other"), ())
+
+            before_third = provider.snapshot_session("session-context")
+            turn("session-context", 3, "Третий вопрос.")
+            bounded = provider.snapshot_session("session-context")
+            self.assertEqual(len(bounded), 4)
+            self.assertNotIn("Первый вопрос.", json.dumps(bounded, ensure_ascii=False))
+            self.assertLessEqual(
+                len(json.dumps(bounded, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()),
+                MAX_CONVERSATION_BYTES,
+            )
+
+            provider.restore_session("session-context", before_third)
+            self.assertEqual(provider.snapshot_session("session-context"), before_third)
+            provider.restore_session("session-context", first_snapshot)
+            provider.retain_visible_failed_turn("session-context", "turn-00000003")
+            visible_failed = provider.snapshot_session("session-context")
+            self.assertEqual(visible_failed[-1]["terminal_status"], "visible_tts_failed")
+            self.assertEqual(visible_failed[-1]["action_outcome"], "no_operation")
+            self.assertNotIn("receipt", json.dumps(visible_failed, ensure_ascii=False).lower())
+
+            provider.reset_session("session-context")
+            self.assertEqual(provider.snapshot_session("session-context"), ())
+            turn("session-context", 4, "После переподключения.")
+            self.assertEqual(model.requests[-1]["conversation"], [])
+            provider.close()
+            self.assertEqual(provider.snapshot_session("session-context"), ())
+        finally:
+            fixture.close()
+
     def test_invalid_decision_fails_one_turn_before_environment_or_tts_mutation(self) -> None:
         marker = "PRIVATE_INVALID_DECISION_7391"
         fixture = Fixture()
@@ -1652,6 +1830,7 @@ class AgentRunTests(unittest.TestCase):
                 identity=AgentRealtimeIdentity("session-e24", 1, "turn-e24", "request-e24", 1),
             )
             self.assertEqual(run.operations, 2)
+            self.assertEqual(run.action_outcome, "completed")
             self.assertEqual(run.answer, "Готово: выполнила два шага.")
             self.assertEqual(run.document()["provider_identity"], PROVIDER_IDENTITY)
             self.assertFalse(run.document()["automatic_fallback"])
