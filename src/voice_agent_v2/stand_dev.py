@@ -53,13 +53,17 @@ CONFIG_KEYS = frozenset({
     "VOICE_AGENT_RTC_UDP_PORT",
     "VOICE_AGENT_GATEWAY_PORT",
 })
-REMOTE_VOICE_CONFIG_KEYS = frozenset({
+REMOTE_VOICE_TOPOLOGY_CONFIG_KEYS = frozenset({
     "SLICE6_APP_PUBLIC_URL",
     "VOICE_AGENT_RTC_INTERFACE",
     "VOICE_AGENT_RTC_IP",
 })
+REMOTE_VOICE_PEER_KEY = "VOICE_AGENT_REMOTE_VOICE_PEER_IPV4_CIDR"
+REMOTE_VOICE_CONFIG_KEYS = REMOTE_VOICE_TOPOLOGY_CONFIG_KEYS | {REMOTE_VOICE_PEER_KEY}
 TAILSCALE_INTERFACE = "tailscale0"
 TAILSCALE_IPV4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+REMOTE_VOICE_FIREWALL_OWNER_SCHEMA = "voice-agent.remote-voice-firewall-owner.v1"
+ZONE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 REMOTE_APP_HTTPS_PORT = 8443
 REMOTE_SIGNAL_HTTPS_PORT = 7443
 PORT_KEYS = frozenset({
@@ -189,7 +193,11 @@ def parse_private_config(path: Path) -> dict[str, str]:
             raise StandError("private configuration has a duplicate key")
         values[key] = value
     configured_keys = frozenset(values)
-    if configured_keys not in {CONFIG_KEYS, CONFIG_KEYS | REMOTE_VOICE_CONFIG_KEYS}:
+    if configured_keys not in {
+        CONFIG_KEYS,
+        CONFIG_KEYS | REMOTE_VOICE_TOPOLOGY_CONFIG_KEYS,
+        CONFIG_KEYS | REMOTE_VOICE_CONFIG_KEYS,
+    }:
         raise StandError("private configuration has an unknown or missing key")
     if values["STAND_NAME"] not in INSTANCE_NAMES:
         raise StandError("private configuration has an invalid stand name")
@@ -219,6 +227,19 @@ def parse_private_config(path: Path) -> dict[str, str]:
             signal_port = signal.port
         except ValueError as error:
             raise StandError("remote voice configuration has an invalid public URL") from error
+        if configured_keys == CONFIG_KEYS | REMOTE_VOICE_CONFIG_KEYS:
+            try:
+                peer = ipaddress.ip_network(values[REMOTE_VOICE_PEER_KEY], strict=True)
+            except ValueError as error:
+                raise StandError("remote voice peer must be one exact IPv4 /32") from error
+            if (
+                peer.version != 4
+                or peer.prefixlen != 32
+                or peer.network_address not in TAILSCALE_IPV4_NETWORK
+                or peer.network_address == rtc_ip
+                or values[REMOTE_VOICE_PEER_KEY] != str(peer)
+            ):
+                raise StandError("remote voice peer must be one exact Tailscale IPv4 /32")
         if (
             app.scheme != "https"
             or signal.scheme != "wss"
@@ -253,10 +274,13 @@ def validate_instance_isolation(state_root: Path) -> None:
             raise StandError("main and dev credentials must be independent")
 
 
-def unit_template(*, stand_executable: Path, state_root: Path) -> str:
-    """A per-user template: the launcher becomes the foreground process."""
-    if any(character.isspace() for character in str(stand_executable)):
-        raise StandError("stand executable path cannot contain whitespace")
+def unit_template(*, state_root: Path) -> str:
+    """A stable template dispatching through the selected immutable release."""
+    if any(character.isspace() or character == "%" for character in str(state_root)):
+        raise StandError("stand state path cannot contain whitespace or percent signs")
+    selected_launcher = (
+        state_root / "instances" / "%i" / "current" / "source" / "scripts" / "stand.py"
+    )
     return "\n".join((
         "[Unit]",
         "Description=Voice Agent v2 local stand %i",
@@ -272,7 +296,7 @@ def unit_template(*, stand_executable: Path, state_root: Path) -> str:
         "KillMode=control-group",
         "Environment=PYTHONUNBUFFERED=1",
         f"Environment=VOICE_AGENT_STAND_STATE_ROOT={state_root}",
-        f"ExecStart={stand_executable} launcher %i",
+        f"ExecStart=/usr/bin/python3 -B {selected_launcher} launcher %i",
         "Restart=on-failure",
         "RestartPreventExitStatus=2",
         "RestartSec=5",
@@ -288,6 +312,54 @@ def unit_template(*, stand_executable: Path, state_root: Path) -> str:
 def controller_source_path(state_root: Path) -> Path:
     """The one ordinary user-owned clone used for remote dev deployments."""
     return state_root / "source"
+
+
+def _install_unit_template(*, state_root: Path, user_unit_directory: Path) -> bool:
+    """Atomically install the release-dispatching unit before schema evolution."""
+    _mkdir_private(user_unit_directory)
+    unit = user_unit_directory / UNIT_NAME
+    expected = unit_template(state_root=state_root)
+    try:
+        current = unit.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = None
+    except (OSError, UnicodeDecodeError) as error:
+        raise StandError("stand user-systemd template cannot be inspected") from error
+    if current == expected:
+        return False
+    temporary = user_unit_directory / f".{UNIT_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as destination:
+            destination.write(expected)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, unit)
+        directory = os.open(user_unit_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        raise StandError("stand user-systemd template cannot be installed") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
+def _ensure_durable_launcher(
+    *, state_root: Path, user_unit_directory: Path, command: CommandRunner,
+) -> bool:
+    """Make systemd load the selected-release dispatcher before private schema writes."""
+    changed = _install_unit_template(
+        state_root=state_root, user_unit_directory=user_unit_directory,
+    )
+    _checked(
+        command, ("systemctl", "--user", "daemon-reload"),
+        failure="user-systemd durable launcher reload failed",
+    )
+    return changed
 
 
 def initialize(
@@ -329,15 +401,8 @@ def initialize(
                 failure="ordinary controller source clone failed",
             )
             _mkdir_private(source)
-    _mkdir_private(user_unit_directory)
-    unit = user_unit_directory / UNIT_NAME
-    temporary = user_unit_directory / f".{UNIT_NAME}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(unit_template(stand_executable=stand_executable, state_root=state_root), encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, unit)
-    finally:
-        temporary.unlink(missing_ok=True)
+    del stand_executable  # The durable unit never points at a mutable controller checkout.
+    _install_unit_template(state_root=state_root, user_unit_directory=user_unit_directory)
 
 
 def _checked(command: CommandRunner, arguments: Sequence[str], *, cwd: Path | None = None, failure: str) -> CommandResult:
@@ -434,7 +499,7 @@ def _replace_private_config(path: Path, values: Mapping[str, str]) -> None:
 
 def _remote_voice_backup(
     *, state_root: Path, instance: str, topology: RemoteVoiceTopology,
-    command: CommandRunner,
+    zone: str, command: CommandRunner,
 ) -> Path:
     root = instance_root(state_root, instance) / "remote-voice"
     _mkdir_private(root)
@@ -448,11 +513,11 @@ def _remote_voice_backup(
             failure="Tailscale Serve configuration cannot be backed up",
         ).stdout,
         "firewall-runtime.txt": _checked(
-            command, ("sudo", "-n", "firewall-cmd", "--zone=public", "--list-all"),
+            command, ("sudo", "-n", "firewall-cmd", f"--zone={zone}", "--list-all"),
             failure="runtime firewall configuration cannot be backed up",
         ).stdout,
         "firewall-permanent.txt": _checked(
-            command, ("sudo", "-n", "firewall-cmd", "--permanent", "--zone=public", "--list-all"),
+            command, ("sudo", "-n", "firewall-cmd", "--permanent", f"--zone={zone}", "--list-all"),
             failure="persistent firewall configuration cannot be backed up",
         ).stdout,
         "topology.json": json.dumps({
@@ -460,6 +525,7 @@ def _remote_voice_backup(
             "hostname": topology.hostname,
             "ipv4": topology.ipv4,
             "interface": topology.interface,
+            "firewall_zone": zone,
         }, sort_keys=True) + "\n",
     }
     for name, content in snapshots.items():
@@ -494,50 +560,214 @@ def _contains_funnel_authority(value: object) -> bool:
     return False
 
 
-def _media_firewall_rule(port: int) -> str:
+@dataclass(frozen=True)
+class RemoteVoiceFirewallOwner:
+    peer: str
+    port: int
+    zone: str
+    rule: str
+
+
+def _media_firewall_rule(*, peer: str, port: int) -> str:
     return (
-        'rule family="ipv4" source address="100.64.0.0/10" '
+        f'rule family="ipv4" source address="{peer}" '
         f'port port="{port}" protocol="udp" accept'
     )
 
 
-def _media_firewall_rule_present(
-    command: CommandRunner, *, port: int, permanent: bool,
+def _firewall_owner_path(state_root: Path, instance: str) -> Path:
+    return instance_root(state_root, instance) / "remote-voice" / "firewall-owner.json"
+
+
+def _parse_approved_peer(value: str) -> str:
+    try:
+        peer = ipaddress.ip_network(value, strict=True)
+    except ValueError as error:
+        raise StandError("remote voice apply requires one explicitly approved IPv4 /32") from error
+    if (
+        peer.version != 4
+        or peer.prefixlen != 32
+        or peer.network_address not in TAILSCALE_IPV4_NETWORK
+        or value != str(peer)
+    ):
+        raise StandError("remote voice apply requires one explicitly approved Tailscale IPv4 /32")
+    return str(peer)
+
+
+def _firewall_owner_document(owner: RemoteVoiceFirewallOwner) -> dict[str, object]:
+    return {
+        "schema": REMOTE_VOICE_FIREWALL_OWNER_SCHEMA,
+        "family": "ipv4",
+        "peer": owner.peer,
+        "port": owner.port,
+        "protocol": "udp",
+        "zone": owner.zone,
+        "rule": owner.rule,
+    }
+
+
+def _read_firewall_owner(state_root: Path, instance: str) -> RemoteVoiceFirewallOwner | None:
+    path = _firewall_owner_path(state_root, instance)
+    if not path.exists():
+        return None
+    try:
+        metadata = path.stat(follow_symlinks=False)
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StandError("remote voice firewall ownership state is invalid") from error
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or _mode(path) != 0o600:
+        raise StandError("remote voice firewall ownership state must be a mode-0600 file")
+    if not isinstance(document, dict) or set(document) != {
+        "schema", "family", "peer", "port", "protocol", "zone", "rule",
+    }:
+        raise StandError("remote voice firewall ownership state is invalid")
+    peer = document.get("peer")
+    port = document.get("port")
+    zone = document.get("zone")
+    rule = document.get("rule")
+    if not (
+        document.get("schema") == REMOTE_VOICE_FIREWALL_OWNER_SCHEMA
+        and document.get("family") == "ipv4"
+        and document.get("protocol") == "udp"
+        and isinstance(peer, str)
+        and isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535
+        and isinstance(zone, str) and ZONE_NAME.fullmatch(zone)
+        and isinstance(rule, str)
+    ):
+        raise StandError("remote voice firewall ownership state is invalid")
+    peer = _parse_approved_peer(peer)
+    if rule != _media_firewall_rule(peer=peer, port=port):
+        raise StandError("remote voice firewall ownership rule is invalid")
+    return RemoteVoiceFirewallOwner(peer=peer, port=port, zone=zone, rule=rule)
+
+
+def _write_firewall_owner(state_root: Path, instance: str, owner: RemoteVoiceFirewallOwner) -> None:
+    path = _firewall_owner_path(state_root, instance)
+    _mkdir_private(path.parent)
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as destination:
+            json.dump(_firewall_owner_document(owner), destination, sort_keys=True)
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _effective_firewall_zone(command: CommandRunner) -> str:
+    assigned = command.run((
+        "sudo", "-n", "firewall-cmd", f"--get-zone-of-interface={TAILSCALE_INTERFACE}",
+    ))
+    observed = assigned.stdout.strip()
+    if assigned.returncode == 0 and observed not in {"", "no zone"}:
+        if not ZONE_NAME.fullmatch(observed):
+            raise StandError("effective tailscale0 firewalld zone is invalid")
+        return observed
+    if not (observed in {"", "no zone"} and assigned.returncode in {0, 1, 2}):
+        raise StandError("effective tailscale0 firewalld zone is unavailable")
+    default = _checked(
+        command, ("sudo", "-n", "firewall-cmd", "--get-default-zone"),
+        failure="default firewalld zone is unavailable",
+    ).stdout.strip()
+    if not ZONE_NAME.fullmatch(default):
+        raise StandError("default firewalld zone is invalid")
+    return default
+
+
+def _firewall_rule_present(
+    command: CommandRunner, *, owner: RemoteVoiceFirewallOwner, permanent: bool,
 ) -> bool:
     arguments = ["sudo", "-n", "firewall-cmd"]
     if permanent:
         arguments.append("--permanent")
-    arguments.extend(("--zone=public", "--query-rich-rule", _media_firewall_rule(port)))
+    arguments.extend((f"--zone={owner.zone}", "--query-rich-rule", owner.rule))
     result = command.run(tuple(arguments))
     if result.returncode == 0:
         return True
     if result.returncode == 1:
         return False
-    raise StandError("firewall media-path status is unavailable")
+    raise StandError("firewall media admission status is unavailable")
 
 
-def _remove_obsolete_media_firewall_rule(
-    command: CommandRunner, *, port: int,
+def _change_firewall_rule(
+    command: CommandRunner, *, owner: RemoteVoiceFirewallOwner,
+    permanent: bool, add: bool,
+) -> None:
+    arguments = ["sudo", "-n", "firewall-cmd"]
+    if permanent:
+        arguments.append("--permanent")
+    arguments.extend((
+        f"--zone={owner.zone}",
+        "--add-rich-rule" if add else "--remove-rich-rule",
+        owner.rule,
+    ))
+    _checked(
+        command, tuple(arguments),
+        failure=f"owned firewall rule could not be {'added' if add else 'removed'}",
+    )
+    if _firewall_rule_present(command, owner=owner, permanent=permanent) != add:
+        raise StandError("owned firewall rule change could not be proved")
+
+
+def _restore_firewall_surfaces(
+    command: CommandRunner, *, owner: RemoteVoiceFirewallOwner,
+    original: Mapping[bool, bool],
 ) -> None:
     for permanent in (False, True):
-        if not _media_firewall_rule_present(
-            command, port=port, permanent=permanent,
-        ):
-            continue
-        arguments = ["sudo", "-n", "firewall-cmd"]
-        if permanent:
-            arguments.append("--permanent")
-        arguments.extend(("--zone=public", "--remove-rich-rule", _media_firewall_rule(port)))
-        _checked(
-            command, tuple(arguments),
-            failure="obsolete LAN-zone media firewall rule could not be removed",
-        )
-        if _media_firewall_rule_present(command, port=port, permanent=permanent):
-            raise StandError("obsolete LAN-zone media firewall rule remains active")
+        present = _firewall_rule_present(command, owner=owner, permanent=permanent)
+        if present != original[permanent]:
+            _change_firewall_rule(
+                command, owner=owner, permanent=permanent, add=original[permanent],
+            )
+
+
+def _reconcile_firewall_rule(
+    command: CommandRunner, *, current: RemoteVoiceFirewallOwner | None,
+    desired: RemoteVoiceFirewallOwner,
+) -> None:
+    desired_original = {
+        permanent: _firewall_rule_present(command, owner=desired, permanent=permanent)
+        for permanent in (False, True)
+    }
+    if current != desired and any(desired_original.values()):
+        raise StandError("desired firewall rule exists without exact current ownership")
+    current_original = None if current is None or current == desired else {
+        permanent: _firewall_rule_present(command, owner=current, permanent=permanent)
+        for permanent in (False, True)
+    }
+    try:
+        for permanent in (False, True):
+            if not desired_original[permanent]:
+                _change_firewall_rule(
+                    command, owner=desired, permanent=permanent, add=True,
+                )
+        if current_original is not None:
+            for permanent in (False, True):
+                if current_original[permanent]:
+                    _change_firewall_rule(
+                        command, owner=current, permanent=permanent, add=False,
+                    )
+    except StandError as error:
+        try:
+            if current_original is not None:
+                _restore_firewall_surfaces(command, owner=current, original=current_original)
+            _restore_firewall_surfaces(command, owner=desired, original=desired_original)
+        except StandError as rollback_error:
+            raise StandError("firewall reconcile failed and exact rollback could not be proved") from rollback_error
+        raise error
 
 
 def _remote_config_values(
-    values: Mapping[str, str], topology: RemoteVoiceTopology,
+    values: Mapping[str, str], topology: RemoteVoiceTopology, *, peer: str,
 ) -> dict[str, str]:
     updated = dict(values)
     updated.update({
@@ -545,6 +775,7 @@ def _remote_config_values(
         "SLICE6_APP_PUBLIC_URL": topology.app_public_url,
         "VOICE_AGENT_RTC_INTERFACE": topology.interface,
         "VOICE_AGENT_RTC_IP": topology.ipv4,
+        REMOTE_VOICE_PEER_KEY: peer,
     })
     return updated
 
@@ -565,12 +796,41 @@ def _serve_document(command: CommandRunner) -> dict[str, object]:
 
 def configure_remote_voice(
     *, state_root: Path, instance: str, command: CommandRunner,
+    approved_peer: str | None = None,
+    user_unit_directory: Path | None = None,
 ) -> tuple[RemoteVoiceTopology, Path, bool]:
-    """Apply the one dev Tailscale topology through current supported Serve syntax."""
+    """Apply the one dev Tailscale topology and exact approved-peer admission."""
     if instance != "dev":
         raise StandError("remote voice configuration is limited to the dev stand")
     values = parse_private_config(config_path(state_root, instance))
+    if user_unit_directory is not None:
+        # This precedes every firewall/config mutation so systemd parses the new
+        # schema through the selected release, never a mutable older checkout.
+        _ensure_durable_launcher(
+            state_root=state_root, user_unit_directory=user_unit_directory,
+            command=command,
+        )
+    configured_peer = values.get(REMOTE_VOICE_PEER_KEY)
+    peer = _parse_approved_peer(approved_peer if approved_peer is not None else configured_peer or "")
     topology = discover_remote_voice_topology(command)
+    if peer == f"{topology.ipv4}/32":
+        raise StandError("remote voice peer must differ from this stand's Tailscale identity")
+    zone = _effective_firewall_zone(command)
+    desired_owner = RemoteVoiceFirewallOwner(
+        peer=peer,
+        port=int(values["VOICE_AGENT_RTC_UDP_PORT"]),
+        zone=zone,
+        rule=_media_firewall_rule(peer=peer, port=int(values["VOICE_AGENT_RTC_UDP_PORT"])),
+    )
+    current_owner = _read_firewall_owner(state_root, instance)
+    desired_before = {
+        permanent: _firewall_rule_present(command, owner=desired_owner, permanent=permanent)
+        for permanent in (False, True)
+    }
+    current_before = None if current_owner is None or current_owner == desired_owner else {
+        permanent: _firewall_rule_present(command, owner=current_owner, permanent=permanent)
+        for permanent in (False, True)
+    }
     app_target = f"http://127.0.0.1:{values['VOICE_AGENT_GATEWAY_PORT']}"
     signal_target = f"http://127.0.0.1:{values['VOICE_AGENT_LIVEKIT_PORT']}"
     before = _serve_document(command)
@@ -585,34 +845,52 @@ def configure_remote_voice(
         if existing is not None and existing != {"Handlers": {"/": {"Proxy": target}}}:
             raise StandError("remote voice refuses to replace an unrelated Serve handler")
     backup = _remote_voice_backup(
-        state_root=state_root, instance=instance, topology=topology, command=command,
+        state_root=state_root, instance=instance, topology=topology,
+        zone=zone, command=command,
     )
-    _remove_obsolete_media_firewall_rule(
-        command, port=int(values["VOICE_AGENT_RTC_UDP_PORT"]),
-    )
-    _checked(
-        command,
-        ("tailscale", "serve", "--bg", f"--https={REMOTE_APP_HTTPS_PORT}", app_target),
-        failure="Tailscale application Serve listener could not be applied",
-    )
-    _checked(
-        command,
-        ("tailscale", "serve", "--bg", f"--https={REMOTE_SIGNAL_HTTPS_PORT}", signal_target),
-        failure="Tailscale LiveKit Serve listener could not be applied",
-    )
-    after = _serve_document(command)
-    if (
-        _contains_funnel_authority(after)
-        or not _serve_handler_matches(
-            after, hostname=topology.hostname, port=REMOTE_APP_HTTPS_PORT, target=app_target,
+    _reconcile_firewall_rule(command, current=current_owner, desired=desired_owner)
+    try:
+        _checked(
+            command,
+            ("tailscale", "serve", "--bg", f"--https={REMOTE_APP_HTTPS_PORT}", app_target),
+            failure="Tailscale application Serve listener could not be applied",
         )
-        or not _serve_handler_matches(
-            after, hostname=topology.hostname, port=REMOTE_SIGNAL_HTTPS_PORT, target=signal_target,
+        _checked(
+            command,
+            ("tailscale", "serve", "--bg", f"--https={REMOTE_SIGNAL_HTTPS_PORT}", signal_target),
+            failure="Tailscale LiveKit Serve listener could not be applied",
         )
-    ):
-        raise StandError("applied Serve topology is not the exact tailnet-only remote voice topology")
-    _replace_private_config(config_path(state_root, instance), _remote_config_values(values, topology))
-    parse_private_config(config_path(state_root, instance))
+        after = _serve_document(command)
+        if (
+            _contains_funnel_authority(after)
+            or not _serve_handler_matches(
+                after, hostname=topology.hostname, port=REMOTE_APP_HTTPS_PORT, target=app_target,
+            )
+            or not _serve_handler_matches(
+                after, hostname=topology.hostname, port=REMOTE_SIGNAL_HTTPS_PORT, target=signal_target,
+            )
+        ):
+            raise StandError("applied Serve topology is not the exact tailnet-only remote voice topology")
+        updated_values = _remote_config_values(values, topology, peer=peer)
+        _replace_private_config(config_path(state_root, instance), updated_values)
+        parse_private_config(config_path(state_root, instance))
+        _write_firewall_owner(state_root, instance, desired_owner)
+    except (OSError, StandError) as error:
+        try:
+            if current_before is not None and current_owner is not None:
+                _restore_firewall_surfaces(command, owner=current_owner, original=current_before)
+            _restore_firewall_surfaces(command, owner=desired_owner, original=desired_before)
+            _replace_private_config(config_path(state_root, instance), values)
+            owner_path = _firewall_owner_path(state_root, instance)
+            if current_owner is None:
+                owner_path.unlink(missing_ok=True)
+            else:
+                _write_firewall_owner(state_root, instance, current_owner)
+        except (OSError, StandError) as rollback_error:
+            raise StandError("remote voice apply failed and exact rollback could not be proved") from rollback_error
+        if isinstance(error, StandError):
+            raise error
+        raise StandError("private remote voice state could not be written") from error
     restarted = _service_running(instance=instance, command=command)
     if restarted:
         _ensure_active(instance=instance, command=command, action="restart")
@@ -638,18 +916,151 @@ def _exact_udp_listener(ipv4: str, port: int, *, proc_root: Path = Path("/proc")
     return addresses == {expected_address}
 
 
+def _firewall_rich_rules(
+    command: CommandRunner, *, zone: str, permanent: bool,
+) -> tuple[str, ...]:
+    arguments = ["sudo", "-n", "firewall-cmd"]
+    if permanent:
+        arguments.append("--permanent")
+    arguments.extend((f"--zone={zone}", "--list-rich-rules"))
+    result = _checked(command, tuple(arguments), failure="firewall rich-rule status is unavailable")
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _has_broader_media_lookalike(
+    rules: Sequence[str], *, desired: RemoteVoiceFirewallOwner,
+) -> bool:
+    marker = f'port port="{desired.port}" protocol="udp"'
+    for rule in rules:
+        if rule == desired.rule or marker not in rule or not rule.endswith(" accept"):
+            continue
+        match = re.search(r'source address="([^"]+)"', rule)
+        if match is None:
+            return True
+        try:
+            source = ipaddress.ip_network(match.group(1), strict=True)
+        except ValueError:
+            return True
+        if source.version != 4 or source.prefixlen != 32:
+            return True
+    return False
+
+
+def _has_broader_firewall_configuration(
+    command: CommandRunner, *, desired: RemoteVoiceFirewallOwner, permanent: bool,
+) -> bool:
+    arguments = ["sudo", "-n", "firewall-cmd"]
+    if permanent:
+        arguments.append("--permanent")
+    arguments.extend((f"--zone={desired.zone}", "--list-all"))
+    configuration = _checked(
+        command, tuple(arguments), failure="firewall zone status is unavailable",
+    ).stdout
+    fields = {
+        key.strip(): value.strip()
+        for line in configuration.splitlines()
+        if ":" in line
+        for key, value in (line.split(":", 1),)
+    }
+    if fields.get("target", "").upper() == "ACCEPT":
+        return True
+    if f"{desired.port}/udp" in fields.get("ports", "").split():
+        return True
+    return _has_broader_media_lookalike(
+        _firewall_rich_rules(command, zone=desired.zone, permanent=permanent),
+        desired=desired,
+    )
+
+
+def disable_remote_voice(
+    *, state_root: Path, instance: str, command: CommandRunner,
+) -> bool:
+    """Remove only exact owned admission and return dev to local-only configuration."""
+    if instance != "dev":
+        raise StandError("remote voice configuration is limited to the dev stand")
+    values = parse_private_config(config_path(state_root, instance))
+    owner = _read_firewall_owner(state_root, instance)
+    if owner is None:
+        if REMOTE_VOICE_CONFIG_KEYS.issubset(values):
+            raise StandError("remote voice configuration has no exact firewall ownership")
+        return False
+    original = {
+        permanent: _firewall_rule_present(command, owner=owner, permanent=permanent)
+        for permanent in (False, True)
+    }
+    local_values = {
+        key: value for key, value in values.items()
+        if key not in REMOTE_VOICE_CONFIG_KEYS
+    }
+    local_values["LIVEKIT_PUBLIC_URL"] = local_values["LIVEKIT_INTERNAL_URL"]
+    try:
+        for permanent in (False, True):
+            if original[permanent]:
+                _change_firewall_rule(command, owner=owner, permanent=permanent, add=False)
+        _replace_private_config(config_path(state_root, instance), local_values)
+        parse_private_config(config_path(state_root, instance))
+        _firewall_owner_path(state_root, instance).unlink()
+    except (OSError, StandError) as error:
+        try:
+            _restore_firewall_surfaces(command, owner=owner, original=original)
+            _replace_private_config(config_path(state_root, instance), values)
+        except (OSError, StandError) as rollback_error:
+            raise StandError("remote voice disable failed and exact rollback could not be proved") from rollback_error
+        if isinstance(error, StandError):
+            raise error
+        raise StandError("remote voice disable could not persist exact cleanup") from error
+    restarted = _service_running(instance=instance, command=command)
+    if restarted:
+        _ensure_active(instance=instance, command=command, action="restart")
+    return True
+
+
+def _not_ready(reason: str) -> dict[str, str]:
+    return {"state": "not-ready", "reason": reason}
+
+
 def remote_voice_status(
     *, state_root: Path, instance: str, command: CommandRunner,
     proc_root: Path = Path("/proc"),
 ) -> dict[str, str]:
-    """Prove configured endpoints, Serve routes, TLS probes, and the exact ICE bind."""
+    """Prove exact configured transport admission without claiming physical media."""
     try:
         values = parse_private_config(config_path(state_root, instance))
         if not REMOTE_VOICE_CONFIG_KEYS.issubset(values):
             return {"state": "not-configured"}
+        peer = _parse_approved_peer(values[REMOTE_VOICE_PEER_KEY])
+        owner = _read_firewall_owner(state_root, instance)
+        if owner is None:
+            return _not_ready("firewall-ownership-absent")
         topology = discover_remote_voice_topology(command)
-        if _remote_config_values(values, topology) != values:
-            raise StandError("private remote voice identity is stale")
+        if _remote_config_values(values, topology, peer=peer) != values:
+            return _not_ready("identity-drift")
+        desired = RemoteVoiceFirewallOwner(
+            peer=peer,
+            port=int(values["VOICE_AGENT_RTC_UDP_PORT"]),
+            zone=owner.zone,
+            rule=_media_firewall_rule(peer=peer, port=int(values["VOICE_AGENT_RTC_UDP_PORT"])),
+        )
+        if owner != desired:
+            return _not_ready("stale-owned-rule")
+        effective_zone = _effective_firewall_zone(command)
+        if effective_zone != owner.zone:
+            return _not_ready("zone-drift")
+        runtime = _firewall_rule_present(command, owner=owner, permanent=False)
+        permanent = _firewall_rule_present(command, owner=owner, permanent=True)
+        if not runtime and not permanent:
+            return _not_ready("firewall-runtime-and-permanent-absent")
+        if not runtime:
+            return _not_ready("firewall-runtime-absent")
+        if not permanent:
+            return _not_ready("firewall-permanent-absent")
+        if any(
+            _has_broader_firewall_configuration(
+                command, desired=owner, permanent=surface,
+            )
+            for surface in (False, True)
+        ):
+            return _not_ready("broader-firewall-lookalike")
         serve = _serve_document(command)
         app_target = f"http://127.0.0.1:{values['VOICE_AGENT_GATEWAY_PORT']}"
         signal_target = f"http://127.0.0.1:{values['VOICE_AGENT_LIVEKIT_PORT']}"
@@ -662,7 +1073,7 @@ def remote_voice_status(
                 serve, hostname=topology.hostname, port=REMOTE_SIGNAL_HTTPS_PORT, target=signal_target,
             )
         ):
-            raise StandError("Serve topology is incomplete")
+            return _not_ready("serve-drift")
         app_probe = _checked(
             command,
             ("curl", "--fail", "--silent", "--show-error", "--max-time", "5", f"{topology.app_public_url}/api/status"),
@@ -679,27 +1090,22 @@ def remote_voice_status(
             and public_status["health"].get("overall_readiness") == "ready"
             and public_status.get("remote_voice_configuration") == "configured"
         ):
-            raise StandError("remote application HTTPS status is not ready")
+            return _not_ready("application-not-ready")
         signal_probe = _checked(
             command,
             ("curl", "--fail", "--silent", "--show-error", "--max-time", "5", topology.livekit_public_url.replace("wss://", "https://") + "/"),
             failure="remote LiveKit HTTPS/WSS listener probe failed",
         )
         if signal_probe.stdout != "OK":
-            raise StandError("remote LiveKit HTTPS/WSS listener is invalid")
-        media_port = int(values["VOICE_AGENT_RTC_UDP_PORT"])
-        if (
-            _media_firewall_rule_present(command, port=media_port, permanent=False)
-            or _media_firewall_rule_present(command, port=media_port, permanent=True)
-        ):
-            raise StandError("an obsolete LAN-zone media firewall rule is still present")
-        if not _exact_udp_listener(
-            topology.ipv4, media_port, proc_root=proc_root,
-        ):
-            raise StandError("LiveKit media is not bound to the exact Tailscale candidate")
-        return {"state": "ready", "url": topology.app_public_url}
+            return _not_ready("signaling-not-ready")
+        if not _exact_udp_listener(topology.ipv4, owner.port, proc_root=proc_root):
+            return _not_ready("exact-listener-absent")
+        return {
+            "state": "ready", "url": topology.app_public_url,
+            "transport": "configured-admission",
+        }
     except StandError:
-        return {"state": "not-ready"}
+        return _not_ready("status-unavailable")
 
 
 def _release_manifest(release: Path) -> dict[str, object]:
@@ -1035,12 +1441,20 @@ def _ensure_active(*, instance: str, command: CommandRunner, action: str) -> Non
         raise StandError(f"selected release remains not-ready after user-systemd {action}")
 
 
-def start(*, state_root: Path, instance: str, command: CommandRunner) -> None:
+def start(
+    *, state_root: Path, instance: str, command: CommandRunner,
+    user_unit_directory: Path | None = None,
+) -> None:
     selected = selected_release(state_root, instance)
     if selected is None:
         raise StandError("start requires one selected immutable release")
     # Fail before persistence changes when external configuration is already known bad.
     launcher_environment(state_root=state_root, instance=instance, environment={})
+    if user_unit_directory is not None:
+        _ensure_durable_launcher(
+            state_root=state_root, user_unit_directory=user_unit_directory,
+            command=command,
+        )
     unit = unit_for(instance)
     user = pwd.getpwuid(os.getuid()).pw_name
     _checked(
@@ -1127,8 +1541,10 @@ def status(
         state_root=state_root, instance=instance, command=command,
     )
     remote_detail = remote["state"]
-    if "url" in remote:
-        remote_detail += f" ({remote['url']})"
+    if "reason" in remote:
+        remote_detail += f" ({remote['reason']})"
+    elif "url" in remote:
+        remote_detail += f" ({remote['url']}; configured transport admission)"
     lines = [
         f"stand status {instance}", f"version: {commit}", f"state: {lifecycle}",
         f"persistence: {persistence}", f"readiness: {readiness}",
@@ -1203,18 +1619,20 @@ def validate_release_external_configuration(
 def _deploy_instance_release(
     *, state_root: Path, instance: str, repository: Path, commit: str,
     was_running: bool, command: CommandRunner,
+    user_unit_directory: Path | None = None,
 ) -> str:
     release = build_release(state_root=state_root, repository=repository, commit=commit, command=command)
     validate_release_external_configuration(
         state_root=state_root, instance=instance, release=release,
     )
+    if user_unit_directory is not None:
+        _ensure_durable_launcher(
+            state_root=state_root, user_unit_directory=user_unit_directory,
+            command=command,
+        )
     select_release(state_root=state_root, instance=instance, release=release)
     if was_running:
         try:
-            _checked(
-                command, ("systemctl", "--user", "daemon-reload"),
-                failure="user-systemd daemon reload failed",
-            )
             _ensure_active(instance=instance, command=command, action="restart")
         except StandError as error:
             # The selected release intentionally remains visible for diagnosis.
@@ -1224,7 +1642,7 @@ def _deploy_instance_release(
 
 def deploy_local(
     *, state_root: Path, instance: str, repository: Path, commit: str,
-    command: CommandRunner,
+    command: CommandRunner, user_unit_directory: Path | None = None,
 ) -> str:
     """Select an exact local commit for dev; main is tag-only."""
     if instance != "dev":
@@ -1240,6 +1658,7 @@ def deploy_local(
         state_root=state_root, instance=instance, repository=repository,
         commit=str(_release_manifest(local_release)["commit"]),
         was_running=was_running, command=command,
+        user_unit_directory=user_unit_directory,
     )
 
 
@@ -1251,7 +1670,10 @@ def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command
     )
 
 
-def deploy_remote(*, state_root: Path, instance: str, ref: str, command: CommandRunner) -> str:
+def deploy_remote(
+    *, state_root: Path, instance: str, ref: str, command: CommandRunner,
+    user_unit_directory: Path | None = None,
+) -> str:
     """Apply the strict main-tag or permissive explicit dev remote policy."""
     if instance not in INSTANCE_NAMES:
         raise StandError("only the declared stand instance is accepted")
@@ -1264,6 +1686,7 @@ def deploy_remote(*, state_root: Path, instance: str, ref: str, command: Command
         state_root=state_root, instance=instance,
         repository=controller_source_path(state_root), commit=commit,
         was_running=was_running, command=command,
+        user_unit_directory=user_unit_directory,
     )
 
 
