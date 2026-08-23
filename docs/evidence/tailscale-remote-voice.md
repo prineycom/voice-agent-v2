@@ -1,62 +1,69 @@
 # Tailscale remote voice topology evidence
 
 **Decision:** [ADR-0016](../adr/0016-tailscale-remote-voice-topology.md)
-**Host proof date:** 2026-08-23
-**Scope:** versioned `dev` stand only
+**Correction proof date:** 2026-08-23
+**Scope:** versioned `dev` stand and one explicitly approved iPhone peer
 
-## Implemented topology
+## Corrected topology
 
 | Boundary | Authoritative result |
 | --- | --- |
 | Browser application | Current self MagicDNS hostname, HTTPS `8443`, Tailscale Serve root proxy to dev gateway loopback |
-| Browser LiveKit signaling | Same hostname, WSS `7443`, separate Tailscale Serve root proxy to dev LiveKit loopback; no path-prefix rewrite |
-| Internal signaling/control | `ws://127.0.0.1:<dev-livekit-port>` for gateway/Python agent |
-| Media/ICE | One current private-config-owned Tailscale IPv4 on exact `tailscale0` and exact dev UDP port |
-| Refused paths | Funnel, public/LAN/wildcard service bind, wildcard media, ICE/TCP, TURN/cloud fallback, alternate candidate, blind retry, 409 suppression |
-| Remote readiness | `./stand status dev` requires current identity, both Serve handlers, HTTPS app health, LiveKit HTTPS/WSS listener, absence of the obsolete LAN-zone media rule, and exact UDP bind together |
+| Browser LiveKit signaling | Same hostname, WSS `7443`, separate root proxy to dev LiveKit loopback; no path-prefix rewrite |
+| Internal signaling/control | Loopback-only gateway, agent, LiveKit signaling and inference paths |
+| Media/ICE | One current private-config host Tailscale IPv4 on exact `tailscale0` and exact configured UDP mux port |
+| Media admission | One explicitly approved private peer IPv4 `/32`, UDP only, exact mux port, effective firewalld zone, runtime and permanent |
+| Refused paths | Peer auto-selection, whole-tailnet/interface/LAN/wildcard admission, Funnel, wildcard media, ICE/TCP, TURN, forwarding, masquerade, alternate candidate, retry/fallback |
+| Remote readiness | Current identity + Serve/app/WSS + exact listener + exact private owner + effective zone + runtime/permanent exact-rule presence; broader lookalikes are not ready |
 
-`./stand remote-voice apply dev` is reproducible from live self identity. It saves mode-`0600` structured Serve and runtime/permanent firewalld snapshots beneath the private dev instance before mutation. It removes only the obsolete exact dev-port LAN-zone tailnet-source rule if present, refuses unrelated Serve handlers, applies only the two current supported Serve listeners, writes the complete HTTPS/WSS/RTC group atomically to the mode-`0600` dev configuration, and restarts dev only if already active. No moving IP is tracked here.
+Exact host/peer addresses remain installation-private. The tracked implementation contains only reserved test values.
+
+## Why exact bind was insufficient
+
+The original host proof established the exact `tailscale0` UDP listener but incorrectly inferred that it needed no firewalld admission. A later full iPhone ICE trace disproved that premise. Nominated tailnet STUN reached the exact host interface and port continuously, while firewalld's later default-zone hook returned administrative-prohibited responses before LiveKit received any request. Consequently ICE timed out before the frontend reached microphone capture, even while the former `stand status` said remote voice was ready.
+
+A synchronized, separately authorized A/B changed one variable: one runtime-only rich rule admitting the current iPhone's exact tailnet IPv4 `/32` to UDP/7882. With the same release, listener, Serve topology, route, client order, and transports:
+
+- the exact UDP pair selected and the browser became active;
+- LiveKit recorded browser microphone publication;
+- the privacy-safe trace recorded `session.ready`, real microphone endpoints, response PCM delivery, and normal cleanup;
+- Pasha physically observed the permission prompt, READY UI, and audible response;
+- removal of the temporary rule restored byte-equivalent runtime/permanent baseline.
+
+This is positive causal and physical evidence for the narrow correction. It does not prove another peer/network, IPv6, reboot persistence, future physical audibility, or a need for ICE/TCP, TURN, permission reordering, or wider firewall authority.
+
+## Repository-owned durable correction
+
+First `./stand remote-voice apply dev --peer <approved-tailnet-ipv4>/32` requires explicit approval; later apply reuses only that private value. The existing stand owner:
+
+1. discovers current self identity and resolves an assigned `tailscale0` zone or, when unassigned, the effective default zone;
+2. stores mode-`0600` Serve/firewall backups and an exact private ownership document;
+3. applies only the canonical IPv4 source `/32`, configured-port, UDP, accept rich rule through `sudo -n firewall-cmd`;
+4. proves immediate runtime and permanent presence without `--reload`;
+5. transactionally reconciles only recorded old/new peer, port, or zone bytes and rolls back only partial owned mutation;
+6. preserves unrelated and broader lookalike rules rather than deleting them;
+7. makes stale ownership, zone drift, absent runtime, absent permanent, and broader lookalikes distinct not-ready reasons;
+8. removes and proves absence of exactly the owned two surfaces on explicit `remote-voice disable` and installation deletion/uninstall cleanup.
+
+Ready means **configured transport admission**. It does not mean that a device is online or that audio was heard now.
 
 ## Deterministic evidence
 
 `tests.test_remote_voice` covers:
 
-- exact HTTPS Origin admission and refusal of scheme/port variants;
-- CSP `connect-src` containing the exact WSS URL without internal loopback signaling;
-- issued capability preserving the exact public WSS URL;
-- app/WSS public URLs remaining separate from the loopback internal agent URL;
-- exact LiveKit `node_ip`, interface include, IP allowlist and UDP port;
-- current self identity validation and two independent Serve command renderings;
-- no Funnel, wildcard, or `0.0.0.0` command path;
-- pre-mutation Serve/firewall backups and exact obsolete-rule removal;
-- refusal to replace unrelated handlers or configure `main`;
-- app-only, WSS-only, non-tailnet media, Funnel-enabled, missing-handler, wrong-candidate, and stale/incomplete readiness cases.
+- strict exact peer `/32` admission and refusal to infer a peer;
+- exact Origin/CSP/public WSS/internal loopback separation and LiveKit tailnet bind;
+- unassigned-interface default-zone and assigned-zone resolution;
+- exact rule and `sudo -n firewall-cmd` command bytes, with no reload/widening command;
+- runtime/permanent idempotence and each partial-add failure boundary;
+- preservation of unrelated rules;
+- peer/port/zone update removing only exact old ownership;
+- runtime absence, permanent absence, zone drift, stale owner, broad lookalike, Serve and listener drift;
+- exact disable cleanup and repeated no-op cleanup;
+- no Funnel, wildcard bind, TCP, TURN, masquerade, forwarding, interface trust, or broad-source mutation.
 
-The canonical command and full saved output are recorded in the matching Do report.
+The canonical PR command remains the sole deterministic gate. Live host mutation and the dated physical A/B remain separate evidence tiers.
 
-## Host-side proof
+## Post-merge Acceptance
 
-The committed task release `2671b18ad80af8debe94ea4fca0e8a2cc9df7df1` was deployed to `dev`. The one canonical prepared-image refresh selected the already-merged current native context without deleting the retained prior image. The existing `./stand init` bootstrap then refreshed the repository launcher contract without changing the selected-release pointer; no unit was hand-edited. The single final `./stand status dev` proof reported running, enabled, internally ready, remote-voice ready, and the AgentEnvironment running.
-
-Structured Serve status contained the preserved unrelated HTTPS `:443` handler plus exactly these task handlers on the current self MagicDNS name:
-
-- HTTPS `:8443` root → `http://127.0.0.1:8000`;
-- HTTPS/WSS `:7443` root → `http://127.0.0.1:7880`.
-
-There was no Funnel record. Listener inspection showed gateway, LiveKit signaling and llama.cpp only on IPv4 loopback; Serve only on the Tailscale addresses; and LiveKit UDP `7882` only on the current Tailscale IPv4. The public firewalld zone retained only its existing bounded SSH rules and no LAN/tailnet media-port rule. No application, signaling, inference, generic-service or media listener appeared on a LAN or wildcard address.
-
-`GET https://priney-arch.darter-smoot.ts.net:8443/` returned HTTP/2 `200` with CSP `connect-src 'self' wss://priney-arch.darter-smoot.ts.net:7443`. An exact-Origin `POST /api/session` with a fresh UUIDv4 returned a non-empty private token and the exact public WSS URL; only non-secret capability fields were displayed. The official Python LiveKit RTC client used that token privately, connected through the public WSS URL, observed the already joined agent participant, and disconnected. LiveKit's current start/ICE logs matched `node_ip` and the selected UDP host candidate on the current `tailscale0` address and port `7882`. The matching exact-Origin `DELETE` returned `204`; public status then reported accepting/available, remote configuration loaded, and AgentEnvironment running.
-
-Chrome DevTools AXI could not launch because this host has no supported Chrome binary, so this host proof makes no browser, microphone, or playback claim. The real official-client WSS/ICE proof is not relabelled as the intended second-device Acceptance.
-
-## Remaining second-device Acceptance
-
-Host evidence cannot claim these observations. Pasha must use the reported exact HTTPS URL from another device in the same tailnet and observe:
-
-1. CONNECT completes;
-2. microphone permission and publication succeed;
-3. the remote participant/media path appears;
-4. agent response audio is audible;
-5. DISCONNECT releases the one session cleanly.
-
-No remote-peer path, physical microphone, audio, audibility, or playback result is claimed until that test occurs.
+After the exact green commit is installed and host readiness proves the service, exact listener, AgentEnvironment, owned runtime/permanent rule, unrelated-rule preservation, and healthy journal, the stand remains running. Pasha then repeats physical iPhone CONNECT, microphone permission/publication, READY, audible response, and DISCONNECT. That future observation is not preclaimed by configured host readiness.

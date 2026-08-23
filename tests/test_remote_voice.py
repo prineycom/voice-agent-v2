@@ -21,6 +21,7 @@ from voice_agent_v2.stand_dev import (
     StandError,
     config_path,
     configure_remote_voice,
+    disable_remote_voice,
     initialize,
     parse_private_config,
     remote_voice_status,
@@ -28,7 +29,16 @@ from voice_agent_v2.stand_dev import (
 
 
 HOSTNAME = "voice-host.example-tailnet.ts.net"
-TAILSCALE_IP = "100.78.238.32"
+TAILSCALE_IP = "100.64.0.10"
+APPROVED_PEER = "100.64.0.20/32"
+OTHER_PEER = "100.64.0.21/32"
+
+
+def exact_rule(peer: str = APPROVED_PEER, port: int = 7882) -> str:
+    return (
+        f'rule family="ipv4" source address="{peer}" '
+        f'port port="{port}" protocol="udp" accept'
+    )
 
 
 class RemoteCommand:
@@ -36,7 +46,18 @@ class RemoteCommand:
         self.calls: list[tuple[str, ...]] = []
         self.serve: dict[str, object] = {"TCP": {}, "Web": {}}
         self.active = False
-        self.firewall_rule = {False: True, True: True}
+        self.default_zone = "public"
+        self.interface_zone: str | None = None
+        self.rules: dict[bool, set[tuple[str, str]]] = {False: set(), True: set()}
+        self.fail_add: bool | None = None
+        self.target = "default"
+        self.open_ports: dict[bool, set[tuple[str, str]]] = {False: set(), True: set()}
+        self.unrelated_rule = (
+            'rule family="ipv4" source address="192.0.2.0/24" '
+            'port port="22" protocol="tcp" accept'
+        )
+        self.rules[False].add(("public", self.unrelated_rule))
+        self.rules[True].add(("public", self.unrelated_rule))
 
     def run(self, arguments, *, cwd: Path | None = None) -> CommandResult:
         del cwd
@@ -66,13 +87,45 @@ class RemoteCommand:
             }
             return CommandResult(0)
         if command[:3] == ("sudo", "-n", "firewall-cmd"):
+            if command[-1] == "--get-zone-of-interface=tailscale0":
+                return CommandResult(
+                    0 if self.interface_zone else 2,
+                    (self.interface_zone or "no zone") + "\n",
+                )
+            if command[-1] == "--get-default-zone":
+                return CommandResult(0, self.default_zone + "\n")
             permanent = "--permanent" in command
+            zone_argument = next((part for part in command if part.startswith("--zone=")), None)
+            zone = zone_argument.split("=", 1)[1] if zone_argument else self.default_zone
             if "--query-rich-rule" in command:
-                return CommandResult(0 if self.firewall_rule[permanent] else 1)
-            if "--remove-rich-rule" in command:
-                self.firewall_rule[permanent] = False
+                rule = command[command.index("--query-rich-rule") + 1]
+                return CommandResult(0 if (zone, rule) in self.rules[permanent] else 1)
+            if "--add-rich-rule" in command:
+                if self.fail_add is permanent:
+                    return CommandResult(1)
+                rule = command[command.index("--add-rich-rule") + 1]
+                self.rules[permanent].add((zone, rule))
                 return CommandResult(0)
-            return CommandResult(0, "public\n  interfaces: wlan0\n")
+            if "--remove-rich-rule" in command:
+                rule = command[command.index("--remove-rich-rule") + 1]
+                self.rules[permanent].discard((zone, rule))
+                return CommandResult(0)
+            if "--list-rich-rules" in command:
+                body = "".join(
+                    rule + "\n" for observed_zone, rule in sorted(self.rules[permanent])
+                    if observed_zone == zone
+                )
+                return CommandResult(0, body)
+            if "--list-all" in command:
+                ports = " ".join(
+                    port for observed_zone, port in sorted(self.open_ports[permanent])
+                    if observed_zone == zone
+                )
+                return CommandResult(
+                    0,
+                    f"{zone}\n  target: {self.target}\n  interfaces: wlan0\n  ports: {ports}\n",
+                )
+            return CommandResult(1, stderr="unexpected firewall command")
         if command[:3] == ("systemctl", "--user", "is-active"):
             return CommandResult(0, "active\n") if self.active else CommandResult(3, "inactive\n")
         if command[:3] == ("systemctl", "--user", "restart"):
@@ -111,102 +164,168 @@ class RemoteVoiceTopologyTests(unittest.TestCase):
         )
         return state
 
-    def test_apply_backs_up_system_state_and_renders_two_exact_serve_listeners(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = self.initialize_state(root)
-            command = RemoteCommand()
-            topology, backup, restarted = configure_remote_voice(
-                state_root=state, instance="dev", command=command,
-            )
+    def apply(self, state: Path, command: RemoteCommand, peer: str = APPROVED_PEER):
+        return configure_remote_voice(
+            state_root=state, instance="dev", command=command, approved_peer=peer,
+        )
 
+    def test_apply_owns_exact_bytes_in_effective_default_zone_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = self.initialize_state(Path(temporary))
+            command = RemoteCommand()
+            topology, backup, restarted = self.apply(state, command)
             self.assertFalse(restarted)
             self.assertEqual(topology.app_public_url, f"https://{HOSTNAME}:8443")
-            self.assertEqual(topology.livekit_public_url, f"wss://{HOSTNAME}:7443")
             self.assertEqual({path.name for path in backup.iterdir()}, {
                 "serve-status.json", "firewall-runtime.txt",
                 "firewall-permanent.txt", "topology.json",
             })
             self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in backup.iterdir()))
             values = parse_private_config(config_path(state, "dev"))
-            self.assertEqual(values["LIVEKIT_INTERNAL_URL"], "ws://127.0.0.1:7880")
-            self.assertEqual(values["LIVEKIT_PUBLIC_URL"], f"wss://{HOSTNAME}:7443")
-            self.assertEqual(values["SLICE6_APP_PUBLIC_URL"], f"https://{HOSTNAME}:8443")
-            self.assertEqual(values["VOICE_AGENT_RTC_INTERFACE"], "tailscale0")
+            self.assertEqual(values["VOICE_AGENT_REMOTE_VOICE_PEER_IPV4_CIDR"], APPROVED_PEER)
             self.assertEqual(values["VOICE_AGENT_RTC_IP"], TAILSCALE_IP)
-            self.assertIn(
-                ("tailscale", "serve", "--bg", "--https=8443", "http://127.0.0.1:8000"),
-                command.calls,
-            )
-            self.assertIn(
-                ("tailscale", "serve", "--bg", "--https=7443", "http://127.0.0.1:7880"),
-                command.calls,
-            )
-            self.assertFalse(any(call[:2] == ("tailscale", "funnel") for call in command.calls))
-            self.assertFalse(any("0.0.0.0" in argument for call in command.calls for argument in call))
-            self.assertFalse(command.firewall_rule[False])
-            self.assertFalse(command.firewall_rule[True])
+            owner_path = state / "instances/dev/remote-voice/firewall-owner.json"
+            owner = json.loads(owner_path.read_text())
+            self.assertEqual(owner["zone"], "public")
+            self.assertEqual(owner["rule"], exact_rule())
+            self.assertEqual(owner_path.stat().st_mode & 0o777, 0o600)
+            for permanent in (False, True):
+                self.assertIn(("public", exact_rule()), command.rules[permanent])
+                self.assertIn(("public", command.unrelated_rule), command.rules[permanent])
+            add_calls = [call for call in command.calls if "--add-rich-rule" in call]
+            self.assertEqual(add_calls, [
+                ("sudo", "-n", "firewall-cmd", "--zone=public", "--add-rich-rule", exact_rule()),
+                ("sudo", "-n", "firewall-cmd", "--permanent", "--zone=public", "--add-rich-rule", exact_rule()),
+            ])
+            self.apply(state, command)
             self.assertEqual(
-                sum("--remove-rich-rule" in call for call in command.calls), 2,
+                len([call for call in command.calls if "--add-rich-rule" in call]), 2,
             )
+            forbidden = ("--reload", "--add-port", "--add-interface", "--add-masquerade", "--add-forward-port")
+            self.assertFalse(any(item in call for call in command.calls for item in forbidden))
+            self.assertFalse(any("tcp" in item or "0.0.0.0" in item for call in add_calls for item in call))
 
-    def test_remote_readiness_requires_app_wss_and_exact_tailnet_udp_together(self) -> None:
+    def test_apply_rolls_back_only_its_runtime_partial_when_permanent_add_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = self.initialize_state(Path(temporary))
+            command = RemoteCommand()
+            command.fail_add = True
+            with self.assertRaisesRegex(StandError, "could not be added"):
+                self.apply(state, command)
+            for permanent in (False, True):
+                self.assertNotIn(("public", exact_rule()), command.rules[permanent])
+                self.assertIn(("public", command.unrelated_rule), command.rules[permanent])
+            self.assertFalse((state / "instances/dev/remote-voice/firewall-owner.json").exists())
+
+    def test_apply_runtime_add_failure_leaves_permanent_and_unrelated_state_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = self.initialize_state(Path(temporary))
+            command = RemoteCommand()
+            command.fail_add = False
+            with self.assertRaisesRegex(StandError, "could not be added"):
+                self.apply(state, command)
+            for permanent in (False, True):
+                self.assertNotIn(("public", exact_rule()), command.rules[permanent])
+                self.assertIn(("public", command.unrelated_rule), command.rules[permanent])
+
+    def test_peer_port_and_effective_zone_change_reconciles_only_owned_old_and_new(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = self.initialize_state(Path(temporary))
+            command = RemoteCommand()
+            self.apply(state, command)
+            path = config_path(state, "dev")
+            path.write_text(path.read_text().replace(
+                "VOICE_AGENT_RTC_UDP_PORT=7882", "VOICE_AGENT_RTC_UDP_PORT=7890",
+            ))
+            command.interface_zone = "work"
+            self.apply(state, command, OTHER_PEER)
+            for permanent in (False, True):
+                self.assertNotIn(("public", exact_rule()), command.rules[permanent])
+                self.assertIn(("work", exact_rule(OTHER_PEER, 7890)), command.rules[permanent])
+                self.assertIn(("public", command.unrelated_rule), command.rules[permanent])
+
+    def test_readiness_distinguishes_firewall_and_zone_drift_and_broad_lookalikes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state = self.initialize_state(root)
             command = RemoteCommand()
-            configure_remote_voice(state_root=state, instance="dev", command=command)
+            self.apply(state, command)
             proc = root / "proc"
             write_udp_fixture(proc)
-
-            ready = remote_voice_status(
+            self.assertEqual(remote_voice_status(
                 state_root=state, instance="dev", command=command, proc_root=proc,
-            )
-            self.assertEqual(ready, {
-                "state": "ready", "url": f"https://{HOSTNAME}:8443",
-            })
+            )["transport"], "configured-admission")
+            command.rules[False].remove(("public", exact_rule()))
+            self.assertEqual(remote_voice_status(
+                state_root=state, instance="dev", command=command, proc_root=proc,
+            )["reason"], "firewall-runtime-absent")
+            command.rules[False].add(("public", exact_rule()))
+            command.rules[True].remove(("public", exact_rule()))
+            self.assertEqual(remote_voice_status(
+                state_root=state, instance="dev", command=command, proc_root=proc,
+            )["reason"], "firewall-permanent-absent")
+            command.rules[True].add(("public", exact_rule()))
+            command.interface_zone = "work"
+            self.assertEqual(remote_voice_status(
+                state_root=state, instance="dev", command=command, proc_root=proc,
+            )["reason"], "zone-drift")
+            command.interface_zone = None
+            broad = exact_rule("100.64.0.0/10")
+            command.rules[False].add(("public", broad))
+            self.assertEqual(remote_voice_status(
+                state_root=state, instance="dev", command=command, proc_root=proc,
+            )["reason"], "broader-firewall-lookalike")
+            command.rules[False].remove(("public", broad))
+            command.open_ports[True].add(("public", "7882/udp"))
+            self.assertEqual(remote_voice_status(
+                state_root=state, instance="dev", command=command, proc_root=proc,
+            )["reason"], "broader-firewall-lookalike")
+            command.open_ports[True].clear()
+            path = config_path(state, "dev")
+            path.write_text(path.read_text().replace(APPROVED_PEER, OTHER_PEER))
+            self.assertEqual(remote_voice_status(
+                state_root=state, instance="dev", command=command, proc_root=proc,
+            )["reason"], "stale-owned-rule")
 
-            signal = command.serve["Web"].pop(f"{HOSTNAME}:{REMOTE_SIGNAL_HTTPS_PORT}")
-            self.assertEqual(
-                remote_voice_status(
-                    state_root=state, instance="dev", command=command, proc_root=proc,
-                )["state"],
-                "not-ready",
-            )
-            command.serve["Web"][f"{HOSTNAME}:{REMOTE_SIGNAL_HTTPS_PORT}"] = signal
-            command.serve["AllowFunnel"] = True
-            self.assertEqual(
-                remote_voice_status(
-                    state_root=state, instance="dev", command=command, proc_root=proc,
-                )["state"],
-                "not-ready",
-            )
-            command.serve.pop("AllowFunnel")
-            write_udp_fixture(root / "wrong-proc", address="192.0.2.10")
-            self.assertEqual(
-                remote_voice_status(
-                    state_root=state, instance="dev", command=command,
-                    proc_root=root / "wrong-proc",
-                )["state"],
-                "not-ready",
-            )
-
-    def test_apply_refuses_main_and_unrelated_existing_handler(self) -> None:
+    def test_disable_and_repeated_cleanup_remove_only_exact_owned_rule(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = self.initialize_state(Path(temporary))
             command = RemoteCommand()
+            self.apply(state, command)
+            self.assertTrue(disable_remote_voice(
+                state_root=state, instance="dev", command=command,
+            ))
+            self.assertFalse(disable_remote_voice(
+                state_root=state, instance="dev", command=command,
+            ))
+            for permanent in (False, True):
+                self.assertNotIn(("public", exact_rule()), command.rules[permanent])
+                self.assertIn(("public", command.unrelated_rule), command.rules[permanent])
+            values = parse_private_config(config_path(state, "dev"))
+            self.assertNotIn("VOICE_AGENT_REMOTE_VOICE_PEER_IPV4_CIDR", values)
+            self.assertFalse((state / "instances/dev/remote-voice/firewall-owner.json").exists())
+
+    def test_apply_requires_explicit_exact_peer_and_refuses_main_or_unrelated_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = self.initialize_state(Path(temporary))
+            command = RemoteCommand()
+            with self.assertRaisesRegex(StandError, "explicitly approved"):
+                configure_remote_voice(state_root=state, instance="dev", command=command)
+            with self.assertRaisesRegex(StandError, "explicitly approved"):
+                self.apply(state, command, "100.64.0.0/24")
             with self.assertRaisesRegex(StandError, "limited to the dev stand"):
-                configure_remote_voice(state_root=state, instance="main", command=command)
+                configure_remote_voice(
+                    state_root=state, instance="main", command=command,
+                    approved_peer=APPROVED_PEER,
+                )
             command.serve = {
                 "TCP": {str(REMOTE_APP_HTTPS_PORT): {"HTTPS": True}},
-                "Web": {
-                    f"{HOSTNAME}:{REMOTE_APP_HTTPS_PORT}": {
-                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}
-                    }
-                },
+                "Web": {f"{HOSTNAME}:{REMOTE_APP_HTTPS_PORT}": {
+                    "Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}
+                }},
             }
             with self.assertRaisesRegex(StandError, "unrelated Serve handler"):
-                configure_remote_voice(state_root=state, instance="dev", command=command)
+                self.apply(state, command)
 
 
 class RemoteApplicationContractTests(unittest.TestCase):
