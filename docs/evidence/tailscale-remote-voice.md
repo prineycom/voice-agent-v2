@@ -36,14 +36,15 @@ This is positive causal and physical evidence for the narrow correction. It does
 
 First `./stand remote-voice apply dev --peer <approved-tailnet-ipv4>/32` requires explicit approval; later apply reuses only that private value. The existing stand owner:
 
-1. discovers current self identity and resolves an assigned `tailscale0` zone or, when unassigned, the effective default zone;
-2. stores mode-`0600` Serve/firewall backups and an exact private ownership document;
-3. applies only the canonical IPv4 source `/32`, configured-port, UDP, accept rich rule through `sudo -n firewall-cmd`;
-4. proves immediate runtime and permanent presence without `--reload`;
-5. transactionally reconciles only recorded old/new peer, port, or zone bytes and rolls back only partial owned mutation;
-6. preserves unrelated and broader lookalike rules rather than deleting them;
-7. makes stale ownership, zone drift, absent runtime, absent permanent, and broader lookalikes distinct not-ready reasons;
-8. removes and proves absence of exactly the owned two surfaces on explicit `remote-voice disable` and installation deletion/uninstall cleanup.
+1. atomically installs/reloads a systemd unit whose sole launcher enters the selected immutable release, before any private-schema or firewall mutation; canonical deploy performs the same handoff before pointer selection;
+2. discovers current self identity and resolves an assigned `tailscale0` zone or, when unassigned, the effective default zone;
+3. stores mode-`0600` Serve/firewall backups and an exact private ownership document;
+4. applies only the canonical IPv4 source `/32`, configured-port, UDP, accept rich rule through `sudo -n firewall-cmd`;
+5. proves immediate runtime and permanent presence without `--reload`;
+6. transactionally reconciles only recorded old/new peer, port, or zone bytes and rolls back only partial owned mutation;
+7. preserves unrelated and broader lookalike rules rather than deleting them;
+8. makes stale ownership, zone drift, absent runtime, absent permanent, and broader lookalikes distinct not-ready reasons;
+9. removes and proves absence of exactly the owned two surfaces on explicit `remote-voice disable` and installation deletion/uninstall cleanup.
 
 Ready means **configured transport admission**. It does not mean that a device is online or that audio was heard now.
 
@@ -51,6 +52,7 @@ Ready means **configured transport admission**. It does not mean that a device i
 
 `tests.test_remote_voice` covers:
 
+- upgrade from an old checkout-based installed launcher and old private schema to the selected-release dispatcher before schema/firewall mutation, including induced-failure rollback with no configuration-failed interval;
 - strict exact peer `/32` admission and refusal to infer a peer;
 - exact Origin/CSP/public WSS/internal loopback separation and LiveKit tailnet bind;
 - unassigned-interface default-zone and assigned-zone resolution;

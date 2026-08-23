@@ -274,10 +274,13 @@ def validate_instance_isolation(state_root: Path) -> None:
             raise StandError("main and dev credentials must be independent")
 
 
-def unit_template(*, stand_executable: Path, state_root: Path) -> str:
-    """A per-user template: the launcher becomes the foreground process."""
-    if any(character.isspace() for character in str(stand_executable)):
-        raise StandError("stand executable path cannot contain whitespace")
+def unit_template(*, state_root: Path) -> str:
+    """A stable template dispatching through the selected immutable release."""
+    if any(character.isspace() or character == "%" for character in str(state_root)):
+        raise StandError("stand state path cannot contain whitespace or percent signs")
+    selected_launcher = (
+        state_root / "instances" / "%i" / "current" / "source" / "scripts" / "stand.py"
+    )
     return "\n".join((
         "[Unit]",
         "Description=Voice Agent v2 local stand %i",
@@ -293,7 +296,7 @@ def unit_template(*, stand_executable: Path, state_root: Path) -> str:
         "KillMode=control-group",
         "Environment=PYTHONUNBUFFERED=1",
         f"Environment=VOICE_AGENT_STAND_STATE_ROOT={state_root}",
-        f"ExecStart={stand_executable} launcher %i",
+        f"ExecStart=/usr/bin/python3 -B {selected_launcher} launcher %i",
         "Restart=on-failure",
         "RestartPreventExitStatus=2",
         "RestartSec=5",
@@ -309,6 +312,54 @@ def unit_template(*, stand_executable: Path, state_root: Path) -> str:
 def controller_source_path(state_root: Path) -> Path:
     """The one ordinary user-owned clone used for remote dev deployments."""
     return state_root / "source"
+
+
+def _install_unit_template(*, state_root: Path, user_unit_directory: Path) -> bool:
+    """Atomically install the release-dispatching unit before schema evolution."""
+    _mkdir_private(user_unit_directory)
+    unit = user_unit_directory / UNIT_NAME
+    expected = unit_template(state_root=state_root)
+    try:
+        current = unit.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = None
+    except (OSError, UnicodeDecodeError) as error:
+        raise StandError("stand user-systemd template cannot be inspected") from error
+    if current == expected:
+        return False
+    temporary = user_unit_directory / f".{UNIT_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as destination:
+            destination.write(expected)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, unit)
+        directory = os.open(user_unit_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        raise StandError("stand user-systemd template cannot be installed") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
+def _ensure_durable_launcher(
+    *, state_root: Path, user_unit_directory: Path, command: CommandRunner,
+) -> bool:
+    """Make systemd load the selected-release dispatcher before private schema writes."""
+    changed = _install_unit_template(
+        state_root=state_root, user_unit_directory=user_unit_directory,
+    )
+    _checked(
+        command, ("systemctl", "--user", "daemon-reload"),
+        failure="user-systemd durable launcher reload failed",
+    )
+    return changed
 
 
 def initialize(
@@ -350,15 +401,8 @@ def initialize(
                 failure="ordinary controller source clone failed",
             )
             _mkdir_private(source)
-    _mkdir_private(user_unit_directory)
-    unit = user_unit_directory / UNIT_NAME
-    temporary = user_unit_directory / f".{UNIT_NAME}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(unit_template(stand_executable=stand_executable, state_root=state_root), encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, unit)
-    finally:
-        temporary.unlink(missing_ok=True)
+    del stand_executable  # The durable unit never points at a mutable controller checkout.
+    _install_unit_template(state_root=state_root, user_unit_directory=user_unit_directory)
 
 
 def _checked(command: CommandRunner, arguments: Sequence[str], *, cwd: Path | None = None, failure: str) -> CommandResult:
@@ -753,11 +797,19 @@ def _serve_document(command: CommandRunner) -> dict[str, object]:
 def configure_remote_voice(
     *, state_root: Path, instance: str, command: CommandRunner,
     approved_peer: str | None = None,
+    user_unit_directory: Path | None = None,
 ) -> tuple[RemoteVoiceTopology, Path, bool]:
     """Apply the one dev Tailscale topology and exact approved-peer admission."""
     if instance != "dev":
         raise StandError("remote voice configuration is limited to the dev stand")
     values = parse_private_config(config_path(state_root, instance))
+    if user_unit_directory is not None:
+        # This precedes every firewall/config mutation so systemd parses the new
+        # schema through the selected release, never a mutable older checkout.
+        _ensure_durable_launcher(
+            state_root=state_root, user_unit_directory=user_unit_directory,
+            command=command,
+        )
     configured_peer = values.get(REMOTE_VOICE_PEER_KEY)
     peer = _parse_approved_peer(approved_peer if approved_peer is not None else configured_peer or "")
     topology = discover_remote_voice_topology(command)
@@ -1389,12 +1441,20 @@ def _ensure_active(*, instance: str, command: CommandRunner, action: str) -> Non
         raise StandError(f"selected release remains not-ready after user-systemd {action}")
 
 
-def start(*, state_root: Path, instance: str, command: CommandRunner) -> None:
+def start(
+    *, state_root: Path, instance: str, command: CommandRunner,
+    user_unit_directory: Path | None = None,
+) -> None:
     selected = selected_release(state_root, instance)
     if selected is None:
         raise StandError("start requires one selected immutable release")
     # Fail before persistence changes when external configuration is already known bad.
     launcher_environment(state_root=state_root, instance=instance, environment={})
+    if user_unit_directory is not None:
+        _ensure_durable_launcher(
+            state_root=state_root, user_unit_directory=user_unit_directory,
+            command=command,
+        )
     unit = unit_for(instance)
     user = pwd.getpwuid(os.getuid()).pw_name
     _checked(
@@ -1559,18 +1619,20 @@ def validate_release_external_configuration(
 def _deploy_instance_release(
     *, state_root: Path, instance: str, repository: Path, commit: str,
     was_running: bool, command: CommandRunner,
+    user_unit_directory: Path | None = None,
 ) -> str:
     release = build_release(state_root=state_root, repository=repository, commit=commit, command=command)
     validate_release_external_configuration(
         state_root=state_root, instance=instance, release=release,
     )
+    if user_unit_directory is not None:
+        _ensure_durable_launcher(
+            state_root=state_root, user_unit_directory=user_unit_directory,
+            command=command,
+        )
     select_release(state_root=state_root, instance=instance, release=release)
     if was_running:
         try:
-            _checked(
-                command, ("systemctl", "--user", "daemon-reload"),
-                failure="user-systemd daemon reload failed",
-            )
             _ensure_active(instance=instance, command=command, action="restart")
         except StandError as error:
             # The selected release intentionally remains visible for diagnosis.
@@ -1580,7 +1642,7 @@ def _deploy_instance_release(
 
 def deploy_local(
     *, state_root: Path, instance: str, repository: Path, commit: str,
-    command: CommandRunner,
+    command: CommandRunner, user_unit_directory: Path | None = None,
 ) -> str:
     """Select an exact local commit for dev; main is tag-only."""
     if instance != "dev":
@@ -1596,6 +1658,7 @@ def deploy_local(
         state_root=state_root, instance=instance, repository=repository,
         commit=str(_release_manifest(local_release)["commit"]),
         was_running=was_running, command=command,
+        user_unit_directory=user_unit_directory,
     )
 
 
@@ -1607,7 +1670,10 @@ def deploy_local_dev(*, state_root: Path, repository: Path, commit: str, command
     )
 
 
-def deploy_remote(*, state_root: Path, instance: str, ref: str, command: CommandRunner) -> str:
+def deploy_remote(
+    *, state_root: Path, instance: str, ref: str, command: CommandRunner,
+    user_unit_directory: Path | None = None,
+) -> str:
     """Apply the strict main-tag or permissive explicit dev remote policy."""
     if instance not in INSTANCE_NAMES:
         raise StandError("only the declared stand instance is accepted")
@@ -1620,6 +1686,7 @@ def deploy_remote(*, state_root: Path, instance: str, ref: str, command: Command
         state_root=state_root, instance=instance,
         repository=controller_source_path(state_root), commit=commit,
         was_running=was_running, command=command,
+        user_unit_directory=user_unit_directory,
     )
 
 

@@ -55,6 +55,7 @@ class RecordingCommand:
         self.calls: list[tuple[str, ...]] = []
         self.fail_fetch_ref: str | None = None
         self.fail_build = False
+        self.fail_daemon_reload = False
         self.before_build = None
         self.ready = True
         self.active = {"voice-agent-v2@main.service": True, "voice-agent-v2@dev.service": True}
@@ -68,6 +69,8 @@ class RecordingCommand:
         self.calls.append(command)
         if command[:2] == ("systemctl", "--user"):
             action = command[2]
+            if action == "daemon-reload" and self.fail_daemon_reload:
+                return CommandResult(1, stderr="deliberate daemon-reload failure")
             unit = command[3] if action == "show" else command[-1]
             if action == "is-active":
                 if self.active.get(unit, False):
@@ -261,7 +264,13 @@ class StandDevTests(unittest.TestCase):
             self.assertIn("Type=notify", template)
             self.assertIn("NotifyAccess=main", template)
             self.assertIn("KillMode=control-group", template)
-            self.assertIn("ExecStart=" + str(controller / "stand") + " launcher %i", template)
+            self.assertIn(
+                "ExecStart=/usr/bin/python3 -B "
+                + str(state / "instances/%i/current/source/scripts/stand.py")
+                + " launcher %i",
+                template,
+            )
+            self.assertNotIn(str(controller / "stand"), template)
             self.assertEqual(template.count("ExecStart="), 1)
             self.assertNotIn("ExecStartPost=", template)
             self.assertIn("Restart=on-failure", template)
@@ -718,6 +727,75 @@ class StandDevTests(unittest.TestCase):
             self.assertEqual(rolled_back, first_commit)
             self.assertEqual(selected_release(state, "main")[0], first_commit)
             self.assertEqual(sum(call[:2] == ("npm", "ci") for call in command.calls), 2)
+
+    def test_deploy_replaces_legacy_checkout_launcher_before_running_release_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, units = self.initialize_state(root, controller, command)
+            unit_path = units / "voice-agent-v2@.service"
+            unit_path.write_text(
+                "[Service]\nExecStart=/old/disposable/checkout/stand launcher %i\n",
+                encoding="utf-8",
+            )
+            calls_before = len(command.calls)
+
+            self.assertEqual(
+                deploy_local(
+                    state_root=state, instance="dev", repository=controller,
+                    commit=commit, command=command, user_unit_directory=units,
+                ),
+                commit,
+            )
+
+            lifecycle = command.calls[calls_before:]
+            reload_index = lifecycle.index(("systemctl", "--user", "daemon-reload"))
+            restart_index = lifecycle.index((
+                "systemctl", "--user", "restart", "voice-agent-v2@dev.service",
+            ))
+            self.assertLess(reload_index, restart_index)
+            template = unit_path.read_text(encoding="utf-8")
+            self.assertIn(
+                str(state / "instances/%i/current/source/scripts/stand.py"), template,
+            )
+            self.assertNotIn("/old/disposable/checkout", template)
+            self.assertEqual(selected_release(state, "dev")[0], commit)
+            self.assertTrue(command.active["voice-agent-v2@dev.service"])
+
+    def test_deploy_launcher_reload_failure_preserves_old_selection_and_running_service(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, first_commit = self.make_source_repository(root)
+            command = RecordingCommand()
+            state, units = self.initialize_state(root, controller, command)
+            deploy_local(
+                state_root=state, instance="dev", repository=controller,
+                commit=first_commit, command=command,
+            )
+            before = os.readlink(state / "instances/dev/current")
+            second_commit = self.commit_remote_revision(controller, "launcher correction target")
+            unit_path = units / "voice-agent-v2@.service"
+            unit_path.write_text(
+                "[Service]\nExecStart=/old/disposable/checkout/stand launcher %i\n",
+                encoding="utf-8",
+            )
+            command.fail_daemon_reload = True
+
+            with self.assertRaisesRegex(StandError, "durable launcher reload failed"):
+                deploy_local(
+                    state_root=state, instance="dev", repository=controller,
+                    commit=second_commit, command=command,
+                    user_unit_directory=units,
+                )
+
+            self.assertEqual(os.readlink(state / "instances/dev/current"), before)
+            self.assertEqual(selected_release(state, "dev")[0], first_commit)
+            self.assertTrue(command.active["voice-agent-v2@dev.service"])
+            self.assertIn(
+                str(state / "instances/%i/current/source/scripts/stand.py"),
+                unit_path.read_text(),
+            )
 
     def test_local_committed_sha_path_remains_available(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

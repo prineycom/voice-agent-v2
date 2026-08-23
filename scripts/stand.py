@@ -34,6 +34,11 @@ from voice_agent_v2.stand_dev import (  # noqa: E402
 from voice_agent_v2.stand_doctor import main as doctor_main  # noqa: E402
 
 
+def user_unit_directory() -> Path:
+    configured = os.environ.get("VOICE_AGENT_STAND_USER_UNIT_DIRECTORY")
+    return Path(configured).expanduser() if configured else DEFAULT_USER_UNIT_DIRECTORY
+
+
 def usage() -> int:
     print("usage: stand doctor | init | agent-image <prepare|status> | remote-voice apply dev [--peer <tailscale-ipv4>/32] | remote-voice disable dev | deploy main <vMAJOR.MINOR.PATCH> | deploy dev <remote-branch|tag|sha> | deploy dev --local <repo> <committed-sha> | start <main|dev> | stop <main|dev> | status <main|dev> | logs <main|dev> | list")
     return 2
@@ -47,10 +52,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     command = SystemCommandRunner()
     try:
         if arguments == ("init",):
-            configured_units = os.environ.get("VOICE_AGENT_STAND_USER_UNIT_DIRECTORY")
-            units = Path(configured_units).expanduser() if configured_units else DEFAULT_USER_UNIT_DIRECTORY
             initialize(
-                state_root=root, user_unit_directory=units, stand_executable=ROOT / "stand",
+                state_root=root, user_unit_directory=user_unit_directory(), stand_executable=ROOT / "stand",
                 controller_repository=ROOT, command=command,
             )
             print("stand init: complete")
@@ -74,6 +77,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             topology, backup, restarted = configure_remote_voice(
                 state_root=root, instance="dev", command=command,
                 approved_peer=approved_peer,
+                user_unit_directory=user_unit_directory(),
             )
             print(f"stand remote-voice apply dev: configured {topology.app_public_url}")
             print(f"LiveKit signaling: {topology.livekit_public_url}")
@@ -91,6 +95,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             commit = deploy_local(
                 state_root=root, instance=instance, repository=Path(arguments[3]),
                 commit=arguments[4], command=command,
+                user_unit_directory=user_unit_directory(),
             )
             print(f"stand deploy {instance}: selected {commit}")
             return 0
@@ -98,11 +103,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
             instance = arguments[1]
             commit = deploy_remote(
                 state_root=root, instance=instance, ref=arguments[2], command=command,
+                user_unit_directory=user_unit_directory(),
             )
             print(f"stand deploy {instance}: selected {commit}")
             return 0
         if len(arguments) == 2 and arguments[0] == "start" and arguments[1] in {"main", "dev"}:
-            start(state_root=root, instance=arguments[1], command=command)
+            start(
+                state_root=root, instance=arguments[1], command=command,
+                user_unit_directory=user_unit_directory(),
+            )
             print(f"stand start {arguments[1]}: running and enabled")
             return 0
         if len(arguments) == 2 and arguments[0] == "stop" and arguments[1] in {"main", "dev"}:

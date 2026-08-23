@@ -126,6 +126,8 @@ class RemoteCommand:
                     f"{zone}\n  target: {self.target}\n  interfaces: wlan0\n  ports: {ports}\n",
                 )
             return CommandResult(1, stderr="unexpected firewall command")
+        if command == ("systemctl", "--user", "daemon-reload"):
+            return CommandResult(0)
         if command[:3] == ("systemctl", "--user", "is-active"):
             return CommandResult(0, "active\n") if self.active else CommandResult(3, "inactive\n")
         if command[:3] == ("systemctl", "--user", "restart"):
@@ -140,6 +142,26 @@ class RemoteCommand:
                 }))
             return CommandResult(0, "OK")
         return CommandResult(1, stderr="unexpected command")
+
+
+class SchemaAwareRemoteCommand(RemoteCommand):
+    def __init__(self, *, unit: Path, config: Path) -> None:
+        super().__init__()
+        self.unit = unit
+        self.config = config
+        self.configuration_failed_interval = False
+
+    def run(self, arguments, *, cwd: Path | None = None) -> CommandResult:
+        command = tuple(arguments)
+        if command[:3] == ("systemctl", "--user", "restart"):
+            schema_is_new = "VOICE_AGENT_REMOTE_VOICE_PEER_IPV4_CIDR=" in self.config.read_text()
+            launcher_is_durable = "/instances/%i/current/source/scripts/stand.py launcher %i" in self.unit.read_text()
+            if schema_is_new and not launcher_is_durable:
+                self.calls.append(command)
+                self.active = False
+                self.configuration_failed_interval = True
+                return CommandResult(1)
+        return super().run(arguments, cwd=cwd)
 
 
 def write_udp_fixture(root: Path, address: str = TAILSCALE_IP, port: int = 7882) -> None:
@@ -168,6 +190,87 @@ class RemoteVoiceTopologyTests(unittest.TestCase):
         return configure_remote_voice(
             state_root=state, instance="dev", command=command, approved_peer=peer,
         )
+
+    def write_legacy_remote_schema(self, state: Path) -> bytes:
+        path = config_path(state, "dev")
+        values = parse_private_config(path)
+        values.update({
+            "LIVEKIT_PUBLIC_URL": f"wss://{HOSTNAME}:7443",
+            "SLICE6_APP_PUBLIC_URL": f"https://{HOSTNAME}:8443",
+            "VOICE_AGENT_RTC_INTERFACE": "tailscale0",
+            "VOICE_AGENT_RTC_IP": TAILSCALE_IP,
+        })
+        body = "".join(f"{key}={values[key]}\n" for key in sorted(values))
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o600)
+        parse_private_config(path)
+        return body.encode("utf-8")
+
+    def test_old_installed_launcher_is_replaced_before_new_schema_and_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = self.initialize_state(root)
+            self.write_legacy_remote_schema(state)
+            unit = root / "units/voice-agent-v2@.service"
+            unit.write_text("[Service]\nExecStart=/old/controller/stand launcher %i\n")
+            command = SchemaAwareRemoteCommand(
+                unit=unit, config=config_path(state, "dev"),
+            )
+            command.active = True
+
+            configure_remote_voice(
+                state_root=state, instance="dev", command=command,
+                approved_peer=APPROVED_PEER, user_unit_directory=root / "units",
+            )
+
+            self.assertFalse(command.configuration_failed_interval)
+            self.assertTrue(command.active)
+            self.assertIn(
+                "/instances/%i/current/source/scripts/stand.py launcher %i",
+                unit.read_text(),
+            )
+            reload_call = ("systemctl", "--user", "daemon-reload")
+            first_add = next(index for index, call in enumerate(command.calls) if "--add-rich-rule" in call)
+            restart = command.calls.index((
+                "systemctl", "--user", "restart", "voice-agent-v2@dev.service",
+            ))
+            self.assertLess(command.calls.index(reload_call), first_add)
+            self.assertLess(first_add, restart)
+            self.assertIn(
+                "VOICE_AGENT_REMOTE_VOICE_PEER_IPV4_CIDR=",
+                config_path(state, "dev").read_text(),
+            )
+
+    def test_launcher_upgrade_survives_firewall_failure_without_schema_or_service_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = self.initialize_state(root)
+            config_before = self.write_legacy_remote_schema(state)
+            unit = root / "units/voice-agent-v2@.service"
+            unit.write_text("[Service]\nExecStart=/old/controller/stand launcher %i\n")
+            command = SchemaAwareRemoteCommand(
+                unit=unit, config=config_path(state, "dev"),
+            )
+            command.active = True
+            command.fail_add = True
+
+            with self.assertRaisesRegex(StandError, "could not be added"):
+                configure_remote_voice(
+                    state_root=state, instance="dev", command=command,
+                    approved_peer=APPROVED_PEER, user_unit_directory=root / "units",
+                )
+
+            self.assertFalse(command.configuration_failed_interval)
+            self.assertTrue(command.active)
+            self.assertEqual(config_path(state, "dev").read_bytes(), config_before)
+            self.assertIn(
+                "/instances/%i/current/source/scripts/stand.py launcher %i",
+                unit.read_text(),
+            )
+            for permanent in (False, True):
+                self.assertNotIn(("public", exact_rule()), command.rules[permanent])
+            self.assertFalse((state / "instances/dev/remote-voice/firewall-owner.json").exists())
+            self.assertFalse(any(call[:3] == ("systemctl", "--user", "restart") for call in command.calls))
 
     def test_apply_owns_exact_bytes_in_effective_default_zone_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
